@@ -1,0 +1,75 @@
+:root{--paper:#f6f1e7;--ink:#1b1b1b;--dim:#5a5751;--line:#e6dfd1;--rule:#1b1b1b;--sage:#8aa37b;--orange:#e8702a;--blue:#6a7fb5;--card:#fffdf8}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.55 "Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif}
+main{max-width:1120px;margin:0 auto;padding:48px 40px 72px;display:flex;flex-direction:column;gap:30px}
+.mono{font-family:"IBM Plex Mono","SF Mono",Menlo,Consolas,monospace;font-size:13px}
+.dim{color:var(--dim)}
+.small{font-size:12px}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+h2{margin:0 0 12px;font-family:"Noto Serif SC","Songti SC","STSong",serif;font-size:17px;font-weight:600}
+button{font:inherit;cursor:pointer;background:transparent;color:var(--ink);border:1px solid var(--ink);border-radius:3px;padding:5px 14px}
+button:disabled{opacity:.5;cursor:default}
+button.ink{background:var(--ink);color:var(--paper)}
+button.warm{background:var(--orange);border-color:var(--orange);color:#fff}
+.top{display:flex;justify-content:space-between;align-items:flex-start;gap:20px}
+#stamp{letter-spacing:.08em;font-size:12px;padding-top:6px}
+.modes{display:flex;flex-direction:column;align-items:flex-end;gap:6px}
+.seg{display:inline-flex;border:1px solid var(--ink);border-radius:3px;overflow:hidden}
+.seg button{border:0;border-radius:0;padding:6px 16px;font-size:13px}
+.seg button[aria-pressed="true"]{background:var(--ink);color:var(--paper)}
+.worth{display:flex;align-items:baseline;gap:24px;flex-wrap:wrap;margin-top:-6px}
+.num{font-family:"Noto Serif SC","Songti SC","STSong",serif;font-size:64px;font-weight:700;line-height:1;letter-spacing:-.01em}
+.sub{font-size:13px}
+.alloc{display:flex;flex-direction:column;gap:8px}
+.bar{display:flex;height:14px;gap:2px}
+.bar i{display:block;height:100%}
+.legend{display:flex;gap:28px;flex-wrap:wrap;font-size:12px}
+table{width:100%;border-collapse:collapse;font-size:15px}
+th{text-align:left;padding:6px 0;font-family:"IBM Plex Mono",Menlo,monospace;font-size:11px;letter-spacing:.06em;color:var(--dim);font-weight:500;border-bottom:1px solid var(--rule)}
+td{padding:9px 0;border-bottom:1px solid var(--line);vertical-align:middle}
+th.type,td.type{width:110px}
+th.r,td.r{text-align:right;width:170px}
+th.pad,td.pad{padding-left:48px;width:240px}
+th.sw,td.sw{width:64px;text-align:right}
+tr.off td{color:var(--dim)}
+button.sw{padding:2px 10px;font-size:12px}
+button.sw.on{background:var(--ink);color:var(--paper)}
+button.sw.off{color:var(--dim);border-color:var(--dim)}
+.live{font-family:"IBM Plex Mono",Menlo,monospace;font-size:10px;letter-spacing:.08em;background:var(--orange);color:#fff;border-radius:2px;padding:1px 5px;margin-left:8px;vertical-align:middle}
+.say form{display:flex;gap:10px;align-items:stretch}
+.say input{flex:1;font:inherit;font-size:15px;padding:10px 14px;border:1px solid var(--ink);border-radius:3px;background:var(--card);color:var(--ink)}
+.say input::placeholder{color:#9a958b}
+.chips{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.chips button{border-color:var(--line);background:var(--card);color:var(--ink);border-radius:999px;padding:4px 12px;font-size:13px}
+.chips button:hover{border-color:var(--ink)}
+.turn{display:flex;flex-direction:column;gap:2px;padding:10px 0;border-top:1px dashed var(--line)}
+.turn:first-child{border-top:0;padding-top:0}
+.line{display:flex;gap:14px;align-items:baseline;padding:3px 0}
+.line .t{width:44px;flex:none;font-size:12px}
+.line .mark{width:18px;flex:none;text-align:center;font-size:13px}
+.line .txt{flex:1;min-width:0}
+.line .usd{width:90px;flex:none;text-align:right;font-size:13px}
+.line.ok .mark{color:var(--sage);font-weight:600}
+.line.no .mark{background:var(--ink);color:var(--paper);border-radius:2px;font-size:12px;line-height:18px}
+.line.note .txt{color:var(--dim)}
+.line.note .mark{color:var(--dim)}
+.you .txt{font-weight:500}
+.line.wait{align-items:center;background:var(--card);border:1px solid var(--orange);border-radius:4px;padding:8px 12px;margin:4px 0}
+.line.wait .mark{color:var(--orange)}
+.line.wait .acts{display:flex;gap:8px;flex:none}
+.line.wait .acts button{padding:4px 14px;font-size:12px}
+.line.done .mark{color:var(--dim)}
+footer{border-top:1px solid var(--line);padding-top:12px;letter-spacing:.02em}
+@media (max-width:760px){main{padding:28px 16px 56px}.num{font-size:44px}th.pad,td.pad{padding-left:16px;width:auto}th.type,td.type{display:none}.line .usd{width:70px}}
+.flight{display:inline-block;background:var(--ink);color:var(--paper);border-radius:2px;padding:0 6px;font-size:11px;letter-spacing:.06em;margin-right:4px;vertical-align:middle}
+.liq{display:flex;flex-direction:column;gap:0;margin-top:12px;font-size:13px}
+.liq-head{font-size:11px;letter-spacing:.06em;padding-bottom:4px}
+.liq-row{display:flex;gap:16px;align-items:baseline;border-top:1px dashed var(--line);padding:6px 0}
+.liq-row b{min-width:56px;font-weight:500}
+.liq-row .amt{min-width:76px;text-align:right}
+.liq-row .src{flex:1;min-width:0}
+.liq-row .src .dim{font-size:12px}
+.liq-row .fee{min-width:60px;text-align:right;font-size:12px}
+.liq-row.closed b,.liq-row.closed .amt{color:var(--dim)}
+.line.cmp{padding:0 0 3px}
+.line.cmp .txt{color:var(--dim);font-size:12px}

@@ -1,0 +1,89 @@
+{
+  "manifestVersion": 1,
+  "venue": "alpaca",
+  "serverName": "alpaca",
+  "title": "Alpaca paper（NYSE 一侧的券商，模拟）",
+  "command": [
+    "tsx",
+    "src/plugins/alpaca/server.ts"
+  ],
+  "native": "经纪商 API key；paper host pin；同一把 key 可交易美股与加密现货",
+  "keyLives": "插件进程内，来自 home 的凭据引用 alpaca/paper；agent 读不到",
+  "limits": "paper key 钉在 paper host · 加密单只接受 gtc/ioc",
+  "identity": {
+    "ref": "alpaca/paper",
+    "kind": "broker-api-key"
+  },
+  "signer": {
+    "kind": "in-plugin"
+  },
+  "tools": {
+    "read": [
+      "account",
+      "positions",
+      "orders",
+      "quote",
+      "news"
+    ],
+    "write": [
+      "place_order",
+      "cancel_order"
+    ],
+    "deny": []
+  },
+  "card": {
+    "place_order": [
+      "symbol",
+      "side",
+      "qty",
+      "order_type",
+      "limit_price",
+      "time_in_force"
+    ],
+    "cancel_order": [
+      "order_id"
+    ]
+  },
+  "sizing": {
+    "place_order": {
+      "kind": "order",
+      "symbol": "symbol",
+      "qty": "qty",
+      "limitPrice": "limit_price",
+      "quote": {
+        "tool": "quote",
+        "args": {
+          "symbol": "symbol"
+        },
+        "price": "ap"
+      }
+    },
+    "cancel_order": {
+      "kind": "cancel"
+    }
+  },
+  "constraints": [
+    {
+      "id": "alpaca-crypto-tif",
+      "tool": "place_order",
+      "when": {
+        "arg": "symbol",
+        "matches": "^[A-Z]+/USD[TC]?$"
+      },
+      "require": {
+        "arg": "time_in_force",
+        "oneOf": [
+          "gtc",
+          "ioc"
+        ],
+        "default": "gtc"
+      },
+      "venueError": {
+        "status": 422,
+        "code": 42210000,
+        "message": "time_in_force must be gtc or ioc",
+        "refusal": "E_VENUE_INVALID_TIF"
+      }
+    }
+  ]
+}

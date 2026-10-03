@@ -1,0 +1,18 @@
+[
+  {
+    "id": "mandate-alpaca-0001",
+    "venue": "alpaca",
+    "purpose": "加密现货试单（paper）",
+    "notionalLimitUsd": 5000,
+    "perOrderCapUsd": 1000,
+    "symbols": ["BTC/USD", "ETH/USD"],
+    "recipients": [],
+    "maxOrdersPerMinute": 6,
+    "validFrom": "2026-10-01T00:00:00Z",
+    "validUntil": "2026-10-09T00:00:00Z",
+    "spentUsd": 0,
+    "status": "signed",
+    "approvedBy": "operator",
+    "approvedAt": "2026-10-01T09:00:00Z"
+  }
+]

@@ -1,0 +1,10 @@
+{
+  "floats": { "binance": 3000, "hyperliquid": 3000, "polymarket": 1000, "ondo": 2000, "xstocks": 1000, "solana": 500 },
+  "totalExposureCapUsd": 6000,
+  "dailyCapUsd": 5000,
+  "withdrawWhitelist": ["wallet-main"],
+  "sessionExpiresAt": "2026-10-09T00:00:00Z",
+  "mode": "guard",
+  "revoked": [],
+  "note": "The MetaMask Agent Wallet's knobs written once: how much may sit at each venue (float, net of what came back), the total out at all venues together, what may leave in any 24 h, where venues may withdraw to, when the session ends, which grants the user revoked, and whether every move needs a card (guard) or only suspicious ones (beast). A poor float is a design: a venue can only ever lose what is there."
+}

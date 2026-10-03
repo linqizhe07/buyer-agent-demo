@@ -1,0 +1,8 @@
+node_modules/
+out/
+*.log
+.DS_Store
+# The home directory lives OUTSIDE the repo ($BUYER_HOME); nothing secret is ever written here.
+# local agent tooling: per-user settings and vendored third-party skills (reinstall from skills-lock.json)
+.claude/
+.agents/

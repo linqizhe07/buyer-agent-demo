@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>买方 agent · 控制台</title>
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+<header id="hdr">
+  <div class="hdr-left">
+    <span class="brand">买方 agent · 控制台</span>
+    <span class="badge sim">四家市场均为本地模拟</span>
+    <span class="mono dim" id="run-id">run –</span>
+    <span class="mono dim" id="driver">driver: scripted</span>
+  </div>
+  <div class="hdr-right">
+    <span class="clock mono">SIM CLOCK <b id="clock">–</b></span>
+    <span class="counter">fills <b id="c-fills">0</b></span>
+    <span class="counter">refusals <b id="c-refusals">0</b></span>
+    <span class="counter">loss <b id="c-loss">$0.00</b></span>
+    <span class="lamp" id="lamp"><i></i>IDLE</span>
+  </div>
+</header>
+<nav id="tabs">
+  <a href="#sec-a">A 五样东西</a><a href="#sec-b">B 插件板</a><a href="#sec-c">C 写路径</a><a href="#sec-e">E 账本</a><a href="#sec-f">F 对账</a><a href="#sec-g">G 决策板</a><a href="#sec-h">H 拒绝</a>
+  <span class="beat mono" id="beat">–</span>
+</nav>
+<main>
+  <section id="sec-a"><h2>A · 投资者的五样东西</h2><div class="cards five" id="five"></div></section>
+  <section id="sec-b"><h2>B · 插件板 <small>每个席位进门先交清单</small></h2><div class="cards plugins" id="plugins"></div></section>
+  <section id="sec-c"><h2>C · 一笔写操作的路径</h2>
+    <div class="pipeline" id="pipeline"></div>
+    <div class="pipe-line mono" id="pipe-line">等待第一笔写操作</div>
+    <div class="trace" id="trace"></div>
+  </section>
+  <section id="sec-e"><h2>E · 账本 <small>只追加 · 哈希链 · 拒绝也是一行</small></h2>
+    <table id="ledger"><thead><tr><th>#</th><th>时间</th><th>市场</th><th>intent</th><th>类型</th><th>状态</th><th>名义</th><th>prev-hash</th></tr></thead><tbody></tbody></table>
+  </section>
+  <section id="sec-f"><h2>F · 对账 <small>账本 vs 场所自己的对账单</small></h2><div id="reconcile" class="recon"></div></section>
+  <section id="sec-g"><h2>G · 决策板</h2><div id="decisions"></div><div class="proof" id="proof"></div></section>
+  <section id="sec-h"><h2>H · 拒绝 <small>谁拒的，一行就看出来</small></h2><table id="refusals"><thead><tr><th>#</th><th>层</th><th>code</th><th>市场</th><th>一行</th></tr></thead><tbody></tbody></table></section>
+  <section id="sec-checks"><h2>终端 <small>✓ 通过 · ✗ 拒绝（设计）· FAIL 断言失败</small></h2><pre id="checks" class="mono"></pre></section>
+</main>
+<div id="modal" class="modal hidden">
+  <div class="card-box">
+    <div class="card-head"><span class="badge wait">审批卡 · 等人</span><span class="mono" id="card-id"></span></div>
+    <div class="card-line mono" id="card-line"></div>
+    <table class="fields" id="card-fields"></table>
+    <div class="card-meta mono" id="card-meta"></div>
+    <div class="card-actions">
+      <button id="btn-approve" class="approve">批准</button>
+      <button id="btn-reject" class="reject">拒绝</button>
+      <span class="dim" id="card-note"></span>
+    </div>
+  </div>
+</div>
+<script src="/app.js"></script>
+</body>
+</html>

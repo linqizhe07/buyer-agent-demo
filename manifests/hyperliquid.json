@@ -1,0 +1,39 @@
+{
+  "manifestVersion": 1,
+  "venue": "hyperliquid",
+  "serverName": "hyperliquid",
+  "title": "Hyperliquid（链上永续 DEX，模拟）",
+  "command": ["tsx", "src/plugins/hyperliquid/server.ts"],
+  "native": "主账户 approveAgent 一把 agent key：能下单撤单，不能提币/转账/再授权，过期由场所侧强制",
+  "keyLives": "插件进程内，来自 home 的凭据引用 hyperliquid/agent-wallet；主账户钥匙从不进入任何插件",
+  "limits": "可交易 · 不可提现 · 60s 到期（场所侧强制）",
+  "identity": { "ref": "hyperliquid/agent-wallet", "kind": "agent-wallet" },
+  "signer": { "kind": "in-plugin" },
+  "tools": {
+    "read": ["l2Book", "userState", "openOrders", "userFills"],
+    "write": ["order", "cancel"],
+    "deny": ["withdraw3"]
+  },
+  "card": {
+    "order": ["coin", "is_buy", "sz", "limit_px", "tif"],
+    "cancel": ["coin", "oid"]
+  },
+  "sizing": {
+    "order": {
+      "kind": "order",
+      "symbol": "coin",
+      "qty": "sz",
+      "limitPrice": "limit_px",
+      "quote": { "tool": "l2Book", "args": { "coin": "coin" }, "price": "mid" }
+    },
+    "cancel": { "kind": "cancel" }
+  },
+  "constraints": [],
+  "venueErrors": [
+    { "match": "Agent keys cannot withdraw", "refusal": "E_VENUE_AGENT_NO_WITHDRAW" },
+    { "match": "Agent key expired", "refusal": "E_VENUE_AGENT_EXPIRED" },
+    { "match": "Unknown agent", "refusal": "E_VENUE_UNKNOWN_AGENT" },
+    { "match": "Invalid nonce", "refusal": "E_VENUE_BAD_NONCE" },
+    { "match": "Invalid signature", "refusal": "E_VENUE_BAD_SIGNATURE" }
+  ]
+}

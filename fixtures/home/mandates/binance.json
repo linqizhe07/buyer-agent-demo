@@ -1,0 +1,18 @@
+[
+  {
+    "id": "mandate-binance-0001",
+    "venue": "binance",
+    "purpose": "现货试单（spot testnet 形状）",
+    "notionalLimitUsd": 2000,
+    "perOrderCapUsd": 800,
+    "symbols": ["BTC/USDT", "ETH/USDT"],
+    "recipients": [],
+    "maxOrdersPerMinute": 6,
+    "validFrom": "2026-10-01T00:00:00Z",
+    "validUntil": "2026-10-09T00:00:00Z",
+    "spentUsd": 0,
+    "status": "signed",
+    "approvedBy": "operator",
+    "approvedAt": "2026-10-01T09:00:00Z"
+  }
+]

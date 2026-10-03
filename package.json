@@ -1,0 +1,32 @@
+{
+  "name": "buyer-agent-demo",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A buyer-side agent that enters four markets through plugins (seat, identity, signing right), with every write behind a human card, a venue-side agent key, a hash-chained ledger and a reconcile. Local simulators only.",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "demo": "tsx src/runner/run-demo.ts",
+    "control-room": "tsx src/control-room/server.ts",
+    "wallet": "tsx src/wallet/server.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "portfolio": "tsx src/portfolio/server.ts",
+    "portfolio:demo": "tsx src/portfolio/demo.ts",
+    "portfolio:mcp": "tsx src/portfolio/mcp.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "express": "^4.22.0",
+    "zod": "^4.5.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}

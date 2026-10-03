@@ -1,0 +1,9 @@
+{
+  "programs": ["system"],
+  "tokens": ["SOL"],
+  "recipients": ["c6822637c7d310ec57627be00ba259d253749f4aaf644470cffbe53a35f73242"],
+  "perTxCapLamports": 200000000,
+  "dailyCapLamports": 1000000000,
+  "sessionExpiresAt": "2026-10-03T00:00:00Z",
+  "note": "What the signer will sign: system transfers of SOL to the treasury only, at most 0.2 SOL per transaction and 1 SOL per day, until the session expires. Written by the operator in a calm moment; it outranks a finger on a card."
+}

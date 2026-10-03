@@ -1,0 +1,18 @@
+[
+  {
+    "id": "mandate-wallet-0001",
+    "venue": "wallet",
+    "purpose": "给场所注资的 float（CEX 现货、DEX 永续）",
+    "notionalLimitUsd": 8000,
+    "perOrderCapUsd": 3000,
+    "symbols": [],
+    "recipients": ["binance", "hyperliquid"],
+    "maxOrdersPerMinute": 6,
+    "validFrom": "2026-10-01T00:00:00Z",
+    "validUntil": "2026-10-09T00:00:00Z",
+    "spentUsd": 0,
+    "status": "signed",
+    "approvedBy": "operator",
+    "approvedAt": "2026-10-01T09:00:00Z"
+  }
+]

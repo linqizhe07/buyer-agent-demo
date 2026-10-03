@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Smart Agent Wallet · 智能 agent 钱包</title>
+<link rel="stylesheet" href="/wallet.css" />
+</head>
+<body>
+<header id="hdr">
+  <div class="hdr-left">
+    <span class="brand">Smart Agent Wallet · 智能 agent 钱包</span>
+    <span class="badge sim">本地模拟 · 骨架</span>
+    <span class="badge soft">蓝本：MetaMask Agent Wallet</span>
+    <span class="mono dim" id="addr">0x…</span>
+  </div>
+  <div class="hdr-right">
+    <span class="counter">总资产 <b id="h-total">–</b></span>
+    <span class="counter">在场所 <b id="h-exposure">–</b></span>
+    <span class="counter">连接器 <b id="h-connectors">–</b></span>
+    <span class="counter">session <b id="h-session">–</b></span>
+    <span class="lamp" id="lamp"><i></i>SIM</span>
+  </div>
+</header>
+<nav id="tabs">
+  <a href="#sec-0">0 账户 · 授权</a><a href="#sec-1">1 资产总览</a><a href="#sec-2">2 连接器</a><a href="#sec-3">3 策略 → 限制</a><a href="#sec-4">4 流水 · 试一笔</a><a href="#sec-5">5 骨架说明</a>
+  <span class="mono dim right">agent 拿不到这把钥匙：它只能申请，钱包决定</span>
+</nav>
+<main>
+  <section id="sec-0"><h2>0 · 账户 · agent 身份 · 授权 <small>蓝本：MetaMask Agent Wallet —— 钱在用户的智能账户里，agent 只有一把会话钥匙和一份可撤销的授权</small></h2>
+    <div class="grid-account">
+      <div class="card" id="account-card"></div>
+      <div class="card" id="agent-card"></div>
+      <div class="card" id="mode-card"></div>
+    </div>
+    <div class="grants-head"><h3>授权（ERC-7710 委托 + caveats；链下场所编译成各自的钥匙限制）</h3><button type="button" id="btn-revoke-all" class="danger">撤销全部授权</button><span class="dim">链上是一笔 revoke 交易，与任何服务器是否在线无关；撤销后 float 仍可提回</span></div>
+    <table id="grants"><thead><tr><th>场所</th><th>类型</th><th>范围（allowedTargets）</th><th>额度</th><th>已用</th><th>到期</th><th>谁强制</th><th></th></tr></thead><tbody></tbody></table>
+    <p class="dim small">MetaMask 对 Agent Wallet 有赔付（$1 万 / 月）；本骨架：无赔付、无保险。</p>
+  </section>
+  <section id="sec-1"><h2>1 · 资产总览 <small>钱在家、钱在场所、总敞口、日出金</small></h2>
+    <div class="grid-overview">
+      <div class="card" id="home-card"></div>
+      <div class="card" id="floats-card"></div>
+      <div class="card" id="exposure-card"></div>
+    </div>
+  </section>
+  <section id="sec-2"><h2>2 · 连接器 <small>一个合同形状，接所有 CEX · DEX · 预测市场 · RWA · 券商</small></h2>
+    <div class="legend"><span class="dot on"></span>已接入（钱包有注资轨道与 float）<span class="dot off"></span>目录内，可接入（同一形状，未配 float）<span class="seat-tag">席位</span>本仓库已挂载插件与模拟器<span class="badge no small">已撤销</span>授权被用户撤销</div>
+    <div id="connectors"></div>
+  </section>
+  <section id="sec-3"><h2>3 · 一份策略 → 各家场所的原生限制 <small>链上是委托的 caveats；链下场所把同一份策略编译成各自钥匙的限制；钱包只留场所做不到的</small></h2>
+    <div class="grid-policy">
+      <div class="card" id="policy-card"></div>
+      <table id="compiled"><thead><tr><th>场所</th><th>钥匙形态</th><th>编译出的限制</th><th>谁强制</th><th>钱包侧</th></tr></thead><tbody></tbody></table>
+    </div>
+  </section>
+  <section id="sec-4"><h2>4 · 流水 · 试一笔 <small>拒绝也是一行</small></h2>
+    <div class="card try">
+      <form id="try-form">
+        <label>场所 <select id="f-venue"></select></label>
+        <label>金额 USD <input id="f-amount" type="number" min="1" step="1" value="500" /></label>
+        <label>用途 <input id="f-purpose" type="text" placeholder="试单 float" /></label>
+        <label>提回到 <select id="f-dest"><option value="wallet-main">wallet-main（主钱包）</option><option value="0xd759…attacker">0xd759…（不在白名单）</option></select></label>
+        <button type="button" id="btn-fund" class="approve">申请注资</button>
+        <button type="button" id="btn-recall">提回</button>
+        <button type="button" id="btn-reset">重置</button>
+      </form>
+      <div class="result mono" id="result">等第一笔</div>
+    </div>
+    <table id="attempts"><thead><tr><th>时间</th><th>动作</th><th>场所</th><th>金额</th><th>结果</th><th>一行</th></tr></thead><tbody></tbody></table>
+  </section>
+  <section id="sec-5"><h2>5 · 骨架说明 <small>做了什么、模拟了什么、下一步接哪里</small></h2>
+    <div class="proof">
+      <div class="card"><h3>做了</h3><ul>
+        <li>按 MetaMask Agent Wallet 的形状：用户智能账户持钱，agent 一把会话钥匙，一份带 caveats 的授权，随时撤销</li>
+        <li>连接器目录：CEX / DEX 永续 / DEX 现货 / 预测市场 / RWA / 券商，一个形状</li>
+        <li>一份策略（float、总敞口、日上限、提币白名单、session、撤销、模式）编译成各家原生限制：链上委托 caveats、CEX key 权限、perp DEX agent key、签名器 allowlist、RWA 发行方转让限制</li>
+        <li>注资与提回两个判定：session → 金额 → 认识 → 接入 → 撤销 → float → 总敞口 → 日上限 → 余额；撤销后仍可提回</li>
+      </ul></div>
+      <div class="card"><h3>模拟了</h3><ul>
+        <li>轨道是桩：注资是一行流水，不会真的把场所模拟器记上账（demo runner 里的钱包才会）</li>
+        <li>没有链：EIP-7702 / ERC-7710 / DelegationManager 只是编译表里的文字，没有合约、没有 revoke 交易</li>
+        <li>"已接入"只说明钱包这一侧配好了；席位是否挂载另有标记。Polymarket / Ondo / xStocks 等没有席位</li>
+        <li>RWA 的 KYC 白名单与发行方冻结是发行方的事；这里只写出谁强制</li>
+        <li>Guard / Beast 只是显示；demo runner 仍每笔过卡。签名全部是 ed25519 替身</li>
+      </ul></div>
+      <div class="card"><h3>下一步</h3><ol>
+        <li>把这页接到 demo runner 的钱包服务（:4706）：读它的流水，注资经授权书与审批卡</li>
+        <li>EVM 场所换成真的委托：MetaMask Delegation Toolkit 签 caveats，revoke 变成交易</li>
+        <li>给 Polymarket 与 Ondo 做席位：CLOB 下单 / 发行方申赎工具，agent 智能账户先过 KYC 白名单</li>
+        <li>撤销时同步撤各家钥匙：Binance 删 key、Hyperliquid 撤 agent、签名器关会话</li>
+      </ol></div>
+    </div>
+  </section>
+</main>
+<script src="/wallet.js"></script>
+</body>
+</html>

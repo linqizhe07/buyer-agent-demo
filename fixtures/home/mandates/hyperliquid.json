@@ -1,0 +1,18 @@
+[
+  {
+    "id": "mandate-hl-0001",
+    "venue": "hyperliquid",
+    "purpose": "BTC/ETH 永续试单（testnet 形状）",
+    "notionalLimitUsd": 3000,
+    "perOrderCapUsd": 1500,
+    "symbols": ["BTC", "ETH"],
+    "recipients": [],
+    "maxOrdersPerMinute": 6,
+    "validFrom": "2026-10-01T00:00:00Z",
+    "validUntil": "2026-10-09T00:00:00Z",
+    "spentUsd": 0,
+    "status": "signed",
+    "approvedBy": "operator",
+    "approvedAt": "2026-10-01T09:00:00Z"
+  }
+]

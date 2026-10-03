@@ -1,0 +1,28 @@
+{
+  "manifestVersion": 1,
+  "venue": "solana",
+  "serverName": "solana",
+  "title": "Solana（一条链，不是场所；经策略签名器，模拟）",
+  "command": ["tsx", "src/plugins/solana/server.ts"],
+  "native": "裸 keypair 等于全权，链本身没有分权；所以钱包插件实际上是策略签名器插件",
+  "keyLives": "策略签名器进程内（home 的 signer/keypair.json）；席位没有任何凭据引用，只发意图",
+  "limits": "policy signer：仅 system 转账 · 仅 SOL · 收款地址 allow-list · 单笔 0.2 SOL · 当日 1 SOL · 会话到期",
+  "identity": null,
+  "signer": { "kind": "external-policy-signer", "url": "http://127.0.0.1:4705" },
+  "tools": {
+    "read": ["getBalance", "getRecentTransactions"],
+    "write": ["transfer"],
+    "deny": []
+  },
+  "card": {
+    "transfer": ["to", "lamports", "memo"]
+  },
+  "sizing": {
+    "transfer": { "kind": "transfer", "recipient": "to", "amount": "lamports", "unitUsd": 0.0000001483 }
+  },
+  "constraints": [],
+  "venueErrors": [
+    { "match": "insufficient lamports", "refusal": "E_VENUE_REJECTED" },
+    { "match": "signer is not the account owner", "refusal": "E_VENUE_BAD_SIGNER" }
+  ]
+}

@@ -1,0 +1,18 @@
+[
+  {
+    "id": "mandate-solana-0001",
+    "venue": "solana",
+    "purpose": "向金库地址做小额再平衡转账",
+    "notionalLimitUsd": 500,
+    "perOrderCapUsd": 100,
+    "symbols": [],
+    "recipients": ["c6822637c7d310ec57627be00ba259d253749f4aaf644470cffbe53a35f73242"],
+    "maxOrdersPerMinute": 6,
+    "validFrom": "2026-10-01T00:00:00Z",
+    "validUntil": "2026-10-09T00:00:00Z",
+    "spentUsd": 0,
+    "status": "signed",
+    "approvedBy": "operator",
+    "approvedAt": "2026-10-01T09:00:00Z"
+  }
+]

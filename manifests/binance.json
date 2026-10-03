@@ -1,0 +1,37 @@
+{
+  "manifestVersion": 1,
+  "venue": "binance",
+  "serverName": "binance",
+  "title": "Binance spot（经第三方 ccxt 形状的 MCP server，模拟）",
+  "command": ["tsx", "src/plugins/binance-ccxt/server.ts"],
+  "native": "API key 分权限（只读 / 现货交易 / 提币）且可绑 IP；交易所侧按 key 的权限拒绝",
+  "keyLives": "第三方 server 进程内，来自 home 的凭据引用 binance/spot-trade；key 不进模型",
+  "limits": "trade-only · IP 绑定 · 无 WITHDRAW 权限",
+  "identity": { "ref": "binance/spot-trade", "kind": "hmac-api-key" },
+  "signer": { "kind": "in-plugin" },
+  "tools": {
+    "read": ["fetchTicker", "fetchBalance", "fetchOpenOrders", "fetchMyTrades"],
+    "write": ["createOrder", "cancelOrder"],
+    "deny": ["withdraw"]
+  },
+  "card": {
+    "createOrder": ["symbol", "side", "type", "amount", "price"],
+    "cancelOrder": ["id", "symbol"]
+  },
+  "sizing": {
+    "createOrder": {
+      "kind": "order",
+      "symbol": "symbol",
+      "qty": "amount",
+      "limitPrice": "price",
+      "quote": { "tool": "fetchTicker", "args": { "symbol": "symbol" }, "price": "last" }
+    },
+    "cancelOrder": { "kind": "cancel" }
+  },
+  "constraints": [],
+  "venueErrors": [
+    { "match": "Invalid API-key, IP, or permissions", "refusal": "E_VENUE_PERMISSION" },
+    { "match": "Signature for this request is not valid", "refusal": "E_VENUE_BAD_SIGNATURE" },
+    { "match": "API-key format invalid", "refusal": "E_VENUE_UNAUTHORIZED" }
+  ]
+}

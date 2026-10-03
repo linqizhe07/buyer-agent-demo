@@ -1,0 +1,85 @@
+{
+  "note": "Seeds for the agent portfolio manager's SIMULATED accounts. Every credential here is a reference to a file in home, never a value; the agent-facing views carry the reference only. The MetaMask account has a sim seed AND a live mode (--mm) that reads the real `mm` CLI.",
+  "binance": {
+    "balances": {
+      "BTC": 0.3,
+      "ETH": 2,
+      "USDT": 5000
+    },
+    "permissions": [
+      "SPOT"
+    ],
+    "ipWhitelist": [
+      "203.0.113.7"
+    ],
+    "withdrawWhitelist": [
+      "wallet-main"
+    ]
+  },
+  "okx": {
+    "balances": {
+      "ETH": 1.5,
+      "USDT": 2500
+    },
+    "permissions": [
+      "read",
+      "trade"
+    ],
+    "ipBound": "203.0.113.7"
+  },
+  "metamask": {
+    "seed": "77777777777777777777777777777777777777777777777777777777777777aa",
+    "tradingMode": "guard",
+    "rolling24hUsd": 1500,
+    "allowlist": [
+      "wallet-main",
+      "0x5a1e…kyc"
+    ],
+    "holdings": [
+      {
+        "asset": "USDC",
+        "amount": 1200,
+        "chain": "Base"
+      },
+      {
+        "asset": "ETH",
+        "amount": 0.15,
+        "chain": "Ethereum"
+      }
+    ]
+  },
+  "ondo": {
+    "address": "0x5a1e…kyc",
+    "ousg": 18,
+    "usdc": 3000,
+    "allowlist": [
+      "0x5a1e…kyc",
+      "wallet-main"
+    ]
+  },
+  "mastercard": {
+    "last4": "4421",
+    "creditLimitUsd": 5000,
+    "availableUsd": 4300,
+    "token": {
+      "id": "agt_7f3a",
+      "maxPerTxnUsd": 500,
+      "dailyUsd": 1500,
+      "mccAllow": {
+        "4816": "网络服务",
+        "5734": "软件零售",
+        "5968": "订阅",
+        "7372": "软件 / SaaS"
+      },
+      "expiresAt": "2026-12-31T00:00:00Z"
+    }
+  },
+  "chase": {
+    "name": "Chase Checking",
+    "mask": "··1182",
+    "aggregator": "Open Banking 聚合 token（Plaid 形状）",
+    "balances": {
+      "USD": 12400
+    }
+  }
+}
