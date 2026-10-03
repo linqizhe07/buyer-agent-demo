@@ -45,6 +45,11 @@
         "asset": "ETH",
         "amount": 0.15,
         "chain": "Ethereum"
+      },
+      {
+        "asset": "ETH",
+        "amount": 1,
+        "chain": "Base"
       }
     ]
   },

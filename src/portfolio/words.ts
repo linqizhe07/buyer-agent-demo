@@ -2,7 +2,7 @@
  * never a code: the code stays on the ledger. Shared by the page's scripted
  * agent and by flights that MCP agents fly. */
 import type { Refusal } from "../core/errors.ts";
-import { baseOf, CAP_LABEL, chainName, type Capability, type ExecOk, type Intent } from "./accounts.ts";
+import { baseOf, CAP_LABEL, chainName, qtyText, type Capability, type ExecOk, type Intent } from "./accounts.ts";
 import { etaLabel } from "./rails.ts";
 
 export const cents = (n: number): string => `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -15,7 +15,7 @@ export function isBridge(i: Intent): boolean {
 export function sayOf(i: Intent, name: string): string {
   switch (i.kind) {
     case "trade":
-      return `${i.side === "sell" ? "卖出" : "买入"} ${i.qty} ${baseOf(i.symbol)} · ${name}`;
+      return `${i.side === "sell" ? "卖出" : "买入"} ${i.qty} ${baseOf(i.symbol)} · ${i.chainId !== undefined ? `DEX（${chainName(i.chainId)}）` : name}`;
     case "move":
       return isBridge(i) ? `跨链 ${i.amount} ${i.asset}：${chainName(i.fromChainId)} → ${chainName(i.chainId)} → ${i.to}` : `转 ${i.amount} ${i.asset} → ${i.to} · ${name}`;
     case "pay":
@@ -52,6 +52,16 @@ export function detailOf(i: Intent, r: ExecOk): string {
       return isBridge(i) ? " · 已到" : " · 已发出";
     }
   }
+}
+
+/** a DEX swap's route, from its receipt: which pools took it and the gas — `路由：Aerodrome 15.8 + Uniswap v3 0.05% 5.2 · gas $0.05` */
+export function routeLine(native: unknown): string | undefined {
+  const n = (native ?? {}) as { route?: unknown; gasUsd?: unknown };
+  if (!Array.isArray(n.route) || !n.route.length) return undefined;
+  const pools = n.route.filter((p): p is { dex: string; qty: number } => typeof p === "object" && p !== null && typeof (p as { dex?: unknown }).dex === "string" && typeof (p as { qty?: unknown }).qty === "number");
+  if (!pools.length) return undefined;
+  const names = pools.length === 1 ? pools[0]!.dex : pools.map((p) => `${p.dex} ${qtyText(p.qty)}`).join(" + ");
+  return `路由：${names}${typeof n.gasUsd === "number" ? ` · gas ${cents(n.gasUsd)}` : ""}`;
 }
 
 export function waitWords(stranger: boolean): string {

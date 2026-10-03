@@ -21,7 +21,7 @@ function render() {
   renderAccounts();
   renderSay();
   renderTurns();
-  $("foot").textContent = `${O.accounts.filter((a) => !a.live).length} 个账户为本地模拟${O.live ? " · MetaMask 为真钱包（只读）" : " · MetaMask 为模拟"} · 页面上的 agent 是关键词脚本，不是 LLM · 价格为固定表`;
+  $("foot").textContent = `${O.accounts.filter((a) => !a.live).length} 个账户为本地模拟${O.live ? " · MetaMask 为真钱包（只读）" : " · MetaMask 为模拟"} · 页面上的 agent 是关键词脚本，不是 LLM · 价格、订单簿与 DEX 池子为固定表`;
 }
 
 function renderTop() {
@@ -71,7 +71,9 @@ function renderSay() {
 
 function lineHtml(l, t, byId) {
   const cmp = l.compare ? `<div class="line cmp"><span class="t"></span><span class="mark"></span><span class="txt">${esc(l.compare)}</span><span class="usd"></span></div>` : "";
-  if (l.mark === "note") return `<div class="line note"><span class="t"></span><span class="mark">·</span><span class="txt">${esc(l.text)}</span><span class="usd"></span></div>`;
+  // a split order: one bar, one segment per venue, sized by its share of the order
+  const split = l.parts && l.parts.length ? `<div class="line split"><span class="t"></span><span class="mark"></span><span class="txt"><span class="parts">${l.parts.map((p) => `<i class="${esc(p.kind)}" style="flex:${Math.max(p.pct, 8)}"><b></b>${esc(p.label)}</i>`).join("")}</span></span><span class="usd"></span></div>` : "";
+  if (l.mark === "note") return `<div class="line note"><span class="t"></span><span class="mark">·</span><span class="txt">${esc(l.text)}</span><span class="usd"></span></div>${split}`;
   if (l.mark === "wait") {
     const ap = byId[l.approvalId];
     if (ap && ap.status === "pending") {
@@ -91,7 +93,7 @@ function renderTurns() {
     return;
   }
   const byId = Object.fromEntries(O.approvals.map((a) => [a.id, a]));
-  el.innerHTML = flights.map((f) => `<div class="turn"><div class="you"><span class="t mono dim">${time(f.at)}</span><span class="mark"></span><span class="txt"><span class="flight mono">${esc(f.no)}</span> ${esc(f.agent.name)} · ${esc(f.request)}</span></div>${f.legs.map((l) => lineHtml(l, f, byId)).join("")}</div>`).join("");
+  el.innerHTML = flights.map((f) => `<div class="turn"><div class="line you"><span class="t mono dim">${time(f.at)}</span><span class="mark"></span><span class="txt"><span class="flight mono">${esc(f.no)}</span> ${esc(f.agent.name)} · ${esc(f.request)}</span><span class="usd"></span></div>${f.legs.map((l) => lineHtml(l, f, byId)).join("")}</div>`).join("");
   for (const b of el.querySelectorAll("button[data-approve]")) b.addEventListener("click", () => act("/api/approve", { id: b.dataset.approve, decision: "approve" }));
   for (const b of el.querySelectorAll("button[data-reject]")) b.addEventListener("click", () => act("/api/approve", { id: b.dataset.reject, decision: "reject" }));
 }

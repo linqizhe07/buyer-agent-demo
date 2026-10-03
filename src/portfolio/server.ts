@@ -8,6 +8,8 @@
  *   POST /api/say     {text}           the user talks to the page agent → a flight (PM-xxxx)
  *   POST /api/approve {id, decision}   the user answers a card → one more leg on that flight
  *   POST /api/execute {account, intent, agent}  an MCP agent's write: a flight of one leg (200 ok · 202 card · 409 refusal)
+ *   GET  /api/quote?base=ETH&side=sell&qty=3    one order priced at every venue (CEX books, DEX pools) and split across them; a read
+ *   POST /api/order   {base, side, qty, agent}  route the order and fly it: one flight, one leg per slice, one card at most
  *   POST /api/mode    {mode}           open | guard
  *   POST /api/revoke  {account} · POST /api/restore {account}   an account's switch
  *   POST /api/reset
@@ -19,9 +21,11 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isRefusal } from "../core/errors.ts";
-import { agentCode, type AgentId, type Intent } from "./accounts.ts";
+import { agentCode, PRICES, type AgentId, type Intent } from "./accounts.ts";
 import { AgentSession, PRESETS } from "./agent.ts";
+import type { OrderPlan } from "./router.ts";
 import { isPending, PortfolioService } from "./service.ts";
+import type { Side } from "./venues.ts";
 
 const PUBLIC = fileURLToPath(new URL("./public/", import.meta.url));
 
@@ -46,7 +50,8 @@ export function parseIntent(raw: unknown): Intent | null {
       const qty = num(o.qty);
       const side = str(o.side);
       if (!str(o.symbol) || !(qty > 0) || (side !== "buy" && side !== "sell")) return null;
-      return { kind: "trade", symbol: str(o.symbol).toUpperCase(), side, qty };
+      const chainId = num(o.chainId);
+      return Number.isFinite(chainId) ? { kind: "trade", symbol: str(o.symbol).toUpperCase(), side, qty, chainId } : { kind: "trade", symbol: str(o.symbol).toUpperCase(), side, qty };
     }
     case "move": {
       const amount = num(o.amount);
@@ -68,6 +73,33 @@ export function parseIntent(raw: unknown): Intent | null {
     default:
       return null;
   }
+}
+
+/** an order for the router: an asset the price table knows, a side, a size */
+export function parseOrder(raw: unknown): { base: string; side: Side; qty: number } | null {
+  if (!raw || typeof raw !== "object") return null;
+  const o = raw as Record<string, unknown>;
+  const base = typeof o.base === "string" ? o.base.trim().toUpperCase() : "";
+  const qty = typeof o.qty === "number" ? o.qty : typeof o.qty === "string" && o.qty.trim() !== "" ? Number(o.qty) : NaN;
+  if (!PRICES[base] || !(qty > 0) || (o.side !== "buy" && o.side !== "sell")) return null;
+  return { base, side: o.side, qty };
+}
+
+/** an order plan as an agent reads it: every venue's quote, the slices, what was left out and why */
+export function quoteView(p: OrderPlan): Record<string, unknown> {
+  const s = p.split;
+  return {
+    order: p.title,
+    feasible: s.feasible,
+    summary: p.narration,
+    venues: s.quotes.map((q) => ({ venue: q.venue, account: q.account, name: q.name, canTakeAll: q.ok, ...(q.why ? { why: q.why } : {}), have: q.have, ...(q.price > 0 ? { price: q.price, feeUsd: q.feeUsd, netUsd: q.netUsd, impactBps: q.impactBps } : {}) })),
+    slices: s.slices.map((x) => ({ venue: x.venue, account: x.account, name: x.name, qty: x.qty, price: x.price, feeUsd: x.feeUsd, netUsd: x.netUsd, ...(x.chain ? { chain: x.chain, gasUsd: x.gasUsd, route: x.route } : {}) })),
+    ...(s.feasible ? { netUsd: s.netUsd, avgPrice: s.avgPrice } : { maxQty: s.maxQty }),
+    ...(s.single ? { bestSingleVenue: { venue: s.single.venue, netUsd: s.single.netUsd } } : {}),
+    ...(s.gainUsd !== undefined ? { gainOverSingleUsd: s.gainUsd } : {}),
+    leftOut: s.passed,
+    notes: [...p.notes, ...p.after],
+  };
 }
 
 /** the agent an MCP client names itself as; anything else flies as an unnamed MCP agent */
@@ -123,6 +155,26 @@ export async function startPortfolioServer(opts: PortfolioServerOptions): Promis
     if (isRefusal(r)) return void res.status(409).json({ ok: false, refusal: r });
     if (isPending(r)) return void res.status(202).json(r);
     res.json(r);
+  }));
+
+  app.get("/api/quote", wrap(async (req, res) => {
+    const o = parseOrder(req.query);
+    if (!o) return void bad(res, "need ?base=ETH|BTC|SOL&side=buy|sell&qty=<number>");
+    res.json({ ok: true, quote: quoteView(await svc.quote(o.base, o.side, o.qty)) });
+  }));
+
+  app.post("/api/order", wrap(async (req, res) => {
+    const o = parseOrder(req.body);
+    if (!o) return void bad(res, "need {base: ETH|BTC|SOL, side: buy|sell, qty}");
+    const r = await svc.order(o.base, o.side, o.qty, parseAgent((req.body as { agent?: unknown }).agent));
+    const legs = r.flight.legs.map((l) => `${l.mark === "ok" ? "✓" : l.mark === "no" ? "✗" : l.mark === "wait" ? "▣" : "·"} ${l.text}${l.compare ? `（${l.compare}）` : ""}`);
+    const body = { flight: r.flight.no, legs, quote: quoteView(r.plan) };
+    const refused = r.outcomes.find(isRefusal);
+    const pending = r.outcomes.find(isPending);
+    if (!r.plan.steps.length) return void res.status(409).json({ ok: false, error: r.plan.narration, ...body });
+    if (refused) return void res.status(409).json({ ok: false, refusal: refused, ...body });
+    if (pending) return void res.status(202).json({ ok: true, pending: true, approval: pending.approval, ...body });
+    res.json({ ok: true, ...body });
   }));
 
   app.post("/api/mode", (req, res) => {

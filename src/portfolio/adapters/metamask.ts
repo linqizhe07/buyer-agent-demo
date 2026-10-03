@@ -1,10 +1,13 @@
 /** The MetaMask Agent Wallet as one account among the others — the on-chain
- * one: it swaps (a DEX route through MetaMask's aggregator), it bridges, and
- * it is the only account that can be LIVE. Two shapes, one interface:
+ * one: it swaps on DEX pools, it bridges, and it is the only account that can
+ * be LIVE. Two shapes, one interface:
  *
- *   metamaskSimAccount   in-memory, holdings per chain. `trade` is a swap on
- *                        the chain where the asset sits (venues.ts prices it:
- *                        pool fee, price impact, gas). A `move` whose chain
+ *   metamaskSimAccount   in-memory, holdings per chain. `trade` is a DEX swap
+ *                        on ONE chain — the one the intent names, or the chain
+ *                        where the swap nets the most among those that hold
+ *                        enough. venues.ts prices it (`dex:<chain>`: the route
+ *                        across that chain's pools, their LP fees, gas once),
+ *                        and the proceeds land on that chain. A `move` whose chain
  *                        differs from the holding's is a BRIDGE over the route
  *                        the intent names (rails.ts quotes it); the fee comes
  *                        out of what arrives. Guard mode's own policy (24 h
@@ -13,8 +16,9 @@
  *                        wallet's: over the line a transfer comes back
  *                        AWAITING_MFA.
  *   metamaskLiveAccount  reads the real `mm` CLI (address, trading mode, the
- *                        policy YAML, balances) and can READ real bridge
- *                        quotes (`mm swap quote --all-quotes`). Writes build
+ *                        policy YAML, balances), a real spot price (`mm price
+ *                        spot`) and real swap / bridge quotes (`mm swap quote
+ *                        --all-quotes`, which needs a funded wallet). Writes build
  *                        the exact `mm` command — `transfer`, or `swap
  *                        execute` for a swap or a bridge — and run it ONLY
  *                        when PORTFOLIO_MM_WRITES=1; otherwise they come back
@@ -26,7 +30,7 @@ import { refuse } from "../../core/errors.ts";
 import { evmAddressOf, keyFromSeed } from "../../core/ed25519.ts";
 import { baseOf, chainName, classOf, priceOf, r2, r8, usdOf, type Account, type AccountAdapter, type Holding, type Intent, type RouteQuote } from "../accounts.ts";
 import { bridgeQuotes } from "../rails.ts";
-import { DEX_GAS_USD, fillAt } from "../venues.ts";
+import { chainKey, dexChains, dexVenue, fillAt, type Fill } from "../venues.ts";
 
 export interface MetamaskSimSeed {
   seed: string;
@@ -40,8 +44,12 @@ const scopeLimits = (mode: string, rolling: number, allowlistCount: number) => [
   `trading mode ${mode}${mode === "guard" ? "：出金策略 + 白名单，超线 → MFA（邮件里批）" : "：跳过策略，恶意交易仍拦"}`,
   `24 h 出金上限 $${rolling}${rolling === 0 ? "（= 任何转出都要人批）" : ""}`,
   `地址白名单 ${allowlistCount} 条`,
-  "server wallet：密钥在 MetaMask 服务端，agent 拿到的是 CLI 会话；链上 swap 与跨链都走 mm swap",
+  "server wallet：密钥在 MetaMask 服务端，agent 拿到的是 CLI 会话；DEX swap 与跨链都走 mm swap",
 ];
+
+/** the receipt of a swap: the fill, the chain, and how it was routed across that chain's pools */
+const swapReceipt = (f: Fill) => ({ price: f.price, grossUsd: f.grossUsd, feeUsd: f.feeUsd, netUsd: f.netUsd, impactBps: f.impactBps, chain: f.chain, gasUsd: f.gasUsd, route: f.route });
+const routeText = (f: Fill) => (f.route ?? []).map((r) => r.dex).join(" + ");
 
 export function metamaskSimAccount(seed: MetamaskSimSeed, now: () => string): AccountAdapter {
   const holdings = seed.holdings.map((h) => ({ ...h }));
@@ -77,24 +85,27 @@ export function metamaskSimAccount(seed: MetamaskSimSeed, now: () => string): Ac
     async execute(i: Intent) {
       if (i.kind === "trade") {
         const base = baseOf(i.symbol);
+        const named = chainName(i.chainId);
+        const chains = dexChains(base).filter((c) => named === undefined || c === named);
+        if (!chains.length) return refuse("E_VENUE_REJECTED", { venue: "metamask", message: `链上没有 ${base} 的池子${named ? `（${named}）` : ""}`, native: { error: "TOKEN_NOT_SUPPORTED" } });
+        const sell = i.side === "sell";
+        // a swap happens on one chain: among the chains that hold enough, the one where it nets the most
+        const options = chains
+          .map((chain) => ({ fill: fillAt(dexVenue(chain), base, i.side, i.qty), holding: holdings.find((x) => x.asset === (sell ? base : "USDC") && chainKey(x.chain) === chain) }))
+          .filter((o): o is { fill: Fill; holding: (typeof holdings)[number] } => o.fill !== undefined && o.holding !== undefined && o.holding.amount >= (sell ? i.qty : o.fill.netUsd))
+          .sort((a, b) => (sell ? b.fill.netUsd - a.fill.netUsd : a.fill.netUsd - b.fill.netUsd));
+        const pick = options[0];
+        if (!pick) return insufficient({ asset: sell ? base : "USDC", ...(named ? { chain: named } : {}) });
+        const { fill: f, holding: h } = pick;
         const n = ++seq;
-        if (i.side === "sell") {
-          const h = holdings.find((x) => x.asset === base && x.amount >= i.qty);
-          if (!h) return insufficient({ asset: base });
-          const f = fillAt("metamask", base, "sell", i.qty, DEX_GAS_USD[h.chain]);
-          if (!f) return refuse("E_VENUE_REJECTED", { venue: "metamask", native: { error: "TOKEN_NOT_SUPPORTED" } });
+        if (sell) {
           h.amount = r8(h.amount - i.qty);
           credit(f.quote, f.netUsd, h.chain);
-          return { ok: true as const, account: account.id, status: "filled" as const, summary: `swap ${i.qty} ${base} → ${f.netUsd} ${f.quote} on ${h.chain} · fee ${f.feeUsd}`, usd: f.grossUsd, ref: `metamask:swap:${n}`, native: { price: f.price, grossUsd: f.grossUsd, feeUsd: f.feeUsd, netUsd: f.netUsd, impactBps: f.impactBps, chain: h.chain } };
+          return { ok: true as const, account: account.id, status: "filled" as const, summary: `swap ${i.qty} ${base} → ${f.netUsd} ${f.quote} on ${h.chain} via ${routeText(f)} · fee ${f.feeUsd}`, usd: f.grossUsd, ref: `metamask:swap:${n}`, native: swapReceipt(f) };
         }
-        for (const c of holdings.filter((x) => x.asset === "USDC").sort((a, b) => (DEX_GAS_USD[a.chain] ?? 4) - (DEX_GAS_USD[b.chain] ?? 4))) {
-          const f = fillAt("metamask", base, "buy", i.qty, DEX_GAS_USD[c.chain]);
-          if (!f || c.amount < f.netUsd) continue;
-          c.amount = r8(c.amount - f.netUsd);
-          credit(base, i.qty, c.chain);
-          return { ok: true as const, account: account.id, status: "filled" as const, summary: `swap ${f.netUsd} ${f.quote} → ${i.qty} ${base} on ${c.chain} · fee ${f.feeUsd}`, usd: f.grossUsd, ref: `metamask:swap:${n}`, native: { price: f.price, grossUsd: f.grossUsd, feeUsd: f.feeUsd, netUsd: f.netUsd, impactBps: f.impactBps, chain: c.chain } };
-        }
-        return insufficient({ asset: "USDC" });
+        h.amount = r8(h.amount - f.netUsd);
+        credit(base, i.qty, h.chain);
+        return { ok: true as const, account: account.id, status: "filled" as const, summary: `swap ${f.netUsd} ${f.quote} → ${i.qty} ${base} on ${h.chain} via ${routeText(f)} · fee ${f.feeUsd}`, usd: f.grossUsd, ref: `metamask:swap:${n}`, native: swapReceipt(f) };
       }
       if (i.kind !== "move") return refuse("E_VENUE_REJECTED", { venue: "metamask", message: `mm 这里接了 swap、transfer 与 bridge；「${i.kind}」不在`, native: { error: "UNSUPPORTED" } });
       const usd = usdOf(i);
@@ -199,14 +210,22 @@ export function mmCommand(bin: string, i: Intent): string[] | null {
   }
   if (i.kind === "trade") {
     const base = baseOf(i.symbol);
-    if (i.side === "sell") return [bin, "swap", "execute", "--from", base, "--to", "USDC", "--amount", String(i.qty), "--from-chain-id", "1"];
-    const cost = fillAt("metamask", base, "buy", i.qty)?.netUsd ?? r2(i.qty * priceOf(base));
-    return [bin, "swap", "execute", "--from", "USDC", "--to", base, "--amount", String(cost), "--from-chain-id", "8453"];
+    if (i.side === "sell") return [bin, "swap", "execute", "--from", base, "--to", "USDC", "--amount", String(i.qty), "--from-chain-id", String(i.chainId ?? 1)];
+    const chain = i.chainId ?? 8453;
+    const cost = fillAt(dexVenue(chainName(chain) ?? "Base"), base, "buy", i.qty)?.netUsd ?? r2(i.qty * priceOf(base));
+    return [bin, "swap", "execute", "--from", "USDC", "--to", base, "--amount", String(cost), "--from-chain-id", String(chain)];
   }
   return null;
 }
 
-/** read candidate quotes out of `mm swap quote --all-quotes`; field names follow the CLI's own quote presentation (feeData.metabridge.usd, gasIncludedBreakdown.gaslessRelayFee.usd, protocols). Not exercised yet: an empty wallet gets INSUFFICIENT_FUNDS instead of quotes. */
+/** CAIP-19 ids the price API knows (`mm price spot --asset-ids`) */
+const CAIP19: Record<string, string> = {
+  ETH: "eip155:1/slip44:60",
+  BTC: "bip122:000000000019d6689c085ae165831e93/slip44:0",
+  SOL: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp/slip44:501",
+};
+
+/** read candidate quotes out of `mm swap quote --all-quotes`; field names follow the CLI's own quote presentation (feeData.metabridge.usd, gasIncludedBreakdown.gaslessRelayFee.usd, priceData.totalToAmountUsd, protocols). Not exercised yet: an empty wallet gets INSUFFICIENT_FUNDS instead of quotes. */
 export function parseMmQuotes(data: unknown): RouteQuote[] {
   const out: RouteQuote[] = [];
   const num = (v: unknown) => (typeof v === "number" ? v : typeof v === "string" && v.trim() !== "" && Number.isFinite(Number(v)) ? Number(v) : 0);
@@ -217,7 +236,10 @@ export function parseMmQuotes(data: unknown): RouteQuote[] {
     if (o.feeData || o.priceData) {
       const fee = num((o.feeData as { metabridge?: { usd?: unknown } } | undefined)?.metabridge?.usd) + num((o.gasIncludedBreakdown as { gaslessRelayFee?: { usd?: unknown } } | undefined)?.gaslessRelayFee?.usd);
       const protocols = Array.isArray(o.protocols) ? o.protocols.filter((p): p is string => typeof p === "string") : [];
-      out.push({ id: `mm:${out.length}`, label: protocols.join(" + ") || "MetaMask bridge", feeUsd: r2(fee), etaSec: num(o.estimatedProcessingTimeInSeconds), open: true, source: "mm" });
+      const q: RouteQuote = { id: `mm:${out.length}`, label: protocols.join(" + ") || "MetaMask bridge", feeUsd: r2(fee), etaSec: num(o.estimatedProcessingTimeInSeconds), open: true, source: "mm" };
+      const outUsd = num((o.priceData as { totalToAmountUsd?: unknown } | undefined)?.totalToAmountUsd);
+      if (outUsd > 0) q.outUsd = r2(outUsd);
+      out.push(q);
       return;
     }
     for (const x of Object.values(o)) if (typeof x === "object" && x !== null) walk(x);
@@ -256,11 +278,26 @@ export async function metamaskLiveAccount(opts: MmLiveOptions = {}): Promise<Acc
       cache = { at: Date.now(), rows: holdingsOf(b) };
       return cache.rows;
     },
-    /** real bridge quotes, read-only: `--all-quotes` compares and never executes */
+    /** real quotes, read-only: `--all-quotes` compares and never executes. A `move` across chains is a bridge quote; a `trade` is a DEX swap quote on its chain. */
     async quote(i: Intent): Promise<RouteQuote[]> {
+      if (i.kind === "trade") {
+        const base = baseOf(i.symbol);
+        const chain = String(i.chainId ?? (i.side === "sell" ? 1 : 8453));
+        const amount = i.side === "sell" ? i.qty : r2(i.qty * priceOf(base));
+        const [from, to] = i.side === "sell" ? [base, "USDC"] : ["USDC", base];
+        return parseMmQuotes(await mm<unknown>(bin, ["swap", "quote", "--from", from, "--to", to, "--amount", String(amount), "--from-chain-id", chain, "--all-quotes"], timeoutMs));
+      }
       if (i.kind !== "move" || i.fromChainId === undefined || i.chainId === undefined || i.fromChainId === i.chainId) return [];
       const data = await mm<unknown>(bin, ["swap", "quote", "--from", i.asset, "--to", i.asset, "--amount", String(i.amount), "--from-chain-id", String(i.fromChainId), "--to-chain-id", String(i.chainId), "--to-address", i.to, "--all-quotes"], timeoutMs);
       return parseMmQuotes(data);
+    },
+    /** a real spot price from MetaMask's price API (read-only; works on an empty wallet) */
+    async spot(asset: string): Promise<number | undefined> {
+      const id = CAIP19[asset];
+      if (!id) return undefined;
+      const data = await mm<{ prices?: Array<{ assetId?: string; price?: number }> }>(bin, ["price", "spot", "--asset-ids", id], timeoutMs);
+      const price = data.prices?.find((p) => p.assetId === id)?.price;
+      return typeof price === "number" && price > 0 ? r2(price) : undefined;
     },
     async execute(i: Intent) {
       const cmd = mmCommand(bin, i);

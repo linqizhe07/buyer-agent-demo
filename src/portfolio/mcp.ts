@@ -6,6 +6,10 @@
  *   npm run portfolio               # the service
  *   npm run portfolio:mcp           # this, over stdio; PORTFOLIO_URL overrides the base
  *
+ * Tools: portfolio_overview · portfolio_read · portfolio_quote (reads) ·
+ * portfolio_execute · portfolio_order (writes) · portfolio_approval ·
+ * portfolio_openness.
+ *
  * Claude Code:  claude mcp add portfolio -- npx tsx src/portfolio/mcp.ts
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -31,7 +35,7 @@ async function call(method: "GET" | "POST", path: string, body?: unknown): Promi
 const text = (payload: unknown, isError = false): CallToolResult => ({ isError, content: [{ type: "text", text: JSON.stringify(payload) }] });
 
 const intentSchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("trade"), symbol: z.string(), side: z.enum(["buy", "sell"]), qty: z.number().positive() }),
+  z.object({ kind: z.literal("trade"), symbol: z.string(), side: z.enum(["buy", "sell"]), qty: z.number().positive(), chainId: z.number().int().optional() }),
   z.object({ kind: z.literal("move"), asset: z.string(), amount: z.number().positive(), to: z.string(), chainId: z.number().int().optional(), fromChainId: z.number().int().optional() }),
   z.object({ kind: z.literal("pay"), merchant: z.string(), mcc: z.string(), amountUsd: z.number().positive() }),
   z.object({ kind: z.literal("subscribe"), fund: z.string(), amountUsd: z.number().positive() }),
@@ -92,11 +96,40 @@ server.registerTool(
   "portfolio_execute",
   {
     description:
-      "Act at one account: trade {symbol, side, qty} · move {asset, amount, to, chainId?, fromChainId?} (fromChainId ≠ chainId is a bridge; a move to another connected account's address lands there) · pay {merchant, mcc, amountUsd} · subscribe/redeem {fund, amountUsd}. Each call is one flight under your name. The wallet first checks the credential's native scope and the user's openness dial; in open mode nothing is capped and only a move to a never-used address raises a card. A card comes back as {pending: true, approval: {id}} — wait for the human, then poll portfolio_approval. A refusal is {ok: false, code: E_WALLET_* | E_VENUE_* | E_CARD_*, message, native}: do not retry it, tell the user.",
+      "Act at one account: trade {symbol, side, qty, chainId?} (at the on-chain wallet a trade is a DEX swap on chainId's pools; to let the wallet pick venues and split, use portfolio_order instead) · move {asset, amount, to, chainId?, fromChainId?} (fromChainId ≠ chainId is a bridge; a move to another connected account's address lands there) · pay {merchant, mcc, amountUsd} · subscribe/redeem {fund, amountUsd}. Each call is one flight under your name. The wallet first checks the credential's native scope and the user's openness dial; in open mode nothing is capped and only a move to a never-used address raises a card. A card comes back as {pending: true, approval: {id}} — wait for the human, then poll portfolio_approval. A refusal is {ok: false, code: E_WALLET_* | E_VENUE_* | E_CARD_*, message, native}: do not retry it, tell the user.",
     inputSchema: { account: z.string(), intent: intentSchema },
   },
   async ({ account, intent }) => {
     const r = await call("POST", "/api/execute", { account, intent, agent: agentOf() });
+    return text(r.body, r.status >= 400);
+  },
+);
+
+const orderSchema = { base: z.string().describe("ETH | BTC | SOL"), side: z.enum(["buy", "sell"]), qty: z.number().positive() };
+
+server.registerTool(
+  "portfolio_quote",
+  {
+    description:
+      "Price one order at every connected venue — the CEX order books and the DEX pools on each chain the on-chain wallet holds inventory on — and see how the wallet's router would split it: each venue's net for the whole order (or why it cannot take it: inventory is liquidity too), the slices with their fills, a DEX slice's route across pools and its gas, the best single venue and what splitting earns over it, and the venues left out with the reason. A read: no card, nothing moves.",
+    inputSchema: orderSchema,
+    annotations: { readOnlyHint: true },
+  },
+  async ({ base, side, qty }) => {
+    const r = await call("GET", `/api/quote?base=${encodeURIComponent(base)}&side=${side}&qty=${qty}`);
+    return text(r.body, r.status >= 400);
+  },
+);
+
+server.registerTool(
+  "portfolio_order",
+  {
+    description:
+      "Route an order and execute it as ONE flight under your name: the wallet splits it across venues by marginal net price and inventory (run portfolio_quote first to see the plan), one leg per slice. The wallet judges the whole order, not the slices — in guard mode an order above the free allowance raises ONE card ({pending: true, approval: {id}}; poll portfolio_approval) and nothing executes until the human answers. {ok: false, error} means the venues together cannot take the order; a refusal is not to be retried.",
+    inputSchema: orderSchema,
+  },
+  async ({ base, side, qty }) => {
+    const r = await call("POST", "/api/order", { base, side, qty, agent: agentOf() });
     return text(r.body, r.status >= 400);
   },
 );

@@ -13,6 +13,14 @@
  *
  *   openFlight / fly / note     the page agent's multi-leg flights
  *   execute(account, intent, agent)  one-leg flight (the MCP server's write)
+ *   quote / order               the tower's routing service: one order priced
+ *                               at every venue (CEX books, DEX pools) and split
+ *                               across them; `order` flies the slices as one
+ *                               flight
+ *   flyBatch                    the slices of one order: ONE decision — the
+ *                               wallet judges the whole order (splitting never
+ *                               slips under an allowance) and raises one card,
+ *                               not one per slice
  *   decide(approvalId, …)       the human's answer to a card, as one more leg
  *   read / overview             never gated; one read across every account
  */
@@ -21,18 +29,20 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Ledger, type LedgerRow } from "../agent/ledger.ts";
 import { isRefusal, refuse, type Refusal } from "../core/errors.ts";
-import { describeIntent, ENFORCER_LABEL, KIND_LABEL, KIND_ORDER, r2, SCRIPT_AGENT, usdOf, WRITE_CAPS, type Account, type AccountAdapter, type AgentId, type Capability, type ExecOk, type ExecResult, type Holding, type Intent } from "./accounts.ts";
+import { describeIntent, ENFORCER_LABEL, KIND_LABEL, KIND_ORDER, PRICES, r2, SCRIPT_AGENT, usdOf, WRITE_CAPS, type Account, type AccountAdapter, type AgentId, type Capability, type ExecOk, type ExecResult, type Holding, type Intent } from "./accounts.ts";
 import { bankAccount, type BankSeed } from "./adapters/bank.ts";
 import { binanceAccount, type BinanceSeed } from "./adapters/binance.ts";
 import { mastercardAccount, type MastercardSeed } from "./adapters/mastercard.ts";
 import { metamaskLiveAccount, metamaskSimAccount, type MetamaskSimSeed, type MmLiveOptions } from "./adapters/metamask.ts";
 import { okxAccount, type OkxSeed } from "./adapters/okx.ts";
 import { ondoAccount, type OndoSeed } from "./adapters/ondo.ts";
-import { compileOpenness, effectiveReach, evaluate, isExpired, parseOpenness, type Mode, type Openness, type OpennessRow } from "./openness.ts";
+import { compileOpenness, effectiveReach, evaluate, isExpired, parseOpenness, type Card, type Mode, type Openness, type OpennessRow } from "./openness.ts";
 import { aggregate, liquidity, type Aggregate, type Liquidity } from "./portfolio.ts";
 import { ladder, type Ladder } from "./rails.ts";
 import { chainName } from "./accounts.ts";
-import { detailOf, plainRefusal, sayOf, waitWords } from "./words.ts";
+import { orderPlan, type OrderPlan, type Part } from "./router.ts";
+import type { Side } from "./venues.ts";
+import { cents, detailOf, plainRefusal, routeLine, sayOf, waitWords } from "./words.ts";
 
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
 export const FIXTURES = join(ROOT, "fixtures", "home", "portfolio");
@@ -57,6 +67,14 @@ export interface ServiceOptions {
   openness?: unknown;
 }
 
+/** one slice of an order (or any step an agent flies): where, what, and the agent's words for it */
+export interface BatchStep {
+  account: string;
+  intent: Intent;
+  say?: string | undefined;
+  compare?: string | undefined;
+}
+
 export interface Approval {
   id: string;
   at: string;
@@ -68,6 +86,14 @@ export interface Approval {
   flight: string;
   decidedAt?: string | undefined;
   result?: ExecResult | undefined;
+  /** a split order waits on ONE card: every slice it covers (`account` / `intent` above are its first slice) */
+  batch?: BatchStep[] | undefined;
+  /** the order in words — `卖出 3 ETH（3 片）` */
+  title?: string | undefined;
+  /** what each slice came back with, once approved */
+  results?: ExecResult[] | undefined;
+  /** lines the agent holds back until the card is approved and the writes have landed (where the proceeds are) */
+  notes?: string[] | undefined;
 }
 
 export type Pending = { ok: true; pending: true; approval: Approval };
@@ -88,8 +114,10 @@ export interface Leg {
   intent?: Intent | undefined;
   usd?: number | undefined;
   approvalId?: string | undefined;
-  /** what this leg was chosen over: the other routes, the other venues */
+  /** what this leg was chosen over: the other routes, the other venues; for a DEX swap, its route */
   compare?: string | undefined;
+  /** a split order's proportions, drawn as one bar under the agent's narration */
+  parts?: Part[] | undefined;
 }
 
 export interface Flight {
@@ -297,23 +325,138 @@ export class PortfolioService {
   async fly(f: Flight, accountId: string, intent: Intent, say?: string, compare?: string): Promise<ExecuteOutcome> {
     const r = await this.write(f, accountId, intent);
     const words = say ?? sayOf(intent, this.nameOf(accountId));
-    const leg: Leg = { seq: f.legs.length + 1, mark: "ok", text: words, account: accountId, intent };
-    if (compare !== undefined) leg.compare = compare;
     if (isPending(r)) {
       const stranger = intent.kind === "move" && !this.openness.knownDestinations.includes(intent.to);
-      leg.mark = "wait";
-      leg.text = `${words}：${waitWords(stranger)}`;
-      leg.usd = r.approval.usd;
-      leg.approvalId = r.approval.id;
-    } else if (isRefusal(r)) {
+      const leg: Leg = { seq: f.legs.length + 1, mark: "wait", text: `${words}：${waitWords(stranger)}`, account: accountId, intent, usd: r.approval.usd, approvalId: r.approval.id };
+      if (compare !== undefined) leg.compare = compare;
+      f.legs.push(leg);
+    } else this.land(f, words, accountId, intent, r, compare);
+    return r;
+  }
+
+  /** a write that reached its venue, as a leg: the fill and what it netted, or the refusal in plain words; a DEX swap shows its route */
+  private land(f: Flight, words: string, accountId: string, intent: Intent, r: ExecResult, compare?: string): Leg {
+    const leg: Leg = { seq: f.legs.length + 1, mark: "ok", text: words, account: accountId, intent };
+    if (isRefusal(r)) {
       leg.mark = "no";
       leg.text = `${words}：${plainRefusal(r, (id) => this.nameOf(id))}`;
+      if (compare !== undefined) leg.compare = compare;
     } else {
       leg.text = `${words}${detailOf(intent, r)}`;
       leg.usd = r.usd;
+      const line = [routeLine(r.native), compare].filter((x): x is string => !!x).join("；");
+      if (line) leg.compare = line;
     }
     f.legs.push(leg);
-    return r;
+    return leg;
+  }
+
+  /** the slices of ONE order. The wallet judges the order as a whole — its total against the allowance and the daily cap — and asks the human once; nothing goes to a venue until every slice has passed. */
+  async flyBatch(f: Flight, title: string, steps: BatchStep[]): Promise<ExecuteOutcome[]> {
+    if (steps.length <= 1) {
+      const out: ExecuteOutcome[] = [];
+      for (const s of steps) out.push(await this.fly(f, s.account, s.intent, s.say, s.compare));
+      return out;
+    }
+    const ctx = { flight: f.no, agent: f.agent.id };
+    const now = this.now();
+    const daily = this.dailyOutUsd(now);
+    const orderUsd = r2(steps.reduce((s, x) => s + usdOf(x.intent), 0));
+    const label = `${title}（${steps.length} 片）`;
+    let refusal: Refusal | undefined;
+    let card: Card | undefined;
+    let before = 0;
+    for (const s of steps) {
+      const tool = `portfolio_${s.intent.kind}`;
+      const a = this.adapters.get(s.account);
+      if (!a) {
+        const r = refuse("E_WALLET_ACCOUNT_UNKNOWN", { venue: s.account, tool, detail: { known: [...this.adapters.keys()] } });
+        this.ledger.append({ kind: "openness-refusal", venue: s.account, tool, code: r.code, reason: r.message, args: { ...s.intent }, ...ctx });
+        refusal ??= r;
+        continue;
+      }
+      this.ledger.append({ kind: "intent", venue: s.account, tool, args: { ...s.intent }, notionalUsd: usdOf(s.intent), reason: `${label} · ${describeIntent(s.intent)}`, ...ctx });
+      const v = evaluate({ intent: s.intent, account: a.account, openness: this.openness, now, dailyOutUsd: daily + before, orderUsd });
+      before += usdOf(s.intent);
+      if (isRefusal(v)) {
+        this.ledger.append({ kind: "openness-refusal", venue: s.account, tool, code: v.code, reason: v.message, detail: v.detail, ...ctx });
+        refusal ??= v;
+      } else if (v.card) card ??= v.card;
+    }
+    if (refusal) {
+      this.counters.refusals++;
+      f.legs.push({ seq: f.legs.length + 1, mark: "no", text: `${label}：${plainRefusal(refusal, (id) => this.nameOf(id))}` });
+      return steps.map(() => refusal);
+    }
+    if (card) {
+      const first = steps[0]!;
+      const approval: Approval = { id: `card-${String(++this.seq).padStart(4, "0")}`, at: now, account: first.account, intent: first.intent, usd: orderUsd, reason: card.reason, status: "pending", flight: f.no, batch: steps.map((s) => ({ ...s })), title: label };
+      this.approvals.unshift(approval);
+      this.counters.cards++;
+      this.ledger.append({ kind: "card", venue: "*", intentId: approval.id, tool: "portfolio_order", outcome: "pending", reason: card.reason, notionalUsd: orderUsd, args: { slices: steps.map((s) => ({ account: s.account, ...s.intent })) }, ...ctx });
+      f.legs.push({ seq: f.legs.length + 1, mark: "wait", text: `${label}：${waitWords(false)}`, usd: orderUsd, approvalId: approval.id });
+      return steps.map(() => ({ ok: true, pending: true, approval }));
+    }
+    const out: ExecuteOutcome[] = [];
+    for (const s of steps) {
+      const r = await this.settle(this.adapters.get(s.account)!, s.intent, undefined, ctx);
+      this.land(f, s.say ?? sayOf(s.intent, this.nameOf(s.account)), s.account, s.intent, r, s.compare);
+      out.push(r);
+    }
+    return out;
+  }
+
+  // ---- the routing service --------------------------------------------------------
+
+  /** one order priced at every venue and split across them; a read (no card, nothing moves) */
+  async quote(base: string, side: Side, qty: number): Promise<OrderPlan> {
+    const plan = orderPlan(base, side, qty, await this.views());
+    this.ledger.append({ kind: "read", venue: "*", tool: "portfolio_quote", outcome: `${plan.title} · ${plan.split.quotes.length} venue(s) quoted · ${plan.split.slices.length} slice(s) · no card` });
+    return plan;
+  }
+
+  /** route an order and fly it: one flight, one leg per slice, one card at most */
+  async order(base: string, side: Side, qty: number, agent: AgentId = SCRIPT_AGENT): Promise<{ flight: Flight; plan: OrderPlan; outcomes: ExecuteOutcome[] }> {
+    const plan = await this.quote(base, side, qty);
+    const f = this.openFlight(agent, plan.title);
+    const first = this.note(f, plan.narration);
+    if (plan.parts) first.parts = plan.parts;
+    const outcomes = await this.flyBatch(f, plan.title, plan.steps);
+    await this.closeOrder(f, plan, outcomes);
+    return { flight: f, plan, outcomes };
+  }
+
+  /** the lines after an order's legs: what the plan left out, what the live wallet adds, and — only once it has filled — where the proceeds are (a pending card keeps that line until it is approved) */
+  async closeOrder(f: Flight, plan: OrderPlan, outcomes: Array<ExecuteOutcome | null>): Promise<void> {
+    for (const n of [...plan.notes, ...(await this.liveNotes(plan))]) this.note(f, n);
+    if (!plan.after.length) return;
+    const pending = outcomes.find((r): r is Pending => r !== null && isPending(r));
+    if (pending) pending.approval.notes = plan.after;
+    else if (outcomes.some((r) => r !== null && r.ok === true)) for (const n of plan.after) this.note(f, n);
+  }
+
+  /** what the LIVE MetaMask wallet can add to an order, read-only: the real spot price, and — for a DEX slice — the real swap quote, or why it could not be read */
+  async liveNotes(plan: OrderPlan): Promise<string[]> {
+    const mm = this.adapters.get("metamask");
+    if (!this.live || !mm || !plan.steps.length) return [];
+    const notes: string[] = [];
+    try {
+      const spot = await mm.spot?.(plan.base);
+      if (spot !== undefined) notes.push(`真实现价 ${cents(spot)}（mm price spot）；上面的场所报价按固定表 ${cents(PRICES[plan.base] ?? 0)}。`);
+    } catch {
+      // a price feed that does not answer is not worth a line
+    }
+    const dex = plan.steps.find((s) => s.account === "metamask" && s.intent.kind === "trade");
+    if (dex && mm.quote) {
+      try {
+        const best = (await mm.quote(dex.intent)).sort((a, b) => (b.outUsd ?? 0) - (a.outUsd ?? 0) || a.feeUsd - b.feeUsd)[0];
+        if (best) notes.push(`真钱包的 DEX 报价（mm swap quote）：${best.label}${best.outUsd !== undefined ? ` · 到手约 ${cents(best.outUsd)}` : ""} · 费 ${cents(best.feeUsd)}。`);
+      } catch (err) {
+        const message = (err as Error).message;
+        notes.push(`真钱包读不到 DEX 报价（${/"code":"([A-Z_]+)"/.exec(message)?.[1] ?? message.slice(0, 80)}），DEX 那片用的是模拟池子。`);
+      }
+    }
+    return notes;
   }
 
   /** the MCP server's (and the demo's) write: a flight of one leg */
@@ -379,17 +522,33 @@ export class PortfolioService {
     const f = this.flight(ap.flight);
     const ctx = { flight: ap.flight, agent: f?.agent.id };
     ap.decidedAt = this.now();
+    const where = ap.batch ? "*" : ap.account;
     if (decision === "reject") {
       ap.status = "rejected";
-      const r = refuse("E_CARD_REJECTED", { venue: ap.account, tool: `portfolio_${ap.intent.kind}`, message: `人拒绝了这张卡：${describeIntent(ap.intent)}`, detail: { approval: ap.id } });
+      const r = refuse("E_CARD_REJECTED", { venue: ap.account, tool: ap.batch ? "portfolio_order" : `portfolio_${ap.intent.kind}`, message: `人拒绝了这张卡：${ap.title ?? describeIntent(ap.intent)}`, detail: { approval: ap.id } });
       ap.result = r;
       this.counters.refusals++;
-      this.ledger.append({ kind: "card", venue: ap.account, intentId: ap.id, outcome: "rejected", code: r.code, reason: r.message, ...ctx });
+      this.ledger.append({ kind: "card", venue: where, intentId: ap.id, outcome: "rejected", code: r.code, reason: r.message, ...ctx });
       if (f) this.note(f, "你拒了，没动", "no");
       return r;
     }
     ap.status = "approved";
-    this.ledger.append({ kind: "card", venue: ap.account, intentId: ap.id, outcome: "approved", reason: ap.reason, notionalUsd: ap.usd, ...ctx });
+    this.ledger.append({ kind: "card", venue: where, intentId: ap.id, outcome: "approved", reason: ap.reason, notionalUsd: ap.usd, ...ctx });
+    if (ap.batch) {
+      // one yes covers every slice of the order
+      const results: ExecResult[] = [];
+      for (const s of ap.batch) {
+        const r = await this.settle(this.adapters.get(s.account)!, s.intent, ap.id, ctx);
+        results.push(r);
+        if (f) this.land(f, `你批了 · ${s.say ?? sayOf(s.intent, this.nameOf(s.account))}`, s.account, s.intent, r, s.compare);
+      }
+      ap.results = results;
+      const done = results.filter((r): r is ExecOk => !isRefusal(r));
+      const summary: ExecResult = results.find(isRefusal) ?? { ok: true, account: [...new Set(ap.batch.map((s) => s.account))].join("+"), status: "filled", summary: `${ap.title ?? "order"} · ${done.length} 片成交`, usd: r2(done.reduce((s, r) => s + r.usd, 0)), ref: `flight:${ap.flight}`, native: { slices: done.map((r) => ({ account: r.account, ref: r.ref, usd: r.usd })) } };
+      ap.result = summary;
+      if (f && done.length) for (const n of ap.notes ?? []) this.note(f, n);
+      return summary;
+    }
     const r = await this.settle(this.adapters.get(ap.account)!, ap.intent, ap.id, ctx);
     ap.result = r;
     if (f) {
@@ -398,6 +557,9 @@ export class PortfolioService {
         const leg = this.note(f, `你批了 · ${sayOf(ap.intent, this.nameOf(ap.account))}${detailOf(ap.intent, r)}`, "ok");
         leg.usd = r.usd;
         leg.account = ap.account;
+        const route = routeLine(r.native);
+        if (route) leg.compare = route;
+        for (const n of ap.notes ?? []) this.note(f, n);
       }
     }
     return r;

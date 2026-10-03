@@ -88,9 +88,11 @@ export interface EvaluateInput {
   now: string;
   /** USD the agent already moved in the last 24 h (guard's daily cap) */
   dailyOutUsd: number;
+  /** when this intent is one slice of a split order: the WHOLE order's notional. Guard judges the free allowance against it, so splitting an order can never slip it under the line */
+  orderUsd?: number | undefined;
 }
 
-/** write order: session → revoked → credential scope → user reach → blocklist → open: stranger address = card · guard: daily cap, then card above the free allowance */
+/** write order: session → revoked → credential scope → user reach → blocklist → open: stranger address = card · guard: daily cap, then card above the free allowance (a slice of a split order is judged by the whole order) */
 export function evaluate(i: EvaluateInput): Verdict {
   const cap = capabilityOf(i.intent);
   const a = i.account;
@@ -126,7 +128,8 @@ export function evaluate(i: EvaluateInput): Verdict {
     return refuse("E_WALLET_DAILY_CAP", { venue: a.id, tool, message: `guard：24 小时内 agent 已动 $${i.dailyOutUsd}，再动 $${usd} 超过日上限 $${o.guard.dailyCapUsd}`, detail: { daily: i.dailyOutUsd, cap: o.guard.dailyCapUsd, amount: usd } });
   }
   const above = o.guard.cardAboveUsd[a.id] ?? o.guard.defaultCardAboveUsd;
-  const card = stranger ? strangerCard : usd > above ? { reason: `guard：$${usd} 超过 ${a.name} 的免审额度 $${above}` } : null;
+  const judged = i.orderUsd ?? usd;
+  const card = stranger ? strangerCard : judged > above ? { reason: i.orderUsd === undefined ? `guard：$${usd} 超过 ${a.name} 的免审额度 $${above}` : `guard：这一单合计 $${judged}（拆单合并计）超过 ${a.name} 的免审额度 $${above}` } : null;
   return { ok: true, capability: cap, usd, card };
 }
 

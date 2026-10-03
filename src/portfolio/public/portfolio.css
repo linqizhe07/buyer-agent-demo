@@ -73,3 +73,9 @@ footer{border-top:1px solid var(--line);padding-top:12px;letter-spacing:.02em}
 .liq-row.closed b,.liq-row.closed .amt{color:var(--dim)}
 .line.cmp{padding:0 0 3px}
 .line.cmp .txt{color:var(--dim);font-size:12px}
+.line.split{padding:2px 0 6px}
+.parts{display:flex;gap:3px;max-width:560px}
+.parts i{display:block;min-width:0;font-style:normal;font-family:"IBM Plex Mono","SF Mono",Menlo,Consolas,monospace;font-size:11px;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.parts i b{display:block;height:5px;margin-bottom:3px;background:var(--ink)}
+.parts i.dex b{background:var(--blue)}
+.parts i.dex{color:var(--blue)}

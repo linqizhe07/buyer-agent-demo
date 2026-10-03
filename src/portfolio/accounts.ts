@@ -55,7 +55,8 @@ export interface Holding {
 }
 
 export type Intent =
-  | { kind: "trade"; symbol: string; side: "buy" | "sell"; qty: number }
+  /** at the on-chain wallet a trade is a DEX swap; `chainId` names the chain whose pools take it */
+  | { kind: "trade"; symbol: string; side: "buy" | "sell"; qty: number; chainId?: number | undefined }
   | { kind: "move"; asset: string; amount: number; to: string; chainId?: number | undefined; fromChainId?: number | undefined; via?: string | undefined }
   | { kind: "pay"; merchant: string; mcc: string; amountUsd: number }
   | { kind: "subscribe"; fund: string; amountUsd: number }
@@ -84,8 +85,10 @@ export interface AccountAdapter {
   execute(intent: Intent): Promise<ExecResult>;
   /** money arriving from another account over a rail (a bridge, a transfer): the service calls this after a successful `move` whose destination is this account's address */
   credit?(asset: string, amount: number, chain?: string): void;
-  /** candidate routes for an intent, when the provider can quote them itself (the live MetaMask bridge aggregator) */
+  /** candidate routes for an intent, when the provider can quote them itself (the live MetaMask bridge / swap aggregator) */
   quote?(intent: Intent): Promise<RouteQuote[]>;
+  /** a real spot price in USD, when the provider has a price feed (the live MetaMask price API) */
+  spot?(asset: string): Promise<number | undefined>;
 }
 
 /** one way to move money between two places — a bridge, a CEX withdrawal, an ACH, a redemption — with its price and its clock */
@@ -97,8 +100,10 @@ export interface RouteQuote {
   /** the agent may take it now; a closed route still carries its quote (what opening it would buy) */
   open: boolean;
   why?: string | undefined;
-  /** `sim` a simulated table · `mm` read from the live MetaMask bridge aggregator */
+  /** `sim` a simulated table · `mm` read from the live MetaMask bridge / swap aggregator */
   source: "sim" | "mm";
+  /** what the route delivers in USD, when the provider says so (a live swap quote) */
+  outUsd?: number | undefined;
 }
 
 /** who is flying: every write belongs to one agent, and every flight number starts with its code */
@@ -123,6 +128,11 @@ export const CHAIN_NAME: Record<number, string> = { 1: "Ethereum", 10: "Optimism
 
 export function chainName(id: number | undefined): string | undefined {
   return id === undefined ? undefined : (CHAIN_NAME[id] ?? `chain ${id}`);
+}
+
+export function chainIdOf(name: string | undefined): number | undefined {
+  const hit = Object.entries(CHAIN_NAME).find(([, n]) => n === name);
+  return hit ? Number(hit[0]) : undefined;
 }
 
 export const KIND_LABEL: Record<AccountKind, string> = {
@@ -190,7 +200,7 @@ export function destinationOf(i: Intent): string | null {
 export function describeIntent(i: Intent): string {
   switch (i.kind) {
     case "trade":
-      return `${i.side.toUpperCase()} ${i.qty} ${baseOf(i.symbol)} (${i.symbol})`;
+      return `${i.side.toUpperCase()} ${i.qty} ${baseOf(i.symbol)} (${i.symbol}${i.chainId !== undefined ? ` @ ${chainName(i.chainId)}` : ""})`;
     case "move":
       return `move ${i.amount} ${i.asset} → ${i.to}${i.fromChainId !== undefined && i.chainId !== undefined && i.fromChainId !== i.chainId ? ` (${chainName(i.fromChainId)} → ${chainName(i.chainId)})` : ""}`;
     case "pay":
@@ -204,3 +214,9 @@ export function describeIntent(i: Intent): string {
 
 export const r2 = (n: number): number => Number(n.toFixed(2));
 export const r8 = (n: number): number => Number(n.toFixed(8));
+
+/** a quantity a person reads: `1.5`, `0.15`, `15.8184` — never `1.4999999` */
+export function qtyText(n: number): string {
+  const a = Math.abs(n);
+  return String(Number(n.toFixed(a >= 100 ? 2 : a >= 0.01 ? 4 : 8)));
+}

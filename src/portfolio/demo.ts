@@ -1,4 +1,4 @@
-/** `npm run portfolio:demo` — seven beats, ✓/✗/FAIL lines, exit 0 iff no
+/** `npm run portfolio:demo` — nine beats, ✓/✗/FAIL lines, exit 0 iff no
  * assertion failed. No port is opened unless `--serve`; five accounts are
  * in-process simulators; `--mm` swaps the MetaMask account for the real `mm`
  * CLI (reads live; writes stay off unless PORTFOLIO_MM_WRITES=1).
@@ -8,10 +8,10 @@
  *   npm run portfolio:demo -- --serve --hold   also open the page at :4820 and keep it up
  */
 import { formatRefusal, isRefusal, type Refusal } from "../core/errors.ts";
-import { CAP_LABEL, describeIntent, type Intent } from "./accounts.ts";
+import { agentCode, CAP_LABEL, describeIntent, qtyText, r2, type Intent } from "./accounts.ts";
 import { AgentSession } from "./agent.ts";
 import { etaLabel } from "./rails.ts";
-import { bestVenue, venueQuotes } from "./venues.ts";
+import { bestVenue, fillAt, splitOrder, venueQuotes } from "./venues.ts";
 import { defaultHome, startPortfolioServer } from "./server.ts";
 import { isPending, PortfolioService, type ExecuteOutcome } from "./service.ts";
 
@@ -54,7 +54,12 @@ export const PROVEN = [
   "open 模式：四笔跨账户写操作零张卡——agent 的触达就是每个凭据原生权限的边缘",
   "流动性 = 金额 × 时间 × 成本：一张到 Ethereum 的阶梯（即时 / 分钟级 / T+1 / 关着），关着的跑道也带报价（打开它要多久、多少钱）",
   "跨链带报价与选路：三座桥加 CEX 中转比过，取最便宜的那条开着的路；桥费从到账里扣，差多少、为什么差，说得清",
-  "成交流动性：同一笔单在 Binance、OKX、DEX 各出一个带点差、深度冲击、手续费的报价，卖在净得最高的地方；库存不在的场所如实说没有",
+  "成交流动性：同一笔单在两家 CEX 的订单簿和链上的 DEX 池子各出一个报价（点差、深度冲击、taker 费 / LP 费、gas）；库存不在的场所如实说没有",
+  "拆单：没有一个场所接得下的单，按边际净价和库存拆到 OKX、DEX、Binance 三处，各片成交价就是比过的报价；gas 只在挣得回来的地方付，多飞一段至少要多挣 $1",
+  "同一套算法在大单上才见钱：400 ETH（忽略库存）拆四处比最好的单一场所多净得 $400 以上——深度才是大单的成本",
+  "DEX 是真的一条跑道：链上那片走池子路由成交，换回的 USDC 留在链上、随时能动；CEX 那两片的 USDT 困在交易所里",
+  "一单一卡：Guard 下拆单按整单判免审额度（拆小了也躲不过），只问人一次，批准后各片一起成交",
+  "路由是塔台的公共服务：经 MCP 来的 agent 用 portfolio_quote / portfolio_order 拿到同一条航路，航班记在它自己名下",
   "每一班有航班号（agent 代码 + 序号），每条账本行都写着是哪个 agent 的哪一班",
   "边缘由凭据与场所守住，钱包不加也不减：钱包预检（E_WALLET_SCOPE）和绕过钱包后场所的第二道线（-2015 / 403 / rc 57 / revert）画的是同一条线",
   "open 模式唯一还会问人的动作：往从没用过的地址转钱；黑名单直接拒；MetaMask 自己的 Guard 仍会把超线转出送去 MFA",
@@ -63,9 +68,10 @@ export const PROVEN = [
 ];
 export const NOT_PROVEN = [
   "五个账户是本地模拟：Binance / OKX 的权限错误码形状真实；Mastercard agentic token 的格式是示意（拒绝码是真的）；Ondo 只模拟了白名单转让限制与 T+1",
-  "桥费、到账时间、提币费、点差与深度都是示意的报价表（形状真实，数字不是行情）；到账时间只是报价，模拟里即时到账；真钱包有钱后桥的报价改读 mm swap quote（该路径尚未实测）",
-  "MetaMask 账户 live 时只读；真钱写操作关着（PORTFOLIO_MM_WRITES），只打印会执行的 mm 命令",
-  "价格是固定表，没有行情、滑点、部分成交；没有和场所对账单对账",
+  "桥费、到账时间、提币费、点差、深度、池子的虚拟储备与 gas 都是示意的报价表（形状真实，数字不是行情）；到账时间只是报价，模拟里即时到账",
+  "订单簿与池子是无状态的：成交不移动价格，没有行情、MEV、滑点保护；拆出的各片依次成交、不是原子的——一片成了另一片被拒就是部分成交（账本看得见，没有回滚）",
+  "MetaMask 账户 live 时只读；真钱写操作关着（PORTFOLIO_MM_WRITES），只打印会执行的 mm 命令；live 的现价读 mm price spot（已实测），桥与 DEX 的报价读 mm swap quote（钱包为空，成功路径尚未实测）",
+  "价格是固定表；没有和场所对账单对账",
   "撤销只是钱包这边：交易所删 key、发卡行冻 token 是运营动作，这里没做",
   "脚本化 agent ≠ LLM 会做同样决定；没有证明任何 alpha",
 ];
@@ -117,10 +123,11 @@ async function main(): Promise<number> {
     tick();
     const pm = new AgentSession(svc);
     const flight = await pm.say("申购 5000 OUSG");
-    const printFlight = (f: typeof flight) => {
-      note(`flight ${f.no} · ${f.agent.name} · ${f.request}`);
-      for (const l of f.legs) {
+    const printFlight = (f: typeof flight, from = 0) => {
+      if (from === 0) note(`flight ${f.no} · ${f.agent.name} · ${f.request}`);
+      for (const l of f.legs.slice(from)) {
         note(`  ${l.mark === "ok" ? "✓" : l.mark === "no" ? "✗" : l.mark === "wait" ? "▣" : "·"} ${l.text}${l.usd ? ` · $${l.usd}` : ""}`);
+        if (l.parts) note(`      [${l.parts.map((p) => `${p.label} ${p.pct}%`).join(" | ")}]`);
         if (l.compare) note(`      ${l.compare}`);
       }
     };
@@ -140,22 +147,45 @@ async function main(): Promise<number> {
     check(svc.rows().filter((r) => r.flight === flight.no).length >= (movedBridge > 0 ? 8 : 3) && (movedBridge === 0 || svc.rows().some((r) => r.kind === "funding" && r.flight === flight.no && r.notionalUsd === arrived)), movedBridge > 0 ? "every ledger row of the flight carries its number and agent; the bridge's arrival ($1,199 after the fee) is a funding row" : "every ledger row of the flight carries its number and agent", "ledger");
 
     // ---- 4 ------------------------------------------------------------------------
-    heading("Beat 4: 成交流动性 · 同一笔单，跨场所比价");
+    heading("Beat 4: 成交流动性 · CEX 订单簿 + DEX 池子 · 一笔单拆到三个场所");
     const quotes = venueQuotes("ETH", "sell", 1, after.accounts);
-    for (const q of quotes) note(`${q.name.padEnd(20)} ${q.ok ? `@ ${q.price} · fee $${q.feeUsd} · net $${q.netUsd} · impact ${q.impactBps} bp` : q.why}`);
+    for (const q of quotes) note(`${q.name.padEnd(16)} ${q.price > 0 ? `@ ${q.price} · fee $${q.feeUsd} · net $${q.netUsd} · impact ${q.impactBps} bp${q.route ? ` · ${q.route.map((r) => r.dex).join(" + ")} · gas $${q.gasUsd}` : ""}` : ""}${q.ok ? "" : `  ← ${q.why}`}`);
     const bestQ = bestVenue(quotes, "sell");
-    const binanceQ = quotes.find((q) => q.venue === "binance");
+    const netAt = (venue: string) => quotes.find((q) => q.venue === venue)?.netUsd;
+    check(bestQ?.venue === "okx" && bestQ.netUsd === 2439.02 && netAt("binance") === 2437.44 && (live || (quotes.length === 4 && netAt("dex:Base") === 2438.67)), live ? `one order (1 ETH) quoted at the venues that could take it: OKX nets $2,439.02, Binance $2,437.44; the LIVE wallet holds no ETH on-chain, so the DEX says so` : "one order (1 ETH) quoted at four venues — two CEX books, the DEX pools on two chains: OKX nets $2,439.02, DEX on Base $2,438.67 (5 bps LP fee + 5¢ gas), Binance $2,437.44", "execution");
+    if (!live) check(quotes.find((q) => q.venue === "dex:Ethereum")?.why === "只有 0.15 ETH" && quotes.find((q) => q.venue === "dex:Base")?.route?.[0]?.dex === "Aerodrome", "a DEX quote is a route across that chain's pools (Aerodrome on Base); the 0.15 ETH on Ethereum cannot take the order alone, and says so", "execution");
     tick();
-    const f2 = await pm.say("卖 1 ETH");
+    const f2 = await pm.say("卖 3 ETH");
     printFlight(f2);
-    const leg2 = f2.legs.find((l) => l.mark === "ok");
-    check(f2.no === "PM-0002" && bestQ?.venue === "okx" && leg2?.account === "okx" && leg2.text.includes(`净得 $${bestQ.netUsd.toLocaleString("en-US", { minimumFractionDigits: 2 })}`), `the same order quoted at three venues, sold where the net is highest: OKX $${bestQ?.netUsd} vs Binance $${binanceQ?.netUsd}`, "execution");
-    check((leg2?.compare ?? "").includes("Binance") && (leg2?.compare ?? "").includes("DEX"), "the leg says what it compared: Binance nets less; the DEX route does not hold a whole ETH on-chain", "execution");
+    const fills = f2.legs.filter((l) => l.mark === "ok");
+    const dexLeg = fills.find((l) => l.account === "metamask");
+    check(f2.no === "PM-0002" && fills.map((l) => l.account).join(",") === (live ? "okx,binance" : "okx,metamask,binance") && f2.legs[0]!.text.includes("没有一个场所接得下") && (f2.legs[0]!.parts?.length ?? 0) === fills.length, live ? "no venue holds 3 ETH, so the order is SPLIT by marginal net price and inventory: OKX 1.5 · Binance 1.5 (the LIVE wallet has nothing on-chain to add)" : "no venue holds 3 ETH, so the order is SPLIT by marginal net price and inventory: OKX 1.5 (best price) · DEX on Base 1 · Binance 0.5 — one flight, three legs", "split");
+    if (!live) {
+      check(f2.legs[0]!.text.includes("净得 $7,315.91") && fills[0]!.text.includes("净得 $3,658.52") && dexLeg !== undefined && dexLeg.text.includes("DEX（Base）") && dexLeg.text.includes("净得 $2,438.67") && fills[2]!.text.includes("净得 $1,218.72"), "each slice filled at the price it was quoted: $3,658.52 + $2,438.67 + $1,218.72 = $7,315.91 net", "split");
+      const twoCex = r2((fillAt("okx", "ETH", "sell", 1.5)?.netUsd ?? 0) + (fillAt("binance", "ETH", "sell", 1.5)?.netUsd ?? 0));
+      const earned = r2(7315.91 - twoCex);
+      check((dexLeg?.compare ?? "").includes("路由：Aerodrome") && (dexLeg?.compare ?? "").includes("gas $0.05") && earned > 1, `the DEX slice shows its route — Aerodrome on Base, gas $0.05 — and it earned its place: $${earned} more than the two CEXs alone (OKX 1.5 + Binance 1.5 = $${twoCex.toLocaleString("en-US")}); one more leg has to add at least $1`, "dex");
+      check(f2.legs.some((l) => l.mark === "note" && l.text.includes("gas $4.00") && l.text.includes("少 $3.83")), "a fixed cost is paid only where it earns itself back: the 0.15 ETH on Ethereum stays put — one swap's gas ($4) would cost more than it adds", "dex");
+    }
+    const after4 = await svc.overview();
+    const onchainUsdc = after4.liquidity.mobile.filter((s) => s.account === "metamask").reduce((s, x) => s + x.usd, 0);
+    if (!live) check(onchainUsdc === 2438.67 && f2.legs.some((l) => l.text.includes("随时能动")) && after4.liquidity.stuckUsd === r2(19900 + 3658.52 + 1218.72), "where it sells decides whether the money can move afterwards: the DEX slice's $2,438.67 USDC is on Base (mobile liquidity again), the two CEX slices' USDT is stuck behind keys that cannot withdraw", "liquidity");
+    check(svc.rows().filter((r) => r.flight === f2.no && r.kind === "venue").length === fills.length && svc.counters.cards === 0, "every slice is its own ledger row under the same flight; open mode raised no card", "ledger");
     tick();
     const f3 = await pm.say("卖 0.05 BTC");
     printFlight(f3);
     const leg3 = f3.legs.find((l) => l.mark === "ok");
-    check(leg3?.account === "binance" && (leg3.compare ?? "").includes("没有 BTC"), "execution liquidity is also where the inventory is: BTC sits only at Binance, so it sells there — the other venues have none to sell", "execution");
+    check(leg3?.account === "binance" && (leg3.compare ?? "").includes("没有 BTC") && f3.legs[0]!.text.includes("不用拆"), "execution liquidity is also where the inventory is: BTC sits only at Binance, so it sells there, unsplit — OKX and the chain have none to sell", "execution");
+    tick();
+    const cc = { id: "claude-code", name: "claude-code", code: agentCode("claude-code") };
+    const routed = await svc.order("ETH", "buy", 0.4, cc);
+    printFlight(routed.flight);
+    const boughtAt = routed.plan.split.slices[0];
+    check(routed.flight.no === "CC-0004" && routed.outcomes.length === 1 && !isRefusal(routed.outcomes[0]!) && boughtAt?.venue === (live ? "binance" : "dex:Base"), live ? "routing is the tower's service, not the page agent's: an MCP agent (Claude Code) asks for 0.4 ETH and flies CC-0004 — Binance, the LIVE wallet has no USDC on-chain" : `routing is the tower's service, not the page agent's: an MCP agent (Claude Code) asks for 0.4 ETH and flies CC-0004 — the DEX on Base wins it on merit ($${boughtAt?.netUsd} against Binance's $977.03: a 5 bps pool and 5¢ of gas beat a 10 bps taker fee)`, "dex");
+    const whale = splitOrder("ETH", "sell", 400, after4.accounts, { ignoreInventory: true });
+    note(`what-if, depth only (inventory ignored): SELL 400 ETH · best single venue ${whale.single?.name} nets $${whale.single?.netUsd.toLocaleString("en-US")} · split nets $${whale.netUsd.toLocaleString("en-US")}`);
+    for (const s of whale.slices) note(`  ${s.name.padEnd(16)} ${String(s.qty).padStart(4)} ETH @ ${s.price} · impact ${s.impactBps} bp${s.route ? ` · ${s.route.map((r) => `${r.dex} ${qtyText(r.qty)}`).join(" + ")}` : ""}`);
+    check(whale.slices.length === 4 && whale.single?.venue === "okx" && (whale.gainUsd ?? 0) > 400, `the same router at size: 400 ETH split across two books and two chains' pools nets $${whale.gainUsd} more than the best single venue — depth is what a large order pays for`, "split");
 
     // ---- 5 ------------------------------------------------------------------------
     heading("Beat 5: open 模式 · 跨账户，零张卡");
@@ -245,6 +275,24 @@ async function main(): Promise<number> {
     const g2 = await svc.execute("mastercard", { kind: "pay", merchant: "GitHub", mcc: "7372", amountUsd: 40 });
     show(g2);
     check(!isRefusal(g2) && !isPending(g2) && g2.status === "authorized", "guard: $40 is inside the card's free allowance $200 → no card, authorized", "guard");
+    tick();
+    const cardsBefore = svc.counters.cards;
+    // a little more ETH than any one venue still holds, so the order has to be split
+    const ethHeld = (await svc.overview()).accounts.flatMap((a) => a.holdings.filter((h) => h.asset === "ETH").map((h) => h.amount));
+    const guardQty = r2(Math.max(...ethHeld) + 0.1);
+    const f4 = await pm.say(`卖 ${guardQty} ETH`);
+    printFlight(f4);
+    const waits = f4.legs.filter((l) => l.mark === "wait");
+    check(waits.length === 1 && svc.counters.cards === cardsBefore + 1 && waits[0]!.text.includes("2 片") && !f4.legs.some((l) => l.mark === "ok"), `guard: a split order is ONE decision — the wallet judges the whole $${(guardQty * 2440).toLocaleString("en-US")} (splitting cannot slip it under the $500 allowance), raises one card, and nothing has gone to a venue yet`, "guard");
+    if (waits[0]?.approvalId) {
+      tick();
+      const legsBefore = f4.legs.length;
+      const a4 = await svc.decide(waits[0].approvalId, "approve");
+      show(a4);
+      printFlight(f4, legsBefore);
+      const landed = f4.legs.filter((l) => l.mark === "ok");
+      check(!isRefusal(a4) && landed.length === 2 && landed.every((l) => l.text.startsWith("你批了")) && landed.map((l) => l.account).join(",") === "okx,binance", `one yes covers every slice: OKX 0.5 and Binance ${qtyText(guardQty - 0.5)} fill on the same card`, "guard");
+    }
     svc.revoke("okx");
     tick();
     const rv = await svc.execute("okx", { kind: "trade", symbol: "ETH-USDT", side: "sell", qty: 0.1 });
@@ -273,7 +321,7 @@ async function main(): Promise<number> {
     const byAgent = new Map<string, number>();
     for (const f of svc.flights) byAgent.set(f.agent.code, (byAgent.get(f.agent.code) ?? 0) + 1);
     note(`flights by agent: ${[...byAgent.entries()].map(([k, n]) => `${k} ${n}`).join(" · ")}`);
-    check(byAgent.get("PM") === 3 && (byAgent.get("TD") ?? 0) > 10, "the flight log tells the agents apart: three PM flights (the page agent), the rest TD (this script)", "flight");
+    check(byAgent.get("PM") === 4 && byAgent.get("CC") === 1 && (byAgent.get("TD") ?? 0) > 10, "the flight log tells the agents apart: four PM flights (the page agent), one CC (Claude Code, routed by the tower), the rest TD (this script)", "flight");
     console.log("  证明了什么 · PROVEN");
     for (const l of PROVEN) note(`  · ${l}`);
     console.log("  没证明什么 · NOT PROVEN");

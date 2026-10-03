@@ -8,31 +8,28 @@
  *                     it beat go on the leg; the fee comes out of what
  *                     arrives); then the gap, with the closed runways and what
  *                     opening one would cost.
- *   "卖 1 ETH"        quotes the same order at every venue (two CEXs, the DEX
- *                     route) and sells where the net is highest; a venue that
- *                     does not hold the asset says so.
+ *   "卖 1 ETH"        quotes the same order at every venue (two CEX books, the
+ *                     DEX pools on each chain the wallet holds the asset on)
+ *                     and sells where the net is highest; a venue that does not
+ *                     hold the asset says so.
+ *   "卖 3 ETH"        no venue holds that much, so the order is SPLIT: each
+ *                     slice goes where its marginal price is best (router.ts,
+ *                     venues.ts). The slices fly as one order — one card at
+ *                     most — and the DEX slice shows its route.
  *
  * Every plan flies as one flight with one leg per account the money touches;
  * the service writes the legs in plain words.
  */
-import { PAGE_AGENT, type Intent, type RouteQuote } from "./accounts.ts";
+import { PAGE_AGENT, type RouteQuote } from "./accounts.ts";
 import type { Mode } from "./openness.ts";
 import type { Liquidity } from "./portfolio.ts";
 import { cexWithdrawFee, etaLabel, pick, routesToHub, type Ladder, type RailAccount } from "./rails.ts";
+import { lead, orderPlan, type OrderPlan, type Step } from "./router.ts";
 import { isPending, PortfolioService, type ExecuteOutcome, type Flight } from "./service.ts";
-import { bestVenue, VENUES, venueQuotes, type VenueQuote } from "./venues.ts";
+import type { Side } from "./venues.ts";
 import { cents } from "./words.ts";
 
-export interface Step {
-  account: string;
-  intent: Intent;
-  /** the agent's own words for this action */
-  say: string;
-  /** what this step was chosen over (other routes, other venues) */
-  compare?: string | undefined;
-  /** index of a step that must have succeeded first (a subscribe after a bridge) */
-  needs?: number | undefined;
-}
+export type { Step };
 
 export interface Plan {
   narration: string;
@@ -40,6 +37,8 @@ export interface Plan {
   /** lines after the legs (what the agent wants the user to know) */
   notes?: string[] | undefined;
   mode?: Mode | undefined;
+  /** when the plan trades: the routed order. Its slices are the FIRST `order.steps.length` steps and fly as one order (one card at most); its own notes close the flight */
+  order?: OrderPlan | undefined;
 }
 
 export interface PlanContext {
@@ -53,7 +52,7 @@ export interface PlanContext {
   liveBridge?: { quotes?: RouteQuote[] | undefined; error?: string | undefined } | undefined;
 }
 
-export const PRESETS = ["申购 5000 OUSG", "再平衡", "付账单", "提到冷钱包", "转给新地址"];
+export const PRESETS = ["申购 5000 OUSG", "卖 3 ETH", "再平衡", "付账单", "提到冷钱包", "转给新地址"];
 const COLD = "0x9C0d4E3b7a2f1c8d9e0f1a2b3c4d5e6f7a8b9c0d";
 const STRANGER = "0x7a11…stranger";
 const BASE = 8453;
@@ -103,24 +102,10 @@ function routeToOndo(usdWanted: number, ctx: PlanContext): Plan {
   return { narration, steps, notes };
 }
 
-/** the same order at every venue; the leg says where it went and what it beat */
-function tradeAtBestVenue(side: "buy" | "sell", qty: number, base: string, ctx: PlanContext): { plan: Plan; best: VenueQuote | undefined } {
-  const quotes = venueQuotes(base, side, qty, ctx.accounts);
-  const best = bestVenue(quotes, side);
-  const verb = side === "sell" ? "卖出" : "买入";
-  if (!best) {
-    return { best, plan: { narration: `${verb} ${qty} ${base}：现在没有一个场所接得了——${quotes.map((q) => `${q.name} ${q.why ?? ""}`).join("；") || "没有接入的场所"}。`, steps: [] } };
-  }
-  const others = quotes.filter((q) => q.venue !== best.venue).map((q) => (q.ok ? `${q.name} ${side === "sell" ? "净得" : "共付"} ${cents(q.netUsd)}（${side === "sell" ? "少" : "多"} ${cents(Math.abs(best.netUsd - q.netUsd))}）` : `${q.name} ${q.why ?? "接不了"}`));
-  const notes = best.venue in VENUES && best.venue !== "metamask" && side === "sell" ? [`卖出的 ${best.quote} 留在 ${best.name}：这把 key 提不出来，它困在那里。`] : [];
-  return {
-    best,
-    plan: {
-      narration: `${verb} ${qty} ${base}：${quotes.length} 个场所比过，${best.name} ${side === "sell" ? "净得最多" : "花得最少"}（${cents(best.netUsd)}）。`,
-      steps: [{ account: best.venue, intent: { kind: "trade", symbol: best.symbol, side, qty }, say: `${verb} ${qty} ${base} · ${best.name}`, compare: others.length ? `比过：${others.join("；")}` : undefined }],
-      notes,
-    },
-  };
+/** an order routed across every venue: one slice where one venue is best, several where no venue can take it alone or a split nets more */
+function trade(side: Side, qty: number, base: string, ctx: PlanContext): Plan {
+  const order = orderPlan(base, side, qty, ctx.accounts);
+  return { narration: order.narration, steps: order.steps, order };
 }
 
 export function plan(text: string, ctx: PlanContext): Plan {
@@ -128,17 +113,17 @@ export function plan(text: string, ctx: PlanContext): Plan {
   const m = /(\d+(?:\.\d+)?)/.exec(t);
   const n = m ? Number(m[1]) : undefined;
   if (/再平衡|rebalance|配置|偏重/.test(t)) {
-    const sell = tradeAtBestVenue("sell", 1, "ETH", ctx);
+    const order = orderPlan("ETH", "sell", 1, ctx.accounts);
     const atOndo = ctx.liquidity.mobile.filter((s) => s.account === "ondo").reduce((s, x) => s + x.usd, 0);
     const sub = Math.min(1500, atOndo);
     return {
-      narration: `加密 ${ctx.cryptoPct}% 偏重。${sell.best ? `卖 1 ETH（${venueQuotes("ETH", "sell", 1, ctx.accounts).length} 个场所比过，在 ${sell.best.name} 成交）` : "ETH 现在卖不了"}${sub > 0 ? `，再用 Ondo 地址上的 USDC 申购 ${money(sub)} OUSG` : ""}。`,
-      steps: [...sell.plan.steps, ...(sub > 0 ? [{ account: "ondo", intent: { kind: "subscribe" as const, fund: "OUSG", amountUsd: sub }, say: "申购 OUSG · Ondo" }] : [])],
-      notes: sell.plan.notes,
+      narration: `加密 ${ctx.cryptoPct}% 偏重。${order.steps.length ? `卖 1 ETH（${order.split.quotes.length} 个场所比过，在 ${lead(order.split.slices.map((s) => s.name).join(" + "))}成交）` : "ETH 现在卖不了"}${sub > 0 ? `，再用 Ondo 地址上的 USDC 申购 ${money(sub)} OUSG` : ""}。`,
+      steps: [...order.steps, ...(sub > 0 ? [{ account: "ondo", intent: { kind: "subscribe" as const, fund: "OUSG", amountUsd: sub }, say: "申购 OUSG · Ondo" }] : [])],
+      order,
     };
   }
   const tm = /(卖出|卖|sell|买入|买|buy)\s*(\d+(?:\.\d+)?)\s*(btc|eth|sol)/.exec(t);
-  if (tm) return tradeAtBestVenue(/买|buy/.test(tm[1]!) ? "buy" : "sell", Number(tm[2]), tm[3]!.toUpperCase(), ctx).plan;
+  if (tm) return trade(/买|buy/.test(tm[1]!) ? "buy" : "sell", Number(tm[2]), tm[3]!.toUpperCase(), ctx);
   if (/guard|收紧|保守|严一点/.test(t)) return { narration: "收紧到 Guard：超过免审额度我先问你。", steps: [], mode: "guard" };
   if (/open|放开|全开|松一点/.test(t)) return { narration: "放开到 Open：凭据允许的我都做，只有转到新地址才问你。", steps: [], mode: "open" };
   if (/账单|付|pay|支付/.test(t)) {
@@ -163,7 +148,7 @@ export function plan(text: string, ctx: PlanContext): Plan {
     const usd = n ?? 300;
     return { narration: `往一个新地址转 $${usd} USDC（从 Ondo 那边的地址）。`, steps: [{ account: "ondo", intent: { kind: "move", asset: "USDC", amount: usd, to: STRANGER }, say: `转 $${usd} USDC 到新地址 ${STRANGER}` }] };
   }
-  return { narration: `我能做：${PRESETS.join("、")}，卖 / 买（如「卖 1 ETH」），或者说「收紧到 Guard」。`, steps: [] };
+  return { narration: `我能做：${PRESETS.join("、")}，卖 / 买任意数量（如「卖 1 ETH」「买 0.4 ETH」，大单会拆到几个场所），或者说「收紧到 Guard」。`, steps: [] };
 }
 
 export class AgentSession {
@@ -182,13 +167,16 @@ export class AgentSession {
     };
     const p = plan(text, ctx);
     const f = this.svc.openFlight(PAGE_AGENT, text);
-    this.svc.note(f, p.narration);
+    const first = this.svc.note(f, p.narration);
+    if (p.order?.parts && p.narration === p.order.narration) first.parts = p.order.parts;
     if (p.mode) {
       this.svc.setMode(p.mode);
       this.svc.note(f, p.mode === "guard" ? "已收紧到 Guard" : "已放开到 Open", "ok");
     }
-    const results: Array<ExecuteOutcome | null> = [];
-    for (const s of p.steps) {
+    // an order's slices fly together: the wallet judges the whole order and asks at most once
+    const slices = p.order ? p.order.steps.length : 0;
+    const results: Array<ExecuteOutcome | null> = slices > 0 && p.order ? await this.svc.flyBatch(f, p.order.title, p.steps.slice(0, slices)) : [];
+    for (const s of p.steps.slice(slices)) {
       const prerequisite = s.needs === undefined ? null : results[s.needs];
       if (s.needs !== undefined && (prerequisite === null || prerequisite === undefined || isPending(prerequisite) || prerequisite.ok !== true)) {
         this.svc.note(f, `${s.say}：前一段没成，跳过`);
@@ -198,6 +186,7 @@ export class AgentSession {
       results.push(await this.svc.fly(f, s.account, s.intent, s.say, s.compare));
     }
     for (const n of p.notes ?? []) this.svc.note(f, n);
+    if (p.order) await this.svc.closeOrder(f, p.order, results.slice(0, slices));
     return f;
   }
 
