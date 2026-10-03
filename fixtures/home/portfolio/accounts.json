@@ -64,8 +64,7 @@
       }
     ],
     "geoblock": {
-      "blocked": false,
-      "country": "SG"
+      "blocked": false
     }
   },
   "kalshi": {

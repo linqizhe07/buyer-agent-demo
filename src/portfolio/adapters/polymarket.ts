@@ -43,7 +43,9 @@ export interface PolymarketSeed {
 
 const V = PREDICTION_VENUES.polymarket!;
 const place = (g: Geoblock) => `${g.country ?? "this region"}${g.region ? `-${g.region}` : ""}`;
-const regionLimit = (g: Geoblock) => (g.blocked ? `region ${place(g)}: restricted, Polymarket takes no orders from here (PREDICT_GEOBLOCKED)` : `region ${place(g)}: not restricted`);
+/** the simulated seed names no place: which regions a venue restricts is the venue's list, and it changes */
+const check = (g: Geoblock) => (g.country ? `region ${place(g)}` : "region check");
+const regionLimit = (g: Geoblock) => (g.blocked ? `${check(g)}: restricted, Polymarket takes no orders from here (PREDICT_GEOBLOCKED)` : `${check(g)}: not restricted`);
 const RULES = [`orders: ${V.minOrder} shares minimum, matched on the CLOB; trades are signed by the deposit wallet, not the owner address`, "funds are pUSD on Polygon in the deposit wallet; deposits and withdrawals go through the relayer", "outcomes are decided by UMA's oracle; a winning share is redeemed at $1"];
 
 /** a position as a holding: valued at the mark, or at $1 / $0 once the market has settled */
