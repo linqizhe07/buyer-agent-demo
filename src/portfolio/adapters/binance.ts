@@ -3,7 +3,7 @@
  * address whitelist. The real error codes: -2015 for a key without the
  * permission, -4026 for an address outside the whitelist, -2010 for balance.
  * A trade fills at the venue model's price (venues.ts): spread, depth, fee. */
-import { refuse } from "../../core/errors.ts";
+import { no } from "../refuse.ts";
 import { baseOf, classOf, priceOf, r2, r8, usdOf, type Account, type AccountAdapter, type Holding, type Intent } from "../accounts.ts";
 import { fillAt } from "../venues.ts";
 
@@ -27,13 +27,13 @@ export function binanceAccount(seed: BinanceSeed): AccountAdapter {
     credentialKind: "API key + HMAC secret",
     scope: {
       can: canWithdraw ? ["read", "trade", "move"] : ["read", "trade"],
-      limits: [`key 权限 ${seed.permissions.join(" + ")}${canWithdraw ? "" : "：没有 WITHDRAW，这把 key 提不了币"}`, `IP 白名单 ${seed.ipWhitelist.join(", ")}`, `提币地址白名单 ${seed.withdrawWhitelist.join(", ")}`],
+      limits: [`key permissions ${seed.permissions.join(" + ")}${canWithdraw ? "" : ": no WITHDRAW, this key cannot withdraw"}`, `IP whitelist ${seed.ipWhitelist.join(", ")}`, `withdrawal address whitelist ${seed.withdrawWhitelist.join(", ")}`],
       enforcedBy: "venue",
     },
-    settlement: "现货即时成交 · 提币等链上确认",
+    settlement: "spot fills instantly · withdrawals wait for on-chain confirmation",
     live: false,
   };
-  const insufficient = () => refuse("E_VENUE_INSUFFICIENT", { venue: "binance", native: { code: -2010, msg: "Account has insufficient balance for requested action." } });
+  const insufficient = () => no("E_VENUE_INSUFFICIENT", { venue: "binance", native: { code: -2010, msg: "Account has insufficient balance for requested action." } });
   return {
     account,
     async read(): Promise<Holding[]> {
@@ -45,7 +45,7 @@ export function binanceAccount(seed: BinanceSeed): AccountAdapter {
       if (i.kind === "trade") {
         const base = baseOf(i.symbol);
         const f = fillAt("binance", base, i.side, i.qty);
-        if (!f) return refuse("E_VENUE_REJECTED", { venue: "binance", native: { code: -1121, msg: "Invalid symbol." } });
+        if (!f) return no("E_VENUE_REJECTED", { venue: "binance", native: { code: -1121, msg: "Invalid symbol." } });
         if (i.side === "buy") {
           if ((balances[f.quote] ?? 0) < f.netUsd) return insufficient();
           balances[f.quote] = r8((balances[f.quote] ?? 0) - f.netUsd);
@@ -59,13 +59,13 @@ export function binanceAccount(seed: BinanceSeed): AccountAdapter {
         return { ok: true as const, account: account.id, status: "filled" as const, summary: `${i.side.toUpperCase()} ${i.qty} ${base} @ ${f.price} ${f.quote} · fee ${f.feeUsd}`, usd: f.grossUsd, ref: `binance:order:${orderId}`, native: { orderId, status: "FILLED", price: f.price, grossUsd: f.grossUsd, feeUsd: f.feeUsd, netUsd: f.netUsd, impactBps: f.impactBps } };
       }
       if (i.kind === "move") {
-        if (!canWithdraw) return refuse("E_VENUE_PERMISSION", { venue: "binance", message: "Binance：这把 key 没有 WITHDRAW 权限，交易所拒绝提币", native: { code: -2015, msg: "Invalid API-key, IP, or permissions for action." } });
-        if (!seed.withdrawWhitelist.includes(i.to)) return refuse("E_VENUE_WITHDRAW_WHITELIST", { venue: "binance", native: { code: -4026, msg: "Withdrawal address is not in the account's whitelist." } });
+        if (!canWithdraw) return no("E_VENUE_PERMISSION", { venue: "binance", message: "Binance: this key has no WITHDRAW permission, the exchange refuses the withdrawal", native: { code: -2015, msg: "Invalid API-key, IP, or permissions for action." } });
+        if (!seed.withdrawWhitelist.includes(i.to)) return no("E_VENUE_WITHDRAW_WHITELIST", { venue: "binance", native: { code: -4026, msg: "Withdrawal address is not in the account's whitelist." } });
         if ((balances[i.asset] ?? 0) < i.amount) return insufficient();
         balances[i.asset] = r8((balances[i.asset] ?? 0) - i.amount);
         return { ok: true as const, account: account.id, status: "sent" as const, summary: `withdraw ${i.amount} ${i.asset} → ${i.to}`, usd: usdOf(i), ref: `binance:wd:${++seq}`, native: { id: `wd-${seq}` } };
       }
-      return refuse("E_VENUE_REJECTED", { venue: "binance", message: `Binance 现货账户没有「${i.kind}」这种操作`, native: { code: -1100, msg: "Illegal characters found in a parameter." } });
+      return no("E_VENUE_REJECTED", { venue: "binance", message: `a Binance spot account has no \"${i.kind}\" action`, native: { code: -1100, msg: "Illegal characters found in a parameter." } });
     },
   };
 }

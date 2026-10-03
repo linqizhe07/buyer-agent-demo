@@ -26,7 +26,7 @@
  *                        the demo never moves real money by accident.
  */
 import { execFile } from "node:child_process";
-import { refuse } from "../../core/errors.ts";
+import { no } from "../refuse.ts";
 import { evmAddressOf, keyFromSeed } from "../../core/ed25519.ts";
 import { baseOf, chainName, classOf, priceOf, r2, r8, usdOf, type Account, type AccountAdapter, type Holding, type Intent, type RouteQuote } from "../accounts.ts";
 import { bridgeQuotes } from "../rails.ts";
@@ -41,10 +41,10 @@ export interface MetamaskSimSeed {
 }
 
 const scopeLimits = (mode: string, rolling: number, allowlistCount: number) => [
-  `trading mode ${mode}${mode === "guard" ? "：出金策略 + 白名单，超线 → MFA（邮件里批）" : "：跳过策略，恶意交易仍拦"}`,
-  `24 h 出金上限 $${rolling}${rolling === 0 ? "（= 任何转出都要人批）" : ""}`,
-  `地址白名单 ${allowlistCount} 条`,
-  "server wallet：密钥在 MetaMask 服务端，agent 拿到的是 CLI 会话；DEX swap 与跨链都走 mm swap",
+  `trading mode ${mode}${mode === "guard" ? ": outflow policy + allowlist; over the line → MFA (approved by email)" : ": policy skipped, malicious transactions still blocked"}`,
+  `24 h outflow limit $${rolling}${rolling === 0 ? " (= every transfer needs a human)" : ""}`,
+  `address allowlist: ${allowlistCount} entr${allowlistCount === 1 ? "y" : "ies"}`,
+  "server wallet: the key lives on MetaMask's side, the agent holds a CLI session; DEX swaps and bridges both go through mm swap",
 ];
 
 /** the receipt of a swap: the fill, the chain, and how it was routed across that chain's pools */
@@ -60,11 +60,11 @@ export function metamaskSimAccount(seed: MetamaskSimSeed, now: () => string): Ac
     id: "metamask",
     name: "MetaMask Agent Wallet",
     kind: "agent-wallet",
-    provider: "MetaMask（server wallet）",
+    provider: "MetaMask (server wallet)",
     credentialRef: "home/credentials/metamask/cli-session.json",
-    credentialKind: `mm CLI 会话（Google 登录派生）· ${address.slice(0, 10)}…`,
+    credentialKind: `mm CLI session (from Google sign-in) · ${address.slice(0, 10)}…`,
     scope: { can: ["read", "trade", "move"], limits: scopeLimits(seed.tradingMode, seed.rolling24hUsd, seed.allowlist.length), enforcedBy: "metamask" },
-    settlement: "链上确认 · DEX swap · 跨链 bridge · 超策略的转出等 MFA",
+    settlement: "on-chain confirmation · DEX swap · bridge · transfers over policy wait for MFA",
     live: false,
     address,
     chain: "Base",
@@ -75,7 +75,7 @@ export function metamaskSimAccount(seed: MetamaskSimSeed, now: () => string): Ac
     if (h) h.amount = r8(h.amount + amount);
     else holdings.push({ asset, amount, chain });
   };
-  const insufficient = (extra: Record<string, unknown> = {}) => refuse("E_VENUE_INSUFFICIENT", { venue: "metamask", native: { error: "INSUFFICIENT_BALANCE", ...extra } });
+  const insufficient = (extra: Record<string, unknown> = {}) => no("E_VENUE_INSUFFICIENT", { venue: "metamask", native: { error: "INSUFFICIENT_BALANCE", ...extra } });
   return {
     account,
     credit,
@@ -87,7 +87,7 @@ export function metamaskSimAccount(seed: MetamaskSimSeed, now: () => string): Ac
         const base = baseOf(i.symbol);
         const named = chainName(i.chainId);
         const chains = dexChains(base).filter((c) => named === undefined || c === named);
-        if (!chains.length) return refuse("E_VENUE_REJECTED", { venue: "metamask", message: `链上没有 ${base} 的池子${named ? `（${named}）` : ""}`, native: { error: "TOKEN_NOT_SUPPORTED" } });
+        if (!chains.length) return no("E_VENUE_REJECTED", { venue: "metamask", message: `no ${base} pool on-chain${named ? ` (${named})` : ""}`, native: { error: "TOKEN_NOT_SUPPORTED" } });
         const sell = i.side === "sell";
         // a swap happens on one chain: among the chains that hold enough, the one where it nets the most
         const options = chains
@@ -107,13 +107,13 @@ export function metamaskSimAccount(seed: MetamaskSimSeed, now: () => string): Ac
         credit(base, i.qty, h.chain);
         return { ok: true as const, account: account.id, status: "filled" as const, summary: `swap ${f.netUsd} ${f.quote} → ${i.qty} ${base} on ${h.chain} via ${routeText(f)} · fee ${f.feeUsd}`, usd: f.grossUsd, ref: `metamask:swap:${n}`, native: swapReceipt(f) };
       }
-      if (i.kind !== "move") return refuse("E_VENUE_REJECTED", { venue: "metamask", message: `mm 这里接了 swap、transfer 与 bridge；「${i.kind}」不在`, native: { error: "UNSUPPORTED" } });
+      if (i.kind !== "move") return no("E_VENUE_REJECTED", { venue: "metamask", message: `mm takes swap, transfer and bridge here; "${i.kind}" is not one of them`, native: { error: "UNSUPPORTED" } });
       const usd = usdOf(i);
       const at = now();
       const pollingId = `poll-${String(++seq).padStart(4, "0")}`;
       // MetaMask's own Guard comes first: policy is evaluated before the transaction is built
       if (seed.tradingMode === "guard" && (!seed.allowlist.includes(i.to) || dayOut(at) + usd > seed.rolling24hUsd)) {
-        return { ok: true as const, account: account.id, status: "pending" as const, summary: `transfer ${i.amount} ${i.asset} → ${i.to}：MetaMask Guard 超线，AWAITING_MFA（用户邮箱里的那张卡）`, usd, ref: `metamask:${pollingId}`, native: { status: "AWAITING_MFA", pollingId, reason: !seed.allowlist.includes(i.to) ? "recipient not in allowlist" : `rolling_24h ${dayOut(at)} + ${usd} > ${seed.rolling24hUsd}` } };
+        return { ok: true as const, account: account.id, status: "pending" as const, summary: `transfer ${i.amount} ${i.asset} → ${i.to}: over MetaMask Guard's line, AWAITING_MFA (the card in the user's inbox)`, usd, ref: `metamask:${pollingId}`, native: { status: "AWAITING_MFA", pollingId, reason: !seed.allowlist.includes(i.to) ? "recipient not in allowlist" : `rolling_24h ${dayOut(at)} + ${usd} > ${seed.rolling24hUsd}` } };
       }
       const fromChain = chainName(i.fromChainId) ?? holdings.find((x) => x.asset === i.asset && x.amount >= i.amount)?.chain ?? holdings.find((x) => x.asset === i.asset)?.chain;
       const h = holdings.find((x) => x.asset === i.asset && x.chain === fromChain);
@@ -122,12 +122,12 @@ export function metamaskSimAccount(seed: MetamaskSimSeed, now: () => string): Ac
       h.amount = r8(h.amount - i.amount);
       outflows.push({ at, usd });
       if (toChain !== h.chain) {
-        const quotes = bridgeQuotes(usd);
+        const quotes = bridgeQuotes(usd, toChain, h.chain);
         const q = quotes.find((x) => x.id === i.via) ?? quotes[0]!;
         const arrived = r8(i.amount - q.feeUsd / (priceOf(i.asset) || 1));
         return { ok: true as const, account: account.id, status: "sent" as const, summary: `bridge ${i.amount} ${i.asset} ${h.chain} → ${toChain} via ${q.label} · fee $${q.feeUsd} · ${arrived} arrives at ${i.to}`, usd, ref: `metamask:bridge:${pollingId}`, native: { bridge: true, from: h.chain, to: toChain, via: q.id, label: q.label, feeUsd: q.feeUsd, etaSec: q.etaSec, arrived, pollingId } };
       }
-      return { ok: true as const, account: account.id, status: "sent" as const, summary: `transfer ${i.amount} ${i.asset} → ${i.to}（${h.chain}）`, usd, ref: `metamask:${pollingId}`, native: { status: "confirmed", pollingId } };
+      return { ok: true as const, account: account.id, status: "sent" as const, summary: `transfer ${i.amount} ${i.asset} → ${i.to} (${h.chain})`, usd, ref: `metamask:${pollingId}`, native: { status: "confirmed", pollingId } };
     },
   };
 }
@@ -147,7 +147,8 @@ interface MmEnvelope<T> {
   error?: unknown;
 }
 
-function mm<T>(bin: string, args: string[], timeoutMs: number): Promise<T> {
+/** run the `mm` CLI and take `data` out of its JSON envelope; a failure rejects with the CLI's own error */
+export function mm<T>(bin: string, args: string[], timeoutMs: number): Promise<T> {
   return new Promise((resolve, reject) => {
     const child = execFile(bin, args, { timeout: timeoutMs, env: process.env, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
       const text = String(stdout ?? "");
@@ -260,11 +261,11 @@ export async function metamaskLiveAccount(opts: MmLiveOptions = {}): Promise<Acc
     id: "metamask",
     name: "MetaMask Agent Wallet",
     kind: "agent-wallet",
-    provider: "MetaMask（server wallet · LIVE）",
-    credentialRef: "~/.metamask-agent-wallet（mm CLI 会话）",
-    credentialKind: `mm CLI 会话 · ${show.address.slice(0, 10)}…`,
+    provider: "MetaMask (server wallet · LIVE)",
+    credentialRef: "~/.metamask-agent-wallet (mm CLI session)",
+    credentialKind: `mm CLI session · ${show.address.slice(0, 10)}…`,
     scope: { can: ["read", "trade", "move"], limits: scopeLimits(show.tradingMode, Number.isFinite(rolling) ? rolling : 0, allowlistCount), enforcedBy: "metamask" },
-    settlement: "链上确认 · DEX swap · 跨链 bridge（mm swap）· 超策略的转出等 MFA（邮件）",
+    settlement: "on-chain confirmation · DEX swap · bridge (mm swap) · transfers over policy wait for MFA (email)",
     live: true,
     address: show.address,
     chain: "EVM",
@@ -301,17 +302,17 @@ export async function metamaskLiveAccount(opts: MmLiveOptions = {}): Promise<Acc
     },
     async execute(i: Intent) {
       const cmd = mmCommand(bin, i);
-      if (!cmd) return refuse("E_VENUE_REJECTED", { venue: "metamask", message: `mm 这里接了 swap、transfer 与 bridge；「${i.kind}」不在`, native: { error: "UNSUPPORTED" } });
+      if (!cmd) return no("E_VENUE_REJECTED", { venue: "metamask", message: `mm takes swap, transfer and bridge here; "${i.kind}" is not one of them`, native: { error: "UNSUPPORTED" } });
       const command = cmd.join(" ");
       if (process.env.PORTFOLIO_MM_WRITES !== "1") {
-        return refuse("E_WALLET_LIVE_WRITES_OFF", { venue: "metamask", tool: `portfolio_${i.kind}`, message: `真钱写操作关着（PORTFOLIO_MM_WRITES≠1）。会执行的命令：${command}；执行后 MetaMask Guard 自己还会按 24 h 出金与白名单决定要不要 MFA`, detail: { command, address: show.address, tradingMode: show.tradingMode } });
+        return no("E_WALLET_LIVE_WRITES_OFF", { venue: "metamask", tool: `portfolio_${i.kind}`, message: `real-money writes are off (PORTFOLIO_MM_WRITES≠1). The command that would run: ${command}; once it runs, MetaMask Guard still decides on MFA by its own 24 h outflow and allowlist`, detail: { command, address: show.address, tradingMode: show.tradingMode } });
       }
       try {
         const r = await mm<Record<string, unknown>>(bin, cmd.slice(1), timeoutMs);
         const pollingId = typeof r.pollingId === "string" ? r.pollingId : undefined;
         return { ok: true as const, account: account.id, status: "pending" as const, summary: `${command} → ${pollingId ?? "submitted"}`, usd: usdOf(i), ref: `metamask:${pollingId ?? "tx"}`, native: r };
       } catch (err) {
-        return refuse("E_VENUE_REJECTED", { venue: "metamask", message: "mm 没有成功", native: { error: (err as Error).message } });
+        return no("E_VENUE_REJECTED", { venue: "metamask", message: "mm did not succeed", native: { error: (err as Error).message } });
       }
     },
   };

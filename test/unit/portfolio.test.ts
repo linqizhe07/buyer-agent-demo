@@ -7,7 +7,10 @@ import { type Account, type Intent } from "../../src/portfolio/accounts.ts";
 import { bankAccount } from "../../src/portfolio/adapters/bank.ts";
 import { binanceAccount } from "../../src/portfolio/adapters/binance.ts";
 import { mastercardAccount } from "../../src/portfolio/adapters/mastercard.ts";
+import { kalshiAccount } from "../../src/portfolio/adapters/kalshi.ts";
 import { metamaskSimAccount } from "../../src/portfolio/adapters/metamask.ts";
+import { geoblockOf, liveScope, polymarketSimAccount } from "../../src/portfolio/adapters/polymarket.ts";
+import { eventMark, eventState, EVENTS, findEvent, isEventSymbol, levelsFor, parseEventSymbol, rawEvent } from "../../src/portfolio/events.ts";
 import { okxAccount } from "../../src/portfolio/adapters/okx.ts";
 import { ondoAccount } from "../../src/portfolio/adapters/ondo.ts";
 import { compileOpenness, effectiveReach, evaluate, parseOpenness } from "../../src/portfolio/openness.ts";
@@ -101,7 +104,7 @@ describe("openness.evaluate (layer 2)", () => {
   it("open: in-scope writes pass with no card; a move to a stranger is a card; the blocklist refuses", () => {
     expect(evaluate({ ...base, intent: trade, account: bin })).toMatchObject({ ok: true, card: null, usd: 3107.5 });
     expect(evaluate({ ...base, intent: { kind: "move", asset: "USDC", amount: 300, to: COLD }, account: ondo })).toMatchObject({ ok: true, card: null });
-    expect(evaluate({ ...base, intent: { kind: "move", asset: "USDC", amount: 300, to: "0x7a11…stranger" }, account: ondo })).toMatchObject({ ok: true, card: { reason: expect.stringContaining("从没用过") } });
+    expect(evaluate({ ...base, intent: { kind: "move", asset: "USDC", amount: 300, to: "0x7a11…stranger" }, account: ondo })).toMatchObject({ ok: true, card: { reason: expect.stringContaining("never used before") } });
     expect(evaluate({ ...base, intent: { kind: "move", asset: "USDC", amount: 300, to: "0xd759…attacker" }, account: ondo })).toMatchObject({ code: "E_WALLET_BLOCKLIST" });
   });
   it("the credential's scope comes before the user's reach: E_WALLET_SCOPE, then E_WALLET_REACH, then revoked, then session", () => {
@@ -113,7 +116,7 @@ describe("openness.evaluate (layer 2)", () => {
   });
   it("guard: a card above the free allowance, none below, a hard daily cap", () => {
     const guard = { ...openness, mode: "guard" as const };
-    expect(evaluate({ ...base, openness: guard, intent: trade, account: bin })).toMatchObject({ ok: true, card: { reason: expect.stringContaining("免审") } });
+    expect(evaluate({ ...base, openness: guard, intent: trade, account: bin })).toMatchObject({ ok: true, card: { reason: expect.stringContaining("no-ask allowance") } });
     expect(evaluate({ ...base, openness: guard, intent: { kind: "trade", symbol: "BTCUSDT", side: "sell", qty: 0.005 }, account: bin })).toMatchObject({ ok: true, card: null });
     expect(evaluate({ ...base, openness: guard, intent: trade, account: bin, dailyOutUsd: 38000 })).toMatchObject({ code: "E_WALLET_DAILY_CAP" });
   });
@@ -121,7 +124,7 @@ describe("openness.evaluate (layer 2)", () => {
     const guard = { ...openness, mode: "guard" as const };
     const slice: Intent = { kind: "trade", symbol: "ETHUSDT", side: "sell", qty: 0.15 };
     expect(evaluate({ ...base, openness: guard, intent: slice, account: bin })).toMatchObject({ ok: true, card: null, usd: 366 });
-    expect(evaluate({ ...base, openness: guard, intent: slice, account: bin, orderUsd: 1464 })).toMatchObject({ ok: true, usd: 366, card: { reason: expect.stringContaining("拆单合并计") } });
+    expect(evaluate({ ...base, openness: guard, intent: slice, account: bin, orderUsd: 1464 })).toMatchObject({ ok: true, usd: 366, card: { reason: expect.stringContaining("slices are counted together") } });
     expect(evaluate({ ...base, intent: slice, account: bin, orderUsd: 1464 })).toMatchObject({ ok: true, card: null });
   });
   it("effectiveReach is scope ∩ reach, and only `read` once revoked", () => {
@@ -132,8 +135,8 @@ describe("openness.evaluate (layer 2)", () => {
   it("compileOpenness gives every account its three layers", () => {
     const rows = compileOpenness([bin, chase, ondo], openness);
     expect(rows.map((r) => r.layer1.enforcedBy)).toEqual(["venue", "bank", "issuer"]);
-    expect(rows[0]!.layer2.walletKeeps[0]).toMatch(/不发卡/);
-    expect(rows[2]!.layer2.walletKeeps[0]).toMatch(/陌生地址/);
+    expect(rows[0]!.layer2.walletKeeps[0]).toMatch(/no cards/);
+    expect(rows[2]!.layer2.walletKeeps[0]).toMatch(/new address/);
     expect(rows[1]!.layer3).toMatch(/403/);
   });
 });
@@ -152,11 +155,13 @@ describe("aggregate", () => {
   });
 });
 
-async function world() {
-  const adapters = [binance(), okxAccount(seeds.okx), metamaskSimAccount(seeds.metamask, clock), ondoAccount(seeds.ondo, clock), mastercardAccount(seeds.mastercard, clock), bankAccount(seeds.chase)];
-  const accounts = await Promise.all(adapters.map(async (a) => ({ id: a.account.id, name: a.account.name, kind: a.account.kind, chain: a.account.chain, reach: a.account.scope.can, revoked: false, holdings: await a.read() })));
+/** the six accounts of the original world, or all eight with the two prediction markets */
+async function worldWith(prediction: boolean) {
+  const adapters = [binance(), okxAccount(seeds.okx), metamaskSimAccount(seeds.metamask, clock), ...(prediction ? [kalshiAccount(seeds.kalshi, clock), polymarketSimAccount(seeds.polymarket, clock)] : []), ondoAccount(seeds.ondo, clock), mastercardAccount(seeds.mastercard, clock), bankAccount(seeds.chase)];
+  const accounts = await Promise.all(adapters.map(async (a) => ({ id: a.account.id, name: a.account.name, kind: a.account.kind, chain: a.account.chain, reach: a.account.scope.can, revoked: false, holdings: await a.read(), closed: a.account.closed })));
   return { accounts, liquidity: liquidity(accounts), ladder: ladder(accounts) };
 }
+const world = () => worldWith(false);
 const ctxOf = async () => ({ cryptoPct: 51, ondoAddress: "0x5a1e…kyc", ...(await world()) });
 
 describe("liquidity: amount × time × cost", () => {
@@ -165,9 +170,9 @@ describe("liquidity: amount × time × cost", () => {
     expect(L.mobileUsd).toBe(4200);
     expect(L.mobile.map((s) => `${s.account}:${s.chain}`)).toEqual(["metamask:Base", "ondo:Ethereum"]);
     expect(L.stuckUsd).toBe(19900);
-    expect(Object.fromEntries(L.stuck.map((s) => [s.account, s.why]))).toEqual({ binance: "key 没开提币", okx: "key 没开提币", chase: "只读，转账不经 agent" });
+    expect(Object.fromEntries(L.stuck.map((s) => [s.account, s.why]))).toEqual({ binance: "key cannot withdraw", okx: "key cannot withdraw", chase: "read-only; transfers don't go through the agent" });
     const off = liquidity(accounts.map((v) => (v.id === "metamask" ? { ...v, revoked: true, reach: ["read" as const] } : v)));
-    expect(off.stuck.find((s) => s.account === "metamask")?.why).toBe("你关了");
+    expect(off.stuck.find((s) => s.account === "metamask")?.why).toBe("switched off");
   });
   it("quotes three bridges: the cheapest open one depends on size, and the fastest is a different answer", () => {
     expect(bridgeQuotes(1200).map((q) => [q.id, q.feeUsd, q.etaSec])).toEqual([["lp", 1, 120], ["cctp", 1.2, 900], ["canonical", 2.5, 604800]]);
@@ -175,14 +180,14 @@ describe("liquidity: amount × time × cost", () => {
     expect(pick(bridgeQuotes(50000))?.id).toBe("cctp");
     expect(pick(bridgeQuotes(50000), "speed")?.id).toBe("lp");
     expect(pick(bridgeQuotes(1200).map((q) => ({ ...q, open: false })))).toBeUndefined();
-    expect([etaLabel(0), etaLabel(120), etaLabel(86400), etaLabel(604800)]).toEqual(["即时", "~2 分钟", "T+1", "7 天"]);
+    expect([etaLabel(0), etaLabel(120), etaLabel(86400), etaLabel(604800)]).toEqual(["instant", "~2 min", "T+1", "7 days"]);
   });
   it("builds the ladder to the hub — now, minutes, T+1, closed — and a closed route keeps its quote", async () => {
     const { ladder: L } = await world();
     expect(L.rows.map((r) => [r.bucket, r.usd])).toEqual([["now", 3000], ["minutes", 1200], ["t1", 1987.56], ["closed", 19900]]);
     expect(L.rows[1]!.items[0]).toMatchObject({ account: "metamask", chain: "Base", open: true, route: { id: "lp", feeUsd: 1, etaSec: 120 } });
     expect(L.rows[2]!.items[0]).toMatchObject({ account: "ondo", asset: "OUSG", route: { id: "redeem", etaSec: 86400, feeUsd: 0 } });
-    expect(Object.fromEntries(L.rows[3]!.items.map((it) => [it.account, [it.open, it.route.why, it.route.feeUsd, it.route.etaSec]]))).toEqual({ binance: [false, "key 没开提币", 9.5, 600], okx: [false, "key 没开提币", 7, 600], chase: [false, "只读，转账不经 agent", 0, 86400] });
+    expect(Object.fromEntries(L.rows[3]!.items.map((it) => [it.account, [it.open, it.route.why, it.route.feeUsd, it.route.etaSec]]))).toEqual({ binance: [false, "key cannot withdraw", 9.5, 600], okx: [false, "key cannot withdraw", 7, 600], chase: [false, "read-only; transfers don't go through the agent", 0, 86400] });
     expect([L.openUsd, L.closedUsd]).toEqual([6187.56, 19900]);
   });
   it("lists a CEX hop as a cross-chain route, closed until a key can withdraw", async () => {
@@ -207,7 +212,7 @@ describe("execution liquidity: the same order at every venue", () => {
     expect((await o.read()).find((h) => h.asset === "USDT")?.amount).toBeCloseTo(2500 + 2439.02, 2);
   });
   it("a DEX fill is a route across one chain's pools: LP fees, gas once, impact from the pool's curve", () => {
-    expect(fillAt("dex:Base", "ETH", "sell", 1)).toMatchObject({ kind: "dex", name: "DEX（Base）", symbol: "ETH-USDC", quote: "USDC", chain: "Base", price: 2439.94, grossUsd: 2439.94, feeUsd: 1.27, netUsd: 2438.67, gasUsd: 0.05, route: [{ pool: "base:aero", dex: "Aerodrome", qty: 1 }] });
+    expect(fillAt("dex:Base", "ETH", "sell", 1)).toMatchObject({ kind: "dex", name: "DEX (Base)", symbol: "ETH-USDC", quote: "USDC", chain: "Base", price: 2439.94, grossUsd: 2439.94, feeUsd: 1.27, netUsd: 2438.67, gasUsd: 0.05, route: [{ pool: "base:aero", dex: "Aerodrome", qty: 1 }] });
     // on Ethereum the same pool fee, but one swap's gas is $4: a small position is expensive to trade there
     expect(fillAt("dex:Ethereum", "ETH", "sell", 0.15)).toMatchObject({ chain: "Ethereum", gasUsd: 4, feeUsd: 4.18, netUsd: 361.78 });
     // a buy takes the pool that sits a hair under the reference
@@ -225,21 +230,21 @@ describe("execution liquidity: the same order at every venue", () => {
   it("quotes the whole order at every venue — two books, the pools on each chain that holds inventory — and says why a venue cannot take it", async () => {
     const { accounts } = await world();
     const eth = venueQuotes("ETH", "sell", 1, accounts);
-    expect(eth.map((q) => [q.venue, q.account, q.ok, q.why, q.have])).toEqual([["binance", "binance", true, undefined, 2], ["okx", "okx", true, undefined, 1.5], ["dex:Base", "metamask", true, undefined, 1], ["dex:Ethereum", "metamask", false, "只有 0.15 ETH", 0.15]]);
+    expect(eth.map((q) => [q.venue, q.account, q.ok, q.why, q.have])).toEqual([["binance", "binance", true, undefined, 2], ["okx", "okx", true, undefined, 1.5], ["dex:Base", "metamask", true, undefined, 1], ["dex:Ethereum", "metamask", false, "has only 0.15 ETH", 0.15]]);
     expect(eth.map((q) => q.netUsd)).toEqual([2437.44, 2439.02, 2438.67, 2434.53]);
     expect(bestVenue(eth, "sell")).toMatchObject({ venue: "okx", netUsd: 2439.02 });
     const btc = venueQuotes("BTC", "sell", 0.05, accounts);
-    expect(btc.map((q) => [q.venue, q.ok, q.why])).toEqual([["binance", true, undefined], ["okx", false, "没有 BTC"], ["dex", false, "链上没有 BTC"]]);
+    expect(btc.map((q) => [q.venue, q.ok, q.why])).toEqual([["binance", true, undefined], ["okx", false, "has no BTC"], ["dex", false, "has no BTC on-chain"]]);
     const small = venueQuotes("ETH", "sell", 0.1, accounts);
     expect(small.find((q) => q.venue === "dex:Ethereum")).toMatchObject({ ok: true });
     expect(bestVenue(small, "sell")?.venue).toBe("okx");
     const buy = venueQuotes("ETH", "buy", 0.5, accounts);
-    expect(buy.map((q) => [q.venue, q.why])).toEqual([["binance", undefined], ["okx", undefined], ["dex:Base", "USDC 不够"]]);
+    expect(buy.map((q) => [q.venue, q.why])).toEqual([["binance", undefined], ["okx", undefined], ["dex:Base", "is short of USDC"]]);
     expect(bestVenue(buy, "buy")?.venue).toBe("binance");
     // a small buy: the DEX wins on merit — a 5 bps pool and cents of gas against a 10 bps taker fee
     expect(bestVenue(venueQuotes("ETH", "buy", 0.4, accounts), "buy")).toMatchObject({ venue: "dex:Base", netUsd: 976.47 });
     const off = accounts.map((a) => (a.id === "okx" ? { ...a, revoked: true, reach: ["read" as const] } : a));
-    expect(venueQuotes("ETH", "sell", 1, off).find((q) => q.venue === "okx")).toMatchObject({ ok: false, why: "你关了" });
+    expect(venueQuotes("ETH", "sell", 1, off).find((q) => q.venue === "okx")).toMatchObject({ ok: false, why: "is switched off" });
     expect(venueQuotes("SOL", "sell", 1, accounts).map((q) => q.venue)).toEqual(["binance", "okx"]);
   });
   it("the on-chain wallet swaps on one chain — the one the intent names, or where it nets the most — and the proceeds land there", async () => {
@@ -270,7 +275,7 @@ describe("the order router: one order, split across venues", () => {
     // every slice is exactly what fillAt quotes for that size — the adapters execute with the same function
     for (const s of p.slices) expect(fillAt(s.venue, "ETH", "sell", s.qty)).toMatchObject({ netUsd: s.netUsd, price: s.price });
     // gas is a fixed cost: the 0.15 ETH on Ethereum would cost more to swap than it adds
-    expect(p.passed).toEqual([{ venue: "dex:Ethereum", name: "DEX（Ethereum）", have: 0.15, deltaUsd: -3.83, gasUsd: 4 }]);
+    expect(p.passed).toEqual([{ venue: "dex:Ethereum", name: "DEX (Ethereum)", have: 0.15, deltaUsd: -3.83, gasUsd: 4 }]);
   });
   it("does not split when one venue is best, and splits when a split nets more than the best single venue", async () => {
     const { accounts } = await world();
@@ -328,23 +333,25 @@ describe("the order router: one order, split across venues", () => {
 describe("the router", () => {
   it("routes a subscription bigger than the issuer's fuel: Ondo first, then the cheapest open bridge with its quote, then the gap and the price of closing it", async () => {
     const { plan } = await import("../../src/portfolio/agent.ts");
-    const p = plan("申购 5000 OUSG", await ctxOf());
+    const p = plan("Subscribe $5,000 OUSG", await ctxOf());
     expect(p.steps.map((s) => [s.account, s.intent.kind, s.needs])).toEqual([["ondo", "subscribe", undefined], ["metamask", "move", undefined], ["ondo", "subscribe", 1]]);
     expect(p.steps[1]!.intent).toMatchObject({ kind: "move", asset: "USDC", amount: 1200, to: "0x5a1e…kyc", fromChainId: 8453, chainId: 1, via: "lp" });
-    expect(p.steps[1]!.compare).toBe("比过：CCTP（原生 USDC） $1.20 · ~15 分钟；官方桥 $2.50 · 7 天；经 Binance 中转 关着（key 没开提币）；经 OKX 中转 关着（key 没开提币）");
+    expect(p.steps[1]!.compare).toBe("Compared: CCTP (native USDC) $1.20 · ~15 min; canonical bridge $2.50 · 7 days; via Binance closed (key cannot withdraw); via OKX closed (key cannot withdraw)");
     expect(p.steps[2]!.intent).toMatchObject({ amountUsd: 1199 });
-    expect(p.narration).toContain("走流动性桥到 Ethereum（费 $1.00 · ~2 分钟）");
-    expect(p.narration).toContain("还差 $801");
-    expect(p.notes?.[0]).toContain("给 Binance 的 key 开提币，~10 分钟 · 约 $5.30");
-    expect(plan("申购 1000 OUSG", await ctxOf()).steps.length).toBe(1);
+    expect(p.narration).toContain("over the liquidity bridge to Ethereum (fee $1.00 · ~2 min)");
+    expect(p.narration).toContain("Still $801 short");
+    expect(p.notes?.[0]).toContain("open withdrawals on the Binance key and it arrives in ~10 min for about $5.30");
+    expect(plan("subscribe 1000 OUSG", await ctxOf()).steps.length).toBe(1);
+    // the Chinese for the same sentence still works
+    expect(plan("申购 5000 OUSG", await ctxOf()).steps.length).toBe(3);
   });
   it("uses live bridge quotes when the wallet can give them, and says so when it cannot", async () => {
     const { plan } = await import("../../src/portfolio/agent.ts");
     const ctx = await ctxOf();
-    const live = plan("申购 5000 OUSG", { ...ctx, liveBridge: { quotes: [{ id: "mm:0", label: "Across", feeUsd: 0.62, etaSec: 30, open: true, source: "mm" }] } });
+    const live = plan("Subscribe $5,000 OUSG", { ...ctx, liveBridge: { quotes: [{ id: "mm:0", label: "Across", feeUsd: 0.62, etaSec: 30, open: true, source: "mm" }] } });
     expect(live.steps[1]!.intent).toMatchObject({ via: "mm:0" });
     expect(live.steps[2]!.intent).toMatchObject({ amountUsd: 1199.38 });
-    const failed = plan("申购 5000 OUSG", { ...ctx, liveBridge: { error: "INSUFFICIENT_FUNDS" } });
+    const failed = plan("Subscribe $5,000 OUSG", { ...ctx, liveBridge: { error: "INSUFFICIENT_FUNDS" } });
     expect(failed.steps[1]!.intent).toMatchObject({ via: "lp" });
     expect(failed.notes?.join(" ")).toContain("INSUFFICIENT_FUNDS");
   });
@@ -359,31 +366,31 @@ describe("the router", () => {
   });
   it("trades at the best venue and keeps what it compared", async () => {
     const { plan } = await import("../../src/portfolio/agent.ts");
-    const p = plan("卖 1 ETH", await ctxOf());
+    const p = plan("Sell 1 ETH", await ctxOf());
     expect(p.steps).toHaveLength(1);
     expect(p.steps[0]).toMatchObject({ account: "okx", intent: { kind: "trade", symbol: "ETH-USDT", side: "sell", qty: 1 } });
-    expect(p.steps[0]!.compare).toBe("比过：DEX（Base）净得 $2,438.67（少 $0.35）；Binance 净得 $2,437.44（少 $1.58）；DEX（Ethereum）只有 0.15 ETH");
-    expect(p.narration).toBe("卖出 1 ETH：4 个场所比过，OKX 净得最多（$2,439.02），一处接得下，不用拆。");
-    expect(p.order?.after[0]).toContain("留在 OKX");
-    expect(plan("卖 0.05 BTC", await ctxOf()).steps[0]).toMatchObject({ account: "binance", compare: "比过：OKX 没有 BTC；DEX 链上没有 BTC" });
+    expect(p.steps[0]!.compare).toBe("Compared: DEX (Base) nets $2,438.67 ($0.35 less); Binance nets $2,437.44 ($1.58 less); DEX (Ethereum) has only 0.15 ETH");
+    expect(p.narration).toBe("Sell 1 ETH: compared at 4 venues; OKX nets the most ($2,439.02). One venue can take it, so no split.");
+    expect(p.order?.after[0]).toBe("The USDT stays at OKX: this key cannot withdraw, so it is stuck there.");
+    expect(plan("sell 0.05 BTC", await ctxOf()).steps[0]).toMatchObject({ account: "binance", compare: "Compared: OKX has no BTC; DEX has no BTC on-chain" });
     const none = plan("卖 5 BTC", await ctxOf());
     expect(none.steps).toEqual([]);
-    expect(none.narration).toContain("所有场所加起来只有 0.3 BTC");
-    expect(plan("买 0.5 ETH", await ctxOf()).narration).toContain("只省 $0.69，不到 $1.00");
+    expect(none.narration).toContain("all venues together hold only 0.3 BTC");
+    expect(plan("buy 0.5 ETH", await ctxOf()).narration).toContain("A split across DEX (Base) + Binance would save only $0.69, under $1.00.");
   });
   it("splits an order no venue can take alone: one step per slice, the split bar, what it left alone, and where the proceeds end up", async () => {
     const { accounts } = await world();
     const o = orderPlan("ETH", "sell", 3, accounts);
-    expect(o.title).toBe("卖出 3 ETH");
-    expect(o.narration).toBe("卖出 3 ETH：没有一个场所接得下（Binance 2 · OKX 1.5 · DEX（Base）1 · DEX（Ethereum）0.15）。拆成 3 片，均价 2,440.44，净得 $7,315.91。");
-    expect(o.steps.map((s) => [s.account, s.say])).toEqual([["okx", "卖出 1.5 ETH · OKX"], ["metamask", "卖出 1 ETH · DEX（Base）"], ["binance", "卖出 0.5 ETH · Binance"]]);
+    expect(o.title).toBe("Sell 3 ETH");
+    expect(o.narration).toBe("Sell 3 ETH: no single venue holds that much (Binance 2 · OKX 1.5 · DEX (Base) 1 · DEX (Ethereum) 0.15). Split into 3 slices: average 2,440.44, net $7,315.91.");
+    expect(o.steps.map((s) => [s.account, s.say])).toEqual([["okx", "Sell 1.5 ETH · OKX"], ["metamask", "Sell 1 ETH · DEX (Base)"], ["binance", "Sell 0.5 ETH · Binance"]]);
     expect(o.steps[1]!.intent).toEqual({ kind: "trade", symbol: "ETH-USDC", side: "sell", qty: 1, chainId: 8453 });
-    expect(o.parts).toEqual([{ label: "OKX 1.5", pct: 50, kind: "cex" }, { label: "DEX（Base）1", pct: 33, kind: "dex" }, { label: "Binance 0.5", pct: 17, kind: "cex" }]);
-    expect(o.notes).toEqual(["比过：DEX（Ethereum）的 0.15 ETH 没动：一笔 swap 的 gas $4.00，用上它反而少 $3.83。"]);
-    expect(o.after).toEqual(["卖出的钱：USDT 留在 OKX、Binance（key 提不出来）；DEX 那片的 USDC 在 Base 上，随时能动。"]);
+    expect(o.parts).toEqual([{ label: "OKX 1.5", pct: 50, kind: "cex" }, { label: "DEX (Base) 1", pct: 33, kind: "dex" }, { label: "Binance 0.5", pct: 17, kind: "cex" }]);
+    expect(o.notes).toEqual(["Compared: DEX (Ethereum)'s 0.15 ETH stays put: one swap costs $4.00 in gas, so using it would net $3.83 less."]);
+    expect(o.after).toEqual(["Proceeds: USDT stays at OKX and Binance (keys cannot withdraw); the DEX slice's USDC is on Base, free to move."]);
     const two = orderPlan("ETH", "sell", 2, accounts);
-    expect(two.narration).toBe("卖出 2 ETH：一处接得下的最好是 Binance（净得 $4,874.86）；拆成 2 片净得 $4,877.84，多 $2.98。");
-    expect(quoteView(o)).toMatchObject({ order: "卖出 3 ETH", feasible: true, netUsd: 7315.91, slices: [{ venue: "okx", qty: 1.5 }, { venue: "dex:Base", chain: "Base", gasUsd: 0.05 }, { venue: "binance", qty: 0.5 }], leftOut: [{ venue: "dex:Ethereum" }] });
+    expect(two.narration).toBe("Sell 2 ETH: the best single venue is Binance (net $4,874.86); split into 2 slices it nets $4,877.84, $2.98 more.");
+    expect(quoteView(o)).toMatchObject({ order: "Sell 3 ETH", feasible: true, netUsd: 7315.91, slices: [{ venue: "okx", qty: 1.5 }, { venue: "dex:Base", chain: "Base", gasUsd: 0.05 }, { venue: "binance", qty: 0.5 }], leftOut: [{ venue: "dex:Ethereum" }] });
     expect(parseOrder({ base: "eth", side: "sell", qty: "3" })).toEqual({ base: "ETH", side: "sell", qty: 3 });
     expect(parseOrder({ base: "DOGE", side: "sell", qty: 1 })).toBeNull();
     expect(parseOrder({ base: "ETH", side: "hold", qty: 1 })).toBeNull();
@@ -460,14 +467,21 @@ describe("the keyword agent behind the page", () => {
   it("maps the presets and a sentence with a number to plans; anything else to the menu", async () => {
     const { plan } = await import("../../src/portfolio/agent.ts");
     const ctx = await ctxOf();
-    expect(plan("再平衡", ctx).steps.map((s) => [s.account, s.intent.kind])).toEqual([["okx", "trade"], ["ondo", "subscribe"]]);
-    expect(plan("付 200 给 GitHub", ctx).steps[0]?.intent).toEqual({ kind: "pay", merchant: "GitHub", mcc: "7372", amountUsd: 200 });
-    expect(plan("申购 1000 OUSG", ctx).steps[0]?.intent).toMatchObject({ kind: "subscribe", amountUsd: 1000 });
-    expect(plan("提到冷钱包", ctx).steps[0]?.intent).toMatchObject({ kind: "move", asset: "BTC" });
-    expect(plan("转给新地址", ctx).steps[0]?.intent).toMatchObject({ kind: "move", to: "0x7a11…stranger" });
-    expect(plan("买 0.5 ETH", ctx).steps[0]).toMatchObject({ account: "binance", intent: { side: "buy", qty: 0.5 } });
-    expect(plan("收紧到 Guard", ctx)).toMatchObject({ mode: "guard", steps: [] });
-    expect(plan("今天天气", ctx).steps).toEqual([]);
+    expect(plan("Rebalance", ctx).steps.map((s) => [s.account, s.intent.kind])).toEqual([["okx", "trade"], ["ondo", "subscribe"]]);
+    expect(plan("pay 200 to GitHub", ctx).steps[0]?.intent).toEqual({ kind: "pay", merchant: "GitHub", mcc: "7372", amountUsd: 200 });
+    expect(plan("subscribe 1000 OUSG", ctx).steps[0]?.intent).toMatchObject({ kind: "subscribe", amountUsd: 1000 });
+    expect(plan("Withdraw to cold wallet", ctx).steps[0]?.intent).toMatchObject({ kind: "move", asset: "BTC" });
+    expect(plan("Send to a new address", ctx).steps[0]?.intent).toMatchObject({ kind: "move", to: "0x7a11…stranger" });
+    expect(plan("buy 0.5 ETH", ctx).steps[0]).toMatchObject({ account: "binance", intent: { side: "buy", qty: 0.5 } });
+    expect(plan("tighten to Guard", ctx)).toMatchObject({ mode: "guard", steps: [] });
+    expect(plan("Pay a bill", ctx).steps[0]?.intent).toEqual({ kind: "pay", merchant: "Anthropic", mcc: "7372", amountUsd: 120 });
+    // every preset is understood, and so is the Chinese for each of them
+    const { PRESETS } = await import("../../src/portfolio/agent.ts");
+    const world8 = { ...ctx, ...(await worldWith(true)), polymarketAddress: "0x9e7a…deposit", now };
+    for (const preset of PRESETS) expect(plan(preset, world8).steps.length, preset).toBeGreaterThan(0);
+    for (const zh of ["再平衡", "付账单", "申购 1000 OUSG", "提到冷钱包", "转给新地址", "卖 1 ETH", "买 300 份加息 YES"]) expect(plan(zh, world8).steps.length, zh).toBeGreaterThan(0);
+    expect(plan("收紧到 Guard", ctx)).toMatchObject({ mode: "guard" });
+    expect(plan("what is the weather today", ctx).steps).toEqual([]);
   });
 
   it("flies in plain words: numbered flights, fills with what they netted and what they beat, a refusal without codes, one card, and the decision as one more leg", async () => {
@@ -475,36 +489,36 @@ describe("the keyword agent behind the page", () => {
     const { agentCode } = await import("../../src/portfolio/accounts.ts");
     const svc = await PortfolioService.create({ home, now: tick });
     const agent = new AgentSession(svc);
-    const f1 = await agent.say("再平衡");
+    const f1 = await agent.say("Rebalance");
     expect(f1.no).toBe("PM-0001");
     expect(f1.legs.map((l) => l.mark)).toEqual(["note", "ok", "ok", "note"]);
     expect(f1.legs[1]).toMatchObject({ account: "okx" });
-    expect(f1.legs[1]?.text).toBe("卖出 1 ETH · OKX @ 2,440.97 · 净得 $2,439.02");
-    expect(f1.legs[1]?.compare).toContain("Binance 净得 $2,437.44");
-    expect(f1.legs[3]?.text).toContain("困在那里");
-    const f2 = await agent.say("提到冷钱包");
+    expect(f1.legs[1]?.text).toBe("Sell 1 ETH · OKX @ 2,440.97 · net $2,439.02");
+    expect(f1.legs[1]?.compare).toContain("Binance nets $2,437.44");
+    expect(f1.legs[3]?.text).toContain("stuck there");
+    const f2 = await agent.say("Withdraw to cold wallet");
     expect(f2.legs[1]).toMatchObject({ mark: "no" });
-    expect(f2.legs[1]?.text).toMatch(/做不了「转出」/);
+    expect(f2.legs[1]?.text).toBe("Withdraw 0.1 BTC to the cold wallet · Binance: the Binance credential can't transfer out; not done");
     expect(f2.legs[1]?.text).not.toMatch(/E_WALLET/);
-    const f3 = await agent.say("转给新地址");
+    const f3 = await agent.say("Send to a new address");
     expect(f3.legs[1]).toMatchObject({ mark: "wait" });
     const id = f3.legs[1]?.approvalId;
     expect(id).toBeTruthy();
     expect(await svc.decide(id!, "reject")).toMatchObject({ code: "E_CARD_REJECTED" });
-    expect(f3.legs[2]).toMatchObject({ mark: "no", text: "你拒了，没动" });
+    expect(f3.legs[2]).toMatchObject({ mark: "no", text: "You rejected it; nothing moved" });
     expect(await svc.decide(id!, "approve")).toMatchObject({ code: "E_CARD_NOT_GRANTED" });
-    const f4 = await agent.say("收紧到 Guard");
+    const f4 = await agent.say("Tighten to Guard");
     expect(svc.policy().mode).toBe("guard");
-    expect(f4.legs[1]?.text).toBe("已收紧到 Guard");
-    await agent.say("放开到 Open");
-    const f6 = await agent.say("申购 5000 OUSG");
+    expect(f4.legs[1]?.text).toBe("Now in Guard");
+    await agent.say("Switch back to Open");
+    const f6 = await agent.say("Subscribe $5,000 OUSG");
     expect(f6.no).toBe("PM-0006");
     const ok6 = f6.legs.filter((l) => l.mark === "ok");
-    expect(ok6.map((l) => l.text.slice(0, 2))).toEqual(["申购", "跨链", "申购"]);
-    expect(ok6[1]?.text).toBe("跨链 $1,200 USDC：Base → Ethereum → Ondo 地址 · 流动性桥 · 费 $1.00 · ~2 分钟");
+    expect(ok6.map((l) => l.text.split(" ")[0])).toEqual(["Subscribe", "Bridge", "Subscribe"]);
+    expect(ok6[1]?.text).toBe("Bridge $1,200 USDC: Base → Ethereum → Ondo address · liquidity bridge · fee $1.00 · ~2 min");
     expect(ok6[1]?.compare).toContain("CCTP");
     expect(ok6[2]?.usd).toBe(1199);
-    expect(f6.legs[0]?.text).toContain("还差");
+    expect(f6.legs[0]?.text).toContain("short");
     expect((await svc.read("ondo")).find((h) => h.asset === "USDC")).toBeUndefined();
     expect(svc.rows().find((r) => r.kind === "funding")).toMatchObject({ venue: "ondo", notionalUsd: 1199, flight: "PM-0006" });
     const mcp = await svc.execute("mastercard", { kind: "pay", merchant: "Anthropic", mcc: "7372", amountUsd: 20 }, { id: "claude-code", name: "claude-code", code: agentCode("claude-code") });
@@ -527,14 +541,14 @@ describe("a split order as a flight", () => {
   it("open: three slices land at three venues at the quoted prices; the DEX slice shows its route and its USDC stays on-chain", async () => {
     const { AgentSession } = await import("../../src/portfolio/agent.ts");
     const svc = await PortfolioService.create({ home, now: tick });
-    const f = await new AgentSession(svc).say("卖 3 ETH");
+    const f = await new AgentSession(svc).say("Sell 3 ETH");
     expect(f.legs.map((l) => l.mark)).toEqual(["note", "ok", "ok", "ok", "note", "note"]);
-    expect(f.legs[0]?.parts?.map((p) => `${p.label}:${p.kind}`)).toEqual(["OKX 1.5:cex", "DEX（Base）1:dex", "Binance 0.5:cex"]);
-    expect(f.legs[1]).toMatchObject({ account: "okx", text: "卖出 1.5 ETH · OKX @ 2,440.97 · 净得 $3,658.52" });
-    expect(f.legs[2]).toMatchObject({ account: "metamask", text: "卖出 1 ETH · DEX（Base） @ 2,439.94 · 净得 $2,438.67", compare: "路由：Aerodrome · gas $0.05" });
-    expect(f.legs[3]).toMatchObject({ account: "binance", text: "卖出 0.5 ETH · Binance @ 2,439.88 · 净得 $1,218.72" });
-    expect(f.legs[4]?.text).toContain("gas $4.00");
-    expect(f.legs[5]?.text).toContain("随时能动");
+    expect(f.legs[0]?.parts?.map((p) => `${p.label}:${p.kind}`)).toEqual(["OKX 1.5:cex", "DEX (Base) 1:dex", "Binance 0.5:cex"]);
+    expect(f.legs[1]).toMatchObject({ account: "okx", text: "Sell 1.5 ETH · OKX @ 2,440.97 · net $3,658.52" });
+    expect(f.legs[2]).toMatchObject({ account: "metamask", text: "Sell 1 ETH · DEX (Base) @ 2,439.94 · net $2,438.67", compare: "Route: Aerodrome · gas $0.05" });
+    expect(f.legs[3]).toMatchObject({ account: "binance", text: "Sell 0.5 ETH · Binance @ 2,439.88 · net $1,218.72" });
+    expect(f.legs[4]?.text).toContain("$4.00 in gas");
+    expect(f.legs[5]?.text).toContain("free to move");
     expect([await eth(svc, "okx"), await eth(svc, "binance"), await eth(svc, "metamask")]).toEqual([0, 1.5, 0.15]);
     expect((await svc.read("metamask")).find((h) => h.asset === "USDC" && h.note === "Base")?.amount).toBe(3638.67);
     const o = await svc.overview();
@@ -542,9 +556,9 @@ describe("a split order as a flight", () => {
     expect(o.counters).toMatchObject({ writes: 3, cards: 0, refusals: 0 });
     expect(svc.rows().filter((r) => r.kind === "venue" && r.flight === f.no).map((r) => r.venue)).toEqual(["okx", "metamask", "binance"]);
     // nothing left that can take 3 ETH: the agent says how much there is instead of selling something else
-    const again = await new AgentSession(svc).say("卖 3 ETH");
+    const again = await new AgentSession(svc).say("Sell 3 ETH");
     expect(again.legs.map((l) => l.mark)).toEqual(["note"]);
-    expect(again.legs[0]?.text).toContain("所有场所加起来只有 1.65 ETH");
+    expect(again.legs[0]?.text).toContain("all venues together hold only 1.65 ETH");
   });
 
   it("guard: the whole order is ONE card; nothing moves until it is answered; one yes fills every slice, one no moves nothing", async () => {
@@ -552,26 +566,26 @@ describe("a split order as a flight", () => {
     const svc = await PortfolioService.create({ home, now: tick });
     svc.setMode("guard");
     const agent = new AgentSession(svc);
-    const f = await agent.say("卖 3 ETH");
+    const f = await agent.say("Sell 3 ETH");
     expect(f.legs.map((l) => l.mark)).toEqual(["note", "wait", "note"]);
-    expect(f.legs[1]).toMatchObject({ text: "卖出 3 ETH（3 片）：超过免审额度，需要你点一下", usd: 7320 });
+    expect(f.legs[1]).toMatchObject({ text: "Sell 3 ETH (3 slices): above the no-ask limit, needs your OK", usd: 7320 });
     expect(svc.counters).toMatchObject({ cards: 1, writes: 0 });
     const ap = (await svc.overview()).approvals[0]!;
-    expect(ap).toMatchObject({ status: "pending", usd: 7320, title: "卖出 3 ETH（3 片）", reason: expect.stringContaining("拆单合并计") });
+    expect(ap).toMatchObject({ status: "pending", why: "allowance", usd: 7320, title: "Sell 3 ETH (3 slices)", reason: expect.stringContaining("slices are counted together") });
     expect(ap.batch?.map((s) => s.account)).toEqual(["okx", "metamask", "binance"]);
     expect([await eth(svc, "okx"), await eth(svc, "binance"), await eth(svc, "metamask")]).toEqual([1.5, 2, 1.15]);
     expect(await svc.decide(ap.id, "approve")).toMatchObject({ ok: true, status: "filled", account: "okx+metamask+binance", usd: 7321.33 });
-    expect(f.legs.slice(3).map((l) => [l.mark, l.text.split(" @")[0]])).toEqual([["ok", "你批了 · 卖出 1.5 ETH · OKX"], ["ok", "你批了 · 卖出 1 ETH · DEX（Base）"], ["ok", "你批了 · 卖出 0.5 ETH · Binance"], ["note", "卖出的钱：USDT 留在 OKX、Binance（key 提不出来）；DEX 那片的 USDC 在 Base 上，随时能动。"]]);
-    expect(f.legs[4]?.compare).toBe("路由：Aerodrome · gas $0.05");
+    expect(f.legs.slice(3).map((l) => [l.mark, l.text.split(" @")[0]])).toEqual([["ok", "Approved · Sell 1.5 ETH · OKX"], ["ok", "Approved · Sell 1 ETH · DEX (Base)"], ["ok", "Approved · Sell 0.5 ETH · Binance"], ["note", "Proceeds: USDT stays at OKX and Binance (keys cannot withdraw); the DEX slice's USDC is on Base, free to move."]]);
+    expect(f.legs[4]?.compare).toBe("Route: Aerodrome · gas $0.05");
     expect([await eth(svc, "okx"), await eth(svc, "binance"), await eth(svc, "metamask")]).toEqual([0, 1.5, 0.15]);
     expect(svc.counters).toMatchObject({ cards: 1, writes: 3 });
     expect(await svc.decide(ap.id, "approve")).toMatchObject({ code: "E_CARD_NOT_GRANTED" });
-    const g = await agent.say("卖 1.6 ETH");
+    const g = await agent.say("Sell 1.6 ETH");
     const id = g.legs.find((l) => l.approvalId)?.approvalId;
-    expect(g.legs.find((l) => l.mark === "wait")?.text).toContain("2 片");
+    expect(g.legs.find((l) => l.mark === "wait")?.text).toContain("2 slices");
     expect(await svc.decide(id!, "reject")).toMatchObject({ code: "E_CARD_REJECTED" });
-    expect(g.legs.at(-1)).toMatchObject({ mark: "no", text: "你拒了，没动" });
-    expect(g.legs.some((l) => l.text.includes("卖出的钱"))).toBe(false);
+    expect(g.legs.at(-1)).toMatchObject({ mark: "no", text: "You rejected it; nothing moved" });
+    expect(g.legs.some((l) => l.text.startsWith("Proceeds"))).toBe(false);
     expect([await eth(svc, "binance"), await eth(svc, "metamask")]).toEqual([1.5, 0.15]);
     expect(svc.verifyChain()).toMatchObject({ ok: true });
   });
@@ -586,7 +600,7 @@ describe("a split order as a flight", () => {
     const r = await svc.order("ETH", "sell", 3, { id: "claude-code", name: "claude-code", code: "CC" });
     expect(r.flight.no).toBe("CC-0001");
     expect(r.outcomes.map((x) => (isRefusal(x) || isPending(x) ? "?" : x.status))).toEqual(["filled", "filled", "filled"]);
-    expect(r.flight.legs.at(-1)?.text).toContain("随时能动");
+    expect(r.flight.legs.at(-1)?.text).toContain("free to move");
     expect(svc.rows().filter((x) => x.kind === "venue").every((x) => x.flight === "CC-0001" && x.agent === "claude-code")).toBe(true);
     const none = await svc.order("ETH", "sell", 9, { id: "claude-code", name: "claude-code", code: "CC" });
     expect(none.outcomes).toEqual([]);
@@ -594,7 +608,181 @@ describe("a split order as a flight", () => {
     // a buy on the DEX: the wallet has USDC on Base again, so the pool route wins a small order on merit
     const buy = await svc.order("ETH", "buy", 0.4);
     expect(buy.plan.split.slices.map((s) => s.venue)).toEqual(["dex:Base"]);
-    expect(buy.flight.legs[1]).toMatchObject({ mark: "ok", account: "metamask", text: "买入 0.4 ETH · DEX（Base） @ 2,439.82 · 共付 $976.47" });
-    expect(buy.flight.legs[1]?.compare).toBe("路由：Uniswap v3 0.05% · gas $0.05；比过：Binance 共付 $977.03（多 $0.56）；OKX 共付 $977.37（多 $0.90）");
+    expect(buy.flight.legs[1]).toMatchObject({ mark: "ok", account: "metamask", text: "Buy 0.4 ETH · DEX (Base) @ 2,439.82 · cost $976.47" });
+    expect(buy.flight.legs[1]?.compare).toBe("Route: Uniswap v3 0.05% · gas $0.05; Compared: Binance costs $977.03 ($0.56 more); OKX costs $977.37 ($0.90 more)");
+  });
+});
+
+describe("prediction markets: event contracts", () => {
+  const FED = "FED-DEC-HIKE25:YES";
+  const at = "2026-10-03T09:00:00.000Z";
+
+  it("a contract is a question with a close date, a book per venue, and a state", () => {
+    expect(EVENTS.map((e) => [e.id, eventState(e, at), Object.keys(e.listings)])).toEqual([["FED-DEC-HIKE25", "open", ["polymarket", "kalshi"]], ["GOV-SHUTDOWN-OCT1", "awaiting", ["polymarket"]], ["FED-SEP-HOLD", "resolved", ["polymarket"]]]);
+    expect([isEventSymbol(FED), isEventSymbol("ETH"), isEventSymbol("ETH-USDC")]).toEqual([true, false, false]);
+    expect(parseEventSymbol(FED)).toMatchObject({ outcome: "YES", event: { title: "Fed hikes 25 bps in December" } });
+    expect(parseEventSymbol("NOPE:YES")).toBeUndefined();
+    // a share is worth its mark, and $1 or $0 once the question is settled
+    expect([eventMark(FED), eventMark("FED-DEC-HIKE25:NO"), eventMark("FED-SEP-HOLD:YES"), eventMark("FED-SEP-HOLD:NO")]).toEqual([0.735, 0.265, 1, 0]);
+    expect([findEvent("buy 1000 yes · fed hike")?.id, findEvent("买 300 份加息")?.id, findEvent("shutdown")?.id, findEvent("eth")]).toEqual(["FED-DEC-HIKE25", "FED-DEC-HIKE25", "GOV-SHUTDOWN-OCT1", undefined]);
+  });
+
+  it("an order walks the book level by level and pays a fee shaped like p × (1 − p); NO is the mirror of YES", () => {
+    expect(levelsFor("polymarket", FED, "buy")?.map((l) => [l.price, l.size])).toEqual([[0.74, 700], [0.75, 2500], [0.76, 6000]]);
+    expect(levelsFor("polymarket", "FED-DEC-HIKE25:NO", "buy")?.map((l) => [l.price, l.size])).toEqual([[0.27, 600], [0.28, 1800], [0.29, 5000]]);
+    expect(rawEvent("polymarket", FED, "buy", 800)).toMatchObject({ gross: 700 * 0.74 + 100 * 0.75, best: 0.74 });
+    expect(rawEvent("polymarket", FED, "buy", 50_000)).toBeUndefined();
+    expect(fillAt("polymarket", FED, "buy", 400)).toMatchObject({ kind: "prediction", name: "Polymarket", quote: "pUSD", price: 0.74, grossUsd: 296, feeUsd: 3.85, netUsd: 299.85 });
+    expect(fillAt("polymarket", FED, "buy", 800)).toMatchObject({ price: 0.7412, grossUsd: 593, feeUsd: 7.67, netUsd: 600.67 });
+    // Kalshi: a cent cheaper at the top, a higher fee rate, rounded UP to the cent
+    expect(fillAt("kalshi", FED, "buy", 400)).toMatchObject({ name: "Kalshi", quote: "USD", price: 0.73, grossUsd: 292, feeUsd: 5.52, netUsd: 297.52 });
+    expect(0.07 * 0.73 * 0.27 * 400).toBeLessThan(5.52);
+    expect(fillAt("kalshi", FED, "sell", 150)).toMatchObject({ price: 0.72, grossUsd: 108, netUsd: 105.88 });
+    // the venues' own order rules: 5 shares minimum at Polymarket, whole contracts at Kalshi
+    expect(fillAt("polymarket", FED, "buy", 3)).toBeUndefined();
+    expect(fillAt("kalshi", FED, "buy", 10.5)).toBeUndefined();
+    expect(fillAt("kalshi", "GOV-SHUTDOWN-OCT1:YES", "buy", 10)).toBeUndefined();
+  });
+
+  it("the same question is quoted at both venues, and bought across both when neither has the cash", async () => {
+    const { accounts } = await worldWith(true);
+    const q = venueQuotes(FED, "buy", 300, accounts);
+    expect(q.map((x) => [x.venue, x.ok, x.netUsd, x.have])).toEqual([["kalshi", true, 223.14, 500], ["polymarket", true, 224.89, 600]]);
+    expect(bestVenue(q, "buy")?.venue).toBe("kalshi");
+    const big = splitOrder(FED, "buy", 1000, accounts);
+    expect(big.slices.map((s) => [s.venue, s.qty, s.price, s.netUsd])).toEqual([["kalshi", 400, 0.73, 297.52], ["polymarket", 600, 0.74, 449.77]]);
+    expect(big).toMatchObject({ feasible: true, lot: 10, netUsd: 747.29, avgPrice: 0.736 });
+    expect(big.single).toBeUndefined();
+    // a split that beats the best single venue
+    expect(splitOrder(FED, "buy", 600, accounts)).toMatchObject({ netUsd: 447.44, single: { venue: "polymarket", netUsd: 449.77 }, gainUsd: 2.33 });
+    expect(splitOrder(FED, "buy", 2000, accounts)).toMatchObject({ feasible: false, maxQty: 1450 });
+    // a sale goes where the shares are
+    expect(splitOrder(FED, "sell", 150, accounts).slices.map((s) => [s.venue, s.qty, s.netUsd])).toEqual([["kalshi", 150, 105.88]]);
+    expect(venueQuotes(FED, "sell", 150, accounts).find((x) => x.venue === "polymarket")).toMatchObject({ ok: false, why: "has no shares" });
+    // a settled market has no book: nothing routes there
+    expect(splitOrder("FED-SEP-HOLD:YES", "buy", 10, accounts)).toMatchObject({ feasible: false, quotes: [] });
+  });
+
+  it("Polymarket: fills in pUSD, takes a bridge deposit, withdraws, redeems winnings; a restricted region gets no orders", async () => {
+    const pm = polymarketSimAccount(seeds.polymarket, clock);
+    expect(pm.account).toMatchObject({ kind: "prediction", chain: "Polygon", address: "0x9e7a…deposit", scope: { can: ["read", "trade", "move", "redeem"], enforcedBy: "venue" } });
+    expect((await pm.read()).map((h) => [h.asset, h.amount, h.usd, h.class, h.redeemable])).toEqual([["pUSD", 600, 600, "stable", undefined], ["FED-SEP-HOLD:YES", 80, 80, "event", true]]);
+    expect(await pm.execute({ kind: "trade", symbol: FED, side: "buy", qty: 400 })).toMatchObject({ ok: true, status: "filled", usd: 296, native: { status: "matched", price: 0.74, netUsd: 299.85 } });
+    expect(await pm.execute({ kind: "trade", symbol: FED, side: "buy", qty: 3 })).toMatchObject({ code: "E_VENUE_REJECTED", native: { error: "INVALID_ORDER_MIN_SIZE" } });
+    expect(await pm.execute({ kind: "trade", symbol: FED, side: "buy", qty: 800 })).toMatchObject({ code: "E_VENUE_INSUFFICIENT" });
+    expect(await pm.execute({ kind: "trade", symbol: "FED-SEP-HOLD:YES", side: "buy", qty: 10 })).toMatchObject({ code: "E_VENUE_MARKET_CLOSED", layer: "VENUE" });
+    expect(await pm.execute({ kind: "trade", symbol: "ETH-USDC", side: "buy", qty: 10 })).toMatchObject({ code: "E_VENUE_REJECTED" });
+    pm.credit!("USDC", 299.45, "Polygon");
+    expect(await pm.execute({ kind: "redeem", fund: "FED-SEP-HOLD", amountUsd: 80 })).toMatchObject({ ok: true, status: "sent", usd: 80 });
+    expect(await pm.execute({ kind: "redeem", fund: "FED-DEC-HIKE25", amountUsd: 10 })).toMatchObject({ code: "E_VENUE_REJECTED" });
+    expect(await pm.execute({ kind: "move", asset: "pUSD", amount: 100, to: "wallet-main" })).toMatchObject({ ok: true, status: "sent" });
+    expect((await pm.read()).map((h) => [h.asset, h.amount])).toEqual([["pUSD", 579.6], ["FED-DEC-HIKE25:YES", 400]]);
+    const blocked = polymarketSimAccount({ ...seeds.polymarket, geoblock: { blocked: true, country: "US", region: "NY" } }, clock);
+    expect(blocked.account).toMatchObject({ scope: { can: ["read", "move", "redeem"] }, closed: { trade: "takes no orders from US-NY" } });
+    expect(blocked.account.scope.limits[0]).toContain("PREDICT_GEOBLOCKED");
+    expect(await blocked.execute({ kind: "trade", symbol: FED, side: "buy", qty: 10 })).toMatchObject({ code: "E_VENUE_GEOBLOCKED", message: "Polymarket takes no orders from US-NY", native: { error: "PREDICT_GEOBLOCKED", country: "US", region: "NY" } });
+    // the live read: what `mm predict geoblock` and `mm predict status` say becomes the credential's scope; the caller's IP is dropped
+    expect(geoblockOf({ result: { blocked: true, ip: "203.0.113.9", country: "US", region: "NY" } })).toEqual({ blocked: true, country: "US", region: "NY" });
+    expect([liveScope(false, { blocked: true }), liveScope(true, { blocked: true }), liveScope(true, { blocked: false })]).toEqual([["read"], ["read", "move", "redeem"], ["read", "trade", "move", "redeem"]]);
+  });
+
+  it("Kalshi: whole contracts paid in USD; the key trades and cannot move money", async () => {
+    const k = kalshiAccount(seeds.kalshi, clock);
+    expect(k.account.scope.can).toEqual(["read", "trade"]);
+    expect((await k.read()).map((h) => [h.asset, h.amount, h.usd, h.class])).toEqual([["USD", 500, 500, "cash"], [FED, 150, 110.25, "event"]]);
+    expect(await k.execute({ kind: "trade", symbol: FED, side: "buy", qty: 400 })).toMatchObject({ ok: true, status: "filled", native: { status: "executed", price: 0.73, feeUsd: 5.52 } });
+    expect(await k.execute({ kind: "trade", symbol: FED, side: "buy", qty: 10.5 })).toMatchObject({ code: "E_VENUE_REJECTED", native: { error: { code: "invalid_order" } } });
+    expect(await k.execute({ kind: "trade", symbol: FED, side: "buy", qty: 400 })).toMatchObject({ code: "E_VENUE_INSUFFICIENT", native: { error: { code: "insufficient_balance" } } });
+    expect(await k.execute({ kind: "trade", symbol: "GOV-SHUTDOWN-OCT1:YES", side: "buy", qty: 10 })).toMatchObject({ code: "E_VENUE_REJECTED", native: { error: { code: "market_not_found" } } });
+    expect(await k.execute({ kind: "move", asset: "USD", amount: 100, to: "wallet-main" })).toMatchObject({ code: "E_VENUE_PERMISSION", native: { status: 404 } });
+    expect(await k.execute({ kind: "trade", symbol: FED, side: "sell", qty: 550 })).toMatchObject({ ok: true, status: "filled" });
+    expect(await kalshiAccount({ ...seeds.kalshi, usd: 50_000, positionLimitUsd: 300 }, clock).execute({ kind: "trade", symbol: FED, side: "buy", qty: 400 })).toMatchObject({ code: "E_VENUE_REJECTED", native: { error: { code: "position_limit_exceeded" } } });
+  });
+
+  it("the ladder and the liquidity map know them: Polymarket's pUSD can come back in minutes, Kalshi's cash only by ACH", async () => {
+    const { ladder: L, liquidity: Liq } = await worldWith(true);
+    expect(L.rows.map((r) => [r.bucket, r.usd])).toEqual([["now", 3000], ["minutes", 1800], ["t1", 1987.56], ["closed", 20400]]);
+    expect(L.rows[1]!.items.find((it) => it.account === "polymarket")).toMatchObject({ asset: "pUSD", chain: "Polygon", open: true, route: { id: "lp", label: "withdraw, then liquidity bridge", feeUsd: 0.7 } });
+    expect(L.rows[3]!.items.find((it) => it.account === "kalshi")).toMatchObject({ open: false, route: { id: "ach", why: "pays out by ACH, not through the agent" } });
+    expect(Liq.mobile.map((s) => s.account)).toEqual(["metamask", "polymarket", "ondo"]);
+    expect(Liq.stuck.find((s) => s.account === "kalshi")?.why).toBe("pays out by ACH, not through the agent");
+    // Polygon is not a rollup of Ethereum: there is no canonical exit to compare
+    expect(bridgeQuotes(600, "Ethereum", "Polygon").map((q) => q.id)).toEqual(["lp", "cctp"]);
+    expect(bridgeQuotes(300, "Polygon", "Base").map((q) => [q.id, q.feeUsd])).toEqual([["lp", 0.55], ["cctp", 1.2]]);
+  });
+
+  it("open mode still asks before an order in a market past its close; a settled market is the venue's refusal", () => {
+    const pm = polymarketSimAccount(seeds.polymarket, clock).account;
+    const base = { openness, now: at, dailyOutUsd: 0, account: pm };
+    expect(evaluate({ ...base, intent: { kind: "trade", symbol: FED, side: "buy", qty: 400 } })).toMatchObject({ ok: true, card: null, usd: 294 });
+    expect(evaluate({ ...base, intent: { kind: "trade", symbol: "GOV-SHUTDOWN-OCT1:YES", side: "buy", qty: 100 } })).toMatchObject({ ok: true, usd: 96, card: { why: "awaiting", reason: expect.stringContaining("is not yet resolved") } });
+    expect(evaluate({ ...base, openness: { ...openness, mode: "guard" }, intent: { kind: "trade", symbol: "GOV-SHUTDOWN-OCT1:YES", side: "buy", qty: 1 } })).toMatchObject({ card: { why: "awaiting" } });
+    expect(evaluate({ ...base, intent: { kind: "trade", symbol: "FED-SEP-HOLD:YES", side: "buy", qty: 10 } })).toMatchObject({ ok: true, card: null });
+    expect(evaluate({ ...base, intent: { kind: "trade", symbol: FED, side: "buy", qty: 400 }, account: { ...pm, scope: { ...pm.scope, can: ["read", "move", "redeem"] } } })).toMatchObject({ code: "E_WALLET_SCOPE" });
+    expect(compileOpenness([pm], openness)[0]!.layer2.walletKeeps[0]).toMatch(/new address/);
+    expect(compileOpenness([kalshiAccount(seeds.kalshi, clock).account], openness)[0]!.layer2.walletKeeps[0]).toMatch(/market past its close/);
+  });
+
+  it("the page agent's sentences: an order, funding over a bridge, redeeming winnings", async () => {
+    const { plan } = await import("../../src/portfolio/agent.ts");
+    const ctx = { cryptoPct: 52, ondoAddress: "0x5a1e…kyc", polymarketAddress: "0x9e7a…deposit", now: at, ...(await worldWith(true)) };
+    const buy = plan("Buy 1,000 YES · Fed hike", ctx);
+    expect(buy.narration).toBe("Buy 1,000 YES · Fed hikes 25 bps in December: no single venue has the cash for it (Kalshi $500 · Polymarket $600). Split into 2 slices: average 0.736, cost $747.29.");
+    expect(buy.steps.map((s) => [s.account, s.intent, s.say])).toEqual([
+      ["kalshi", { kind: "trade", symbol: FED, side: "buy", qty: 400 }, "Buy 400 YES · Kalshi"],
+      ["polymarket", { kind: "trade", symbol: FED, side: "buy", qty: 600 }, "Buy 600 YES · Polymarket"],
+    ]);
+    expect(buy.order?.parts).toEqual([{ label: "Kalshi 400", pct: 40, kind: "prediction" }, { label: "Polymarket 600", pct: 60, kind: "prediction" }]);
+    expect(buy.order?.after).toEqual(["Each share pays $1 if this resolves YES (closes 2026-12-09), $0 if not; until then it can be sold back at the bid.", "Kalshi settles by its own rulebook, Polymarket settles by UMA's optimistic oracle: the same question can resolve differently at each."]);
+    expect(plan("buy 300 no fed hike", ctx).steps[0]?.intent).toMatchObject({ symbol: "FED-DEC-HIKE25:NO", side: "buy", qty: 300 });
+    expect(plan("sell 150 yes fed hike", ctx).steps.map((s) => [s.account, s.compare])).toEqual([["kalshi", "Compared: Polymarket has no shares"]]);
+    expect(plan("buy 10 yes september hold", ctx)).toMatchObject({ steps: [], narration: expect.stringContaining("this market has settled (YES)") });
+    const fund = plan("Fund Polymarket with 300", ctx);
+    expect(fund.steps[0]).toMatchObject({ account: "metamask", intent: { kind: "move", asset: "USDC", amount: 300, to: "0x9e7a…deposit", fromChainId: 8453, chainId: 137, via: "lp" }, say: "Bridge $300 USDC: Base → Polygon → Polymarket deposit wallet", compare: "Compared: CCTP (native USDC) $1.20 · ~15 min" });
+    expect(plan("fund polymarket with 5000", ctx)).toMatchObject({ steps: [], narration: expect.stringContaining("Not enough") });
+    const redeem = plan("Redeem winnings", ctx);
+    expect(redeem.steps[0]).toMatchObject({ account: "polymarket", intent: { kind: "redeem", fund: "FED-SEP-HOLD", amountUsd: 80 }, say: "Redeem 80 winning shares · Polymarket" });
+    // the OUSG router names the cash that is parked at Polymarket instead of taking it
+    expect(plan("Subscribe $5,000 OUSG", ctx).notes?.[1]).toBe("Polymarket holds $600 pUSD: it could come over in minutes, but it is parked for betting. Say so and I'll move it.");
+  });
+
+  it("flies: a split buy across both venues, the funding bridge that lands in the deposit wallet, the card for a market past its close", async () => {
+    const home = mkdtempSync(join(tmpdir(), "portfolio-predict-"));
+    let t = Date.parse(at);
+    const tick = () => new Date((t += 1000)).toISOString();
+    const { AgentSession } = await import("../../src/portfolio/agent.ts");
+    const svc = await PortfolioService.create({ home, now: tick });
+    const agent = new AgentSession(svc);
+    expect(svc.accounts().map((a) => a.id)).toEqual(["binance", "okx", "metamask", "kalshi", "polymarket", "ondo", "mastercard", "chase"]);
+    const o = await svc.overview();
+    expect(o.portfolio.totalUsd).toBe(57368.81);
+    expect(o.portfolio.byClass.map((c) => [c.class, c.label, c.usd])).toEqual([["cash", "Cash", 12900], ["stable", "Stablecoins", 12300], ["crypto", "Crypto", 29991], ["event", "Predictions", 190.25], ["rwa", "RWA", 1987.56]]);
+    expect(svc.markets().map((m) => [m.id, m.state, m.venues.map((v) => `${v.venue} ${v.yes.bid}/${v.yes.ask}`)])).toEqual([["FED-DEC-HIKE25", "open", ["polymarket 0.73/0.74", "kalshi 0.72/0.73"]], ["GOV-SHUTDOWN-OCT1", "awaiting", ["polymarket 0.95/0.97"]], ["FED-SEP-HOLD", "resolved", ["polymarket undefined/undefined"]]]);
+    const f1 = await agent.say("Buy 1,000 YES · Fed hike");
+    expect(f1.legs.map((l) => l.mark)).toEqual(["note", "ok", "ok", "note", "note"]);
+    expect(f1.legs.slice(1, 3).map((l) => l.text)).toEqual(["Buy 400 YES · Kalshi @ 0.73 · cost $297.52", "Buy 600 YES · Polymarket @ 0.74 · cost $449.77"]);
+    expect((await svc.read("kalshi")).map((h) => [h.asset, h.amount])).toEqual([["USD", 202.48], ["FED-DEC-HIKE25:YES", 550]]);
+    const f2 = await agent.say("Fund Polymarket with 300");
+    expect(f2.legs[1]).toMatchObject({ mark: "ok", account: "metamask", text: "Bridge $300 USDC: Base → Polygon → Polymarket deposit wallet · liquidity bridge · fee $0.55 · ~2 min" });
+    expect(svc.rows().find((r) => r.kind === "funding")).toMatchObject({ venue: "polymarket", notionalUsd: 299.45, flight: f2.no });
+    expect((await svc.read("polymarket")).find((h) => h.asset === "pUSD")?.amount).toBe(449.68);
+    const f3 = await agent.say("Redeem winnings");
+    expect(f3.legs[1]).toMatchObject({ mark: "ok", text: "Redeem 80 winning shares · Polymarket · paid out", usd: 80 });
+    // open mode, and still a card: the market is past its close
+    const f4 = await agent.say("buy 100 yes shutdown");
+    expect(f4.legs[1]).toMatchObject({ mark: "wait", text: "Buy 100 YES · Polymarket: this market is past its close and not yet resolved, needs your OK" });
+    expect((await svc.overview()).approvals[0]).toMatchObject({ status: "pending", why: "awaiting" });
+    expect(await svc.decide(f4.legs[1]!.approvalId!, "approve")).toMatchObject({ ok: true, status: "filled" });
+    expect(f4.legs.at(-1)?.text).toContain("pays $1 if this resolves YES");
+    // the venue's own line once the wallet is out of the way; an MCP agent routes an event order like any other
+    expect(await svc.execute("kalshi", { kind: "move", asset: "USD", amount: 50, to: "wallet-main" })).toMatchObject({ code: "E_WALLET_SCOPE" });
+    expect(await svc.bypass("kalshi", { kind: "move", asset: "USD", amount: 50, to: "wallet-main" })).toMatchObject({ code: "E_VENUE_PERMISSION" });
+    const r = await svc.order(FED, "sell", 100, { id: "codex", name: "codex", code: "CO" });
+    expect(r.flight.no).toBe("CO-0006");
+    expect(r.plan.split.slices.map((s) => s.venue)).toEqual(["polymarket"]);
+    expect(parseOrder({ base: "fed-dec-hike25:yes", side: "buy", qty: 10 })).toEqual({ base: "FED-DEC-HIKE25:YES", side: "buy", qty: 10 });
+    expect(parseOrder({ base: "NOPE:YES", side: "buy", qty: 10 })).toBeNull();
+    expect(svc.verifyChain()).toMatchObject({ ok: true });
+    rmSync(home, { recursive: true, force: true });
   });
 });

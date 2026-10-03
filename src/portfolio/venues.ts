@@ -1,7 +1,7 @@
 /** Execution liquidity: where an order can be filled, at what price, and how
  * to SPLIT it across venues.
  *
- * Two kinds of venue, one Fill shape:
+ * Three kinds of venue, one Fill shape:
  *
  *   CEX order books  a mid (venues disagree by a few bps), a half-spread, a
  *                    depth (bps of impact per dollar of size) and a taker fee
@@ -10,6 +10,10 @@
  *                    (`dex:Base`): inside it the route water-fills that chain's
  *                    pools until their marginal prices are equal, pays each
  *                    pool's LP fee, and pays gas once
+ *   prediction       an event contract (`FED-DEC-HIKE25:YES`, events.ts) on a
+ *     markets        price-level book at Polymarket and at Kalshi: the order
+ *                    walks the levels, pays a fee shaped like p × (1 − p), and
+ *                    is paid for with the cash that sits at that venue
  *
  *   fillAt       one venue, one size → the fill. The adapters execute with this
  *                same function, so a quote the agent compared is the price it
@@ -32,6 +36,7 @@
  * back between two flights.
  */
 import { PRICES, qtyText, r2, r8 } from "./accounts.ts";
+import { isEventSymbol, levelsFor, PREDICTION_VENUES, rawEvent } from "./events.ts";
 import type { RailAccount } from "./rails.ts";
 
 export type Side = "buy" | "sell";
@@ -73,8 +78,8 @@ export const POOLS: PoolModel[] = [
   { id: "eth:univ3-30", dex: "Uniswap v3 0.3%", chain: "Ethereum", base: "ETH", feeBps: 30, reserve: 120_000, midAdjBps: 0 },
   { id: "base:aero", dex: "Aerodrome", chain: "Base", base: "ETH", feeBps: 5, reserve: 40_000, midAdjBps: 0 },
   { id: "base:univ3-5", dex: "Uniswap v3 0.05%", chain: "Base", base: "ETH", feeBps: 5, reserve: 15_000, midAdjBps: -1 },
-  { id: "eth:univ3-wbtc", dex: "Uniswap v3 0.3%（WBTC）", chain: "Ethereum", base: "BTC", feeBps: 30, reserve: 6_000, midAdjBps: 0 },
-  { id: "base:aero-cbbtc", dex: "Aerodrome（cbBTC）", chain: "Base", base: "BTC", feeBps: 5, reserve: 1_500, midAdjBps: 0 },
+  { id: "eth:univ3-wbtc", dex: "Uniswap v3 0.3% (WBTC)", chain: "Ethereum", base: "BTC", feeBps: 30, reserve: 6_000, midAdjBps: 0 },
+  { id: "base:aero-cbbtc", dex: "Aerodrome (cbBTC)", chain: "Base", base: "BTC", feeBps: 5, reserve: 1_500, midAdjBps: 0 },
 ];
 
 /** one swap transaction, per chain */
@@ -89,7 +94,7 @@ const MIN_POOL_SHARE = 0.01;
 const DEX_PREFIX = "dex:";
 export const dexVenue = (chain: string): string => `${DEX_PREFIX}${chain}`;
 export const dexChainOf = (venue: string): string | undefined => (venue.startsWith(DEX_PREFIX) ? venue.slice(DEX_PREFIX.length) : undefined);
-export const dexName = (chain: string): string => `DEX（${chain}）`;
+export const dexName = (chain: string): string => `DEX (${chain})`;
 
 /** chains that have a pool for this asset */
 export function dexChains(base: string): string[] {
@@ -112,10 +117,12 @@ export interface PoolFill {
   feeUsd: number;
 }
 
+export type VenueKind = "cex" | "dex" | "prediction";
+
 export interface Fill {
-  /** `binance` · `okx` · `dex:Base` */
+  /** `binance` · `okx` · `dex:Base` · `polymarket` · `kalshi` */
   venue: string;
-  kind: "cex" | "dex";
+  kind: VenueKind;
   name: string;
   symbol: string;
   base: string;
@@ -209,6 +216,16 @@ function rawSwap(chain: string, base: string, side: Side, qty: number): Raw | un
 
 /** one venue, one size → the fill (the adapters execute with this) */
 export function fillAt(venue: string, base: string, side: Side, qty: number): Fill | undefined {
+  if (isEventSymbol(base)) {
+    // an event contract: walk the venue's price levels; shares below the venue's minimum, or fractions of a whole contract, do not fill
+    const v = PREDICTION_VENUES[venue];
+    const raw = rawEvent(venue, base, side, qty);
+    if (!v || !raw || qty < v.minOrder || (v.integerOnly && !Number.isInteger(qty))) return undefined;
+    const price = Number((raw.gross / qty).toFixed(4));
+    const grossUsd = r2(raw.gross);
+    const feeUsd = v.feeCeilCents ? Math.ceil(raw.fee * 100 - 1e-9) / 100 : r2(raw.fee);
+    return { venue, kind: "prediction", name: v.name, symbol: base, base, quote: v.quote, side, qty, mid: raw.best, price, grossUsd, feeUsd, netUsd: r2(side === "sell" ? grossUsd - feeUsd : grossUsd + feeUsd), impactBps: Number(((Math.abs(price - raw.best) / raw.best) * 1e4).toFixed(1)) };
+  }
   const ref = PRICES[base];
   if (!ref || !(qty > 0)) return undefined;
   const chain = dexChainOf(venue);
@@ -234,7 +251,7 @@ export function fillAt(venue: string, base: string, side: Side, qty: number): Fi
 interface Source {
   venue: string;
   account: string;
-  kind: "cex" | "dex";
+  kind: VenueKind;
   name: string;
   quote: string;
   chain?: string | undefined;
@@ -248,7 +265,13 @@ function sourcesFor(base: string, side: Side, accounts: RailAccount[]): Source[]
   const out: Source[] = [];
   const held = (a: RailAccount, asset: string, chain?: string) => a.holdings.filter((h) => h.asset === asset && (chain === undefined || chainKey(h.note) === chain)).reduce((s, h) => s + h.amount, 0);
   for (const a of accounts) {
-    const blocked = a.reach.includes("trade") ? undefined : a.revoked ? "你关了" : "交易没开放";
+    const blocked = a.reach.includes("trade") ? undefined : a.revoked ? "is switched off" : (a.closed?.trade ?? "is not opened for trading");
+    if (isEventSymbol(base)) {
+      // an event contract trades only where it is listed, and is paid for with the cash at that venue
+      const v = a.kind === "prediction" ? PREDICTION_VENUES[a.id] : undefined;
+      if (v && levelsFor(a.id, base, side)?.length) out.push({ venue: a.id, account: a.id, kind: "prediction", name: v.name, quote: v.quote, have: held(a, side === "sell" ? base : v.quote), blocked });
+      continue;
+    }
     const book = a.kind === "cex" ? BOOKS[a.id] : undefined;
     if (book) {
       if (base === book.quote || !PRICES[base]) continue;
@@ -265,7 +288,7 @@ export interface VenueQuote extends Fill {
   account: string;
   /** this venue can take the WHOLE order alone */
   ok: boolean;
-  /** why it cannot, in the user's words */
+  /** why it cannot, as a phrase that follows the venue's name: `has only 0.15 ETH`, `is short of USDC` */
   why?: string | undefined;
   /** what it holds for this order: the asset to sell, or the quote currency to pay with */
   have: number;
@@ -280,17 +303,22 @@ export function venueQuotes(base: string, side: Side, qty: number, accounts: Rai
   for (const s of sources) {
     if (s.kind === "dex" && s.have <= 0) continue;
     const fill = fillAt(s.venue, base, side, qty);
-    if (!fill) continue;
+    if (!fill) {
+      // an event book that cannot fill the whole order alone still answers
+      if (s.kind === "prediction") out.push({ venue: s.venue, kind: s.kind, name: s.name, symbol: base, base, quote: s.quote, side, qty, mid: 0, price: 0, grossUsd: 0, feeUsd: 0, netUsd: 0, impactBps: 0, account: s.account, ok: false, why: s.blocked ?? (qty < (PREDICTION_VENUES[s.venue]?.minOrder ?? 0) ? `takes orders of ${PREDICTION_VENUES[s.venue]!.minOrder} shares or more` : "has a book too thin for the whole order"), have: s.have });
+      continue;
+    }
+    const unit = s.kind === "prediction" ? "shares" : base;
     let why: string | undefined;
     if (s.blocked) why = s.blocked;
-    else if (side === "sell" && s.have < qty - 1e-9) why = s.have > 0 ? `只有 ${qtyText(s.have)} ${base}` : `没有 ${base}`;
-    else if (side === "buy" && s.have < fill.netUsd) why = `${s.quote} 不够`;
+    else if (side === "sell" && s.have < qty - 1e-9) why = s.have > 0 ? `has only ${qtyText(s.have)} ${unit}` : `has no ${unit}`;
+    else if (side === "buy" && s.have < fill.netUsd) why = `is short of ${s.quote}`;
     out.push({ ...fill, account: s.account, ok: why === undefined, why, have: s.have });
   }
   // the on-chain wallet holds nothing to trade with on any chain: one line for the DEX, not one per chain
   const first = dex[0];
   if (first && !dexHolds) {
-    out.push({ venue: "dex", kind: "dex", name: "DEX", symbol: `${base}-${DEX_QUOTE}`, base, quote: DEX_QUOTE, side, qty, mid: 0, price: 0, grossUsd: 0, feeUsd: 0, netUsd: 0, impactBps: 0, account: first.account, ok: false, why: first.blocked ?? `链上没有 ${side === "sell" ? base : DEX_QUOTE}`, have: 0 });
+    out.push({ venue: "dex", kind: "dex", name: "DEX", symbol: `${base}-${DEX_QUOTE}`, base, quote: DEX_QUOTE, side, qty, mid: 0, price: 0, grossUsd: 0, feeUsd: 0, netUsd: 0, impactBps: 0, account: first.account, ok: false, why: first.blocked ?? `has no ${side === "sell" ? base : DEX_QUOTE} on-chain`, have: 0 });
   }
   return out;
 }
@@ -355,18 +383,20 @@ function lotOf(qty: number): number {
 export function splitOrder(base: string, side: Side, qty: number, accounts: RailAccount[], opts: SplitOptions = {}): SplitPlan {
   const quotes = venueQuotes(base, side, qty, accounts);
   const plan: SplitPlan = { base, side, qty, lot: 0, quotes, feasible: false, maxQty: 0, slices: [], grossUsd: 0, feeUsd: 0, netUsd: 0, avgPrice: 0, passed: [] };
-  const ref = PRICES[base];
+  const event = isEventSymbol(base);
+  const ref = event ? 1 : PRICES[base];
   if (!ref || !(qty > 0)) return plan;
   const minGain = opts.minGainPerLegUsd ?? EXTRA_LEG_MIN_GAIN_USD;
   const usable = sourcesFor(base, side, accounts).filter((s) => !s.blocked && (opts.ignoreInventory === true || s.have > 0));
-  const lot = lotOf(qty);
+  // event contracts move in whole shares
+  const lot = event ? Math.max(1, lotOf(qty)) : lotOf(qty);
   plan.lot = lot;
   const whole = Math.floor(qty / lot + 1e-9);
   const rest = r8(qty - whole * lot);
 
   /** variable proceeds (sell) or cost (buy) of `q` at one source, without its fixed cost */
   const variable = (s: Source, q: number): number | undefined => {
-    const raw = s.kind === "cex" ? rawBook(BOOKS[s.venue]!, ref, side, q) : rawSwap(s.chain!, base, side, q);
+    const raw = s.kind === "prediction" ? rawEvent(s.venue, base, side, q) : s.kind === "cex" ? rawBook(BOOKS[s.venue]!, ref, side, q) : rawSwap(s.chain!, base, side, q);
     return raw ? (side === "sell" ? raw.gross - raw.fee : raw.gross + raw.fee) : undefined;
   };
   const fixed = (s: Source) => (s.kind === "dex" ? (DEX_GAS_USD[s.chain!] ?? 1) : 0);
@@ -434,7 +464,8 @@ export function splitOrder(base: string, side: Side, qty: number, accounts: Rail
       usable.reduce((sum, s) => {
         if (side === "sell") return sum + s.have;
         let lo = 0;
-        let hi = (s.have / ref) * 1.01;
+        // a share can cost as little as a tenth of a cent, so the ceiling for an event is far above have / $1
+        let hi = event ? s.have * 1000 : (s.have / ref) * 1.01;
         for (let i = 0; i < 60; i++) {
           const m = (lo + hi) / 2;
           const v = variable(s, m);
@@ -452,7 +483,7 @@ export function splitOrder(base: string, side: Side, qty: number, accounts: Rail
   plan.grossUsd = r2(chosen.slices.reduce((s, x) => s + x.grossUsd, 0));
   plan.feeUsd = r2(chosen.slices.reduce((s, x) => s + x.feeUsd, 0));
   plan.netUsd = chosen.net;
-  plan.avgPrice = r2(plan.grossUsd / qty);
+  plan.avgPrice = event ? Number((plan.grossUsd / qty).toFixed(4)) : r2(plan.grossUsd / qty);
   plan.single = candidates.filter((c) => c.slices.length === 1).sort((a, b) => better(b.net, a.net))[0]?.slices[0];
   if (plan.single && chosen.slices.length > 1) plan.gainUsd = r2(better(chosen.net, plan.single.netUsd));
   for (const s of usable) {

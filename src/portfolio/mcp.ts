@@ -6,7 +6,7 @@
  *   npm run portfolio               # the service
  *   npm run portfolio:mcp           # this, over stdio; PORTFOLIO_URL overrides the base
  *
- * Tools: portfolio_overview · portfolio_read · portfolio_quote (reads) ·
+ * Tools: portfolio_overview · portfolio_read · portfolio_markets · portfolio_quote (reads) ·
  * portfolio_execute · portfolio_order (writes) · portfolio_approval ·
  * portfolio_openness.
  *
@@ -60,7 +60,7 @@ const server = new McpServer({ name: "agent-portfolio-manager", version: "0.1.0"
 
 server.registerTool(
   "portfolio_overview",
-  { description: "The user's whole portfolio across every connected account (CEX, agent wallet, RWA, card, bank): total USD, by asset class, by account, the LIQUIDITY map (stablecoins you may move across accounts/chains vs. stuck ones and why) and LADDER (how soon and for how much each holding can reach the hub chain; closed routes keep their quote), the openness mode, what you may do at each account, and today's flights (every agent's requests, by flight number). Reads are never gated.", inputSchema: {}, annotations: { readOnlyHint: true } },
+  { description: "The user's whole portfolio across every connected account (CEX, on-chain agent wallet, prediction markets, RWA, card, bank): total USD, by asset class, by account, the LIQUIDITY map (stablecoins you may move across accounts/chains vs. stuck ones and why) and LADDER (how soon and for how much each holding can reach the hub chain; closed routes keep their quote), the openness mode, what you may do at each account, and today's flights (every agent's requests, by flight number). Reads are never gated.", inputSchema: {}, annotations: { readOnlyHint: true } },
   async () => {
     const r = await call("GET", "/api/overview");
     if (r.status >= 400) return text(r.body, true);
@@ -96,7 +96,7 @@ server.registerTool(
   "portfolio_execute",
   {
     description:
-      "Act at one account: trade {symbol, side, qty, chainId?} (at the on-chain wallet a trade is a DEX swap on chainId's pools; to let the wallet pick venues and split, use portfolio_order instead) · move {asset, amount, to, chainId?, fromChainId?} (fromChainId ≠ chainId is a bridge; a move to another connected account's address lands there) · pay {merchant, mcc, amountUsd} · subscribe/redeem {fund, amountUsd}. Each call is one flight under your name. The wallet first checks the credential's native scope and the user's openness dial; in open mode nothing is capped and only a move to a never-used address raises a card. A card comes back as {pending: true, approval: {id}} — wait for the human, then poll portfolio_approval. A refusal is {ok: false, code: E_WALLET_* | E_VENUE_* | E_CARD_*, message, native}: do not retry it, tell the user.",
+      "Act at one account: trade {symbol, side, qty, chainId?} (at the on-chain wallet a trade is a DEX swap on chainId's pools; at a prediction market the symbol is an event contract like FED-DEC-HIKE25:YES and qty is shares; to let the wallet pick venues and split, use portfolio_order instead) · move {asset, amount, to, chainId?, fromChainId?} (fromChainId ≠ chainId is a bridge; a move to another connected account's address lands there) · pay {merchant, mcc, amountUsd} · subscribe/redeem {fund, amountUsd} (at a prediction market, redeem claims the winning shares of a settled market: fund is the event id). Each call is one flight under your name. The wallet first checks the credential's native scope and the user's openness dial; in open mode nothing is capped and only the dangerous ones raise a card: a move to a never-used address, an order in a prediction market past its close. A card comes back as {pending: true, approval: {id}} — wait for the human, then poll portfolio_approval. A refusal is {ok: false, code: E_WALLET_* | E_VENUE_* | E_CARD_*, message, native}: do not retry it, tell the user.",
     inputSchema: { account: z.string(), intent: intentSchema },
   },
   async ({ account, intent }) => {
@@ -105,13 +105,22 @@ server.registerTool(
   },
 );
 
-const orderSchema = { base: z.string().describe("ETH | BTC | SOL"), side: z.enum(["buy", "sell"]), qty: z.number().positive() };
+const orderSchema = { base: z.string().describe("an asset (ETH | BTC | SOL) or an event contract from portfolio_markets (e.g. FED-DEC-HIKE25:YES)"), side: z.enum(["buy", "sell"]), qty: z.number().positive().describe("units of the asset, or shares of the outcome") };
+
+server.registerTool(
+  "portfolio_markets",
+  { description: "The event contracts on the connected prediction markets (Polymarket, Kalshi): each question, when it closes, its state (open · awaiting = past its close and not yet resolved, where an order always needs the human · resolved), and every venue's top of book for YES. The `symbols` (`<id>:YES`, `<id>:NO`) are what portfolio_quote and portfolio_order take as `base`. A read.", inputSchema: {}, annotations: { readOnlyHint: true } },
+  async () => {
+    const r = await call("GET", "/api/markets");
+    return text(r.body, r.status >= 400);
+  },
+);
 
 server.registerTool(
   "portfolio_quote",
   {
     description:
-      "Price one order at every connected venue — the CEX order books and the DEX pools on each chain the on-chain wallet holds inventory on — and see how the wallet's router would split it: each venue's net for the whole order (or why it cannot take it: inventory is liquidity too), the slices with their fills, a DEX slice's route across pools and its gas, the best single venue and what splitting earns over it, and the venues left out with the reason. A read: no card, nothing moves.",
+      "Price one order at every connected venue — the CEX order books and the DEX pools on each chain the on-chain wallet holds inventory on, or, for an event contract, each prediction market's book — and see how the wallet's router would split it: each venue's net for the whole order (or why it cannot take it: inventory is liquidity too), the slices with their fills, a DEX slice's route across pools and its gas, the best single venue and what splitting earns over it, and the venues left out with the reason. A read: no card, nothing moves.",
     inputSchema: orderSchema,
     annotations: { readOnlyHint: true },
   },

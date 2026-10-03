@@ -16,14 +16,16 @@
  *   3. the venue's own second line — what the adapter returns when a write is
  *      tried anyway (bypass): -2015, rc 57, a revert, a 403.
  */
-import { refuse, type Refusal } from "../core/errors.ts";
+import type { Refusal } from "../core/errors.ts";
+import { no } from "./refuse.ts";
 import { CAP_LABEL, ENFORCER_LABEL, KIND_LABEL, WRITE_CAPS, capabilityOf, destinationOf, usdOf, type Account, type Capability, type Intent, type ScopeEnforcer } from "./accounts.ts";
+import { eventState, parseEventSymbol } from "./events.ts";
 
 export type Mode = "open" | "guard";
 
 export const MODE_LABEL: Record<Mode, string> = {
-  open: "Open：agent 触达每个凭据的边缘，钱包不加额度、不发卡；只有往陌生地址转钱才问人",
-  guard: "Guard：每个账户有免审额度，超过就停在一张卡上；日上限是硬线",
+  open: "Open: the agent reaches the edge of every credential; no wallet-side caps, no cards. It still asks before the dangerous ones: a transfer to a never-used address, an order in a market that is past its close and not yet resolved",
+  guard: "Guard: each account has a no-ask allowance; above it the write waits on a card. The daily cap is a hard line",
 };
 
 export interface GuardKnobs {
@@ -75,7 +77,11 @@ export function effectiveReach(a: Account, o: Openness): Capability[] {
   return a.scope.can.filter((c) => c === "read" || !r || r.includes(c));
 }
 
+/** why a write waits for the human: a never-used address · a prediction market past its close and not yet resolved · the Guard allowance */
+export type AskReason = "stranger" | "awaiting" | "allowance";
+
 export interface Card {
+  why: AskReason;
   reason: string;
 }
 
@@ -92,44 +98,51 @@ export interface EvaluateInput {
   orderUsd?: number | undefined;
 }
 
-/** write order: session → revoked → credential scope → user reach → blocklist → open: stranger address = card · guard: daily cap, then card above the free allowance (a slice of a split order is judged by the whole order) */
+/** write order: session → revoked → credential scope → user reach → blocklist → the dangerous ones (a stranger address, a market past its close) = card in ANY mode · guard: daily cap, then a card above the free allowance (a slice of a split order is judged by the whole order) */
 export function evaluate(i: EvaluateInput): Verdict {
   const cap = capabilityOf(i.intent);
   const a = i.account;
   const o = i.openness;
   const tool = `portfolio_${cap}`;
   if (isExpired(i.now, o.sessionExpiresAt)) {
-    return refuse("E_WALLET_SESSION_EXPIRED", { venue: a.id, tool, message: "agent 的开放会话已到期：所有写操作停，读照常", detail: { sessionExpiresAt: o.sessionExpiresAt, now: i.now } });
+    return no("E_WALLET_SESSION_EXPIRED", { venue: a.id, tool, message: "the agent's session has expired: every write stops, reads continue", detail: { sessionExpiresAt: o.sessionExpiresAt, now: i.now } });
   }
   if (o.revoked.includes(a.id)) {
-    return refuse("E_WALLET_ACCOUNT_REVOKED", { venue: a.id, tool, message: `${a.name} 对 agent 的开放已撤销：只剩读`, detail: { revoked: o.revoked } });
+    return no("E_WALLET_ACCOUNT_REVOKED", { venue: a.id, tool, message: `${a.name} is switched off for the agent: reads only`, detail: { revoked: o.revoked } });
   }
   if (!a.scope.can.includes(cap)) {
-    return refuse("E_WALLET_SCOPE", {
+    return no("E_WALLET_SCOPE", {
       venue: a.id,
       tool,
-      message: `${a.name} 的凭据本身做不了「${CAP_LABEL[cap]}」（${a.scope.limits[0] ?? a.credentialKind}）：钱包再开放也开不出凭据没有的权限`,
+      message: `the ${a.name} credential itself cannot ${CAP_LABEL[cap]} (${a.scope.limits[0] ?? a.credentialKind}): no wallet setting can open what the credential does not have`,
       detail: { can: a.scope.can, want: cap, enforcedBy: a.scope.enforcedBy },
     });
   }
   const reach = o.reach[a.id];
   if (reach && !reach.includes(cap)) {
-    return refuse("E_WALLET_REACH", { venue: a.id, tool, message: `用户只把「${reach.map((c) => CAP_LABEL[c]).join(" / ") || "读"}」开放给了 agent：「${CAP_LABEL[cap]}」不在里面`, detail: { reach, want: cap } });
+    return no("E_WALLET_REACH", { venue: a.id, tool, message: `the user opened only "${reach.map((c) => CAP_LABEL[c]).join(" / ") || "read"}" to the agent: "${CAP_LABEL[cap]}" is not in it`, detail: { reach, want: cap } });
   }
   const dest = destinationOf(i.intent);
   if (dest && o.blocklist.includes(dest)) {
-    return refuse("E_WALLET_BLOCKLIST", { venue: a.id, tool, message: `${dest} 在用户的黑名单里`, detail: { destination: dest, blocklist: o.blocklist } });
+    return no("E_WALLET_BLOCKLIST", { venue: a.id, tool, message: `${dest} is on the user's blocklist`, detail: { destination: dest, blocklist: o.blocklist } });
   }
   const usd = usdOf(i.intent);
   const stranger = i.intent.kind === "move" && !o.knownDestinations.includes(i.intent.to);
-  const strangerCard: Card = { reason: `往一个从没用过的地址转 $${usd}（${dest}）：open 模式下唯一还会停下来问人的动作` };
-  if (o.mode === "open") return { ok: true, capability: cap, usd, card: stranger ? strangerCard : null };
+  // a prediction market past its close and not yet resolved: the book is still open, but its price is not odds — a resolution can surprise
+  const market = i.intent.kind === "trade" ? parseEventSymbol(i.intent.symbol)?.event : undefined;
+  const awaiting = market !== undefined && eventState(market, i.now) === "awaiting";
+  const dangerous: Card | null = stranger
+    ? { why: "stranger", reason: `a transfer of $${usd} to an address never used before (${dest}): open mode still stops to ask about this one` }
+    : awaiting
+      ? { why: "awaiting", reason: `an order in "${market.title}", which closed on ${market.closesAt.slice(0, 10)} and is not yet resolved: the price there is not odds, so open mode still stops to ask` }
+      : null;
+  if (o.mode === "open") return { ok: true, capability: cap, usd, card: dangerous };
   if (i.dailyOutUsd + usd > o.guard.dailyCapUsd) {
-    return refuse("E_WALLET_DAILY_CAP", { venue: a.id, tool, message: `guard：24 小时内 agent 已动 $${i.dailyOutUsd}，再动 $${usd} 超过日上限 $${o.guard.dailyCapUsd}`, detail: { daily: i.dailyOutUsd, cap: o.guard.dailyCapUsd, amount: usd } });
+    return no("E_WALLET_DAILY_CAP", { venue: a.id, tool, message: `guard: the agent has moved $${i.dailyOutUsd} in the last 24 h; $${usd} more would pass the daily cap $${o.guard.dailyCapUsd}`, detail: { daily: i.dailyOutUsd, cap: o.guard.dailyCapUsd, amount: usd } });
   }
   const above = o.guard.cardAboveUsd[a.id] ?? o.guard.defaultCardAboveUsd;
   const judged = i.orderUsd ?? usd;
-  const card = stranger ? strangerCard : judged > above ? { reason: i.orderUsd === undefined ? `guard：$${usd} 超过 ${a.name} 的免审额度 $${above}` : `guard：这一单合计 $${judged}（拆单合并计）超过 ${a.name} 的免审额度 $${above}` } : null;
+  const card: Card | null = dangerous ?? (judged > above ? { why: "allowance", reason: i.orderUsd === undefined ? `guard: $${usd} is above ${a.name}'s no-ask allowance $${above}` : `guard: this order totals $${judged} (its slices are counted together), above ${a.name}'s no-ask allowance $${above}` } : null);
   return { ok: true, capability: cap, usd, card };
 }
 
@@ -150,11 +163,11 @@ export interface OpennessRow {
 }
 
 const SECOND_LINE: Record<ScopeEnforcer, string> = {
-  venue: "交易所自己再查一次：key 权限、IP、提币白名单（-2015 · -4026 · 50114）",
-  network: "发卡行 / 卡组织按 token 范围拒绝授权（rc 57 · 61 · 65 · 54）",
-  bank: "银行聚合 token 只读：任何写都是 403",
-  issuer: "转让限制合约 revert：收款地址不在 KYC 白名单",
-  metamask: "MetaMask Guard：超 24 h 出金或非白名单 → MFA 邮件；恶意交易即使 beast 也拦",
+  venue: "the exchange checks again itself: key permissions, IP, withdrawal whitelist (-2015 · -4026 · 50114)",
+  network: "the issuer / network declines by token scope (rc 57 · 61 · 65 · 54)",
+  bank: "the aggregation token is read-only: any write is a 403",
+  issuer: "the transfer-restriction contract reverts: recipient not on the KYC allowlist",
+  metamask: "MetaMask Guard: over the 24 h outflow or off the allowlist → MFA by email; malicious transactions are blocked even in beast mode",
 };
 
 export function compileOpenness(accounts: Account[], o: Openness): OpennessRow[] {
@@ -163,13 +176,13 @@ export function compileOpenness(accounts: Account[], o: Openness): OpennessRow[]
     const closed = a.scope.can.filter((c) => !opened.includes(c));
     const revoked = o.revoked.includes(a.id);
     const walletKeeps: string[] = [];
-    if (revoked) walletKeeps.push("已撤销：只剩读");
-    else if (o.mode === "open") walletKeeps.push(a.scope.can.includes("move") ? "不加额度 · 不发卡 · 转到陌生地址才问人" : "不加额度 · 不发卡");
+    if (revoked) walletKeeps.push("switched off: reads only");
+    else if (o.mode === "open") walletKeeps.push(a.scope.can.includes("move") ? "no caps · no cards · asks before a transfer to a new address" : a.kind === "prediction" ? "no caps · no cards · asks before an order in a market past its close" : "no caps · no cards");
     else {
       const above = o.guard.cardAboveUsd[a.id] ?? o.guard.defaultCardAboveUsd;
-      walletKeeps.push(`免审 ≤ $${above}，超过停卡`, `日上限 $${Number.isFinite(o.guard.dailyCapUsd) ? o.guard.dailyCapUsd : "∞"}（全部账户合计）`);
+      walletKeeps.push(`no-ask ≤ $${above}, a card above it`, `daily cap $${Number.isFinite(o.guard.dailyCapUsd) ? o.guard.dailyCapUsd : "∞"} (all accounts together)`);
     }
-    if (o.blocklist.length) walletKeeps.push(`黑名单 ${o.blocklist.length} 条`);
+    if (o.blocklist.length) walletKeeps.push(`blocklist: ${o.blocklist.length} address${o.blocklist.length === 1 ? "" : "es"}`);
     return {
       account: a.id,
       name: a.name,

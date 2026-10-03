@@ -68,6 +68,8 @@ export const CODES = {
   E_VENUE_CARD_DECLINED: { layer: "VENUE", zh: "发卡行 / 卡组织拒绝了这笔授权" },
   E_VENUE_TRANSFER_RESTRICTED: { layer: "VENUE", zh: "发行方转让限制：收款地址不在 KYC 白名单，合约 revert" },
   E_VENUE_INSUFFICIENT: { layer: "VENUE", zh: "场所账户余额不足" },
+  E_VENUE_GEOBLOCKED: { layer: "VENUE", zh: "场所不接这个地区的单" },
+  E_VENUE_MARKET_CLOSED: { layer: "VENUE", zh: "市场已截止或已结算，不再接单" },
 } as const satisfies Record<`E_${Layer}_${string}`, { layer: Layer; zh: string }>;
 
 export type Code = keyof typeof CODES;

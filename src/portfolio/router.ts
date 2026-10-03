@@ -3,11 +3,15 @@
  * the proceeds end up (a sale on a CEX whose key cannot withdraw leaves the
  * money stuck there; a sale on a DEX leaves it on-chain, free to move).
  *
+ * One planner for both kinds of thing an order can be about: an asset
+ * (`ETH`) or an event contract (`FED-DEC-HIKE25:YES`).
+ *
  * Pure. The service flies it: every slice is a leg, and the whole order is ONE
  * decision for the human — one card, not one per slice. */
 import { chainIdOf, qtyText, type Intent } from "./accounts.ts";
+import { eventState, parseEventSymbol, PREDICTION_VENUES } from "./events.ts";
 import type { RailAccount } from "./rails.ts";
-import { EXTRA_LEG_MIN_GAIN_USD, splitOrder, type Side, type Slice, type SplitPlan } from "./venues.ts";
+import { EXTRA_LEG_MIN_GAIN_USD, splitOrder, type Side, type Slice, type SplitPlan, type VenueKind } from "./venues.ts";
 import { cents } from "./words.ts";
 
 export interface Step {
@@ -25,14 +29,15 @@ export interface Step {
 export interface Part {
   label: string;
   pct: number;
-  kind: "cex" | "dex";
+  kind: VenueKind;
 }
 
 export interface OrderPlan {
+  /** an asset (`ETH`) or an event contract (`FED-DEC-HIKE25:YES`) */
   base: string;
   side: Side;
   qty: number;
-  /** `卖出 3 ETH` */
+  /** `Sell 3 ETH` · `Buy 1,000 YES · Fed hikes 25 bps in December` */
   title: string;
   split: SplitPlan;
   narration: string;
@@ -40,38 +45,44 @@ export interface OrderPlan {
   steps: Step[];
   /** about the plan: what was left out and why */
   notes: string[];
-  /** about the outcome — where the proceeds are. Said only once the order has actually filled (after the card, if there is one) */
+  /** about the outcome — where the proceeds are, what the position pays. Said only once the order has actually filled (after the card, if there is one) */
   after: string[];
   parts?: Part[] | undefined;
 }
 
 const money = (n: number) => `$${Math.round(n).toLocaleString("en-US")}`;
-const price = (n: number) => n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-/** a name followed by a number or a word: a full-width bracket already carries its own space */
-export const lead = (name: string): string => (name.endsWith("）") ? name : `${name} `);
+/** an asset's price to the cent; a share's price to the tenth of a cent */
+const price = (n: number) => (n < 10 ? n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 4 }) : n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
 
-export function orderPlan(base: string, side: Side, qty: number, accounts: RailAccount[]): OrderPlan {
+export function orderPlan(base: string, side: Side, qty: number, accounts: RailAccount[], now?: string): OrderPlan {
   const split = splitOrder(base, side, qty, accounts);
   const sell = side === "sell";
-  const verb = sell ? "卖出" : "买入";
-  const got = sell ? "净得" : "共付";
-  const title = `${verb} ${qtyText(qty)} ${base}`;
+  const ev = parseEventSymbol(base);
+  const verb = sell ? "Sell" : "Buy";
+  /** what one unit of the order is called: `ETH`, or the outcome of an event contract */
+  const unit = ev ? ev.outcome : base;
+  const title = ev ? `${verb} ${qtyText(qty)} ${ev.outcome} · ${ev.event.title}` : `${verb} ${qtyText(qty)} ${base}`;
   const out: OrderPlan = { base, side, qty, title, split, narration: "", steps: [], notes: [], after: [] };
+  const mixOf = (slices: Slice[]) => slices.map((s) => `${s.name} ${qtyText(s.qty)}`).join(" · ");
 
+  if (ev && now !== undefined && eventState(ev.event, now) === "resolved") {
+    out.narration = `${title}: this market has settled (${ev.event.resolved}); it takes no more orders.`;
+    return out;
+  }
   if (!split.feasible) {
-    const reasons = split.quotes.filter((q) => !q.ok).map((q) => `${lead(q.name)}${q.why ?? "接不了"}`).join("；");
+    const reasons = split.quotes.filter((q) => !q.ok).map((q) => `${q.name} ${q.why ?? "cannot take it"}`).join("; ");
     out.narration = !split.quotes.length
-      ? `${title}：没有接入能交易 ${base} 的场所。`
+      ? `${title}: no connected venue trades it.`
       : split.maxQty > 0
-        ? `${title}：所有场所加起来${sell ? `只有 ${qtyText(split.maxQty)} ${base}，卖不了这么多` : `只买得起 ${qtyText(split.maxQty)} ${base}`}——${reasons}。`
-        : `${title}：现在没有一个场所接得了——${reasons || "没有库存"}。`;
+        ? `${title}: all venues together ${sell ? `hold only ${qtyText(split.maxQty)} ${unit}, not enough` : `can pay for only ${qtyText(split.maxQty)} ${unit}`} — ${reasons}.`
+        : `${title}: no venue can take it right now — ${reasons || "no inventory"}.`;
     return out;
   }
 
   const stepOf = (s: Slice, compare?: string): Step => ({
     account: s.account,
     intent: { kind: "trade", symbol: s.symbol, side, qty: s.qty, ...(s.chain ? { chainId: chainIdOf(s.chain) } : {}) },
-    say: `${verb} ${qtyText(s.qty)} ${base} · ${s.name}`,
+    say: `${verb} ${qtyText(s.qty)} ${unit} · ${s.name}`,
     compare,
   });
 
@@ -79,22 +90,34 @@ export function orderPlan(base: string, side: Side, qty: number, accounts: RailA
     const best = split.slices[0]!;
     const rest = split.quotes.filter((q) => q.venue !== best.venue);
     const priced = rest.filter((q) => q.ok).sort((a, b) => (sell ? b.netUsd - a.netUsd : a.netUsd - b.netUsd));
-    const others = [...priced.map((q) => `${lead(q.name)}${got} ${cents(q.netUsd)}（${sell ? "少" : "多"} ${cents(Math.abs(best.netUsd - q.netUsd))}）`), ...rest.filter((q) => !q.ok).map((q) => `${lead(q.name)}${q.why ?? "接不了"}`)];
-    const richer = split.richer ? `——拆成 ${split.richer.slices.map((s) => s.name).join(" + ")} 只${sell ? "多" : "省"} ${cents(split.richer.gainUsd)}，不到 ${cents(EXTRA_LEG_MIN_GAIN_USD)}` : "";
-    out.narration = `${title}：${split.quotes.length} 个场所比过，${lead(best.name)}${sell ? "净得最多" : "花得最少"}（${cents(best.netUsd)}），一处接得下，不用拆${richer}。`;
-    out.steps = [stepOf(best, others.length ? `比过：${others.join("；")}` : undefined)];
+    const others = [...priced.map((q) => `${q.name} ${sell ? "nets" : "costs"} ${cents(q.netUsd)} (${cents(Math.abs(best.netUsd - q.netUsd))} ${sell ? "less" : "more"})`), ...rest.filter((q) => !q.ok).map((q) => `${q.name} ${q.why ?? "cannot take it"}`)];
+    const richer = split.richer ? ` A split across ${split.richer.slices.map((s) => s.name).join(" + ")} would ${sell ? "add" : "save"} only ${cents(split.richer.gainUsd)}, under ${cents(EXTRA_LEG_MIN_GAIN_USD)}.` : "";
+    out.narration =
+      split.quotes.length > 1
+        ? `${title}: compared at ${split.quotes.length} venues; ${best.name} ${sell ? "nets the most" : "costs the least"} (${cents(best.netUsd)}). One venue can take it, so no split.${richer}`
+        : `${title}: ${best.name} is the only venue for it (${sell ? "net" : "cost"} ${cents(best.netUsd)}).`;
+    out.steps = [stepOf(best, others.length ? `Compared: ${others.join("; ")}` : undefined)];
   } else {
     const n = split.slices.length;
-    const haves = split.quotes.filter((q) => q.have > 0).map((q) => `${lead(q.name)}${sell ? qtyText(q.have) : money(q.have)}`).join(" · ");
+    const haves = split.quotes.filter((q) => q.have > 0).map((q) => `${q.name} ${sell ? qtyText(q.have) : money(q.have)}`).join(" · ");
     out.narration = split.single
-      ? `${title}：一处接得下的最好是 ${split.single.name}（${got} ${cents(split.single.netUsd)}）；拆成 ${n} 片${got} ${cents(split.netUsd)}，${sell ? "多" : "省"} ${cents(split.gainUsd ?? 0)}。`
-      : `${title}：没有一个场所${sell ? "接得下" : "的钱够"}（${haves}）。拆成 ${n} 片，均价 ${price(split.avgPrice)}，${got} ${cents(split.netUsd)}。`;
+      ? `${title}: the best single venue is ${split.single.name} (${sell ? "net" : "cost"} ${cents(split.single.netUsd)}); split into ${n} slices it ${sell ? "nets" : "costs"} ${cents(split.netUsd)}, ${cents(split.gainUsd ?? 0)} ${sell ? "more" : "less"}.`
+      : `${title}: no single venue ${sell ? "holds that much" : "has the cash for it"} (${haves}). Split into ${n} slices: average ${price(split.avgPrice)}, ${sell ? "net" : "cost"} ${cents(split.netUsd)}.`;
     out.steps = split.slices.map((s) => stepOf(s));
-    out.parts = split.slices.map((s) => ({ label: `${lead(s.name)}${qtyText(s.qty)}`, pct: Math.round((s.qty / qty) * 100), kind: s.kind }));
-    const passed = split.passed.map((p) => `${lead(p.name)}${sell ? `的 ${qtyText(p.have)} ${base} 没动` : "没用"}：${p.gasUsd !== undefined && p.gasUsd >= 1 ? `一笔 swap 的 gas ${cents(p.gasUsd)}，` : ""}用上它反而${sell ? "少" : "多花"} ${cents(-p.deltaUsd)}`);
+    out.parts = split.slices.map((s) => ({ label: `${s.name} ${qtyText(s.qty)}`, pct: Math.round((s.qty / qty) * 100), kind: s.kind }));
+    const compared = split.passed.map((p) => (sell ? `${p.name}'s ${qtyText(p.have)} ${unit} stays put: ${p.gasUsd !== undefined && p.gasUsd >= 1 ? `one swap costs ${cents(p.gasUsd)} in gas, so ` : ""}using it would net ${cents(-p.deltaUsd)} less` : `${p.name} is left out: using it would cost ${cents(-p.deltaUsd)} more`));
     // a richer split exists but its extra leg earns less than the threshold: say so, and say what it was
-    if (split.richer) passed.unshift(`再多拆一片（${split.richer.slices.map((s) => `${lead(s.name)}${qtyText(s.qty)}`).join(" · ")}）只${sell ? "多" : "省"} ${cents(split.richer.gainUsd)}，不到 ${cents(EXTRA_LEG_MIN_GAIN_USD)}，不多飞一段`);
-    if (passed.length) out.notes.push(`比过：${passed.join("；")}。`);
+    if (split.richer) compared.unshift(`one more slice (${mixOf(split.richer.slices)}) would ${sell ? "add" : "save"} only ${cents(split.richer.gainUsd)}, under ${cents(EXTRA_LEG_MIN_GAIN_USD)}: not worth another leg`);
+    if (compared.length) out.notes.push(`Compared: ${compared.join("; ")}.`);
+  }
+
+  if (ev) {
+    // what the position is, and the catch of holding one question at two venues
+    const venues = [...new Set(split.slices.map((s) => s.venue))];
+    if (!sell) out.after.push(`Each share pays $1 if this resolves ${ev.outcome} (closes ${ev.event.closesAt.slice(0, 10)}), $0 if not; until then it can be sold back at the bid.`);
+    else out.after.push(`Proceeds: ${split.slices.map((s) => `${s.quote} at ${s.name}`).join(", ")}.`);
+    if (venues.length > 1) out.after.push(`${venues.map((v) => `${PREDICTION_VENUES[v]?.name ?? v} settles by ${ev.event.listings[v]?.rules ?? "its own rules"}`).join(", ")}: the same question can resolve differently at each.`);
+    return out;
   }
 
   // where the proceeds are: stuck at a CEX whose key cannot withdraw, or on-chain and free to move
@@ -102,13 +125,13 @@ export function orderPlan(base: string, side: Side, qty: number, accounts: RailA
     const stuck = split.slices.filter((s) => s.kind === "cex" && !accounts.find((a) => a.id === s.account)?.reach.includes("move"));
     const onchain = split.slices.filter((s) => s.kind === "dex");
     if (split.slices.length === 1) {
-      if (stuck[0]) out.after.push(`卖出的 ${stuck[0].quote} 留在 ${stuck[0].name}：这把 key 提不出来，它困在那里。`);
-      else if (onchain[0]) out.after.push(`卖出的 ${onchain[0].quote} 在 ${onchain[0].chain} 上，随时能动。`);
+      if (stuck[0]) out.after.push(`The ${stuck[0].quote} stays at ${stuck[0].name}: this key cannot withdraw, so it is stuck there.`);
+      else if (onchain[0]) out.after.push(`The ${onchain[0].quote} is on ${onchain[0].chain}, free to move.`);
     } else {
       const where: string[] = [];
-      if (stuck.length) where.push(`${stuck[0]!.quote} 留在 ${stuck.map((s) => s.name).join("、")}（key 提不出来）`);
-      if (onchain.length) where.push(`DEX 那片的 ${onchain[0]!.quote} 在 ${onchain.map((s) => s.chain).join("、")} 上，随时能动`);
-      if (where.length) out.after.push(`卖出的钱：${where.join("；")}。`);
+      if (stuck.length) where.push(`${stuck[0]!.quote} stays at ${stuck.map((s) => s.name).join(" and ")} (keys cannot withdraw)`);
+      if (onchain.length) where.push(`the DEX slice's ${onchain[0]!.quote} is on ${onchain.map((s) => s.chain).join(" and ")}, free to move`);
+      if (where.length) out.after.push(`Proceeds: ${where.join("; ")}.`);
     }
   }
   return out;

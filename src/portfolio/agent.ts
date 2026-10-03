@@ -2,29 +2,36 @@
  *
  * A keyword script, not an LLM — but its plans are ROUTED, not canned:
  *
- *   "申购 5000 OUSG"  reads the liquidity ladder: fuel already at the issuer
- *                     first; then what the on-chain wallet holds on another
- *                     chain, over the cheapest open bridge (the quote and what
- *                     it beat go on the leg; the fee comes out of what
+ *   "Subscribe $5,000 OUSG"  reads the liquidity ladder: fuel already at the
+ *                     issuer first; then what the on-chain wallet holds on
+ *                     another chain, over the cheapest open bridge (the quote
+ *                     and what it beat go on the leg; the fee comes out of what
  *                     arrives); then the gap, with the closed runways and what
  *                     opening one would cost.
- *   "卖 1 ETH"        quotes the same order at every venue (two CEX books, the
+ *   "Sell 1 ETH"      quotes the same order at every venue (two CEX books, the
  *                     DEX pools on each chain the wallet holds the asset on)
  *                     and sells where the net is highest; a venue that does not
  *                     hold the asset says so.
- *   "卖 3 ETH"        no venue holds that much, so the order is SPLIT: each
+ *   "Sell 3 ETH"      no venue holds that much, so the order is SPLIT: each
  *                     slice goes where its marginal price is best (router.ts,
  *                     venues.ts). The slices fly as one order — one card at
  *                     most — and the DEX slice shows its route.
+ *   "Buy 1,000 YES · Fed hike"  an event contract: the same question at
+ *                     Polymarket and at Kalshi, each with its own book, fee
+ *                     and cash; the order is routed and split like any other.
+ *   "Fund Polymarket with 300"  bridges USDC from the on-chain wallet straight
+ *                     into the Polymarket deposit wallet on Polygon.
  *
  * Every plan flies as one flight with one leg per account the money touches;
- * the service writes the legs in plain words.
+ * the service writes the legs in plain words. It also understands the Chinese
+ * for each of these.
  */
-import { PAGE_AGENT, type RouteQuote } from "./accounts.ts";
+import { PAGE_AGENT, qtyText, type RouteQuote } from "./accounts.ts";
+import { eventSymbol, findEvent, parseEventSymbol, type Outcome } from "./events.ts";
 import type { Mode } from "./openness.ts";
 import type { Liquidity } from "./portfolio.ts";
-import { cexWithdrawFee, etaLabel, pick, routesToHub, type Ladder, type RailAccount } from "./rails.ts";
-import { lead, orderPlan, type OrderPlan, type Step } from "./router.ts";
+import { bridgeQuotes, cexWithdrawFee, etaLabel, pick, routesToHub, type Ladder, type RailAccount } from "./rails.ts";
+import { orderPlan, type OrderPlan, type Step } from "./router.ts";
 import { isPending, PortfolioService, type ExecuteOutcome, type Flight } from "./service.ts";
 import type { Side } from "./venues.ts";
 import { cents } from "./words.ts";
@@ -48,107 +55,152 @@ export interface PlanContext {
   accounts: RailAccount[];
   /** where the Ondo position lives (the bridge's destination) */
   ondoAddress: string | undefined;
+  /** the Polymarket deposit wallet (a funding bridge's destination) */
+  polymarketAddress?: string | undefined;
+  /** the clock, for a market's state (open, past its close, settled) */
+  now?: string | undefined;
   /** bridge quotes read from the live MetaMask wallet, or why they could not be read */
   liveBridge?: { quotes?: RouteQuote[] | undefined; error?: string | undefined } | undefined;
 }
 
-export const PRESETS = ["申购 5000 OUSG", "卖 3 ETH", "再平衡", "付账单", "提到冷钱包", "转给新地址"];
+export const PRESETS = ["Subscribe $5,000 OUSG", "Sell 3 ETH", "Buy 1,000 YES · Fed hike", "Rebalance", "Pay a bill", "Withdraw to cold wallet", "Send to a new address"];
 const COLD = "0x9C0d4E3b7a2f1c8d9e0f1a2b3c4d5e6f7a8b9c0d";
 const STRANGER = "0x7a11…stranger";
 const BASE = 8453;
 const ETHEREUM = 1;
+const POLYGON = 137;
 const money = (n: number) => `$${Math.round(n).toLocaleString("en-US")}`;
 const amount = (n: number) => (Number.isInteger(n) ? money(n) : cents(n));
 const r2 = (n: number) => Number(n.toFixed(2));
+const routeWords = (q: RouteQuote) => (q.open ? `${q.label} ${cents(q.feeUsd)} · ${etaLabel(q.etaSec)}` : `${q.label} closed (${q.why ?? "unavailable"})`);
+
+/** the on-chain wallet's USDC that sits on Base, ready to bridge */
+function baseUsdc(ctx: PlanContext) {
+  const mm = ctx.accounts.find((a) => a.id === "metamask");
+  const usdc = mm?.holdings.find((h) => h.asset === "USDC" && h.usd > 0 && (h.note === "Base" || h.note === undefined));
+  return mm && usdc && !mm.revoked && mm.reach.includes("move") ? { mm, usdc } : undefined;
+}
 
 /** the router: fuel at the issuer first, then what the on-chain wallet can bridge (cheapest open route), then the gap and what closing it would take */
 function routeToOndo(usdWanted: number, ctx: PlanContext): Plan {
   const atOndo = ctx.liquidity.mobile.filter((s) => s.account === "ondo").reduce((s, x) => s + x.usd, 0);
-  const mm = ctx.accounts.find((a) => a.id === "metamask");
-  const mmBase = mm?.holdings.find((h) => h.asset === "USDC" && h.usd > 0 && (h.note === "Base" || h.note === undefined));
+  const onBase = baseUsdc(ctx);
   const steps: Step[] = [];
   const fuel: string[] = [];
   const notes: string[] = [];
   let need = usdWanted;
   if (atOndo > 0 && need > 0) {
     const x = Math.min(need, atOndo);
-    steps.push({ account: "ondo", intent: { kind: "subscribe", fund: "OUSG", amountUsd: x }, say: `申购 ${money(x)} OUSG · Ondo 地址上的 USDC` });
-    fuel.push(`Ondo 地址上有 ${money(atOndo)} USDC（即时）`);
+    steps.push({ account: "ondo", intent: { kind: "subscribe", fund: "OUSG", amountUsd: x }, say: `Subscribe ${money(x)} OUSG · USDC at the Ondo address` });
+    fuel.push(`${money(atOndo)} USDC at the Ondo address (instant)`);
     need = r2(need - x);
   }
-  if (need > 0 && mm && mmBase && !mm.revoked && mm.reach.includes("move") && ctx.ondoAddress) {
-    const x = Math.min(need, mmBase.usd);
-    const sim = routesToHub(mm, { ...mmBase, usd: x }, ctx.accounts);
+  if (need > 0 && onBase && ctx.ondoAddress) {
+    const x = Math.min(need, onBase.usdc.usd);
+    const sim = routesToHub(onBase.mm, { ...onBase.usdc, usd: x }, ctx.accounts);
     const live = ctx.liveBridge?.quotes ?? [];
     const quotes = live.length ? [...live, ...sim.filter((q) => q.id.startsWith("cex:"))] : sim;
     const best = pick(quotes, "cost");
     if (best) {
       const arrival = r2(x - best.feeUsd);
-      const others = quotes.filter((q) => q.id !== best.id).map((q) => (q.open ? `${q.label} ${cents(q.feeUsd)} · ${etaLabel(q.etaSec)}` : `${q.label} 关着（${q.why ?? "不可用"}）`));
       const bridge = steps.length;
-      steps.push({ account: "metamask", intent: { kind: "move", asset: "USDC", amount: x, to: ctx.ondoAddress, fromChainId: BASE, chainId: ETHEREUM, via: best.id }, say: `跨链 ${money(x)} USDC：Base → Ethereum → Ondo 地址`, compare: `比过：${others.join("；")}` });
-      steps.push({ account: "ondo", intent: { kind: "subscribe", fund: "OUSG", amountUsd: arrival }, say: `申购 ${amount(arrival)} OUSG · 跨链到的 USDC`, needs: bridge });
-      fuel.push(`MetaMask 在 Base 上有 ${money(mmBase.usd)} USDC，走${best.label}到 Ethereum（费 ${cents(best.feeUsd)} · ${etaLabel(best.etaSec)}）`);
-      if (ctx.liveBridge?.error) notes.push(`真钱包读不到跨链报价（${ctx.liveBridge.error}），上面用的是模拟报价。`);
+      steps.push({ account: "metamask", intent: { kind: "move", asset: "USDC", amount: x, to: ctx.ondoAddress, fromChainId: BASE, chainId: ETHEREUM, via: best.id }, say: `Bridge ${money(x)} USDC: Base → Ethereum → Ondo address`, compare: `Compared: ${quotes.filter((q) => q.id !== best.id).map(routeWords).join("; ")}` });
+      steps.push({ account: "ondo", intent: { kind: "subscribe", fund: "OUSG", amountUsd: arrival }, say: `Subscribe ${amount(arrival)} OUSG · the bridged USDC`, needs: bridge });
+      fuel.push(`MetaMask has ${money(onBase.usdc.usd)} USDC on Base, over the ${best.label} to Ethereum (fee ${cents(best.feeUsd)} · ${etaLabel(best.etaSec)})`);
+      if (ctx.liveBridge?.error) notes.push(`The live wallet could not give bridge quotes (${ctx.liveBridge.error}); the quotes above are simulated.`);
       need = r2(need - arrival);
     }
   }
   const closed = ctx.ladder.rows.find((r) => r.bucket === "closed")?.items ?? [];
-  const narration = `申购 ${money(usdWanted)} OUSG。燃油：${fuel.length ? fuel.join("；") : "没有能动的稳定币"}。` + (need > 0 ? ` 还差 ${amount(need)}：${closed.map((it) => `${it.name} ${money(it.usd)}（${it.route.why ?? "关着"}）`).join("、") || "没有其他来源"}——这几条跑道现在关着。` : "");
+  const narration = `Subscribe ${money(usdWanted)} OUSG. Fuel: ${fuel.length ? fuel.join("; ") : "no stablecoins I can move"}.` + (need > 0 ? ` Still ${amount(need)} short: ${closed.map((it) => `${it.name} ${money(it.usd)} (${it.route.why ?? "closed"})`).join(", ") || "no other source"}. Those runways are closed right now.` : "");
   if (need > 0) {
     const cex = closed.find((it) => it.route.id === "withdraw" && it.usd >= need);
-    notes.push(cex ? `差的 ${amount(need)}：给 ${cex.name} 的 key 开提币，${etaLabel(cex.route.etaSec)} · 约 ${cents(cexWithdrawFee(need))} 就能到；从银行走 ACH 是 T+1。两样都不经我。` : `差的 ${amount(need)} 得从别处打进来，不经我。`);
+    notes.push(cex ? `The missing ${amount(need)}: open withdrawals on the ${cex.name} key and it arrives in ${etaLabel(cex.route.etaSec)} for about ${cents(cexWithdrawFee(need))}; ACH from the bank is T+1. Neither goes through me.` : `The missing ${amount(need)} has to come from somewhere else; not through me.`);
+    // money the agent could move but that is parked for something else: say it is there rather than take it
+    const parked = ctx.liquidity.mobile.filter((s) => s.account !== "ondo" && s.account !== "metamask");
+    if (parked.length) notes.push(`${parked.map((s) => `${s.name} holds ${money(s.usd)} ${s.asset}`).join("; ")}: it could come over in minutes, but it is parked for betting. Say so and I'll move it.`);
   }
   return { narration, steps, notes };
 }
 
 /** an order routed across every venue: one slice where one venue is best, several where no venue can take it alone or a split nets more */
 function trade(side: Side, qty: number, base: string, ctx: PlanContext): Plan {
-  const order = orderPlan(base, side, qty, ctx.accounts);
+  const order = orderPlan(base, side, qty, ctx.accounts, ctx.now);
   return { narration: order.narration, steps: order.steps, order };
+}
+
+/** bridge USDC from the on-chain wallet straight into the Polymarket deposit wallet on Polygon */
+function fundPolymarket(usd: number, ctx: PlanContext): Plan {
+  const onBase = baseUsdc(ctx);
+  if (!ctx.polymarketAddress) return { narration: "Polymarket is not connected.", steps: [] };
+  if (!onBase || onBase.usdc.usd < usd) return { narration: `Fund Polymarket with ${money(usd)}: MetaMask has ${money(onBase?.usdc.usd ?? 0)} USDC on Base that I can move. Not enough.`, steps: [] };
+  const quotes = bridgeQuotes(usd, "Polygon", "Base");
+  const best = pick(quotes, "cost")!;
+  return {
+    narration: `Fund Polymarket with ${money(usd)}: MetaMask has ${money(onBase.usdc.usd)} USDC on Base; over the ${best.label} to Polygon (fee ${cents(best.feeUsd)} · ${etaLabel(best.etaSec)}), straight into the Polymarket deposit wallet.`,
+    steps: [{ account: "metamask", intent: { kind: "move", asset: "USDC", amount: usd, to: ctx.polymarketAddress, fromChainId: BASE, chainId: POLYGON, via: best.id }, say: `Bridge ${money(usd)} USDC: Base → Polygon → Polymarket deposit wallet`, compare: `Compared: ${quotes.filter((q) => q.id !== best.id).map(routeWords).join("; ")}` }],
+  };
+}
+
+/** claim the winning shares of settled markets */
+function redeemWinnings(ctx: PlanContext): Plan {
+  const won = ctx.accounts.filter((a) => a.kind === "prediction" && !a.revoked && a.reach.includes("redeem")).flatMap((a) => a.holdings.filter((h) => h.redeemable).map((h) => ({ a, h })));
+  if (!won.length) return { narration: "Nothing to redeem: no settled market has paid out in your favour.", steps: [] };
+  return {
+    narration: `Redeem ${cents(won.reduce((s, x) => s + x.h.usd, 0))} of winnings: ${won.map(({ h }) => `${qtyText(h.amount)} shares of "${parseEventSymbol(h.asset)?.event.title ?? h.asset}" (settled ${parseEventSymbol(h.asset)?.outcome})`).join("; ")}.`,
+    steps: won.map(({ a, h }) => ({ account: a.id, intent: { kind: "redeem" as const, fund: h.asset.split(":")[0]!, amountUsd: h.usd }, say: `Redeem ${qtyText(h.amount)} winning shares · ${a.name}` })),
+  };
 }
 
 export function plan(text: string, ctx: PlanContext): Plan {
   const t = text.trim().toLowerCase().replace(/,/g, "");
   const m = /(\d+(?:\.\d+)?)/.exec(t);
   const n = m ? Number(m[1]) : undefined;
-  if (/再平衡|rebalance|配置|偏重/.test(t)) {
-    const order = orderPlan("ETH", "sell", 1, ctx.accounts);
+  if (/再平衡|rebalance|overweight|偏重/.test(t)) {
+    const order = orderPlan("ETH", "sell", 1, ctx.accounts, ctx.now);
     const atOndo = ctx.liquidity.mobile.filter((s) => s.account === "ondo").reduce((s, x) => s + x.usd, 0);
     const sub = Math.min(1500, atOndo);
     return {
-      narration: `加密 ${ctx.cryptoPct}% 偏重。${order.steps.length ? `卖 1 ETH（${order.split.quotes.length} 个场所比过，在 ${lead(order.split.slices.map((s) => s.name).join(" + "))}成交）` : "ETH 现在卖不了"}${sub > 0 ? `，再用 Ondo 地址上的 USDC 申购 ${money(sub)} OUSG` : ""}。`,
-      steps: [...order.steps, ...(sub > 0 ? [{ account: "ondo", intent: { kind: "subscribe" as const, fund: "OUSG", amountUsd: sub }, say: "申购 OUSG · Ondo" }] : [])],
+      narration: `Crypto is ${ctx.cryptoPct}% of the portfolio, overweight. ${order.steps.length ? `Sell 1 ETH (compared at ${order.split.quotes.length} venues, filled at ${order.split.slices.map((s) => s.name).join(" + ")})` : "ETH cannot be sold right now"}${sub > 0 ? `, then subscribe ${money(sub)} OUSG with the USDC at the Ondo address` : ""}.`,
+      steps: [...order.steps, ...(sub > 0 ? [{ account: "ondo", intent: { kind: "subscribe" as const, fund: "OUSG", amountUsd: sub }, say: "Subscribe OUSG · Ondo" }] : [])],
       order,
     };
   }
-  const tm = /(卖出|卖|sell|买入|买|buy)\s*(\d+(?:\.\d+)?)\s*(btc|eth|sol)/.exec(t);
-  if (tm) return trade(/买|buy/.test(tm[1]!) ? "buy" : "sell", Number(tm[2]), tm[3]!.toUpperCase(), ctx);
-  if (/guard|收紧|保守|严一点/.test(t)) return { narration: "收紧到 Guard：超过免审额度我先问你。", steps: [], mode: "guard" };
-  if (/open|放开|全开|松一点/.test(t)) return { narration: "放开到 Open：凭据允许的我都做，只有转到新地址才问你。", steps: [], mode: "open" };
-  if (/账单|付|pay|支付/.test(t)) {
+  const side = /(卖出|卖|sell|买入|买|buy)\s*\$?(\d+(?:\.\d+)?)/.exec(t);
+  const spot = /(卖出|卖|sell|买入|买|buy)\s*(\d+(?:\.\d+)?)\s*(btc|eth|sol)\b/.exec(t);
+  if (spot) return trade(/买|buy/.test(spot[1]!) ? "buy" : "sell", Number(spot[2]), spot[3]!.toUpperCase(), ctx);
+  const event = findEvent(t);
+  if (side && event) {
+    const outcome: Outcome = /\bno\b|否/.test(t) ? "NO" : "YES";
+    return trade(/买|buy/.test(side[1]!) ? "buy" : "sell", Number(side[2]), eventSymbol(event.id, outcome), ctx);
+  }
+  if (/polymarket/.test(t) && /fund|top ?up|deposit|充/.test(t)) return fundPolymarket(n ?? 300, ctx);
+  if (/winnings|claim|兑付|领奖/.test(t)) return redeemWinnings(ctx);
+  if (/guard|tighten|收紧|保守|严一点/.test(t)) return { narration: "Tightening to Guard: above the no-ask limit I ask you first.", steps: [], mode: "guard" };
+  if (/\bopen\b|loosen|放开|全开|松一点/.test(t)) return { narration: "Opening up: I do whatever the credentials allow, and only stop to ask before something dangerous (a new address, a market past its close).", steps: [], mode: "open" };
+  if (/账单|付|\bpay\b|\bbill\b|支付/.test(t)) {
     const usd = n ?? 120;
     const merchant = /github/.test(t) ? "GitHub" : "Anthropic";
-    return { narration: `付 $${usd} 给 ${merchant}，走 Mastercard 的 agentic token。`, steps: [{ account: "mastercard", intent: { kind: "pay", merchant, mcc: "7372", amountUsd: usd }, say: `付 ${merchant} · Mastercard` }] };
+    return { narration: `Pay $${usd} to ${merchant} with the Mastercard agentic token.`, steps: [{ account: "mastercard", intent: { kind: "pay", merchant, mcc: "7372", amountUsd: usd }, say: `Pay ${merchant} · Mastercard` }] };
   }
   if (/赎回|redeem/.test(t)) {
     const usd = n ?? 500;
-    return { narration: `赎回 $${usd} OUSG，T+1 到账。`, steps: [{ account: "ondo", intent: { kind: "redeem", fund: "OUSG", amountUsd: usd }, say: "赎回 OUSG · Ondo" }] };
+    return { narration: `Redeem $${usd} OUSG; it settles T+1.`, steps: [{ account: "ondo", intent: { kind: "redeem", fund: "OUSG", amountUsd: usd }, say: "Redeem OUSG · Ondo" }] };
   }
-  if (/申购|ousg|国债|treasur|集中/.test(t)) {
+  if (/申购|subscribe|ousg|国债|treasur/.test(t)) {
     const usd = n ?? 1000;
     const atOndo = ctx.liquidity.mobile.filter((s) => s.account === "ondo").reduce((s, x) => s + x.usd, 0);
-    if (usd <= atOndo) return { narration: `申购 $${usd} OUSG，Ondo 地址上的 USDC 够，按 NAV 即时铸造。`, steps: [{ account: "ondo", intent: { kind: "subscribe", fund: "OUSG", amountUsd: usd }, say: "申购 OUSG · Ondo" }] };
+    if (usd <= atOndo) return { narration: `Subscribe $${usd} OUSG: the USDC at the Ondo address covers it, minted at NAV right away.`, steps: [{ account: "ondo", intent: { kind: "subscribe", fund: "OUSG", amountUsd: usd }, say: "Subscribe OUSG · Ondo" }] };
     return routeToOndo(usd, ctx);
   }
-  if (/冷钱包|提币|提现|withdraw/.test(t)) {
-    return { narration: "把 0.1 BTC 从 Binance 提到你的冷钱包。", steps: [{ account: "binance", intent: { kind: "move", asset: "BTC", amount: 0.1, to: COLD }, say: "提 0.1 BTC 到冷钱包 · Binance" }] };
+  if (/冷钱包|cold|提币|提现|withdraw/.test(t)) {
+    return { narration: "Withdraw 0.1 BTC from Binance to your cold wallet.", steps: [{ account: "binance", intent: { kind: "move", asset: "BTC", amount: 0.1, to: COLD }, say: "Withdraw 0.1 BTC to the cold wallet · Binance" }] };
   }
-  if (/新地址|转给|陌生|send to|transfer/.test(t)) {
+  if (/新地址|new address|转给|陌生|send to|transfer/.test(t)) {
     const usd = n ?? 300;
-    return { narration: `往一个新地址转 $${usd} USDC（从 Ondo 那边的地址）。`, steps: [{ account: "ondo", intent: { kind: "move", asset: "USDC", amount: usd, to: STRANGER }, say: `转 $${usd} USDC 到新地址 ${STRANGER}` }] };
+    return { narration: `Send $${usd} USDC to a new address (from the Ondo address).`, steps: [{ account: "ondo", intent: { kind: "move", asset: "USDC", amount: usd, to: STRANGER }, say: `Send $${usd} USDC to new address ${STRANGER}` }] };
   }
-  return { narration: `我能做：${PRESETS.join("、")}，卖 / 买任意数量（如「卖 1 ETH」「买 0.4 ETH」，大单会拆到几个场所），或者说「收紧到 Guard」。`, steps: [] };
+  return { narration: `I can do: ${PRESETS.join(" / ")}. Also: sell or buy any size (“sell 1 ETH”, “buy 0.4 ETH”; a large order is split across venues), “fund Polymarket with 300”, “redeem winnings”, or “tighten to Guard”.`, steps: [] };
 }
 
 export class AgentSession {
@@ -163,6 +215,8 @@ export class AgentSession {
       ladder: o.ladder,
       accounts: o.accounts,
       ondoAddress,
+      polymarketAddress: o.accounts.find((a) => a.id === "polymarket")?.address,
+      now: o.now,
       liveBridge: await this.liveBridgeQuotes(o.liquidity, ondoAddress),
     };
     const p = plan(text, ctx);
@@ -171,7 +225,7 @@ export class AgentSession {
     if (p.order?.parts && p.narration === p.order.narration) first.parts = p.order.parts;
     if (p.mode) {
       this.svc.setMode(p.mode);
-      this.svc.note(f, p.mode === "guard" ? "已收紧到 Guard" : "已放开到 Open", "ok");
+      this.svc.note(f, p.mode === "guard" ? "Now in Guard" : "Now in Open", "ok");
     }
     // an order's slices fly together: the wallet judges the whole order and asks at most once
     const slices = p.order ? p.order.steps.length : 0;
@@ -179,7 +233,7 @@ export class AgentSession {
     for (const s of p.steps.slice(slices)) {
       const prerequisite = s.needs === undefined ? null : results[s.needs];
       if (s.needs !== undefined && (prerequisite === null || prerequisite === undefined || isPending(prerequisite) || prerequisite.ok !== true)) {
-        this.svc.note(f, `${s.say}：前一段没成，跳过`);
+        this.svc.note(f, `${s.say}: the leg before it did not complete, skipped`);
         results.push(null);
         continue;
       }

@@ -5,7 +5,8 @@
   "knownDestinations": [
     "wallet-main",
     "0x5a1e…kyc",
-    "0x9C0d4E3b7a2f1c8d9e0f1a2b3c4d5e6f7a8b9c0d"
+    "0x9C0d4E3b7a2f1c8d9e0f1a2b3c4d5e6f7a8b9c0d",
+    "0x9e7a…deposit"
   ],
   "blocklist": [
     "0xd759…attacker"
@@ -18,5 +19,5 @@
     "dailyCapUsd": 40000
   },
   "sessionExpiresAt": "2026-10-16T00:00:00Z",
-  "note": "The user's openness dial. `open`: the agent reaches the edge of every credential's native scope with no wallet-side caps and no cards, except a move to a destination the user has never used (knownDestinations: the main wallet, the KYC address at Ondo, the cold wallet 0x9C0d…). `guard`: every write above the account's free allowance (cardAboveUsd) stops on a card, and dailyCapUsd is a hard line. `reach` narrows what the agent may do per account (missing = everything the credential can do); `revoked` keeps only reads. The MetaMask blueprint: beast still blocks malicious transactions; open still asks about a stranger's address."
+  "note": "The user's openness dial. `open`: the agent reaches the edge of every credential's native scope with no wallet-side caps and no cards, except the dangerous ones — a move to a destination the user has never used (knownDestinations: the main wallet, the KYC address at Ondo, the cold wallet 0x9C0d…, the Polymarket deposit wallet), and an order in a prediction market that is past its close and not yet resolved. `guard`: every write above the account's free allowance (cardAboveUsd) stops on a card, and dailyCapUsd is a hard line. `reach` narrows what the agent may do per account (missing = everything the credential can do); `revoked` keeps only reads. The MetaMask blueprint: beast still blocks malicious transactions; open still asks about the dangerous ones."
 }

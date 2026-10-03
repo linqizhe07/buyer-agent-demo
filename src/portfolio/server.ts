@@ -8,7 +8,9 @@
  *   POST /api/say     {text}           the user talks to the page agent → a flight (PM-xxxx)
  *   POST /api/approve {id, decision}   the user answers a card → one more leg on that flight
  *   POST /api/execute {account, intent, agent}  an MCP agent's write: a flight of one leg (200 ok · 202 card · 409 refusal)
- *   GET  /api/quote?base=ETH&side=sell&qty=3    one order priced at every venue (CEX books, DEX pools) and split across them; a read
+ *   GET  /api/markets                           the event contracts on the prediction markets: state, close date, each venue's top of book
+ *   GET  /api/quote?base=ETH&side=sell&qty=3    one order priced at every venue (CEX books, DEX pools, prediction-market books) and split across them; a read.
+ *                                               `base` is an asset (ETH) or an event contract (FED-DEC-HIKE25:YES)
  *   POST /api/order   {base, side, qty, agent}  route the order and fly it: one flight, one leg per slice, one card at most
  *   POST /api/mode    {mode}           open | guard
  *   POST /api/revoke  {account} · POST /api/restore {account}   an account's switch
@@ -23,6 +25,7 @@ import { fileURLToPath } from "node:url";
 import { isRefusal } from "../core/errors.ts";
 import { agentCode, PRICES, type AgentId, type Intent } from "./accounts.ts";
 import { AgentSession, PRESETS } from "./agent.ts";
+import { parseEventSymbol } from "./events.ts";
 import type { OrderPlan } from "./router.ts";
 import { isPending, PortfolioService } from "./service.ts";
 import type { Side } from "./venues.ts";
@@ -75,13 +78,14 @@ export function parseIntent(raw: unknown): Intent | null {
   }
 }
 
-/** an order for the router: an asset the price table knows, a side, a size */
+/** an order for the router: an asset the price table knows or an event contract the catalogue lists, a side, a size */
 export function parseOrder(raw: unknown): { base: string; side: Side; qty: number } | null {
   if (!raw || typeof raw !== "object") return null;
   const o = raw as Record<string, unknown>;
   const base = typeof o.base === "string" ? o.base.trim().toUpperCase() : "";
+  const known = PRICES[base] !== undefined || parseEventSymbol(base) !== undefined;
   const qty = typeof o.qty === "number" ? o.qty : typeof o.qty === "string" && o.qty.trim() !== "" ? Number(o.qty) : NaN;
-  if (!PRICES[base] || !(qty > 0) || (o.side !== "buy" && o.side !== "sell")) return null;
+  if (!known || !(qty > 0) || (o.side !== "buy" && o.side !== "sell")) return null;
   return { base, side: o.side, qty };
 }
 
@@ -157,17 +161,19 @@ export async function startPortfolioServer(opts: PortfolioServerOptions): Promis
     res.json(r);
   }));
 
+  app.get("/api/markets", (_req, res) => void res.json({ ok: true, markets: svc.markets() }));
+
   app.get("/api/quote", wrap(async (req, res) => {
     const o = parseOrder(req.query);
-    if (!o) return void bad(res, "need ?base=ETH|BTC|SOL&side=buy|sell&qty=<number>");
+    if (!o) return void bad(res, "need ?base=<ETH|BTC|SOL or an event contract like FED-DEC-HIKE25:YES>&side=buy|sell&qty=<number>");
     res.json({ ok: true, quote: quoteView(await svc.quote(o.base, o.side, o.qty)) });
   }));
 
   app.post("/api/order", wrap(async (req, res) => {
     const o = parseOrder(req.body);
-    if (!o) return void bad(res, "need {base: ETH|BTC|SOL, side: buy|sell, qty}");
+    if (!o) return void bad(res, "need {base: <ETH|BTC|SOL or an event contract like FED-DEC-HIKE25:YES>, side: buy|sell, qty}");
     const r = await svc.order(o.base, o.side, o.qty, parseAgent((req.body as { agent?: unknown }).agent));
-    const legs = r.flight.legs.map((l) => `${l.mark === "ok" ? "✓" : l.mark === "no" ? "✗" : l.mark === "wait" ? "▣" : "·"} ${l.text}${l.compare ? `（${l.compare}）` : ""}`);
+    const legs = r.flight.legs.map((l) => `${l.mark === "ok" ? "✓" : l.mark === "no" ? "✗" : l.mark === "wait" ? "▣" : "·"} ${l.text}${l.compare ? ` (${l.compare})` : ""}`);
     const body = { flight: r.flight.no, legs, quote: quoteView(r.plan) };
     const refused = r.outcomes.find(isRefusal);
     const pending = r.outcomes.find(isPending);

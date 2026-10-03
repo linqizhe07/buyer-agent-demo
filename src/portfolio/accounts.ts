@@ -10,8 +10,9 @@
  * in the home directory and no agent-facing view ever carries it.
  */
 import type { Refusal } from "../core/errors.ts";
+import { eventMark, isEventSymbol } from "./events.ts";
 
-export type AccountKind = "cex" | "card" | "bank" | "agent-wallet" | "rwa";
+export type AccountKind = "cex" | "card" | "bank" | "agent-wallet" | "rwa" | "prediction";
 export type Capability = "read" | "trade" | "move" | "pay" | "subscribe" | "redeem";
 export type ScopeEnforcer = "venue" | "network" | "bank" | "issuer" | "metamask";
 
@@ -41,9 +42,12 @@ export interface Account {
   address?: string | undefined;
   /** home chain of an on-chain account */
   chain?: string | undefined;
+  /** a capability this kind of credential normally has that the venue has closed for THIS one, and why — as a phrase after the venue's name (`takes no orders from US-NY`) */
+  closed?: Partial<Record<Capability, string>> | undefined;
 }
 
-export type AssetClass = "crypto" | "stable" | "cash" | "rwa" | "credit";
+/** `event`: shares of a prediction-market outcome, worth $1 or $0 at settlement */
+export type AssetClass = "crypto" | "stable" | "cash" | "rwa" | "event" | "credit";
 
 export interface Holding {
   account: string;
@@ -52,6 +56,10 @@ export interface Holding {
   usd: number;
   class: AssetClass;
   note?: string | undefined;
+  /** winning shares of a settled market, waiting to be redeemed at $1 */
+  redeemable?: boolean | undefined;
+  /** money that is on its way (a T+1 redemption): owned, but not yet anywhere it can be used */
+  inTransit?: boolean | undefined;
 }
 
 export type Intent =
@@ -89,6 +97,19 @@ export interface AccountAdapter {
   quote?(intent: Intent): Promise<RouteQuote[]>;
   /** a real spot price in USD, when the provider has a price feed (the live MetaMask price API) */
   spot?(asset: string): Promise<number | undefined>;
+  /** the real market behind an event contract, when the provider can read it (the live Polymarket book through `mm predict`): top of book and a preview of this order */
+  market?(symbol: string, side: "buy" | "sell", qty: number): Promise<LiveMarket | undefined>;
+}
+
+export interface LiveMarket {
+  question: string;
+  bid?: number | undefined;
+  ask?: number | undefined;
+  /** how many of the requested shares the real book would fill, and at what average price */
+  filled?: number | undefined;
+  averagePrice?: number | undefined;
+  /** what the preview says a buy costs / a sell brings in, before the venue's fee */
+  amountUsd?: number | undefined;
 }
 
 /** one way to move money between two places — a bridge, a CEX withdrawal, an ACH, a redemption — with its price and its clock */
@@ -121,8 +142,8 @@ export function agentCode(name: string): string {
   return code.toUpperCase();
 }
 
-export const PAGE_AGENT: AgentId = { id: "page", name: "组合经理（页面脚本）", code: "PM" };
-export const SCRIPT_AGENT: AgentId = { id: "demo", name: "终端 demo 脚本", code: "TD" };
+export const PAGE_AGENT: AgentId = { id: "page", name: "Portfolio manager (page script)", code: "PM" };
+export const SCRIPT_AGENT: AgentId = { id: "demo", name: "Terminal demo script", code: "TD" };
 
 export const CHAIN_NAME: Record<number, string> = { 1: "Ethereum", 10: "Optimism", 137: "Polygon", 8453: "Base", 42161: "Arbitrum" };
 
@@ -136,36 +157,39 @@ export function chainIdOf(name: string | undefined): number | undefined {
 }
 
 export const KIND_LABEL: Record<AccountKind, string> = {
-  cex: "CEX 账户",
-  "agent-wallet": "agent 钱包（链上）",
-  rwa: "RWA 持仓",
-  card: "银行卡",
-  bank: "银行账户",
+  cex: "CEX account",
+  "agent-wallet": "Agent wallet (on-chain)",
+  prediction: "Prediction market",
+  rwa: "RWA position",
+  card: "Card",
+  bank: "Bank account",
 };
-export const KIND_ORDER: AccountKind[] = ["cex", "agent-wallet", "rwa", "card", "bank"];
-export const CAP_LABEL: Record<Capability, string> = { read: "读", trade: "交易", move: "转出", pay: "支付", subscribe: "申购", redeem: "赎回" };
+export const KIND_ORDER: AccountKind[] = ["cex", "agent-wallet", "prediction", "rwa", "card", "bank"];
+export const CAP_LABEL: Record<Capability, string> = { read: "read", trade: "trade", move: "transfer out", pay: "pay", subscribe: "subscribe", redeem: "redeem" };
 export const WRITE_CAPS: Capability[] = ["trade", "move", "pay", "subscribe", "redeem"];
 export const ENFORCER_LABEL: Record<ScopeEnforcer, string> = {
-  venue: "交易所侧（key 权限 · IP · 白名单）",
-  network: "卡组织 / 发卡行（token 范围）",
-  bank: "银行（聚合 token 只读）",
-  issuer: "发行方（转让限制合约）",
-  metamask: "MetaMask（Guard 策略 + MFA）",
+  venue: "the venue (key permissions · IP · whitelists)",
+  network: "the card network / issuer (token scope)",
+  bank: "the bank (read-only aggregation token)",
+  issuer: "the issuer (transfer-restriction contract)",
+  metamask: "MetaMask (Guard policy + MFA)",
 };
-export const CLASS_LABEL: Record<AssetClass, string> = { crypto: "加密资产", stable: "稳定币", cash: "现金", rwa: "RWA", credit: "信用额度" };
-export const CLASS_ORDER: AssetClass[] = ["cash", "stable", "crypto", "rwa", "credit"];
+export const CLASS_LABEL: Record<AssetClass, string> = { crypto: "Crypto", stable: "Stablecoins", cash: "Cash", rwa: "RWA", event: "Predictions", credit: "Credit line" };
+export const CLASS_ORDER: AssetClass[] = ["cash", "stable", "crypto", "event", "rwa", "credit"];
 
 /** demo prices, fixed so a run is reproducible; the live MetaMask read brings its own USD values */
-export const PRICES: Record<string, number> = { BTC: 62150, ETH: 2440, SOL: 148.3, OUSG: 110.42, USDT: 1, USDC: 1, USD: 1 };
+export const PRICES: Record<string, number> = { BTC: 62150, ETH: 2440, SOL: 148.3, OUSG: 110.42, USDT: 1, USDC: 1, pUSD: 1, USD: 1 };
 
+/** an asset's price, or — for a share of a prediction-market outcome (`EVENT:YES`) — its mark in [0, 1] */
 export function priceOf(asset: string): number {
-  return PRICES[asset] ?? 0;
+  return PRICES[asset] ?? eventMark(asset) ?? 0;
 }
 
 export function classOf(asset: string): AssetClass {
   if (asset === "USD") return "cash";
-  if (asset === "USDT" || asset === "USDC") return "stable";
+  if (asset === "USDT" || asset === "USDC" || asset === "pUSD") return "stable";
   if (asset === "OUSG") return "rwa";
+  if (isEventSymbol(asset)) return "event";
   return "crypto";
 }
 
@@ -182,7 +206,7 @@ export function capabilityOf(i: Intent): Capability {
 export function usdOf(i: Intent): number {
   switch (i.kind) {
     case "trade":
-      return Number((i.qty * priceOf(baseOf(i.symbol))).toFixed(2));
+      return Number((i.qty * priceOf(isEventSymbol(i.symbol) ? i.symbol : baseOf(i.symbol))).toFixed(2));
     case "move":
       return Number((i.amount * priceOf(i.asset)).toFixed(2));
     case "pay":
@@ -200,6 +224,7 @@ export function destinationOf(i: Intent): string | null {
 export function describeIntent(i: Intent): string {
   switch (i.kind) {
     case "trade":
+      if (isEventSymbol(i.symbol)) return `${i.side.toUpperCase()} ${i.qty} ${i.symbol}`;
       return `${i.side.toUpperCase()} ${i.qty} ${baseOf(i.symbol)} (${i.symbol}${i.chainId !== undefined ? ` @ ${chainName(i.chainId)}` : ""})`;
     case "move":
       return `move ${i.amount} ${i.asset} → ${i.to}${i.fromChainId !== undefined && i.chainId !== undefined && i.fromChainId !== i.chainId ? ` (${chainName(i.fromChainId)} → ${chainName(i.chainId)})` : ""}`;
@@ -218,5 +243,6 @@ export const r8 = (n: number): number => Number(n.toFixed(8));
 /** a quantity a person reads: `1.5`, `0.15`, `15.8184` — never `1.4999999` */
 export function qtyText(n: number): string {
   const a = Math.abs(n);
-  return String(Number(n.toFixed(a >= 100 ? 2 : a >= 0.01 ? 4 : 8)));
+  const digits = a >= 100 ? 2 : a >= 0.01 ? 4 : 8;
+  return Number(n.toFixed(digits)).toLocaleString("en-US", { maximumFractionDigits: digits });
 }

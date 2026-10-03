@@ -91,12 +91,12 @@ export function liquidity(accounts: LiquidityInput[]): Liquidity {
   const stuck: StuckSource[] = [];
   for (const a of accounts) {
     for (const h of a.holdings) {
-      if ((h.class !== "stable" && h.class !== "cash") || h.usd <= 0 || h.asset.includes("在途")) continue;
+      if ((h.class !== "stable" && h.class !== "cash") || h.usd <= 0 || h.inTransit) continue;
       const chain = h.note && CHAINS.has(h.note) ? h.note : a.chain;
       const src: LiquiditySource = { account: a.id, name: a.name, asset: h.asset, chain, usd: h.usd };
-      if (a.revoked) stuck.push({ ...src, why: "你关了" });
+      if (a.revoked) stuck.push({ ...src, why: "switched off" });
       else if (a.reach.includes("move")) mobile.push(src);
-      else stuck.push({ ...src, why: a.kind === "bank" ? "只读，转账不经 agent" : a.kind === "cex" ? "key 没开提币" : "凭据不能转出" });
+      else stuck.push({ ...src, why: a.kind === "bank" ? "read-only; transfers don't go through the agent" : a.kind === "cex" ? "key cannot withdraw" : a.kind === "prediction" ? "pays out by ACH, not through the agent" : "credential cannot transfer out" });
     }
   }
   return { mobileUsd: r2(mobile.reduce((s, x) => s + x.usd, 0)), stuckUsd: r2(stuck.reduce((s, x) => s + x.usd, 0)), mobile, stuck };

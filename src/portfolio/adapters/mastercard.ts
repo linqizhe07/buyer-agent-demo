@@ -5,7 +5,7 @@
  * permitted to cardholder, 61 exceeds amount limit, 65 exceeds frequency, 54
  * expired, 51 insufficient funds. The token format is illustrative (Agent Pay
  * shaped); the decline codes are the real ones. */
-import { refuse } from "../../core/errors.ts";
+import { no } from "../refuse.ts";
 import { r2, type Account, type AccountAdapter, type Holding, type Intent } from "../accounts.ts";
 
 export interface MastercardSeed {
@@ -24,26 +24,26 @@ export function mastercardAccount(seed: MastercardSeed, now: () => string): Acco
     id: "mastercard",
     name: `Mastercard ··${seed.last4}`,
     kind: "card",
-    provider: "Mastercard（发卡行 + 卡组织）",
+    provider: "Mastercard (issuer + network)",
     credentialRef: "home/credentials/mastercard/agentic-token.json",
-    credentialKind: `agentic token ${t.id}（替代卡号，绑定这个 agent）`,
+    credentialKind: `agentic token ${t.id} (stands in for the card number, bound to this agent)`,
     scope: {
       can: ["read", "pay"],
-      limits: [`单笔 ≤ $${t.maxPerTxnUsd} · 日 ≤ $${t.dailyUsd}`, `MCC 白名单 ${Object.entries(t.mccAllow).map(([k, v]) => `${k} ${v}`).join(" · ")}`, `token 到期 ${t.expiresAt.slice(0, 10)}`, "每笔授权带 agent 身份；持卡人可单独冻结这枚 token，不动卡"],
+      limits: [`per transaction ≤ $${t.maxPerTxnUsd} · per day ≤ $${t.dailyUsd}`, `MCC allowlist ${Object.entries(t.mccAllow).map(([k, v]) => `${k} ${v}`).join(" · ")}`, `token expires ${t.expiresAt.slice(0, 10)}`, "every authorization carries the agent's identity; the cardholder can freeze this token alone, without touching the card"],
       enforcedBy: "network",
     },
-    settlement: "授权即时 · 清算 T+1 · 账单月结",
+    settlement: "authorization instant · clearing T+1 · billed monthly",
     live: false,
   };
-  const decline = (rc: string, text: string, extra: Record<string, unknown> = {}) => refuse("E_VENUE_CARD_DECLINED", { venue: "mastercard", message: `发卡行拒绝：rc ${rc} ${text}`, native: { responseCode: rc, text, ...extra } });
+  const decline = (rc: string, text: string, extra: Record<string, unknown> = {}) => no("E_VENUE_CARD_DECLINED", { venue: "mastercard", message: `issuer declined: rc ${rc} ${text}`, native: { responseCode: rc, text, ...extra } });
   const dailySpent = (at: string) => r2(spent.filter((s) => Date.parse(at) - Date.parse(s.at) < 24 * 3600 * 1000).reduce((s, x) => s + x.usd, 0));
   return {
     account,
     async read(): Promise<Holding[]> {
-      return [{ account: account.id, asset: "USD · 可用额度", amount: available, usd: available, class: "credit", note: `额度 $${seed.creditLimitUsd}；负债侧，不计入总资产` }];
+      return [{ account: account.id, asset: "USD · available credit", amount: available, usd: available, class: "credit", note: `limit $${seed.creditLimitUsd}; a liability, not counted in net worth` }];
     },
     async execute(i: Intent) {
-      if (i.kind !== "pay") return refuse("E_VENUE_REJECTED", { venue: "mastercard", message: `一张卡没有「${i.kind}」这种操作`, native: { responseCode: "12", text: "Invalid transaction" } });
+      if (i.kind !== "pay") return no("E_VENUE_REJECTED", { venue: "mastercard", message: `a card has no \"${i.kind}\" action`, native: { responseCode: "12", text: "Invalid transaction" } });
       const at = now();
       if (Date.parse(at) >= Date.parse(t.expiresAt)) return decline("54", "Expired card (agentic token expired)");
       if (!(i.mcc in t.mccAllow)) return decline("57", "Transaction not permitted to cardholder", { reason: `MCC ${i.mcc} not in the agentic token's scope` });
