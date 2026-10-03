@@ -80,7 +80,7 @@ npm run wallet          # http://127.0.0.1:4810 · 一页 UI + 内存里的钱�
 ```bash
 npm run portfolio                               # http://127.0.0.1:4820 · 一张对账单（英文界面）：看 · 说 · 批 · MetaMask 与 Polymarket 为模拟
 npm run portfolio -- --mm                       # MetaMask 账户和它的 Polymarket deposit wallet 读真的（mm CLI，只读）
-npm run portfolio:demo                          # 无头：十个 beat，✓/✗/FAIL，exit 0 当且仅当没有断言失败
+npm run portfolio:demo                          # 无头：十个 beat，✓/✗/FAIL，exit 0 当且仅当没有断言失败；每次从空账本开始，可重复跑
 npm run portfolio:demo -- --mm --serve --hold   # 现场：live MetaMask / Polymarket + 页面保持
 npm run portfolio:mcp                           # stdio MCP：agent 面（portfolio_overview / read / markets / quote / execute / order / approval / openness）
 ```

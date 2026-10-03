@@ -56,17 +56,21 @@ describe("npm run portfolio:demo (headless, no ports)", () => {
   let stderr = "";
   let code: number | null = null;
 
-  beforeAll(async () => {
-    home = mkdtempSync(join(tmpdir(), "portfolio-demo-"));
-    await new Promise<void>((resolve) => {
-      const child = spawn("npx", ["tsx", "src/portfolio/demo.ts", "--home", home], { cwd: ROOT, env: { ...process.env, PORTFOLIO_MM: "0" }, stdio: ["ignore", "pipe", "pipe"] });
-      child.stdout.on("data", (d) => (stdout += d.toString()));
-      child.stderr.on("data", (d) => (stderr += d.toString()));
+  const run = (dir: string) =>
+    new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve) => {
+      const out = { code: null as number | null, stdout: "", stderr: "" };
+      const child = spawn("npx", ["tsx", "src/portfolio/demo.ts", "--home", dir], { cwd: ROOT, env: { ...process.env, PORTFOLIO_MM: "0" }, stdio: ["ignore", "pipe", "pipe"] });
+      child.stdout.on("data", (d) => (out.stdout += d.toString()));
+      child.stderr.on("data", (d) => (out.stderr += d.toString()));
       child.on("close", (c) => {
-        code = c;
-        resolve();
+        out.code = c;
+        resolve(out);
       });
     });
+
+  beforeAll(async () => {
+    home = mkdtempSync(join(tmpdir(), "portfolio-demo-"));
+    ({ code, stdout, stderr } = await run(home));
   });
   afterAll(() => rmSync(home, { recursive: true, force: true }));
 
@@ -77,6 +81,13 @@ describe("npm run portfolio:demo (headless, no ports)", () => {
     expect(stdout).not.toMatch(/^FAIL /m);
     expect([...stdout.matchAll(/^==== Beat (\d+):/gm)].map((m) => Number(m[1]))).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
   });
+  it("passes again in the same home: every run starts from an empty ledger", async () => {
+    const again = await run(home);
+    if (again.code !== 0) console.log(again.stdout, again.stderr);
+    expect(again.code).toBe(0);
+    expect(again.stdout).toContain("ALL PORTFOLIO ASSERTIONS PASSED");
+    expect(again.stdout).not.toMatch(/^FAIL /m);
+  }, 60_000);
   it("prints the headlines of the story", () => {
     for (const line of HEADLINES) expect(stdout).toContain(line);
   });

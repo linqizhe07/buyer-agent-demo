@@ -24,7 +24,7 @@
  *   decide(approvalId, …)       the human's answer to a card, as one more leg
  *   read / overview             never gated; one read across every account
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Ledger, type LedgerRow } from "../agent/ledger.ts";
@@ -71,6 +71,8 @@ export interface ServiceOptions {
   mm?: MmLiveOptions;
   seeds?: Seeds;
   openness?: unknown;
+  /** start from an empty ledger even when a file with this name exists: a scripted run on a fixed clock gets the same file name every time and would otherwise append to its previous run */
+  freshLedger?: boolean;
 }
 
 /** one slice of an order (or any step an agent flies): where, what, and the agent's words for it */
@@ -222,7 +224,9 @@ export class PortfolioService {
 
   private openLedger(): Ledger {
     const stamp = this.now().replace(/[:.]/g, "-");
-    return new Ledger(join(this.opts.home, "portfolio", `ledger-${stamp}.jsonl`), this.now);
+    const file = join(this.opts.home, "portfolio", `ledger-${stamp}.jsonl`);
+    if (this.opts.freshLedger) rmSync(file, { force: true });
+    return new Ledger(file, this.now);
   }
 
   /** the five simulators are rebuilt from the seeds; the live account is kept (its state is MetaMask's, not ours) */

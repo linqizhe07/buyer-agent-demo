@@ -83,7 +83,8 @@ export const NOT_PROVEN = [
 async function main(): Promise<number> {
   const live = flag("--mm") || process.env.PORTFOLIO_MM === "1";
   const home = value("--home") ?? defaultHome();
-  const svc = await PortfolioService.create({ home, now, live });
+  // the sim clock is fixed, so the ledger's file name is too: every run starts from an empty ledger, like the main demo
+  const svc = await PortfolioService.create({ home, now, live, freshLedger: true });
   const server = flag("--serve") ? await startPortfolioServer({ port: Number(value("--port") ?? 4820), service: svc }) : undefined;
 
   heading("Setup");
