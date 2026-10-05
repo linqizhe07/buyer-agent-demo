@@ -104,7 +104,8 @@ export type OwnerAction =
   | { type: "disconnectVenue"; venue: string; nonce: number }
   /** REAL money at venues connected live: the owner signs the exact destination address the venue gave, the most the venue may charge, and
    * the moment after which it is void. `kind`: withdraw (from an exchange) · send (from a wallet) · transfer (between an exchange's own
-   * ledgers) · swap (one dollar stablecoin for another at an exchange) */
+   * ledgers) · swap (one dollar stablecoin for another at an exchange) · bridge (from a wallet to another chain: `network` is the chain it
+   * leaves, `toLedger` the chain it lands on, `maxFee` the most the bridge may charge) */
   | { type: "liveMove"; kind: string; from: string; fromLedger: string; to: string; toLedger: string; asset: string; toAsset: string; network: string; amount: string; toAddress: string; maxFee: string; deadline: number; nonce: number }
   /** An ORDER at a venue connected live, on the owner's signature: the market, the side, the exact size in the market's own units, the limit
    * price ("" for a market order), the most the order may be worth in dollars when it is placed (a price that has moved past it is a new
@@ -214,9 +215,24 @@ function messageOf(fields: Field[], values: Record<string, unknown>): Record<str
 /** Is this action exactly what its signature covers? An owner action is signed field by field, with numbers as whole uint64s: a field its type does
  * not have is something no signature covers, and a number with a fraction signs as the whole number below it (a nonce of 1000.5 would carry the
  * signature made for 1000 and still look unused). `null` when it is well formed; otherwise what is wrong. */
+/** the text fields of the agent requests that reach a real venue: each has to be text, and nothing else rides along */
+const AGENT_TEXT: Partial<Record<AgentAction["type"], string[]>> = {
+  agentLiveOrder: ["venue", "symbol", "side", "orderType", "qty", "usd", "limitPrice"],
+  agentLiveCancel: ["venue", "order"],
+  agentLiveMove: ["kind", "from", "fromLedger", "to", "toLedger", "asset", "toAsset", "network", "amount", "maxFee"],
+};
+
 export function malformed(action: Action): string | null {
   if (!Number.isSafeInteger(action.nonce) || action.nonce < 0) return "the nonce is a whole number of milliseconds";
-  if (!isOwnerAction(action)) return null;
+  if (!isOwnerAction(action)) {
+    const names = AGENT_TEXT[action.type];
+    if (!names) return null;
+    const have = action as unknown as Record<string, unknown>;
+    const wrong = names.find((k) => typeof have[k] !== "string");
+    if (wrong) return `"${wrong}" is text`;
+    const extra = Object.keys(have).find((k) => k !== "type" && k !== "nonce" && !names.includes(k));
+    return extra === undefined ? null : `"${extra}" is not part of "${action.type}"`;
+  }
   const fields = OWNER_FIELDS[action.type].fields;
   const have = action as unknown as Record<string, unknown>;
   for (const f of fields) {

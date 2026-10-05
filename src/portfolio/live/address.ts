@@ -13,8 +13,10 @@ import { getAddress, isAddress, type Hex } from "viem";
 import type { Refusal } from "../../core/errors.ts";
 import { no } from "../refuse.ts";
 import { STABLECOINS, type ChainName, type ChainReader, type TokenRef } from "./chain.ts";
+import { dexTrader } from "./dex.ts";
 import { stockTokenHoldings } from "./robinhood.ts";
 import { walletWriter } from "./writes.ts";
+import { walletBridge } from "./wallet-bridge.ts";
 import { asRefusal, num, unreachable, venueSaidNo, type Http, type LiveBalance, type LiveProbe, type LiveSource } from "./types.ts";
 
 export interface AddressRequest {
@@ -52,7 +54,7 @@ export async function walletSource(req: AddressRequest): Promise<Opened> {
   };
   try {
     const first = await read();
-    const source: LiveSource = { name, kind: "agent-wallet", reference: address, via: `${req.proven ?? "an address"} · read from the chains`, address, writer: walletWriter(address, req.chain), probe: probeOf(req, `dollar stablecoins and each chain's own coin on ${ALL_CHAINS.join(", ")}, and Robinhood's Stock Tokens${unread.length ? ` (no answer this time: ${unread.join("; ")})` : ""}`, { address, chains: ALL_CHAINS, unread }), read };
+    const source: LiveSource = { name, kind: "agent-wallet", reference: address, via: `${req.proven ?? "an address"} · read from the chains`, address, writer: { ...walletWriter(address, req.chain), bridge: walletBridge(address, req.chain, req.http, req.venue) }, trader: dexTrader({ venue: req.venue, address, proven: req.proven, http: req.http, chain: req.chain }), probe: probeOf(req, `dollar stablecoins and each chain's own coin on ${ALL_CHAINS.join(", ")}, and Robinhood's Stock Tokens${unread.length ? ` (no answer this time: ${unread.join("; ")})` : ""}`, { address, chains: ALL_CHAINS, unread }), read };
     return { source, first };
   } catch (err) {
     return asRefusal(req.venue, name, err);

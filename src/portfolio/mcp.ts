@@ -6,7 +6,7 @@
  *   npm run account                 # the service
  *   npm run portfolio:mcp           # this, over stdio; PORTFOLIO_URL overrides the base
  *
- * Tools on the user's REAL accounts (the service's default): portfolio_account · portfolio_live_markets (reads) ·
+ * Tools on the user's REAL accounts (the service's default): portfolio_account · portfolio_live_markets · portfolio_live_compare (reads) ·
  * portfolio_live_order · portfolio_live_cancel · portfolio_live_move (writes: inside the limit the owner signed for this seat;
  * Conservative asks the owner on a card, Aggressive places it at once) · portfolio_approval.
  * On the simulated statement (--classic): portfolio_overview · portfolio_read · portfolio_markets · portfolio_quote ·
@@ -314,7 +314,8 @@ server.registerTool(
     description:
       "Ask to move REAL money at venues the owner connected live (portfolio_account marks them `live: true`): withdraw from an exchange to another place of the user's, send from a wallet, transfer between an exchange's own ledgers, or swap one dollar stablecoin for another there. What happens next is the owner's mode. Conservative (the default): every request becomes a card the owner signs, showing the exact destination address and the fee the venue quotes; the answer is {pending: true, card} and portfolio_approval tells you how it went. Aggressive: a request inside your spending approval runs at once and the answer is the payment; outside it, a refusal. Money goes only to the user's own places (an exchange's own deposit address, or a wallet that proved it is the user's), at most the server's per-movement cap, and only if this server was started with real-money writes on. Your spending approval (`venues`) must name both venues. A refusal ({ok: false, code}) is not to be retried: E_WALLET_LIVE_WRITES_OFF (the server moves no real money), E_ACCOUNT_DESTINATION (not a place shown to be the user's), E_ACCOUNT_LIMIT (above the cap), E_VENUE_* (the venue's own rule).",
     inputSchema: {
-      kind: z.enum(["withdraw", "send", "transfer", "swap"]).describe("withdraw: from an exchange · send: from a wallet · transfer: between an exchange's own ledgers · swap: one stablecoin for another at an exchange"),
+      kind: z.enum(["withdraw", "send", "transfer", "swap", "bridge"]).describe("withdraw: from an exchange · send: from a wallet · transfer: between an exchange's own ledgers · swap: one stablecoin for another at an exchange · bridge: from a wallet to another chain (the same wallet there, another wallet of the user's, or an exchange's deposit address on that chain)"),
+      toNetwork: z.enum(["Arbitrum", "Base", "Ethereum", "Optimism", "Polygon", "BNB Chain"]).optional().describe("bridge: the chain it lands on"),
       from: z.string().describe("the live venue's id, e.g. okx"),
       to: z.string().optional().describe("withdraw/send: the live venue it goes to (an exchange, or a proven wallet); the same venue for transfer and swap"),
       asset: z.enum(["USDC", "USDT"]).describe("what leaves"),
@@ -325,9 +326,10 @@ server.registerTool(
       amount: z.number().positive().describe("in dollars (the stablecoin's units)"),
     },
   },
-  async ({ kind, from, to, asset, toAsset, network, fromLedger, toLedger, amount }) => {
+  async ({ kind, from, to, asset, toAsset, network, toNetwork, fromLedger, toLedger, amount }) => {
     if (!(await layer())) return text({ ok: false, error: "this service runs without the account layer (--classic)" }, true);
-    return answer(await sign({ type: "agentLiveMove", kind, from, fromLedger: fromLedger ?? "", to: kind === "transfer" || kind === "swap" ? from : (to ?? ""), toLedger: toLedger ?? "", asset, toAsset: toAsset ?? asset, network: network ?? "", amount: String(amount), maxFee: "0" }));
+    const dest = kind === "transfer" || kind === "swap" ? from : kind === "bridge" ? to || from : (to ?? "");
+    return answer(await sign({ type: "agentLiveMove", kind, from, fromLedger: fromLedger ?? "", to: dest, toLedger: kind === "bridge" ? (toNetwork ?? "") : (toLedger ?? ""), asset, toAsset: toAsset ?? asset, network: network ?? "", amount: String(amount), maxFee: "0" }));
   },
 );
 
@@ -344,6 +346,22 @@ server.registerTool(
     const b = r.body as { ok?: boolean; refusal?: { code: string; message: string }; market?: unknown; markets?: unknown };
     if (b.refusal) return text({ ok: false, code: b.refusal.code, message: b.refusal.message }, true);
     return text(symbol ? { ok: true, market: b.market } : { ok: true, markets: b.markets });
+  },
+);
+
+server.registerTool(
+  "portfolio_live_compare",
+  {
+    description:
+      "Where is it cheapest to buy, or best to sell? The same coin or stock (`base`: BTC, ETH, SOL, AAPL …) at every venue the owner connected live that trades it, ranked by the price an order would take there: the ask for a buy, the bid for a sell. Each row has the venue, its own symbol for it (send that to portfolio_live_order), the price, bid/ask and spread, whether it is open and whether this account can trade there now, and how much worse than the best it is. `usd` checks the size fits each venue's smallest order. Fees are not guessed: a venue's own note says so when it knows. A venue that does not answer in four seconds is listed under `missing`. A price far from the others is marked not ready: it may be another token under the same name. A read.",
+    inputSchema: { base: z.string().describe("what to compare: BTC, ETH, AAPL"), side: z.enum(["buy", "sell"]), usd: z.number().positive().optional().describe("the size in dollars, to check it fits each venue's smallest order") },
+    annotations: { readOnlyHint: true },
+  },
+  async ({ base, side, usd }) => {
+    const r = await call("GET", `/api/account/compare?${new URLSearchParams({ base, side, ...(usd !== undefined ? { usd: String(usd) } : {}) })}`);
+    const b = r.body as { refusal?: { code: string; message: string } } & Record<string, unknown>;
+    if (b.refusal) return text({ ok: false, code: b.refusal.code, message: b.refusal.message }, true);
+    return text(b);
   },
 );
 

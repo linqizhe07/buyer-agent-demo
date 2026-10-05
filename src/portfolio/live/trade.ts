@@ -24,7 +24,7 @@ export type MarketKind = "spot" | "perp" | "future" | "stock" | "crypto" | "even
 
 export interface Market {
   /** the account's name for it — what the owner and an agent type: `BTC/USDT` at an exchange, `AAPL` at a broker, `BTC-USD` at Robinhood
-   * Crypto, `KXFED-25DEC-T4.00:YES` at Kalshi, `<token id>` or `<slug>:<outcome>` at Polymarket, `USDC>WETH@Base` from a wallet */
+   * Crypto, `KXFED-25DEC-T4.00:YES` at Kalshi, `<token id>` or `<slug>:<outcome>` at Polymarket, `WETH/USDC@Base` from a wallet */
   symbol: string;
   /** in words */
   name: string;
@@ -58,7 +58,12 @@ export interface OrderRequest {
   /** in base units: coins, shares, contracts */
   qty: number;
   limitPrice?: number | undefined;
-  /** the account's id for this order: the venue's idempotency key where it takes one, so a retry is the same order and not a second one */
+  /** a MARKET order: the worst price it may fill at — the most a buy pays, the least a sell takes, per unit. The trader keeps the fill
+   * inside it (a marketable limit order that fills at once or not at all, a maximum cost, an aggregator's minimum out); a venue that has no
+   * way to bound a market order is sent the limit order instead */
+  worstPrice?: number | undefined;
+  /** the account's id for this order: the venue's idempotency key where it takes one, so a retry is the same order and not a second one.
+   * Thirty-two lower-case hex digits, new for every order in every run of the account */
   clientId: string;
 }
 
@@ -77,12 +82,14 @@ export interface OrderState {
   /** the venue's own answer, with nothing secret in it */
   native: unknown;
   /** a DEX order from a wallet: the transaction(s) the wallet is asked to send, in order (an approval first, when one is needed) */
-  walletTxs?: Array<{ chainId: number; chainIdHex: `0x${string}`; from: `0x${string}`; to: `0x${string}`; data: `0x${string}`; value: `0x${string}`; what: string }> | undefined;
+  walletTxs?: Array<{ chainId: number; chainIdHex: `0x${string}`; from: `0x${string}`; to: `0x${string}`; data: `0x${string}`; value: `0x${string}`; /** the gas the route needs, when the venue says: the wallet is given it */ gas?: `0x${string}` | undefined; what: string }> | undefined;
 }
 
 export interface LiveTrader {
   /** may this key or sign-in trade here: what the venue said, `unknown` where it has no call that says (its first refusal will) */
   can: boolean | "unknown";
+  /** why it may not, in the venue's terms, when `can` is false (a key without the trading permission; no Agentic account) */
+  whyNot?: string | undefined;
   /** what is traded here, in a few words: "spot and perpetuals", "US stocks and ETFs", "event contracts" */
   what: string;
   /** a few markets to start from (query empty), or the ones matching a query; at most 20 */
@@ -92,8 +99,12 @@ export interface LiveTrader {
   place(order: OrderRequest): Promise<OrderState | Refusal>;
   cancel(ref: string, symbol: string): Promise<OrderState | Refusal>;
   status(ref: string, symbol: string): Promise<OrderState | Refusal>;
-  /** a wallet's DEX order: the account hears which transaction the wallet sent (the last one), and asks the chain from then on */
-  sent?(ref: string, hash: `0x${string}`): Promise<OrderState | Refusal>;
+  /** a wallet's DEX order: the account hears which transaction the wallet sent (the last one); `expected` is the transaction the account
+   * built, so the trader can check on chain that the hash is that transaction and not another one; it asks the chain from then on */
+  sent?(ref: string, hash: `0x${string}`, expected?: NonNullable<OrderState["walletTxs"]>[number]): Promise<OrderState | Refusal>;
+  /** a wallet's DEX order whose approval is now on chain: the swap built again from a fresh quote, held to the same order (its size, side and
+   * worst price), so a slow approval does not leave the wallet a stale swap that reverts */
+  requote?(order: OrderRequest): Promise<OrderState | Refusal>;
 }
 
 // ---- sizes and prices ------------------------------------------------------------------------------
@@ -113,6 +124,13 @@ const decimals = (step: number): number => {
 export function floorTo(x: number, step: number | undefined): number {
   if (!(step && step > 0)) return x;
   const n = Math.floor(x / step + 1e-9);
+  return Number((n * step).toFixed(decimals(step)));
+}
+
+/** up to the step (a sell's worst price is never looser than asked) */
+export function ceilTo(x: number, step: number | undefined): number {
+  if (!(step && step > 0)) return x;
+  const n = Math.ceil(x / step - 1e-9);
   return Number((n * step).toFixed(decimals(step)));
 }
 

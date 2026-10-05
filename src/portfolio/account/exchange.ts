@@ -73,6 +73,8 @@ export interface CardOffer {
   amount: string;
   protocol: string;
   network: string;
+  /** a real-money movement: the most its fee may be, as the owner is shown it */
+  fee?: string | undefined;
   /** a metered session: the most that is locked in escrow when it opens, and the escrow contract that holds it */
   deposit?: string | undefined;
   escrow?: string | undefined;
@@ -333,7 +335,12 @@ export class AccountEngine {
    * payee, a signature): two requests let in together would each see the budget as it was before the other spent it. A limit that two requests can
    * each pass alone is not a limit. */
   exchange(envelope: Envelope): Promise<Outcome> {
-    const turn = this.queue.then(() => this.take(envelope));
+    return this.serially(() => this.take(envelope));
+  }
+
+  /** run `fn` in the same line as the instructions: what changes an order or a payment never runs in the middle of one */
+  serially<T>(fn: () => Promise<T>): Promise<T> {
+    const turn = this.queue.then(fn);
     this.queue = turn.catch(() => undefined);
     return turn;
   }
@@ -391,7 +398,8 @@ export class AccountEngine {
     if (MONEY_TYPES.has(action.type) && Math.abs(now - action.nonce) > MONEY_TTL_MS) return this.refused(no("E_ACCOUNT_EXPIRED", { message: now > action.nonce ? `signed ${Math.round((now - action.nonce) / 60_000)} min ago: a money instruction is good for ${MONEY_TTL_MS / 60_000} minutes` : `dated ${Math.round((action.nonce - now) / 60_000)} min ahead: a money instruction is good for ${MONEY_TTL_MS / 60_000} minutes around its date`, detail: { signedAt: new Date(action.nonce).toISOString() } }), envelope, signer);
     for (const who of signers) this.nonces.use(who, action.nonce);
 
-    await this.settle();
+    // an order or a cancel is not kept waiting while the account asks other venues how their orders stand
+    await this.settle(["liveCancel", "agentLiveCancel", "liveOrder", "agentLiveOrder"].includes(action.type));
     const out = await this.run(action, envelope, signer, agent, hash);
     this.results.set(key, out);
     if (isRefusal(out)) this.host.log({ kind: "account-refusal", venue: out.venue ?? "*", tool: action.type, code: out.code, reason: out.message, detail: out.detail, native: out.native, signer, envelope, ...(agent ? { agent: slug(agent.name) } : {}) });
@@ -434,8 +442,11 @@ export class AccountEngine {
       case "connectVenue":
       case "disconnectVenue": {
         // a venue with money on its way to it or from it stays plugged in until that has landed
-        const busy = this.host.adapter(action.venue) ? this.payments.find((p) => p.status === "pending" && (p.from === action.venue || p.to === action.venue)) : undefined;
+        const busy = this.host.adapter(action.venue) ? this.payments.find((p) => (p.status === "pending" || (p.status === "authorized" && p.live)) && (p.from === action.venue || p.to === action.venue)) : undefined;
         if (busy) return no("E_ACCOUNT_BAD_ACTION", { venue: action.venue, message: `${this.name(action.venue)} has a payment in flight (${busy.id}): it can be ${action.type === "connectVenue" ? "connected live" : "unplugged"} when that has landed`, detail: { payment: busy.id } });
+        // an order still open there: disconnected, the account could neither follow it nor cancel it
+        const open = this.trade.openAt(action.venue);
+        if (open) return no("E_ACCOUNT_BAD_ACTION", { venue: action.venue, message: `${this.name(action.venue)} has an open order (${open.id}): cancel it, or let it fill, before ${action.type === "connectVenue" ? "connecting it again" : "disconnecting it"}`, detail: { order: open.id } });
         const r = action.type === "connectVenue" ? await this.host.connect(action.venue, action.connector, action.label, action.credentialRef) : this.host.disconnect(action.venue);
         if (isRefusal(r)) return r;
         this.host.log({ kind: "action", venue: action.venue, tool: action.type, signer, envelope, outcome: "ok", reason: r.summary, ...("native" in r && r.native !== undefined ? { native: r.native } : {}) });
@@ -448,7 +459,7 @@ export class AccountEngine {
       case "agentLiveMove":
         return this.live.agent(action, { signer, envelope, hash, agent: agent! });
       case "liveOrder":
-        return this.trade.owner(action, { signer, hash });
+        return this.trade.owner(action, { signer, envelope, hash });
       case "liveCancel":
         return this.trade.cancel(action, { signer, authority: "owner", envelope });
       case "agentLiveOrder":
@@ -806,11 +817,22 @@ export class AccountEngine {
   // ---- time -----------------------------------------------------------------------------
 
   /** land whatever is due; called before anything reads or moves */
-  async settle(): Promise<void> {
+  async settle(quick = false): Promise<void> {
     this.record(await settleDue(this.payments, this.nowMs(), this.money()));
     this.payer?.tick(this.nowMs());
-    await this.live.poll();
-    await this.trade.poll();
+    if (quick) return;
+    // asking venues how things stand never takes the account down: a venue that throws is asked again next time
+    try {
+      await this.live.poll();
+    } catch (err) {
+      this.host.log({ kind: "note", venue: "*", tool: "live poll", reason: `asking how payments stand failed: ${String((err as Error)?.message ?? err).slice(0, 160)}` });
+    }
+    try {
+      // a page read waits for the venues a few seconds at most: what arrives later is shown on the next read
+      await Promise.race([this.trade.poll(), new Promise((resolve) => setTimeout(resolve, 3_000))]);
+    } catch (err) {
+      this.host.log({ kind: "note", venue: "*", tool: "order poll", reason: `asking how orders stand failed: ${String((err as Error)?.message ?? err).slice(0, 160)}` });
+    }
   }
 
   private record(events: Advance[]): void {

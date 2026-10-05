@@ -64,12 +64,12 @@ function chain(held: Record<string, number>): ChainReader & { asked: string[] } 
   };
 }
 
-async function boot(o: { http: Http; chain?: ChainReader; openMcp?: OpenMcp; clock?: () => number }) {
+async function boot(o: { http: Http; chain?: ChainReader; openMcp?: OpenMcp; clock?: () => number; writes?: boolean }) {
   let n = 0;
   const home = mkdtempSync(join(tmpdir(), "account-robinhood-"));
   homes.push(home);
   const liveDeps: Partial<LiveDeps> = { http: o.http, clock: o.clock ?? (() => START), chain: o.chain ?? chain({}), price: async () => undefined, ...(o.openMcp ? { openMcp: o.openMcp } : {}) };
-  const svc = await PortfolioService.create({ home, now: () => new Date(START).toISOString(), venues: "frontline", liveDeps, account: { owners: [{ id: owner.address, kind: "eoa", label: "owner", addedAt: new Date(START).toISOString() }] } });
+  const svc = await PortfolioService.create({ home, now: () => new Date(START).toISOString(), venues: "frontline", liveDeps, ...(o.writes ? { liveWrites: { capUsd: 100, pairingCode: "K7QX-M2PA" } } : {}), account: { owners: [{ id: owner.address, kind: "eoa", label: "owner", addedAt: new Date(START).toISOString() }] } });
   const own = async (a: NoNonce<OwnerAction>) => svc.exchange(await signOwner(owner, { ...a, nonce: START + ++n } as OwnerAction));
   const keyFile = (ref: string, content: unknown) => {
     const path = join(home, ref);
@@ -104,7 +104,8 @@ describe("Robinhood Crypto, through its own API", () => {
       if (u.pathname === "/api/v2/crypto/trading/accounts/") return json({ results: [{ account_number: "5512340009", status: "active", buying_power: "125.50", buying_power_currency: "USD", is_api_tradable: true }], next: null });
       if (u.pathname === "/api/v2/crypto/trading/holdings/" && !u.searchParams.has("cursor")) return json({ results: [{ account_number: "5512340009", asset_code: "BTC", total_quantity: "0.01" }], next: "https://trading.robinhood.com/api/v2/crypto/trading/holdings/?account_number=5512340009&cursor=abc" });
       if (u.pathname === "/api/v2/crypto/trading/holdings/") return json({ results: [{ account_number: "5512340009", asset_code: "ETH", total_quantity: "0.5" }, { account_number: "5512340009", asset_code: "DOGE", total_quantity: "0" }], next: null });
-      if (u.pathname === "/api/v2/crypto/marketdata/best_bid_ask/") return json({ results: [{ symbol: "BTC-USD", price: 60000 }, { symbol: "ETH-USD", price: 2500 }] });
+      // v2's V2BestBidAsk as Robinhood's spec has it: symbol, bid and ask, and no `price` (only v1's answer has the midpoint in it)
+      if (u.pathname === "/api/v2/crypto/marketdata/best_bid_ask/") return json({ results: [{ symbol: "BTC-USD", bid: 59990, ask: 60010 }, { symbol: "ETH-USD", bid: 2499, ask: 2501 }] });
       return undefined;
     });
     const x = await boot({ http });
@@ -113,8 +114,9 @@ describe("Robinhood Crypto, through its own API", () => {
     expect(said).toContain("Robinhood Crypto connected live · $1,975.50 there now");
     expect(said).toContain("read only: Robinhood's crypto API reads and trades; it has no call that moves money in or out");
     const v = (await x.venue("robinhood-crypto"))!;
-    // the page lists what is worth most first
+    // the page lists what is worth most first, each coin at the middle of Robinhood's bid and ask
     expect(v.holdings.map((h) => [h.asset, h.amount, h.usd])).toEqual([["ETH", 0.5, 1250], ["BTC", 0.01, 600], ["USD", 125.5, 125.5]]);
+    expect(http.asked.filter((a) => a.url.includes("/best_bid_ask/")).map((a) => new URL(a.url).searchParams.getAll("symbol"))).toEqual([["BTC-USD", "ETH-USD"]]);
     // every request a GET, signed: Ed25519 over api key + timestamp in seconds + path with its query + GET, and nothing else in the body
     expect(http.asked.every((a) => a.method === "GET")).toBe(true);
     for (const a of http.asked) {
@@ -239,8 +241,8 @@ describe("Robinhood's own sign-in", () => {
 });
 
 describe("Robinhood's investing accounts, through its MCP server", () => {
-  const signedIn = async (http: Http & { asked: Asked[] }, server: ReturnType<typeof mcpServer>) => {
-    const x = await boot({ http, openMcp: server.open });
+  const signedIn = async (http: Http & { asked: Asked[] }, server: ReturnType<typeof mcpServer>, o: { writes?: boolean } = {}) => {
+    const x = await boot({ http, openMcp: server.open, ...o });
     const signIn = x.svc.signIn("robinhood")!;
     const started = await signIn.start(CALLBACK);
     if (isRefusal(started)) throw new Error(started.message);
@@ -283,5 +285,26 @@ describe("Robinhood's investing accounts, through its MCP server", () => {
     expect([unread.code, unread.message]).toEqual(["E_VENUE_REJECTED", "Robinhood answered, but not in a shape this connection reads yet: nothing in it looks like an account, cash or a position"]);
     // what is said about the answer is its keys, never its values
     expect(JSON.stringify(unread.native)).toBe(JSON.stringify({ answered: [{ tool: "get_portfolio", keys: ["total"] }, { tool: "get_equity_positions", keys: ["string"] }] }));
+  });
+
+  it("a sign-in with no Agentic account: an order is refused before Robinhood is asked, saying how that account is opened", async () => {
+    const server = mcpServer(
+      {
+        get_accounts: { structuredContent: { data: { accounts: [{ account_number: "5RH00001234", brokerage_account_type: "individual", agentic_allowed: false }] } } },
+        get_portfolio: { structuredContent: { data: { cash: "250.00" } } },
+        get_equity_positions: { structuredContent: { data: { positions: [] } } },
+      },
+      [{ name: "get_accounts" }, { name: "get_portfolio", inputSchema: { required: ["account_number"] } }, { name: "get_equity_positions" }, { name: "get_equity_quotes" }, { name: "get_equity_tradability" }, { name: "place_equity_order" }, { name: "get_equity_orders" }, { name: "cancel_equity_order" }],
+    );
+    const x = await signedIn(robinhoodSignIn(), server, { writes: true });
+    summary(await x.own({ type: "connectVenue", venue: "robinhood", connector: "live:robinhood", label: "", credentialRef: x.state }));
+    server.called.length = 0;
+    const said = refusal(await x.svc.account!.prepare({ type: "liveOrder", venue: "robinhood", symbol: "AAPL", side: "buy", orderType: "market", qty: "1" }));
+    expect([said.code, said.message]).toEqual([
+      "E_VENUE_PERMISSION",
+      "Robinhood: this sign-in has no Robinhood Agentic account, the one account an agent may trade in (Robinhood marks it agentic_allowed): Robinhood opens it, as a self-directed individual investing account it calls the MCP account, during the sign-in that first connects an agent, so sign in again from the account page and open it there",
+    ]);
+    // not a quote, not an order: nothing was asked of Robinhood
+    expect(server.called).toEqual([]);
   });
 });

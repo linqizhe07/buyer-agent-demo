@@ -1,8 +1,9 @@
-/** LIVE connections: a venue the user really has, read through its own interface.
+/** LIVE connections: a venue the user really has, reached through its own interface.
  *
- * Everything in this directory READS. Nothing here places an order, starts a withdrawal or signs a transaction: a live venue on the account is
- * watch-only, and every runway through it is closed (account/doors.ts). What is real is what the page then shows — the balance the venue
- * reports, and what the venue says the credential may do.
+ * A source READS: the balance the venue reports, and what the venue says the credential may do. Some sources can also be asked to move
+ * money (`writer`, writes.ts) or to place orders (`trader`, trade.ts) — but nothing in this directory decides whether they are: the account's
+ * doors do (account/live-moves.ts, account/live-orders.ts), on the owner's signature or inside a limit the owner signed. A wallet's
+ * transaction is never signed here: it is handed to the wallet.
  *
  * A source is reached in one of two ways:
  *   · a KEY FILE in the home directory (an exchange, a broker): this process reads the file; no page, no agent and no ledger row ever
@@ -92,7 +93,8 @@ export const REGION = /restricted (location|jurisdiction|region|countr)|unavaila
 /** A venue's answer that is not a yes, as one of the account's refusals. The venue's own words go with it. A venue that does not serve this
  * location is the venue's rule: it is reported as that, and nothing here looks for another way in. */
 export function venueSaidNo(venue: string, name: string, status: number, text: string, secrets: Array<string | undefined> = []): Refusal {
-  const said = redact(text.replace(/\s+/g, " ").trim().slice(0, 220), secrets);
+  // redacted before the whitespace is folded: a secret that runs over several lines (a PEM key) is still found
+  const said = redact(text, secrets).replace(/\s+/g, " ").trim().slice(0, 220);
   const native = { status, said };
   if (status === 451 || REGION.test(text)) return no("E_VENUE_GEOBLOCKED", { venue, message: `${name} does not serve this location: that is its own rule, and the account does not look for a way around it`, native });
   if (status === 401) return no("E_VENUE_UNAUTHORIZED", { venue, message: `${name} does not accept this key`, native });
@@ -105,13 +107,13 @@ export function venueSaidNo(venue: string, name: string, status: number, text: s
 /** a thrown network failure (DNS, timeout, reset) as a refusal */
 export function unreachable(venue: string, name: string, err: unknown, secrets: Array<string | undefined> = []): Refusal {
   const e = err as { name?: string; message?: string };
-  return no("E_VENUE_UNREACHABLE", { venue, message: `${name} could not be reached${e?.name === "TimeoutError" ? ": no answer in time" : ""}`, native: { error: redact(String(e?.message ?? err).slice(0, 200), secrets) } });
+  return no("E_VENUE_UNREACHABLE", { venue, message: `${name} could not be reached${e?.name === "TimeoutError" ? ": no answer in time" : ""}`, native: { error: redact(String(e?.message ?? err), secrets).slice(0, 200) } });
 }
 
 /** whatever was thrown while a venue was being read, as a refusal: the venue's own no if it was one, otherwise "it answered something this could not read" */
 export function asRefusal(venue: string, name: string, err: unknown, secrets: Array<string | undefined> = []): Refusal {
   if (isRefusal(err)) return err;
-  return no("E_VENUE_REJECTED", { venue, message: `${name} answered in a way this connection could not read`, native: { error: redact(String((err as { message?: string })?.message ?? err).slice(0, 200), secrets) } });
+  return no("E_VENUE_REJECTED", { venue, message: `${name} answered in a way this connection could not read`, native: { error: redact(String((err as { message?: string })?.message ?? err), secrets).slice(0, 200) } });
 }
 
 export const num = (v: unknown): number => {

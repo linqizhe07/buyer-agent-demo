@@ -24,7 +24,9 @@ export type LedgerKind =
   | "action"
   | "account-refusal"
   | "payment"
-  | "order";
+  | "order"
+  /** one line of the account's statement: a transaction as it stands now (account/statement.ts) */
+  | "statement";
 
 export interface LedgerRowInput {
   kind: LedgerKind;

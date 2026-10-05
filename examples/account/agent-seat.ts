@@ -10,6 +10,7 @@
  *   npx tsx examples/account/agent-seat.ts order okx sell BTC/USDT 0.0001 70000    # a limit order: 0.0001 BTC at 70,000
  *   npx tsx examples/account/agent-seat.ts cancel okx ord-0001                     # take an order of this seat's off the book
  *   npx tsx examples/account/agent-seat.ts move withdraw okx wallet 5 USDC Arbitrum   # from an exchange to another place of the user's
+ *   npx tsx examples/account/agent-seat.ts move bridge wallet wallet 5 USDC Arbitrum Base   # from a wallet to the same wallet on another chain
  *   npx tsx examples/account/agent-seat.ts move transfer okx okx 5 USDT funding trading   # between an exchange's own ledgers
  *   npx tsx examples/account/agent-seat.ts move swap okx okx 5 USDT USDC              # one stablecoin for another there
  *
@@ -73,11 +74,14 @@ if (cmd === "whoami") {
   say(await send({ type: "agentLiveOrder", venue, symbol, side, orderType: e ? "limit" : "market", qty: usd ? "" : size, usd: usd ? size.slice(1) : "", limitPrice: e }));
 } else if (cmd === "cancel") {
   say(await send({ type: "agentLiveCancel", venue: kind, order: from }));
+} else if (cmd === "move" && kind === "bridge") {
+  // bridge <from wallet> <to: the same wallet or another place of the user's> <usd> [asset] <from chain> <to chain>
+  say(await send({ type: "agentLiveMove", kind, from, fromLedger: "", to: to || from, toLedger: g, asset: e || "USDC", toAsset: e || "USDC", network: f, amount, maxFee: "0" }));
 } else if (cmd === "move" && ["withdraw", "send", "transfer", "swap"].includes(kind)) {
   // withdraw: from an exchange · send: from a wallet · transfer: between an exchange's own ledgers · swap: one stablecoin for another there.
   // The account asks the destination for its address and the venue for its fee: the card the owner signs shows both
   const inside = kind === "transfer" || kind === "swap";
   say(await send({ type: "agentLiveMove", kind, from, fromLedger: kind === "transfer" ? f : "", to: inside ? from : to, toLedger: kind === "transfer" ? g : "", asset: e || "USDC", toAsset: kind === "swap" ? f || "USDC" : e || "USDC", network: inside ? "" : f, amount, maxFee: "0" }));
 } else {
-  console.log("usage: whoami · markets <venue> [query] · order <venue> buy|sell <symbol> <qty|$usd> [limit] · cancel <venue> <order> · move withdraw|send <from> <to> <usd> [asset] [network] · move transfer <venue> <venue> <usd> [asset] <fromLedger> <toLedger> · move swap <venue> <venue> <usd> <sell> <buy>");
+  console.log("usage: whoami · markets <venue> [query] · order <venue> buy|sell <symbol> <qty|$usd> [limit] · cancel <venue> <order> · move bridge <wallet> <to> <usd> [asset] <fromChain> <toChain> · move withdraw|send <from> <to> <usd> [asset] [network] · move transfer <venue> <venue> <usd> [asset] <fromLedger> <toLedger> · move swap <venue> <venue> <usd> <sell> <buy>");
 }

@@ -128,6 +128,23 @@ export async function startPortfolioServer(opts: PortfolioServerOptions): Promis
   };
   const bad = (res: express.Response, error: string) => res.status(400).json({ ok: false, error });
 
+  // Only this machine's own pages and programs talk to the account: a request that names another site as its origin, or reaches it under a
+  // host name that is not this server's (a DNS-rebinding page), is turned away before any route sees it. The page, the MCP seat and the
+  // terminal scripts send no foreign origin and use 127.0.0.1 or localhost
+  app.use((req, res, next) => {
+    const host = String(req.headers.host ?? "");
+    const local = /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i.test(host);
+    const origin = req.headers.origin;
+    // a browser says where a request comes from (Fetch Metadata): another site's request is refused, except a top-level navigation — a link to
+    // the page, or a venue's sign-in page sending the owner back (Robinhood's OAuth callback)
+    const site = req.headers["sec-fetch-site"];
+    const topLevel = req.headers["sec-fetch-mode"] === "navigate" && req.headers["sec-fetch-dest"] === "document" && req.method === "GET";
+    const foreignOrigin = typeof origin === "string" && origin !== `${req.protocol}://${host}`;
+    const foreignSite = (site === "cross-site" || site === "same-site") && !topLevel;
+    if (!local || foreignOrigin || foreignSite) return void res.status(403).json({ ok: false, error: "this server answers only its own pages on this machine" });
+    next();
+  });
+
   /** the owner's routes and the agents' routes are closed to an unsigned caller once the account layer is mounted */
   const layer = () => svc.account !== undefined;
   const ownerOnly = (res: express.Response, what: string) => void res.status(401).json({ ok: false, refusal: no("E_ACCOUNT_OWNER_SURFACE", { tool: what, message: `${what} is the owner's: it arrives as a signed action at POST /api/exchange` }) });
@@ -210,6 +227,13 @@ export async function startPortfolioServer(opts: PortfolioServerOptions): Promis
     res.status(isRefusal(r) ? 400 : 200).type("html").send(signedInPage(isRefusal(r) ? r.message : undefined));
   }));
 
+  // the statement: every transaction at the real venues, from every ledger in this home (so it outlives a restart), newest first
+  app.get("/api/account/statement", wrap(async (_req, res) => {
+    if (!svc.account) return void res.status(404).json({ ok: false, error: "the account layer is not mounted" });
+    await svc.account.settle();
+    res.json({ ok: true, lines: svc.statement() });
+  }));
+
   // the markets a venue connected live trades, and one market with a fresh price: what the order ticket and an agent read before an order
   app.get("/api/account/markets", wrap(async (req, res) => {
     if (!svc.account) return void res.status(404).json({ ok: false, error: "the account layer is not mounted" });
@@ -224,11 +248,37 @@ export async function startPortfolioServer(opts: PortfolioServerOptions): Promis
     res.status(isRefusal(r) ? 409 : 200).json(isRefusal(r) ? { ok: false, refusal: r } : { ok: true, market: r });
   }));
 
+  // the same coin or stock at every venue connected live, ranked by the price an order would take there
+  app.get("/api/account/compare", wrap(async (req, res) => {
+    if (!svc.account) return void res.status(404).json({ ok: false, error: "the account layer is not mounted" });
+    const q = (k: string) => (typeof req.query[k] === "string" ? String(req.query[k]).slice(0, 60) : "");
+    const usd = Number(q("usd"));
+    const r = await svc.liveCompare(q("base"), q("side") === "sell" ? "sell" : "buy", usd > 0 ? usd : undefined);
+    res.status(isRefusal(r) ? 409 : 200).json(isRefusal(r) ? { ok: false, refusal: r } : { ok: true, ...r });
+  }));
+
+  // the routes a bridge could take across chains from a wallet of the owner's, the one the account would sign for first (a read)
+  app.post("/api/account/bridge-routes", wrap(async (req, res) => {
+    if (!svc.account) return void res.status(404).json({ ok: false, error: "the account layer is not mounted" });
+    const draft = (req.body as { draft?: unknown }).draft;
+    if (!draft || typeof draft !== "object") return void bad(res, "need {draft: {from, to, network, toLedger, asset, toAsset, amount}}");
+    const r = await svc.account.live.bridgeRoutes(draft as Record<string, unknown>);
+    res.status(isRefusal(r) ? 409 : 200).json(isRefusal(r) ? { ok: false, refusal: r } : { ok: true, routes: r });
+  }));
+
   // the page says which transaction the wallet sent for a DEX order that was waiting for it; the chain decides from then on
   app.post("/api/account/live/order-sent", wrap(async (req, res) => {
     if (!svc.account) return void res.status(404).json({ ok: false, error: "the account layer is not mounted" });
     const { order, hash } = req.body as { order?: unknown; hash?: unknown };
-    const r = await svc.account.trade.sent(String(order ?? ""), String(hash ?? ""));
+    const r = await svc.account.serially(() => svc.account!.trade.sent(String(order ?? ""), String(hash ?? "")));
+    res.status(isRefusal(r) ? 409 : 200).json(isRefusal(r) ? { ok: false, refusal: r } : r);
+  }));
+
+  // a wallet order whose approval is on chain: the swap is built again from a fresh quote before the wallet is asked to send it
+  app.post("/api/account/live/order-requote", wrap(async (req, res) => {
+    if (!svc.account) return void res.status(404).json({ ok: false, error: "the account layer is not mounted" });
+    const { order } = req.body as { order?: unknown };
+    const r = await svc.account.serially(() => svc.account!.trade.requote(String(order ?? "")));
     res.status(isRefusal(r) ? 409 : 200).json(isRefusal(r) ? { ok: false, refusal: r } : r);
   }));
 
@@ -236,7 +286,7 @@ export async function startPortfolioServer(opts: PortfolioServerOptions): Promis
   app.post("/api/account/live/sent", wrap(async (req, res) => {
     if (!svc.account) return void res.status(404).json({ ok: false, error: "the account layer is not mounted" });
     const { payment, hash } = req.body as { payment?: unknown; hash?: unknown };
-    const r = await svc.account.live.sent(String(payment ?? ""), String(hash ?? ""));
+    const r = await svc.account.serially(() => svc.account!.live.sent(String(payment ?? ""), String(hash ?? "")));
     res.status(isRefusal(r) ? 409 : 200).json(isRefusal(r) ? { ok: false, refusal: r } : r);
   }));
 

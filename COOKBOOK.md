@@ -7,14 +7,14 @@ README 的「Account：资金的机场」讲这一层**是什么**，这里讲**
 ## 三个角色，一个入口
 
 - **owner**：钱的主人。页面上是浏览器里一把导不出来的设备钥匙。脚本和测试里是一把从标签派生的钱包钥匙。
-- **agent**：一把钥匙。owner 放它进来、给了额度之后，它能请求在你真实的账户之间动钱。Conservative 下每一笔都等你签；Aggressive 下额度内直接动。别的都不能。
+- **agent**：一把钥匙。owner 放它进来、给了额度之后，它能在你真实的账户上下单（还可以请求在账户之间挪钱，要另一份额度）。Conservative 下每一单都等你签；Aggressive 下额度内直接下。别的都不能。
 - **account**：跑着的服务。它验签、查额度，替你向场所要目的地址和手续费。agent 拿不到任何场所的凭据。
 
 所有改动走同一个入口：一条签了名的指令，`POST /api/exchange`。回答只有四种：
 
 | 状态 | 意思 |
 |---|---|
-| `200` | 做了。动钱返回一张付款单，可能还在途 |
+| `200` | 做了。下单返回订单（可能还挂着），动钱返回一张付款单（可能还在途） |
 | `202` | 先问 owner：页面上出现一张卡 |
 | `401` | 这把钥匙不是签名人（没授权、过期、被撤销） |
 | `409` | 拒绝，带一个说明越了哪条线的码（文末有速查） |
@@ -25,8 +25,9 @@ README 的「Account：资金的机场」讲这一层**是什么**，这里讲**
 
 | 想要 | 命令 |
 |---|---|
-| 接你真实的账户，自己点 | `npm run account`，打开 <http://127.0.0.1:4820>（`npm run portfolio` 同） |
-| 允许动真钱（终端打印配对码，每笔最多 $5） | `npm run account -- --live-writes --live-cap 5` |
+| 接你真实的账户，下单、动钱（终端打印配对码） | `npm run account`，打开 <http://127.0.0.1:4820>（`npm run portfolio` 同） |
+| 每一单、每一笔最多 $5 | `npm run account -- --live-cap 5`（默认 $100） |
+| 只读：不下单、不动钱 | `npm run account -- --read-only` |
 | 扮演一个 agent，对跑着的服务发请求 | `npx tsx examples/account/agent-seat.ts whoami` |
 | 让 Claude Code、Codex 这类 agent 来当 agent | `claude mcp add portfolio -- npx tsx src/portfolio/mcp.ts` |
 | 模拟账户里的规则，一个脚本从头走到尾，不起服务 | `npx tsx examples/account/headless.ts` |
@@ -34,7 +35,7 @@ README 的「Account：资金的机场」讲这一层**是什么**，这里讲**
 
 `npm run account -- --port 4821 --home /tmp/x` 另起一个互不相干的实例。`--classic` 是原来的模拟对账单，不挂这一层。
 
-页面从上到下：头部（Account、Conservative / Aggressive、真钱开关）· 净值和配置条 · 等你批的卡 · Accounts · Activity · Agents · Devices。`seat` 是这个别名：
+页面从上到下：头部（Account、Conservative / Aggressive、"Trading on · up to $100 an order" 或 "Read-only"）· 净值、配置条和流动性 · 等你批的卡 · Accounts · Statement · Agents · Devices。`seat` 是这个别名：
 
 ```bash
 alias seat='npx tsx examples/account/agent-seat.ts'
@@ -42,7 +43,7 @@ alias seat='npx tsx examples/account/agent-seat.ts'
 
 ## 1 · 成为 owner
 
-用 `--live-writes` 起的服务在终端打印一个配对码：打开页面，在顶上那一栏输入它，点 "Pair"，这个浏览器才成为 owner。没开真钱写入的服务，第一个打开页面的浏览器就是 owner。Devices 里那一行写着 "This browser"。
+能交易的服务（默认）在终端打印一个配对码：打开页面，在顶上那一栏输入它，点 "Pair"，这个浏览器才成为 owner。`--read-only` 起的服务，第一个打开页面的浏览器就是 owner。Devices 里那一行写着 "This browser"。
 
 - 不是 owner 时，页面顶上有一行 "This browser can look but not sign."，按钮都是灰的。让 owner 的浏览器在 Devices 里点 "Let it sign"。点 "Require both" 则变成两个都签才算数。
 - 配对码输错五次就不再收，重启服务换一个新码。
@@ -54,31 +55,31 @@ alias seat='npx tsx examples/account/agent-seat.ts'
 
 **交易所**（OKX、Kraken、Coinbase、Bybit、Binance，或 "Another exchange" 从统一接口库的一百来家里挑）：
 
-1. 点卡片，弹窗里三步。第一步 "open its API page" 打开交易所自己建 key 的页面，建一把**只读**的 key。
+1. 点卡片，弹窗里三步。第一步 "open its API page" 打开交易所自己建 key 的页面，建一把**能交易、不能提币**的 key。下面一行用这家自己的话写要勾什么，例如 OKX：Read 和 Trade（要在资金和交易账户之间划转再勾 Transfer），Withdraw 不勾，绑本机 IP（不绑 IP 的交易 key 闲置 14 天会被删）；Coinbase：签名算法选 ECDSA，权限 View 和 Trade；Binance：系统生成的 key 不绑 IP 只能读，要交易就绑 IP，或者用自己生成的 Ed25519 key。
 2. 第二步给出它要的文件路径（默认 `~/.buyer-agent-demo/credentials/okx/api-key.json`）和字段（`apiKey`、`secret`，OKX、KuCoin、Bitget 还要建 key 时设的 `password`）。"Copy" 复制路径；"Copy setup command" 复制一条命令：建目录、写一个空模板（文件已经在就不动它）、`chmod 600`、用 `nano` 打开，你把值填进去存盘。
 3. 第三步每两秒自己检查一次，只看字段名，不读值：`Waiting for the file…` → `Missing: password.` → `Others on this machine can read it.`（旁边 "Copy fix" 复制 `chmod 600`）→ `Ready.`
 4. 点 "Connect"。
 
 ```
-OKX connected live · $1,000.00 there now · the venue says this credential can read · not bound to an IP · a read-only key · read only: this server was started without real-money writes
+OKX connected live · $1,000.00 there now · the venue says this credential can read, trade · bound to an IP list · it can do more than read (trade) · real money moves only when you sign it, at most $100.00 a movement
 ```
 
-页面上这一句缩成 "OKX connected · $1,000.00"，后面 "details" 展开是全文。Accounts 多一行：余额是 OKX 自己报的，半分钟读一次；状态是一个小标签（Can move / Read-only / Watched / Read failed）；Details 里是持仓和场所对这把钥匙的说法。
+页面上这一句缩成 "OKX connected · $1,000.00"，后面 "details" 展开是全文。Accounts 多一行：余额是 OKX 自己报的，半分钟读一次；状态是一个小标签（Trades / Can move / Read-only key / Watched / Read failed）；Details 里是持仓、它交易什么、场所对这把钥匙的说法。钥匙没开交易的，标签是 "Read-only key"，Details 里写着这家要勾什么，改好后重新接。
 
-**钱包**（OKX Wallet、Binance Wallet、MetaMask 扩展等）：在装了钱包的浏览器里点 "Browser wallet"，再点你的钱包。钱包先给地址，再签一句话（不是交易，什么都不批准），这个地址就是你的。"Watch an address" 只粘贴地址：能看，既不收也不发真钱。
+**钱包**（OKX Wallet、Binance Wallet、MetaMask 扩展等）：在装了钱包的浏览器里点 "Browser wallet"，再点你的钱包。钱包先给地址，再签一句话（不是交易，什么都不批准），这个地址就是你的，从它可以换币（下面第 5 条）。"Watch an address" 只粘贴地址：能看，既不交易也不收发。
 
 **Robinhood**：
-- 投资账户：卡片 "Robinhood" → "Sign in at Robinhood…"，在 Robinhood 自己的页面登录、批准，回来点 "Connect"。读各账户的现金和股票持仓；令牌只在服务的内存里，重启要重新登录。
-- Crypto：在 Robinhood 网页版的 crypto 账户设置里建 API 凭据（你自己生成 Ed25519 密钥对，把公钥交给 Robinhood）。卡片 "Robinhood Crypto" 走和交易所一样的三步，字段是 `apiKey`、`privateKey`（base64 私钥）。
+- 投资账户：卡片 "Robinhood" → "Sign in at Robinhood…"，在 Robinhood 自己的页面登录、批准，回来点 "Connect"。读各账户的现金和股票持仓；下单只在 Robinhood 的 Agentic 账户里，整股。令牌只在服务的内存里，重启要重新登录。
+- Crypto：在 Robinhood 网页版的 crypto 账户设置里建 API 凭据（你自己生成 Ed25519 密钥对，把公钥交给 Robinhood，勾上读和下单）。卡片 "Robinhood Crypto" 走和交易所一样的三步，字段是 `apiKey`、`privateKey`（base64 私钥）。
 - Stock Tokens：接任何钱包（包括 "Watch an address" 粘贴 Robinhood Wallet 的地址）都会一起读 Robinhood Chain 上的 Stock Tokens。
 
-**其他**：MetaMask Agent Wallet 走本机的 `mm` 命令行（先确认 `mm wallet show` 能用）；Alpaca 和 Kalshi 是钥匙文件（Kalshi 是 `keyId` 加它给的私钥 `.pem` 的路径 `privateKeyFile`）；Hyperliquid、Polymarket、Ondo 填地址。
+**其他**：Alpaca 是钥匙文件（它的 key 没有权限可选，任何 key 都能下单，都不能动现金；先用 Paper 账户的 key 试）；Kalshi 是 `keyId` 加它给的私钥 `.pem` 的路径 `privateKeyFile`（有权限可选时选 `read` 和 `write::trade`）；MetaMask Agent Wallet 走本机的 `mm` 命令行（先确认 `mm wallet show` 能用）；Polymarket 要交易用账户钱包的钥匙文件，先问 Polymarket 自己这个地区让不让用；Hyperliquid、Ondo 只填地址、只读。
 
-拔掉点那一行的 "Disconnect"。场所那边的钥匙不动，要删去那边删。Accounts 右上 "Download CSV" 下载每个账户的持仓。
+拔掉点那一行的 "Disconnect"。还有没完成的单时拔不掉，先撤单。场所那边的钥匙不动，要删去那边删。Accounts 右上 "Download CSV" 下载每个账户的持仓。
 
-会被拒：钥匙文件不在、权限不是 600、缺字段 `E_ACCOUNT_CREDENTIAL` · 交易所不认这把钥匙 `E_VENUE_UNAUTHORIZED` · 场所不服务这个地区 `E_VENUE_GEOBLOCKED`（Binance、Bybit 从这台机器就是这样，那是它们的规矩）· 没应答 `E_VENUE_UNREACHABLE` · 已经接过同一个 `E_ACCOUNT_BAD_ACTION`（第二个账户在弹窗的 "More options" 里换一个 "Shown as"）。
+会被拒：钥匙文件不在、权限不是 600、缺字段 `E_ACCOUNT_CREDENTIAL` · 交易所不认这把钥匙 `E_VENUE_UNAUTHORIZED` · 场所不服务这个地区 `E_VENUE_GEOBLOCKED`（Binance、Bybit 从这台机器就是这样，那是它们的规矩）· 没应答 `E_VENUE_UNREACHABLE` · 已经接过同一个 `E_ACCOUNT_BAD_ACTION`（第二个账户在弹窗的 "More options" 里换一个 "Shown as"）· 还有没完成的单 `E_ACCOUNT_BAD_ACTION`。
 
-## 3 · 让一个 agent 进来，给它额度
+## 3 · 让一个 agent 进来，给它交易额度
 
 agent 先敲门：
 
@@ -91,115 +92,131 @@ seat "example-seat" · key 0xec4c4c61959f9f09b12683ea8077d10b223816c1
 401 ✗ E_ACCOUNT_UNKNOWN_SIGNER · this key is not authorised on the account: the owner lets it in under Agents
 ```
 
-页面 Agents 里出现一行 "asked to be let in"。点 "Let in…"，钥匙地址进了下面的表单。填名字，勾上它可以在哪几个账户之间动钱，填 Per move、Budget，选期限，点 "Save"。这是两个签名：先放钥匙进来，再给它额度。
+页面 Agents 里出现一行 "asked to be let in"。点 "Let in…"，钥匙地址进了下面的表单。填名字，在 "May trade at" 里勾上它可以下单的账户，填 Per order（每单最多值多少）和 Budget（一共能下多少单的钱），选期限，点 "Save"。要它也能在你的账户之间挪钱，再勾 "and move money between my accounts"。每一样是一个签名：放钥匙进来、交易额度、（勾了的话）挪钱额度。
 
 ```
-spending approval: venues every venue on the account now · up to $5 a payment · $20 in all · until Mon 12 Oct
+trading limit: every venue on the account now · up to $25 an order · $100 of orders in all · until Mon 12 Oct
 ```
 
-- 不填 Budget 只放钥匙进来：没有额度，它一分钱也动不了。
-- 改额度：那一行 "Change limit"，表单换成这个 agent，填新的数存下，新的替换旧的。
-- 单笔上限、总预算、到期，三样都算。拆成许多小笔也过不了总预算。等批的卡占着它那份预算。
+- 不填 Budget 只放钥匙进来：没有额度，它什么都做不了。
+- 改额度：那一行 "Change limit"，表单换成这个 agent，填新的数存下，新的替换旧的。去掉 "move money" 的勾，挪钱额度就收回。
+- 每单上限、总额、到期，三样都算。拆成许多小单也过不了总额。等批的卡占着它那份额度；没成交就撤掉的单，那份额度退回来。
 - 全勾上等于「所有账户」，指签字那一刻接上的账户。之后接上的不算，要再存一次点它的名。
+- 交易额度和挪钱额度是两样：有交易额度的 agent 不能把钱挪出场所，有挪钱额度的不能下单。
 
-MCP 席位同理：它的钥匙由 MCP 客户端的名字派生（环境变量 `PORTFOLIO_AGENT` 可以改名），工具 `portfolio_account` 返回它的地址和有没有被授权。
+MCP 席位同理：它的钥匙由 MCP 客户端的名字派生（环境变量 `PORTFOLIO_AGENT` 可以改名），工具 `portfolio_account` 返回它的地址、有没有被授权、额度还剩多少。
 
-会被拒：没点名 `E_MANDATE_RECIPIENT` · 超单笔 `E_MANDATE_PER_ORDER_CAP` · 超预算 `E_MANDATE_BUDGET` · 到期 `E_MANDATE_EXPIRED` · 没有额度 `E_MANDATE_NONE`。
+会被拒：没点名 `E_MANDATE_RECIPIENT` · 超每单 `E_MANDATE_PER_ORDER_CAP` · 超总额 `E_MANDATE_BUDGET` · 到期 `E_MANDATE_EXPIRED` · 没有额度 `E_MANDATE_NONE`。
 
 ## 4 · 选模式：保守还是激进
 
 头部右上两档：
 
-| 模式 | agent 请求动钱时 | 怎么切 |
+| 模式 | agent 下单时 | 怎么切 |
 |---|---|---|
-| Conservative（保守，真实账户的默认） | 每一笔都变成一张卡，你签了才走 | 点一下，不用签名 |
-| Aggressive（激进） | 额度内直接动，不再问你；超出额度就拒 | 点一下，是 owner 的一次签名 |
+| Conservative（保守，真实账户的默认） | 每一单都变成一张卡，卡上是数量、价格和价值，你签了才下 | 点一下，不用签名 |
+| Aggressive（激进） | 额度内直接下，不再问你；超出额度就拒 | 点一下，是 owner 的一次签名 |
 
-两档都一样的：钱只去你自己的地方，每笔不超过 `--live-cap`，场所自己的规矩照旧。Activity 里写着每一笔是 "approved by you" 还是 "inside its limit"。
+两档都一样的：每单不超过 `--live-cap`；市价单带着最差价格去场所（买最多比卖一高 2%，卖最少比买一低 2%）；撤单从不出卡；场所自己的规矩照旧。agent 挪钱也是这两档。Statement 里写着每一笔是 "approved by you" 还是 "inside its limit"。
 
-## 5 · 用真钱
+## 5 · 自己下单
 
-默认关。要打开，用这条命令起服务，终端会打印一个配对码：
+账户那一行点 "Trade…"：
+
+1. Market 里打几个字母（BTC、AAPL、FED），下拉里是这个场所交易的、以美元计价的市场。选一个，下面马上是它的价格和买一卖一；收盘了会写 "Closed now"。
+2. Buy / Sell，数量按美元（Dollars）或按单位（币、股、合约），Market 或 Limit（Limit 填价格）。
+3. 预览：确切数量（按美元下的单向下取整到这个市场的步长）、按什么价格估的值、市价买单最多花多少。"What you sign" 展开是要签的每个字段。
+4. 点 "Sign and place"。从钱包换币的，钱包会请你确认（要先授权的，先确认授权、等它上链，再确认换币）。
+
+Statement 最上面 "Under way" 里多一行：挂着的单每十秒问一次场所，有 "Cancel"，两单以上时右上有 "Cancel all N open"。成交、撤掉之后它落进下面的流水。
+
+**Statement** 是银行流水的样子：一行一笔交易（成交、提现、划转、跨链、换币），日期、说明、账户、金额（买入 −、卖出 +，挪钱照原数）、状态，下一行小字是谁做的、手续费、场所的编号或交易哈希。上面三个下拉按月份、账户、类型筛；最后一行是这一屏的合计（买了多少、卖了多少、挪了多少、手续费）。"Download CSV" 下载这一屏，"Print" 只打印流水。流水从账本文件读，重启以后还在。
+
+几条规矩：只交易美元计价的市场；每单不超过 `--live-cap`；签名十分钟内有效；下单前再问一次价格，买单涨过你签的价值、市价卖单跌了 2% 以上就不下；撤单要等场所说撤掉了才算，期间成交的照算。
+
+会被拒：服务是只读的 `E_WALLET_LIVE_WRITES_OFF` · 超上限 `E_ACCOUNT_LIMIT` · 不到最小单、不在步长上 `E_VENUE_ORDER_INVALID` · 收盘了 `E_VENUE_MARKET_CLOSED` · 没有美元价格 `E_ACCOUNT_UNPRICED` · 价格动了 `E_ACCOUNT_REQUOTE` · 签名过期 `E_ACCOUNT_EXPIRED` · 钥匙不许交易 `E_VENUE_PERMISSION` · 余额不够 `E_VENUE_INSUFFICIENT`。
+
+**先小后大**：第一次用 `--live-cap 5` 下一单几美元的；Alpaca 先用 Paper 账户，Kalshi 先用 demo。
+
+## 6 · agent 下单
 
 ```bash
-npm run account -- --live-writes --live-cap 5
+seat markets okx BTC
+seat order okx buy BTC/USDT '$5'
+seat order okx sell BTC/USDT 0.0001 70000
+seat cancel okx ord-0001
 ```
 
-头部右上出现橙色的 "Real money on · $5.00 a move"；没开时那里写 "Read-only"。
+MCP 里是 `portfolio_live_markets {venue, query | symbol}`、`portfolio_live_order {venue, symbol, side, orderType, qty | usd, limitPrice}`、`portfolio_live_cancel {venue, order}`。Conservative 下回答是 `202` 和一张卡；你签了才下，MCP 的 `portfolio_approval` 告诉 agent 结果。Aggressive 下额度内回答直接是 `200` 和订单：
 
-1. 输入配对码成为 owner（第 1 条），接上要用的账户（第 2 条）。钱包要从钱包本身接，才能收钱。
-2. 账户那一行点 "Move…"：提到你自己的地方、账本之间划转、稳定币互换，或者从钱包发。
-3. 填好金额，预览里是**账户替你向目的地要来的地址**、手续费上限、网络。确认没错，点 "Sign and send"。从钱包发的，钱包会再请你确认一次。
-4. Activity 里有这一笔，场所或链说到了才算到账。右上 "Download CSV" 下载全部。
+```
+202 ▣ card-0001 waits for the owner · Example seat asks to buy 0.00008 BTC at OKX · market · about $5.00
+200 ✓ ord-0001 · buy 0.00008 BTC/USDT at OKX · filled · filled at 62500
+```
 
-标着 "Read-only" 的那一行没有 "Move…"：钥匙只读的交易所，从它那里动不了钱，但它可以收你钱包发来的钱；"Watched" 的钱包只看，既不收也不发。
+agent 只能撤自己下的单；你能撤任何单。在模拟账户里才有的指令（`agentOrder`、`agentExecute`、`agentSendAsset`、`agentSwap`、`agentPay`）在这里回 `E_ACCOUNT_BAD_ACTION · this account holds real accounts only`。
 
-几条规矩：每笔不超过 `--live-cap`；签名十分钟内有效；执行前再问一次场所，地址或手续费变了就不执行；钱只去交易所自己的充值地址或签过那句话的钱包；第一次提到新地址，多数交易所要你先在它那边加白名单。MetaMask Agent Wallet 发钱还要它自己的开关 `PORTFOLIO_MM_WRITES=1`。
+## 7 · 动钱
 
-会被拒：服务没开写入 `E_WALLET_LIVE_WRITES_OFF` · 超上限 `E_ACCOUNT_LIMIT` · 目的地不是你的 `E_ACCOUNT_DESTINATION` · 地址或手续费变了 `E_ACCOUNT_REQUOTE` · 签名过期 `E_ACCOUNT_EXPIRED` · 钥匙不许提币 `E_VENUE_PERMISSION` · 地址不在交易所白名单 `E_VENUE_WITHDRAW_WHITELIST`。
+账户那一行点 "Move…"：提到你自己的地方、账本之间划转、稳定币互换，或者从钱包发。预览里是**账户替你向目的地要来的地址**、手续费上限、网络，点 "Sign and send"。Statement 里有这一笔，场所或链说到了才算到账。
 
-**先小后大**：第一次用只读钥匙；要写，先 `--live-cap 5` 走一笔几美元的。
-
-## 6 · agent 请求动真钱
+agent 请求挪钱（要有挪钱额度）：
 
 ```bash
 seat move withdraw okx wallet 5 USDC Arbitrum
 seat move transfer okx okx 5 USDT funding trading
-seat move swap okx okx 5 USDT USDC
 ```
 
-MCP 里是 `portfolio_live_move {kind, from, to, asset, network, amount}`。Conservative 下回答是 `202` 和一张卡：卡上是哪个 agent 要动、从哪到哪、多少，展开是账户向目的地要来的地址和场所报的手续费；你签了才走，MCP 的 `portfolio_approval` 告诉 agent 结果。Aggressive 下额度内回答直接是 `200` 和付款单：
+MCP 里是 `portfolio_live_move`。规矩：钱只去交易所自己的充值地址或签过那句话的钱包；第一次提到新地址，多数交易所要你先在它那边加白名单；钥匙不许提币的交易所，从它那里提不了，但能收钱；MetaMask Agent Wallet 发钱还要它自己的开关 `PORTFOLIO_MM_WRITES=1`。
 
+**跨链**：钱包那一行 "Move…" → "Across chains"。选落到哪里（这个钱包在另一条链上、你另一个钱包、你交易所在那条链上的充值地址）、从哪条链到哪条链、发什么到什么、多少。预览里是账户签的那条路线（最便宜的）、最少到账多少、大约多久、钱包要付的网络费，下面一行是其他路线。签了以后钱包先确认授权（要的话），再确认转账；Statement 里这一笔是 "On the way"，桥送到了才变成 "Done"。交易所提币时点 "Fees on every network"，每条链的手续费并排出来，点一个就换成那条链。
+
+```bash
+seat move bridge wallet wallet 25 USDC Arbitrum Base   # agent 请求（MCP 的 portfolio_live_move 带 toNetwork）
 ```
-202 ▣ card-0001 waits for the owner · Example seat asks to move 3 USDT at OKX from trading to funding
-200 ✓ pay-0001 · transfer okx → okx · $5 · settled · done at OKX
-```
 
-会被拒：钥匙没授权 `401` · 没有额度、没点名、超额 `E_MANDATE_*` · 服务没开写入 `E_WALLET_LIVE_WRITES_OFF` · 场所自己不许 `E_VENUE_*`。在模拟账户里才有的指令（`agentSendAsset`、`agentSwap`、`agentPay`，MCP 的 `portfolio_transfer`、`portfolio_pay`）在这里回 `E_ACCOUNT_BAD_ACTION · this account holds real accounts only`。
+会被拒：目的地不是你的 `E_ACCOUNT_DESTINATION` · 地址或手续费变了 `E_ACCOUNT_REQUOTE` · 钥匙不许提币 `E_VENUE_PERMISSION` · 地址不在交易所白名单 `E_VENUE_WITHDRAW_WHITELIST` · 同一条链、只看的钱包、没有桥能送 `E_ACCOUNT_BAD_ACTION` / `E_VENUE_RAIL_CLOSED` · 钱包报来的哈希不是构造的那笔 `E_VENUE_REJECTED`。
 
-## 7 · 批卡、拒卡
+**比价**：下单弹窗里选好市场，下面一行是同一个东西在你其他账户的价格："OKX is 0.20% better to buy: 62,031 · Trade there"，点了就在那家开同一单。agent 用 `portfolio_live_compare {base, side, usd}`。
+
+## 8 · 批卡、拒卡
 
 净值下面橙色边框的那一行；浏览器标签页的标题带着等你批的张数，比如 "(1) Account"。
 
-- "Details" 展开是你将要签的每个字段，包括目的地址和网络。
-- 批准是 owner 的一次签名，写明卡号和这张卡将放行的内容的哈希。放行时所有检查重跑：预算、上限、场所的报价有没有变。
+- "Details" 展开是你将要签的每个字段：市场、数量、价格、价值；挪钱的是目的地址和网络。
+- 批准是 owner 的一次签名，写明卡号和这张卡将放行的内容的哈希。批了下的就是卡上那一单：同一个市场、同样的数量；价格动过了头就不下。agent 的额度、签名、模式也都重查一遍：卡还在等的时候你收回了额度，批了也不下。
 - 卡 30 分钟过期（`E_ACCOUNT_CARD_EXPIRED`）。
 - agent 批不了自己的卡（`E_ACCOUNT_OWNER_ONLY`）。
 
-## 8 · 把 agent 停下来
+## 9 · 把 agent 停下来
 
 从轻到重：
 
 | 想做的 | 怎么做 |
 |---|---|
-| 只停这一笔 | 那张卡点 "Reject" |
-| 以后每一笔都先问你 | 头部切到 "Conservative"，不用签名 |
+| 只停这一单 | 那张卡点 "Reject"；已经下了的，Statement 最上面 "Cancel" |
+| 以后每一单都先问你 | 头部切到 "Conservative"，不用签名 |
 | 收紧或收回它的额度 | Agents 里那一行 "Change limit" |
 | 停掉这把钥匙 | Agents 里那一行 "Revoke" |
+| 撤掉所有挂着的单 | Statement 右上 "Cancel all N open" |
 
 钥匙撤销之后：
 
 ```
-seat move withdraw okx wallet 5 USDC Arbitrum
+seat order okx buy BTC/USDT '$5'
 401 ✗ E_ACCOUNT_AGENT_REVOKED · the agent key was revoked
 ```
 
 撤销过的钥匙不能再授权，要换一把新的。
 
-## 9 · 账本当证据
-
-每条被接受的指令连同它的签名信封写进账本，账本是一条哈希链。
+**账本当证据**：每条被接受的指令连同它的签名信封、每一单的下单、成交、撤单都写进账本，账本是一条哈希链。
 
 ```bash
 curl -s http://127.0.0.1:4820/api/overview | python3 -c "import json,sys; o=json.load(sys.stdin); print(o['chain'], o['ledgerPath'])"
 ```
 
-```
-{'ok': True, 'rows': 10} /Users/you/.buyer-agent-demo/portfolio/ledger-2026-10-05T03-45-22-552Z.jsonl
-```
-
 - 文件在 `$BUYER_HOME/portfolio/`（默认 `~/.buyer-agent-demo`），每次启动一个新文件。
-- 账户的状态在内存里：重启之后账户是空的，要重新接，Robinhood 要重新登录。账本文件留着：以前收过的指令，重启之后不会再收第二次。
+- 账户的状态在内存里：重启之后账户是空的，要重新接，Robinhood 要重新登录；重启前下的单在场所那边照旧，账户不再跟踪，去场所看。账本文件留着：以前收过的指令，重启之后不会再收第二次；发给场所的客户端编号每次启动都不同，不会撞上以前的单。
 
 # 下半 · 模拟账户里的规则
 
@@ -399,13 +416,16 @@ npx vitest run test/attack
 | `npm run account` 报 `port 4820 is already in use` | 已经有一个在跑了，直接打开页面。要第二个就加 `--port 4821 --home 〈另一个目录〉` |
 | 页面按钮全灰，顶上一行 "can look but not sign" | 你不是 owner，见第 1 条 |
 | 钥匙文件那一步一直 "Waiting for the file…" | 路径不对，或者文件还没存盘。复制弹窗里的路径或那条命令 |
-| 席位一直 `401` | 钥匙没授权、过期或被撤销，见第 3、8 条 |
-| `this account holds real accounts only` | 这条指令只动模拟的钱。真钱走 `liveMove` / `agentLiveMove`，见第 5、6 条 |
+| 席位一直 `401` | 钥匙没授权、过期或被撤销，见第 3、9 条 |
+| `this account holds real accounts only` | 这条指令只动模拟的钱。下单走 `liveOrder` / `agentLiveOrder`，动钱走 `liveMove` / `agentLiveMove`，见第 5、6、7 条 |
+| 账户那一行没有 "Trade…" | 服务是 `--read-only` 起的；或者钥匙没开交易（标签 "Read-only key"，Details 里写着要勾什么）；或者这个场所不能从这里下单（Hyperliquid、Ondo、只填了地址的 Polymarket） |
+| 下单回 `E_VENUE_ORDER_INVALID` | 不到这个市场的最小单，或者数量、价格不在步长上：Trade 弹窗里的价格行写着步长 |
+| Binance 的 key 下不了单 | 系统生成的 key 不绑 IP 只能读：绑本机 IP，或者用自己生成的 Ed25519 key |
 | `E_ACCOUNT_EXPIRED` | nonce 用了本机时间。取 `GET /api/now` |
 | `E_ACCOUNT_NONCE` | 这条指令收过了。同一条重发拿到的是第一次的结果，改了内容要换 nonce |
 | 刚接上的账户 agent 用不了 | 它不在旧额度里，见第 3 条 |
-| agent 的请求没有出卡就动了 | 模式是 Aggressive，见第 4 条 |
-| 重启之后什么都没了 | 状态在内存里，连接要重新接。账本文件还在 |
+| agent 的单没有出卡就下了 | 模式是 Aggressive，见第 4 条 |
+| 重启之后什么都没了 | 状态在内存里，连接要重新接；重启前的单在场所那边。账本文件还在 |
 
 ## 拒绝码速查
 
@@ -418,7 +438,9 @@ npx vitest run test/attack
 | `E_ACCOUNT_NOT_HOME` | agent 想把钱送到你自己的场所之外 |
 | `E_ACCOUNT_SOURCE` | 没写来源而账户是 Separate；或者动了别人的 float |
 | `E_ACCOUNT_DESTINATION` · `E_ACCOUNT_DEST_COOLING` | 目的地不是你的、不在地址簿、链不对，或者还在冷静期 |
-| `E_ACCOUNT_REQUOTE` · `E_ACCOUNT_CARD_EXPIRED` | 签过之后报价变了；卡过期了 |
+| `E_ACCOUNT_REQUOTE` · `E_ACCOUNT_CARD_EXPIRED` | 签过之后价格或报价变了；卡过期了 |
+| `E_ACCOUNT_ORDER_UNKNOWN` | 账户上没有这张单，或者它不是这把钥匙下的（agent 只能撤自己的单） |
+| `E_VENUE_ORDER_INVALID` · `E_VENUE_MARKET_CLOSED` · `E_VENUE_INSUFFICIENT` | 场所不按这样的数量、步长或价格接单；市场收盘了；余额不够 |
 | `E_ACCOUNT_FEE_CAP` · `E_ACCOUNT_THRESHOLD` · `E_ACCOUNT_UNPRICED` | 应用抽成高于你批的费率；签名人不够；这个币没有价格，没法判额度 |
 | `E_ACCOUNT_LIMIT` · `E_ACCOUNT_OWNER_SURFACE` | 超过账户自己的上限（含 `--live-cap`）；一个没签名的请求打到了只认 owner 设备的接口上，或配对码不对 |
 | `E_MANDATE_NONE` · `E_MANDATE_RECIPIENT` · `E_MANDATE_PER_ORDER_CAP` · `E_MANDATE_BUDGET` · `E_MANDATE_RATE` · `E_MANDATE_EXPIRED` | 支出授权的线：没有授权、没点名、超单笔、超预算、太频繁、到期 |
@@ -427,4 +449,5 @@ npx vitest run test/attack
 | `E_VENUE_RAIL_CLOSED` · `E_VENUE_MIN_DEPOSIT` · `E_VENUE_WITHDRAW_WHITELIST` · `E_VENUE_PERMISSION` | 场所自己的线：这扇门不对你开、低于最低额、地址不在白名单、钥匙不许 |
 | `E_WALLET_FLOAT_CAP` · `E_WALLET_INSUFFICIENT` · `E_WALLET_BLOCKLIST` | float 满了、不够，或者地址在黑名单上 |
 | `E_ACCOUNT_CREDENTIAL` · `E_VENUE_UNREACHABLE` · `E_VENUE_GEOBLOCKED` · `E_VENUE_UNAUTHORIZED` | 真实连接：钥匙文件不能用、场所没应答、场所不服务这个地区、场所不认这把钥匙 |
-| `E_WALLET_LIVE_WRITES_OFF` | 这个服务不动真钱（没用 `--live-writes` 起），或者 MetaMask 自己的开关没开 |
+| `E_WALLET_LIVE_WRITES_OFF` | 这个服务是 `--read-only` 起的，或者 MetaMask 自己的开关没开 |
+| `E_WALLET_SESSION_EXPIRED` · `E_WALLET_ACCOUNT_REVOKED` | agent 的会话结束了；这个账户对 agent 关着 |

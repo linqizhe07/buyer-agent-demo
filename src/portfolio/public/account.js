@@ -7,6 +7,8 @@ const money = (n) => "$" + Number(n || 0).toLocaleString("en-US", { minimumFract
 const short = (a) => (/^0x[0-9a-fA-F]{16,}$/.test(String(a)) ? `${String(a).slice(0, 8)}…${String(a).slice(-4)}` : String(a));
 /* an amount can be a cent or less: show what it was, not $0.00 */
 const fine = (n) => (n && Math.abs(n) < 0.01 ? "$" + Number(n).toFixed(6).replace(/0+$/, "") : money(n));
+/* a price as a person reads it: no float tails, up to eight decimals */
+const px = (n) => (n === undefined || n === null || n === "" ? "—" : Number(Number(n).toPrecision(10)).toLocaleString("en-US", { maximumFractionDigits: 8 }));
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many || one + "s"}`;
 const ny = (iso, opts) => new Intl.DateTimeFormat("en-GB", { timeZone: "America/New_York", ...opts }).format(new Date(iso));
 const nyDay = (iso) => ny(iso, { weekday: "short", day: "numeric", month: "short" }).replace(",", "");
@@ -18,8 +20,10 @@ let A = null;
 let busy = false;
 let flash = "";
 let said = "";
-let allActivity = false;
-let allOrders = false;
+let allStatement = false;
+/* the statement's lines (every transaction, from every run's ledger) and what it is filtered to */
+let S = [];
+const view = { month: "", account: "", type: "" };
 /* a connection's summary, short: its name and balance; the rest behind "details" */
 const sayHtml = (s) => {
   const m = /^(.+?) connected live · (\$[\d,.]+) there now · (.+)$/.exec(s || "");
@@ -32,7 +36,8 @@ const keyName = (address) => (A.keys.find((k) => k.address === address) || {}).n
 const nowMs = () => Date.parse(A.now);
 
 async function load() {
-  const r = await fetch("/api/account");
+  const [r, st] = await Promise.all([fetch("/api/account"), fetch("/api/account/statement").catch(() => null)]);
+  S = st && st.ok ? ((await st.json()).lines || []) : S;
   if (r.status === 404) return void (document.querySelector("main").innerHTML = '<p class="dim">This server runs the simulated statement (<span class="mono">--classic</span>). <a href="/">Open it</a>.</p>');
   A = await r.json();
   // the service was restarted under this page: it no longer knows this browser's key, so offer it again
@@ -81,6 +86,7 @@ function render() {
   $("connect").hidden = !A.connectLive;
   $("connect").disabled = !owner;
   renderAlloc(L);
+  renderLiquidity(L);
   $("banner").hidden = owner;
   if (Owner.role === "needs-code") {
     $("banner").innerHTML = `<form id="code-form" class="codeform"><span>Enter the pairing code shown in the terminal.</span><input name="code" placeholder="XXXX-XXXX" maxlength="9" autocomplete="off" spellcheck="false" required /><button type="submit" class="ink">Pair</button><span class="msg" id="code-msg"></span></form>`;
@@ -95,8 +101,7 @@ function render() {
   $("flash").innerHTML = flash ? esc(flash) : sayHtml(said);
   renderWaiting(owner);
   renderAccounts(L, owner);
-  renderOrders(owner);
-  renderActivity();
+  renderStatement(owner);
   renderAgents(L, owner);
   renderDevices(owner);
 }
@@ -111,6 +116,27 @@ function renderAlloc(L) {
   const slices = Object.keys(CLASS).filter((c) => by[c]).map((c) => ({ c, usd: by[c], pct: Math.round((by[c] / total) * 100) }));
   $("alloc-bar").innerHTML = slices.map((s) => `<i style="width:${(s.usd / total) * 100}%;background:${CLASS[s.c][1]}"></i>`).join("");
   $("alloc-legend").innerHTML = slices.map((s) => `<span style="color:${CLASS[s.c][1]}">■ ${CLASS[s.c][0]} ${s.pct}% · ${money(s.usd)}</span>`).join("");
+}
+
+/* Liquidity: the dollars that are ready (cash and dollar stablecoins), where they sit — which account, which ledger or chain — and how far
+   they can go from here: traded where they are, moved to another account of yours, or only taken out at the venue itself */
+function renderLiquidity(L) {
+  const rows = L.flatMap((v) => (v.holdings || []).filter((h) => (h.class === "cash" || h.class === "stable") && h.usd > 0 && !h.inTransit).map((h) => ({ v, h })));
+  const total = rows.reduce((s, r) => s + r.h.usd, 0);
+  $("liq").hidden = !(total > 0);
+  if (!(total > 0)) return;
+  const mobile = rows.filter((r) => canMove(r.v)).reduce((s, r) => s + r.h.usd, 0);
+  const tradable = rows.filter((r) => canTrade(r.v)).reduce((s, r) => s + r.h.usd, 0);
+  $("liq-sum").innerHTML = `<b>${money(total)}</b> in dollars, ready · ${money(tradable)} can trade where it is · ${money(mobile)} can move between your accounts${total - mobile > 0.005 ? ` · ${money(total - mobile)} leaves only at its venue` : ""}`;
+  const by = new Map();
+  for (const r of rows) {
+    const k = r.v.id;
+    if (!by.has(k)) by.set(k, { v: r.v, usd: 0, where: [] });
+    const e = by.get(k);
+    e.usd += r.h.usd;
+    e.where.push(`${r.h.asset}${r.h.note ? ` (${r.h.note})` : ""} ${money(r.h.usd)}`);
+  }
+  $("liq-body").innerHTML = `<table class="liq-t"><tbody>${[...by.values()].sort((a, b) => b.usd - a.usd).map((e) => `<tr><td>${esc(e.v.name)}<span class="why">${esc(e.where.join(" · "))}</span></td><td class="r num2">${money(e.usd)}</td><td class="dim small">${esc([canTrade(e.v) ? "trades here" : "", canMove(e.v) ? "moves out from here" : e.v.readOnlyBecause ? "moves only at the venue" : watched(e.v) ? "watched" : "this key only reads"].filter(Boolean).join(" · "))}</td></tr>`).join("")}</tbody></table>`;
 }
 
 function renderWaiting(owner) {
@@ -139,7 +165,7 @@ function accountRow(v, owner) {
   const status = v.stale ? `<span class="chip bad" title="${esc(v.stale)}">Read failed</span>` : canTrade(v) ? '<span class="chip warm">Trades</span>' : canMove(v) ? '<span class="chip warm">Can move</span>' : watched(v) ? '<span class="chip">Watched</span>' : v.trade && v.trade.can === false && writesOn() ? '<span class="chip" title="This key cannot trade">Read-only key</span>' : '<span class="chip">Read-only</span>';
   const holds = (v.holdings || []).filter((h) => h.amount);
   const can = v.liveCan && writesOn() && !watched(v) ? ["withdraw", "transfer", "swap"].filter((k) => v.liveCan[k] === true) : [];
-  const notes = [v.via, canTrade(v) ? `Trades ${v.trade.what}.` : "", v.trade && v.trade.can === false && writesOn() ? "This key can't trade: turn trading on for it at the venue, then connect it again." : "", can.length ? `Moves money: ${can.join(", ")}.` : "", keyOnlyReads(v) && !canTrade(v) ? "Read-only key: it can receive, not send." : "", watched(v) ? "Watched address: nothing is traded or sent from it." : "", v.proven ? `Proven yours by ${v.proven}.` : "", v.noTradeBecause && writesOn() ? v.noTradeBecause : "", v.readOnlyBecause && writesOn() && !canTrade(v) ? v.readOnlyBecause : "", v.stale ? `Last read failed: ${v.stale}` : ""].filter(Boolean);
+  const notes = [v.via, canTrade(v) ? `Trades ${v.trade.what}.` : "", v.trade && v.trade.can === false && writesOn() ? `This key can't trade. ${keyHow(v.id.replace(/-.*$/, ""))} Then connect it again.` : "", can.length ? `Moves money: ${can.join(", ")}.` : "", keyOnlyReads(v) && !canTrade(v) ? "Read-only key: it can receive, not send." : "", watched(v) ? "Watched address: nothing is traded or sent from it." : "", v.proven ? `Proven yours by ${v.proven}.` : "", v.noTradeBecause && writesOn() ? v.noTradeBecause : "", v.readOnlyBecause && writesOn() && !canTrade(v) ? v.readOnlyBecause : "", v.stale ? `Last read failed: ${v.stale}` : ""].filter(Boolean);
   const qty = (n) => Number(n).toLocaleString("en-US", { maximumFractionDigits: Math.abs(n) >= 1000 ? 2 : 6 });
   return `<tr><td><div class="vn">${esc(v.name)}</div><div class="cap dim">${esc(caption(v))}</div><details class="more"><summary>Details</summary>${holds.length ? `<div class="holds">${holds.slice(0, 12).map((h) => `<span>${esc(h.asset)}</span><span>${qty(h.amount)}</span><span class="dim">${h.usd ? money(h.usd) : "no price"}${h.note ? ` · ${esc(h.note)}` : ""}</span>`).join("")}</div>` : '<div class="dim">Nothing held there.</div>'}${notes.map((x) => `<div>${esc(x)}</div>`).join("")}</details></td><td class="r num2">${money(v.usd)}${v.asOf ? `<div class="cap dim">${nyTime(v.asOf)}</div>` : ""}</td><td>${status}</td><td class="r">${owner ? `${canTrade(v) ? `<button type="button" class="ink sm" data-trade="${esc(v.id)}">Trade…</button> ` : ""}${canMove(v) ? `<button type="button" class="sm" data-move="${esc(v.id)}">Move…</button> ` : ""}<button type="button" class="link dim" data-unplug="${esc(v.id)}">Disconnect</button>` : ""}</td></tr>`;
 }
@@ -156,84 +182,93 @@ function renderAccounts(L, owner) {
   if ($("csv-balances")) $("csv-balances").addEventListener("click", () => download(`balances-${A.now.slice(0, 10)}.csv`, [["account", "asset", "amount", "usd", "where", "as_of"], ...L.flatMap((v) => (v.holdings || []).map((h) => [v.name, h.asset, h.amount, h.usd, h.note || "", v.asOf || A.now]))]));
 }
 
-// ---- orders -----------------------------------------------------------------------------
+// ---- statement -------------------------------------------------------------------------
 
 const qtyOf = (n) => Number(n).toLocaleString("en-US", { maximumFractionDigits: Math.abs(n) >= 1000 ? 2 : 8 });
-const ORDER_ST = { filled: ["Filled", "settled"], partial: ["Part filled", "pending"], open: ["Open", "pending"], pending: ["Sent", "pending"], canceled: ["Canceled", ""], expired: ["Expired", ""], rejected: ["Rejected", "failed"] };
 const isLive = (o) => ["open", "partial", "pending"].includes(o.status);
-/* what an order is worth: what filled, at what it filled; otherwise what it was valued at when it was placed */
-const worthOf = (o) => (o.filledQty && o.avgPrice ? o.filledQty * o.avgPrice : o.qty * o.price);
-function renderOrders(owner) {
-  const list = A.orders || [];
-  const anyTrades = connected().some(canTrade);
-  $("orders-sec").hidden = !list.length && !anyTrades;
-  const working = list.filter(isLive);
-  $("orders-tools").innerHTML = list.length ? `${owner && working.length > 1 ? `<button type="button" class="link" id="cancel-all">Cancel all ${working.length} open</button> · ` : ""}<button type="button" class="link dim" id="csv-orders">Download CSV</button>` : "";
-  // every open order off the book, one signature each, the newest first
+const ST = { "not followed since a restart": ["Not followed since a restart", "failed"], filled: ["Filled", "settled"], settled: ["Done", "settled"], partial: ["Part filled", "pending"], open: ["Open", "pending"], pending: ["On the way", "pending"], "waiting for wallet": ["Waiting for your wallet", "pending"], canceled: ["Canceled", ""], expired: ["Expired", ""], rejected: ["Rejected", "failed"], failed: ["Failed", "failed"], returned: ["Returned", "failed"] };
+/* the month a line falls in, in New York time, as its date is shown */
+const monthOf = (iso) => new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" }).format(new Date(iso)).slice(0, 7);
+const monthName = (m) => new Intl.DateTimeFormat("en-GB", { month: "long", year: "numeric", timeZone: "UTC" }).format(new Date(`${m}-01T00:00:00Z`));
+/* a statement's amount: a buy is money out, a sell money in; a transfer between your own places is shown as it is */
+const amountOf = (l) => (l.type === "trade" ? (l.amountUsd ? `${l.amountUsd < 0 ? "−" : "+"}${fine(Math.abs(l.amountUsd))}` : "—") : fine(l.amountUsd));
+
+/** what is still under way: orders on a book, and anything waiting for your wallet — each with what you can do about it */
+function renderOpen(owner) {
+  const orders = (A.orders || []).filter(isLive);
+  const wallet = A.payments.filter((p) => p.live && p.status === "authorized");
+  if (!orders.length && !wallet.length) return void ($("open-now").innerHTML = "");
+  const orderRow = (o) => {
+    const waiting = o.walletTxs && !o.ref;
+    return `<tr><td>${o.side === "buy" ? "Buy" : "Sell"} ${esc(qtyOf(o.qty))} ${esc(o.contractSize ? "contracts" : o.base)} · ${esc(o.venueName)}<span class="why">${esc([`${nyDay(o.at)} ${nyTime(o.at)}`, byOf(o), o.type === "limit" ? `limit ${o.limitPrice}` : "market", o.note].join(" · "))}</span></td><td class="r num2">${fine(o.qty * o.price * (o.contractSize || 1))}</td><td>${owner ? `${waiting ? `<button type="button" class="link" data-order-send="${esc(o.id)}"${INFLIGHT.has(o.clientId) ? " disabled" : ""}>${o.reported ? "Report again" : "Send from wallet…"}</button> · ` : ""}<button type="button" class="link dim" data-cancel="${esc(o.id)}" data-venue="${esc(o.venue)}">Cancel</button>` : `<span class="st pending">${o.canceling ? "Canceling" : "Open"}</span>`}</td></tr>`;
+  };
+  const payRow = (p) => `<tr><td>${esc(whatOf(p))}<span class="why">${esc(`${nyDay(p.at)} ${nyTime(p.at)} · ${byOf(p)}${p.live.sendBy && !p.live.reported ? ` · send by ${nyTime(p.live.sendBy)}` : ""}`)}</span></td><td class="r num2">${fine(p.amountUsd)}</td><td>${owner ? `<button type="button" class="link" data-wallet-send="${esc(p.id)}"${INFLIGHT.has(`${p.id}@${p.at}`) ? " disabled" : ""}>${p.live.reported ? "Report again" : "Send from wallet…"}</button>` : '<span class="st pending">Waiting for your wallet</span>'}</td></tr>`;
+  $("open-now").innerHTML = `<div class="sub-h">Under way</div><table class="open-t"><tbody>${orders.map(orderRow).join("")}${wallet.map(payRow).join("")}</tbody></table>`;
+  for (const b of $("open-now").querySelectorAll("button[data-cancel]")) b.addEventListener("click", () => own({ type: "liveCancel", venue: b.dataset.venue, order: b.dataset.cancel }));
+  const later = (fn) => async (b) => {
+    b.disabled = true;
+    try {
+      await fn(b);
+    } catch (err) {
+      flash = String((err && err.message) || err).slice(0, 200);
+    }
+    await load();
+  };
+  for (const b of $("open-now").querySelectorAll("button[data-order-send]")) b.addEventListener("click", () => later(async () => sendOrderFromWallet(A.orders.find((x) => x.id === b.dataset.orderSend)))(b));
+  for (const b of $("open-now").querySelectorAll("button[data-wallet-send]")) b.addEventListener("click", () => later(async () => {
+    const p = A.payments.find((x) => x.id === b.dataset.walletSend);
+    const n = p && p.legs[0].native;
+    if (n && n.walletTx) await sendFromWallet(p, n.walletTx, n.walletTxs);
+  })(b));
+}
+
+/** Every transaction, one line each, like a bank statement: what, where, how much, who, how it stands. Filtered by month, account and type;
+ * downloaded as CSV; printed */
+function renderStatement(owner) {
+  renderOpen(owner);
+  const working = (A.orders || []).filter(isLive);
+  const months = [...new Set(S.map((l) => monthOf(l.at)))].sort().reverse();
+  if (view.month && view.month !== "all" && !months.includes(view.month)) view.month = "";
+  const month = view.month || (months.includes(monthOf(A.now)) ? monthOf(A.now) : "all");
+  const lines = S.filter((l) => (month === "all" || monthOf(l.at) === month) && (!view.account || l.account === view.account || l.to === view.account) && (!view.type || l.type === view.type));
+  $("statement-tools").innerHTML = `${owner && working.length > 1 ? `<button type="button" class="link" id="cancel-all">Cancel all ${working.length} open</button> · ` : ""}${S.length ? '<button type="button" class="link dim" id="csv-statement">Download CSV</button> · <button type="button" class="link dim" id="print-statement">Print</button>' : ""}`;
+  const accounts = [...new Map(S.flatMap((l) => [[l.account, l.accountName], ...(l.to ? [[l.to, l.toName || l.to]] : [])])).entries()];
+  $("statement-filters").innerHTML = S.length ? `${select("month", [["all", "All time"], ...months.map((m) => [m, monthName(m)])], month)}${select("account", [["", "All accounts"], ...accounts], view.account)}${select("type", [["", "Trades and transfers"], ["trade", "Trades"], ["transfer", "Transfers"]], view.type)}` : "";
+  for (const el of $("statement-filters").querySelectorAll("select")) el.addEventListener("change", () => { view[el.name] = el.value; allStatement = false; renderStatement(owner); });
+  if (!S.length) return void ($("statement").innerHTML = `<p class="empty">${connected().length ? "No transactions yet. Trade or move money from an account above, or let an agent trade inside a limit." : "Connect an account to start."}</p>`);
+  const sum = (f) => lines.filter(f).reduce((s, l) => s + Math.abs(l.amountUsd), 0);
+  // a trade counts what filled; a transfer counts unless it failed or never left; a fee only where money moved
+  const moved = (l) => l.type === "transfer" && !["failed", "returned", "waiting for wallet", "not followed since a restart"].includes(l.status);
+  const fees = lines.reduce((s, l) => s + (l.type === "transfer" && !moved(l) ? 0 : l.feeUsd || 0), 0);
+  const [bought, sold, sent] = [sum((l) => l.kind === "buy"), sum((l) => l.kind === "sell"), sum(moved)];
+  const total = [plural(lines.length, "transaction"), bought ? `bought ${money(bought)}` : "", sold ? `sold ${money(sold)}` : "", sent ? `moved ${money(sent)}` : "", fees ? `fees ${fine(fees)}` : ""].filter(Boolean).join(" · ");
+  const shown = allStatement ? lines : lines.slice(0, 25);
+  $("print-head").innerHTML = `<b>Account statement</b> · ${esc(month === "all" ? "all time" : monthName(month))}${view.account ? ` · ${esc(nameOf(view.account))}` : ""} · printed ${esc(nyDay(A.now))} ${esc(nyTime(A.now))} New York`;
+  $("statement").innerHTML = lines.length
+    ? `<table class="stmt"><thead><tr><th>Date</th><th>Description</th><th class="hide-s">Account</th><th class="r">Amount</th><th>Status</th></tr></thead><tbody>${shown.map((l) => {
+      const [label, cls] = ST[l.status] || [l.status, ""];
+      const sub = [l.by, l.type === "trade" && !l.amountUsd && l.worthUsd ? `worth ${fine(l.worthUsd)}` : "", l.feeUsd ? `fee ${fine(l.feeUsd)}` : "", l.ref ? `ref ${short(l.ref)}` : "", l.id].filter(Boolean).join(" · ");
+      return `<tr><td class="num2 dim">${esc(nyDay(l.at))}<span class="why">${esc(nyTime(l.at))}</span></td><td>${esc(l.description)}<span class="why">${esc(sub)}</span></td><td class="hide-s">${esc(l.accountName)}${l.toName ? ` → ${esc(l.toName)}` : ""}</td><td class="r num2">${esc(amountOf(l))}</td><td><span class="st ${cls}">${esc(label)}</span></td></tr>`;
+    }).join("")}</tbody></table><div class="totals dim small">${esc(total)}</div>${lines.length > shown.length ? `<button type="button" class="link dim more-btn" id="all-statement">Show all ${lines.length}</button>` : ""}`
+    : '<p class="empty">Nothing in this view.</p>';
+  if ($("all-statement")) $("all-statement").addEventListener("click", () => { allStatement = true; renderStatement(owner); });
   if ($("cancel-all")) $("cancel-all").addEventListener("click", async () => {
+    // every open order off the book, one signature each
     for (const o of working) await own({ type: "liveCancel", venue: o.venue, order: o.id });
   });
-  if (!list.length) return void ($("orders").innerHTML = '<p class="empty">No orders yet. Trade from an account above, or let an agent trade inside a limit.</p>');
-  const shown = allOrders ? list : list.slice(0, 10);
-  $("orders").innerHTML = `<table><tbody>${shown.map((o) => {
-    const [label, cls] = ORDER_ST[o.status] || [o.status, ""];
-    const waiting = o.walletTxs && !o.ref && isLive(o);
-    const sub = [`${nyDay(o.at)} ${nyTime(o.at)}`, byOf(o), o.type === "limit" ? `limit ${o.limitPrice}` : "market", o.note].filter(Boolean).join(" · ");
-    return `<tr><td>${o.side === "buy" ? "Buy" : "Sell"} ${esc(qtyOf(o.qty))} ${esc(o.base)} · ${esc(o.venueName)}${o.base !== o.symbol ? `<span class="dim"> ${esc(o.name)}</span>` : ""}<span class="why">${esc(sub)}</span></td><td class="r num2">${fine(worthOf(o))}</td><td><span class="st ${cls}">${esc(waiting ? "Waiting for your wallet" : label)}</span>${owner && isLive(o) ? `<span class="why">${waiting ? `<button type="button" class="link" data-order-send="${esc(o.id)}">Send from wallet…</button> · ` : ""}<button type="button" class="link dim" data-cancel="${esc(o.id)}" data-venue="${esc(o.venue)}">Cancel</button></span>` : ""}</td></tr>`;
-  }).join("")}</tbody></table>${list.length > shown.length ? `<button type="button" class="link dim more-btn" id="all-orders">Show all ${list.length}</button>` : ""}`;
-  if ($("all-orders")) $("all-orders").addEventListener("click", () => { allOrders = true; renderOrders(owner); });
-  $("csv-orders").addEventListener("click", () => download(`orders-${A.now.slice(0, 10)}.csv`, [["id", "time", "account", "market", "side", "type", "qty", "limit_price", "valued_at", "status", "filled_qty", "avg_price", "fee_usd", "by", "venue_order_id"], ...list.map((o) => [o.id, o.at, o.venueName, o.symbol, o.side, o.type, o.qty, o.limitPrice ?? "", o.price, o.status, o.filledQty, o.avgPrice ?? "", o.feeUsd ?? "", byOf(o), o.ref])]));
-  for (const b of $("orders").querySelectorAll("button[data-cancel]")) b.addEventListener("click", () => own({ type: "liveCancel", venue: b.dataset.venue, order: b.dataset.cancel }));
-  for (const b of $("orders").querySelectorAll("button[data-order-send]")) {
-    b.addEventListener("click", async () => {
-      const o = A.orders.find((x) => x.id === b.dataset.orderSend);
-      if (!o) return;
-      b.disabled = true;
-      try {
-        await sendOrderFromWallet(o);
-      } catch (err) {
-        flash = String((err && err.message) || err).slice(0, 200);
-      }
-      await load();
-    });
-  }
+  if ($("csv-statement")) $("csv-statement").addEventListener("click", () => download(`statement-${month === "all" ? "all" : month}.csv`, [["date", "id", "type", "kind", "account", "to", "description", "amount_usd", "fee_usd", "status", "by", "ref"], ...lines.map((l) => [l.at, l.id, l.type, l.kind, l.accountName, l.toName || "", l.description, l.amountUsd, l.feeUsd ?? "", l.status, l.by, l.ref || ""])]));
+  if ($("print-statement")) $("print-statement").addEventListener("click", () => {
+    allStatement = true;
+    renderStatement(owner);
+    document.body.dataset.print = "statement";
+    window.print();
+    delete document.body.dataset.print;
+  });
 }
-
-// ---- activity ---------------------------------------------------------------------------
 
 const whatOf = (p) => (p.kind === "swap" ? `Swap at ${nameOf(p.from)} · ${p.sourceToken} → ${p.token}` : p.kind === "transfer" && p.from === p.to ? `Transfer at ${nameOf(p.from)} · ${p.legs[0].fromLedger} → ${p.legs[0].toLedger}` : `${p.kind[0].toUpperCase() + p.kind.slice(1)} · ${nameOf(p.from)} → ${nameOf(p.to)}${p.live && p.live.network ? ` · ${p.live.network}` : ""}`);
-/* who moved it: you, or an agent — on your yes (Conservative), or inside its limit (Aggressive) */
+/* who did it: you, or an agent — on your yes (Conservative), or inside its limit (Aggressive) */
 const byOf = (p) => (p.authority !== "agent" ? "You" : `${keyName(p.agent)}, ${p.card ? "approved by you" : "inside its limit"}`);
-const statusOf = (p) => (p.status === "authorized" ? "Waiting for your wallet" : p.status === "pending" ? "On the way" : p.status[0].toUpperCase() + p.status.slice(1));
-function renderActivity() {
-  const list = A.payments.filter((p) => p.live);
-  // nothing has moved and nothing can: the section waits until something can
-  $("activity-sec").hidden = !list.length && !connected().some(canMove);
-  $("activity-tools").innerHTML = list.length ? '<button type="button" class="link dim" id="csv-activity">Download CSV</button>' : "";
-  if (!list.length) return void ($("activity").innerHTML = '<p class="empty">Nothing has moved yet.</p>');
-  const shown = allActivity ? list : list.slice(0, 10);
-  $("activity").innerHTML = `<table><tbody>${shown.map((p) => {
-    const wallet = p.status === "authorized" && p.legs[0].native && p.legs[0].native.walletTx;
-    const sub = [`${nyDay(p.at)} ${nyTime(p.at)}`, byOf(p), p.feeUsd ? `fee ${fine(p.feeUsd)}` : "", p.live.toAddress ? `to ${short(p.live.toAddress)}` : ""].filter(Boolean).join(" · ");
-    return `<tr><td>${esc(whatOf(p))}<span class="why">${esc(sub)}</span></td><td class="r num2">${fine(p.amountUsd)}</td><td><span class="st ${esc(p.status === "authorized" ? "pending" : p.status)}">${esc(statusOf(p))}</span>${wallet ? `<span class="why"><button type="button" class="link" data-wallet-send="${esc(p.id)}">Send from wallet…</button></span>` : ""}</td></tr>`;
-  }).join("")}</tbody></table>${list.length > shown.length ? `<button type="button" class="link dim more-btn" id="all-activity">Show all ${list.length}</button>` : ""}`;
-  if ($("all-activity")) $("all-activity").addEventListener("click", () => { allActivity = true; renderActivity(); });
-  $("csv-activity").addEventListener("click", () => download(`activity-${A.now.slice(0, 10)}.csv`, [["id", "time", "kind", "from", "to", "network", "amount_usd", "fee_usd", "status", "by", "to_address", "note"], ...list.map((p) => [p.id, p.at, p.kind, nameOf(p.from), nameOf(p.to), (p.live && p.live.network) || "", p.amountUsd, p.feeUsd || 0, p.status, byOf(p), (p.live && p.live.toAddress) || "", p.note || ""])]));
-  for (const b of $("activity").querySelectorAll("button[data-wallet-send]")) {
-    b.addEventListener("click", async () => {
-      const p = A.payments.find((x) => x.id === b.dataset.walletSend);
-      const tx = p && p.legs[0].native && p.legs[0].native.walletTx;
-      if (!tx) return;
-      b.disabled = true;
-      try {
-        await sendFromWallet(p.id, tx);
-      } catch (err) {
-        flash = String((err && err.message) || err).slice(0, 200);
-      }
-      await load();
-    });
-  }
-}
 
 /* a table as a CSV file the browser saves */
 const csvCell = (c) => { const v = String(c ?? ""); return /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v; };
@@ -381,16 +416,42 @@ async function walletFor(address) {
 }
 
 /** the account built the transaction; the wallet shows it to you and sends it; the page tells the account which transaction it was */
-async function sendFromWallet(paymentId, tx) {
-  const w = await walletFor(tx.from);
+async function sendFromWallet(p, tx, txs) {
+  const key = `${p.id}@${p.at}`;
+  if (INFLIGHT.has(key)) throw new Error(`${p.id} is already waiting for your wallet: finish it there`);
+  INFLIGHT.add(key);
   try {
-    await w.provider.request({ method: "wallet_switchEthereumChain", params: [{ chainId: tx.chainIdHex }] });
-  } catch (err) {
-    throw new Error(`${w.info.name} did not switch to the right network: ${(err && err.message) || err}`);
+    await sendPaymentOnce(p, key, tx, txs);
+  } finally {
+    INFLIGHT.delete(key);
   }
-  const hash = await w.provider.request({ method: "eth_sendTransaction", params: [{ from: tx.from, to: tx.to, data: tx.data, value: tx.value }] });
+}
+async function sendPaymentOnce(p, key, tx, txs) {
+  const paymentId = p.id;
+  // asked again first: the account may already have a hash for it (another tab, a reload), and then that one is reported, nothing is sent
+  const now = ((await (await fetch("/api/account")).json()).payments || []).find((x) => x.id === p.id && x.at === p.at);
+  if (!now || !(now.status === "authorized" || (now.status === "failed" && now.live && now.live.expired))) throw new Error(`${p.id} is no longer waiting for your wallet (${now ? now.status : "gone"}): nothing was sent`);
+  if (now.live && now.live.reported) SENT.set(key, now.live.reported);
+  const all = txs && txs.length ? txs : [tx];
+  const w = await walletFor(all[0].from);
+  const send = async (t) => {
+    try {
+      await w.provider.request({ method: "wallet_switchEthereumChain", params: [{ chainId: t.chainIdHex }] });
+    } catch (err) {
+      throw new Error(`${w.info.name} did not switch to the right network: ${(err && err.message) || err}`);
+    }
+    return w.provider.request({ method: "eth_sendTransaction", params: [{ from: t.from, to: t.to, data: t.data, value: t.value, ...(t.gas ? { gas: t.gas } : {}) }] });
+  };
+  // a bridge's approval first, on chain before the transfer; a transfer the wallet already sent is reported again, never sent twice
+  let hash = SENT.get(key);
+  if (!hash) {
+    for (const t of all.slice(0, -1)) await mined(w, await send(t));
+    hash = await send(all[all.length - 1]);
+    SENT.set(key, hash);
+  }
   const r = await postJson("/api/account/live/sent", { payment: paymentId, hash });
-  if (r.status !== 200) throw new Error(Owner.why(r) || "the account could not take the transaction");
+  if (r.status !== 200) throw new Error(`${Owner.why(r) || "the account could not take the transaction"}. Your wallet sent ${short(hash)}: “Report again” reports that same transaction, it does not send another`);
+  SENT.delete(key);
   said = `${w.info.name} sent it: ${short(hash)}`;
 }
 
@@ -399,7 +460,7 @@ function openLiveMove(venueId) {
   const v = A.venues.find((x) => x.id === venueId);
   if (!v || !v.liveCan) return;
   const c = v.liveCan;
-  const kinds = [...(c.withdraw !== false && !c.send ? [["withdraw", "Withdraw to another account of yours"]] : []), ...(c.send ? [["send", "Send from this wallet"]] : []), ...(c.ledgers.length > 1 && c.transfer !== false ? [["transfer", "Between its own ledgers"]] : []), ...(c.swap !== false && !c.send ? [["swap", "Swap stablecoins"]] : [])];
+  const kinds = [...(c.withdraw !== false && !c.send ? [["withdraw", "Withdraw to another account of yours"]] : []), ...(c.send ? [["send", "Send from this wallet"]] : []), ...(c.send === "wallet" && v.proven ? [["bridge", "Across chains"]] : []), ...(c.ledgers.length > 1 && c.transfer !== false ? [["transfer", "Between its own ledgers"]] : []), ...(c.swap !== false && !c.send ? [["swap", "Swap stablecoins"]] : [])];
   const dests = A.venues.filter((x) => x.id !== v.id && x.watchOnly && x.liveCan && x.liveCan.receive && !x.readOnlyBecause);
   $("modal-form").innerHTML = `<h2>Move money · ${esc(v.name)}</h2><div class="dim small">Up to ${money(A.connectLive.writes.capUsd)} a move.</div>
     ${field("What", select("kind", kinds))}
@@ -411,6 +472,8 @@ function openLiveMove(venueId) {
   const form = $("modal-form");
   let prepared = null;
   let timer = 0;
+  // the latest ask wins: an answer to an older one is dropped (each ask of a bridge costs LI.FI quotes)
+  let seq = 0;
   const say = (text, state) => { $("modal-msg").className = `msg${text && state ? ` ${state}` : ""}`; $("modal-msg").textContent = text || ""; };
   const body = () => {
     const k = form.elements.kind.value;
@@ -419,16 +482,33 @@ function openLiveMove(venueId) {
       ? `<div class="row">${field("From", select("fromLedger", c.ledgers.map((l) => [l, l])))}${field("To", select("toLedger", c.ledgers.map((l) => [l, l]), c.ledgers[1]))}</div><div class="row">${field("Currency", select("asset", assets))}${field("Amount", '<input name="amount" inputmode="decimal" placeholder="50" autocomplete="off" required />')}</div>`
       : k === "swap"
         ? `<div class="row">${field("Sell", select("asset", assets, "USDT"))}${field("Buy", select("toAsset", assets, "USDC"))}</div>${field("Amount", '<input name="amount" inputmode="decimal" placeholder="50" autocomplete="off" required />')}`
-        : `${dests.length ? field("To", select("to", dests.map((d) => [d.id, `${d.name}${d.address ? (d.proven ? "" : " · watched") : ""}`, !!d.address && !d.proven]))) : '<div class="path dim">Connect where it should go first: another exchange, or your wallet from the wallet itself.</div>'}<div class="row">${field("Network", select("network", NETWORKS.map((x) => [x, x])))}${field("Currency", select("asset", assets))}</div>${field("Amount", '<input name="amount" inputmode="decimal" placeholder="25" autocomplete="off" required />')}`;
+        : k === "bridge"
+          ? `${field("To", select("to", [[v.id, "This wallet, on the other chain"], ...dests.filter((d) => !d.address || d.proven).map((d) => [d.id, d.name])]))}<div class="row">${field("From chain", select("network", NETWORKS.map((x) => [x, x]), "Arbitrum"))}${field("To chain", select("toLedger", NETWORKS.map((x) => [x, x]), "Base"))}</div><div class="row">${field("Send", select("asset", assets))}${field("Arrives as", select("toAsset", assets))}</div>${field("Amount", '<input name="amount" inputmode="decimal" placeholder="25" autocomplete="off" required />')}`
+        : `${dests.length ? field("To", select("to", dests.map((d) => [d.id, `${d.name}${d.address ? (d.proven ? "" : " · watched") : ""}`, !!d.address && !d.proven]))) : '<div class="path dim">Connect where it should go first: another exchange, or your wallet from the wallet itself.</div>'}<div class="row">${field("Network", select("network", NETWORKS.map((x) => [x, x])))}${field("Currency", select("asset", assets))}</div>${field("Amount", '<input name="amount" inputmode="decimal" placeholder="25" autocomplete="off" required />')}${k === "withdraw" ? '<div class="path"><button type="button" class="link dim" id="fees-all">Fees on every network</button><span id="fees-list" class="dim small"></span></div>' : ""}`;
+    if ($("fees-all")) $("fees-all").addEventListener("click", feesEverywhere);
     for (const el of form.querySelectorAll("#move-body select, #move-body input")) el.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(quote, 300); });
     quote();
   };
   const draft = () => {
     const f = formOf("modal-form");
     const k = f.kind;
-    return { type: "liveMove", kind: k, from: v.id, to: k === "transfer" || k === "swap" ? v.id : f.to || "", fromLedger: f.fromLedger || "", toLedger: f.toLedger || "", asset: f.asset || "USDC", toAsset: k === "swap" ? f.toAsset : f.asset || "USDC", network: k === "transfer" || k === "swap" ? "" : f.network || "", amount: String(f.amount || "").trim() };
+    return { type: "liveMove", kind: k, from: v.id, to: k === "transfer" || k === "swap" ? v.id : f.to || "", fromLedger: f.fromLedger || "", toLedger: f.toLedger || "", asset: f.asset || "USDC", toAsset: k === "swap" || k === "bridge" ? f.toAsset || f.asset : f.asset || "USDC", network: k === "transfer" || k === "swap" ? "" : f.network || "", amount: String(f.amount || "").trim() };
+  };
+  /* a withdrawal's fee on every network the destination takes, side by side: one click picks the network */
+  const feesEverywhere = async () => {
+    const d = draft();
+    if (!(Number(d.amount) > 0)) return void ($("fees-list").textContent = " · type an amount first");
+    $("fees-list").textContent = " · asking…";
+    const rows = await Promise.all(NETWORKS.map(async (n) => {
+      const r = await Owner.prepare({ ...d, network: n });
+      return r.status === 200 ? { n, fee: Number(r.body.action.maxFee) } : { n, why: Owner.why(r) };
+    }));
+    const okRows = rows.filter((x) => x.fee !== undefined).sort((a, b) => a.fee - b.fee);
+    $("fees-list").innerHTML = ` · ${okRows.map((x) => `<button type="button" class="link" data-net="${esc(x.n)}">${esc(x.n)} ${esc(x.fee.toFixed(2))} ${esc(d.asset)}</button>`).join(" · ") || "no network takes it"}${rows.length > okRows.length ? ` · not on ${esc(rows.filter((x) => x.fee === undefined).map((x) => x.n).join(", "))}` : ""}`;
+    for (const b of $("fees-list").querySelectorAll("button[data-net]")) b.addEventListener("click", () => { form.elements.network.value = b.dataset.net; quote(); });
   };
   const quote = async () => {
+    const my = ++seq;
     prepared = null;
     $("modal-go").disabled = true;
     $("signs").hidden = true;
@@ -436,10 +516,24 @@ function openLiveMove(venueId) {
     if (!(Number(d.amount) > 0)) return void ($("quote").innerHTML = '<span class="dim">Fill it in to see where it goes and what it costs.</span>');
     $("quote").innerHTML = `<span class="dim">Asking ${esc(v.name)}…</span>`;
     const r = await Owner.prepare(d);
+    if (my !== seq) return;
     if (r.status !== 200) return void ($("quote").innerHTML = `<div class="msg no">${esc(Owner.why(r))}</div>`);
     prepared = r.body;
     const a = prepared.action;
     const to = A.venues.find((x) => x.id === a.to) || {};
+    if (a.kind === "bridge") {
+      // the route the account signs for (the cheapest), and the others, from the same answer the bridge will be held to
+      const rr = await postJson("/api/account/bridge-routes", { draft: d });
+      if (my !== seq) return;
+      const routes = rr.status === 200 ? rr.body.routes : [];
+      const best = routes[0];
+      const eta = (s) => (s < 90 ? `~${Math.max(1, Math.round(s))} s` : s < 5400 ? `~${Math.round(s / 60)} min` : `~${Math.round(s / 3600)} h`);
+      $("quote").innerHTML = `<div class="big"><span>${esc(a.amount)} ${esc(a.asset)} · ${esc(a.network)} → ${esc(a.toLedger)}</span><span>fee up to ${esc(a.maxFee)}</span></div>${best ? `<div class="path"><b>Via ${esc(best.tool)}</b> · at least ${money(best.receiveUsd)} ${esc(a.toAsset)} arrives · ${esc(eta(best.etaSec))}${best.gasUsd ? ` · network fee about ${fine(best.gasUsd)} in your wallet` : ""}</div>` : ""}${routes.length > 1 ? `<div class="path">Other routes: ${routes.slice(1).map((x) => `${esc(x.tool)} fee ${fine(x.feeUsd)}, ${esc(eta(x.etaSec))}`).join(" · ")}</div>` : ""}<div class="path"><b>To</b> ${esc(a.to === v.id ? "this wallet" : to.name || a.to)} · <span class="mono">${esc(a.toAddress)}</span> on ${esc(a.toLedger)}</div><div class="path">Your wallet sends it; it lands on ${esc(a.toLedger)} when the bridge delivers. Can't be undone. Your signature is good for 10 minutes.</div>`;
+      $("signs-pre").textContent = prepared.shown.map((x) => `${x.name}: ${x.value}`).join("\n");
+      $("signs").hidden = false;
+      $("modal-go").disabled = Owner.role !== "owner";
+      return;
+    }
     $("quote").innerHTML = `<div class="big"><span>${esc(a.amount)} ${esc(a.asset)}${a.kind === "swap" ? ` → ${esc(a.toAsset)}` : ""}</span><span>${a.kind === "send" ? "network fee in your wallet" : `fee up to ${esc(a.maxFee)} ${esc(a.asset)}`}</span></div>${a.toAddress ? `<div class="path"><b>To</b> ${esc(to.name || a.to)} · <span class="mono">${esc(a.toAddress)}</span> on ${esc(a.network)}</div><div class="path">${to.address ? "The address your wallet signed for." : `${esc(to.name || a.to)}'s deposit address, checked again before sending.`}</div>` : `<div class="path">${a.kind === "transfer" ? `${esc(a.fromLedger)} → ${esc(a.toLedger)} at ${esc(v.name)}` : `a market order at ${esc(v.name)}`}</div>`}<div class="path">Can't be undone. Your signature is good for 10 minutes.</div>`;
     $("signs-pre").textContent = prepared.shown.map((x) => `${x.name}: ${x.value}`).join("\n");
     $("signs").hidden = false;
@@ -461,9 +555,9 @@ function openLiveMove(venueId) {
     if (out && out.wallet) {
       try {
         say("Waiting for your wallet…", "wait");
-        await sendFromWallet(out.payment.id, out.wallet);
+        await sendFromWallet(out.payment, out.wallet, out.walletTxs);
       } catch (err) {
-        flash = `${String((err && err.message) || err).slice(0, 200)}. It waits under Activity: “Send from wallet…”`;
+        flash = `${String((err && err.message) || err).slice(0, 200)}. It waits in the Statement, under way: “Send from wallet…”`;
       }
     } else said = r.body.payment ? `${r.body.payment.note || "Sent"}` : "";
     $("modal").close();
@@ -490,22 +584,52 @@ async function mined(w, hash, ms = 120_000) {
 }
 
 /** a DEX order: the account built the transactions (an approval first, when one is needed); the wallet shows each one and sends it */
+/** what a wallet has already sent, by a key no other run of the account reuses (an order's client id; a payment's id and time), while this
+   page is open; the account itself keeps the hash once it has been reported */
+const SENT = new Map();
+/** payments and orders whose wallet flow is running in this page: never two at once for one */
+const INFLIGHT = new Set();
+
 async function sendOrderFromWallet(o) {
-  const txs = o.walletTxs || [];
+  if (INFLIGHT.has(o.clientId)) throw new Error(`${o.id} is already waiting for your wallet: finish it there`);
+  INFLIGHT.add(o.clientId);
+  try {
+    await sendOrderOnce(o);
+  } finally {
+    INFLIGHT.delete(o.clientId);
+  }
+}
+async function sendOrderOnce(o) {
+  // asked again first: an order taken back since this page last read it is not sent
+  const now = ((await (await fetch("/api/account")).json()).orders || []).find((x) => x.id === o.id);
+  if (!now || now.ref || !["pending"].includes(now.status)) throw new Error(`${o.id} is no longer waiting for your wallet (${now ? now.status : "gone"}): nothing was sent`);
+  // the account already has a hash for it: that one is reported again, nothing new is sent
+  if (now.reported) SENT.set(o.clientId, now.reported);
+  const txs = now.walletTxs || [];
   if (!txs.length) return;
   const w = await walletFor(txs[0].from);
-  let hash = "";
-  for (const [i, tx] of txs.entries()) {
+  const send = async (tx) => {
     try {
       await w.provider.request({ method: "wallet_switchEthereumChain", params: [{ chainId: tx.chainIdHex }] });
     } catch (err) {
       throw new Error(`${w.info.name} did not switch to the right network: ${(err && err.message) || err}`);
     }
-    hash = await w.provider.request({ method: "eth_sendTransaction", params: [{ from: tx.from, to: tx.to, data: tx.data, value: tx.value }] });
-    if (i < txs.length - 1) await mined(w, hash);
+    return w.provider.request({ method: "eth_sendTransaction", params: [{ from: tx.from, to: tx.to, data: tx.data, value: tx.value, ...(tx.gas ? { gas: tx.gas } : {}) }] });
+  };
+  let swap = txs[txs.length - 1];
+  if (txs.length > 1 && !SENT.get(o.clientId)) {
+    // the approval first, on chain before the swap; then the swap built again from a fresh quote, so a slow approval leaves no stale swap
+    for (const tx of txs.slice(0, -1)) await mined(w, await send(tx));
+    const fresh = await postJson("/api/account/live/order-requote", { order: o.id });
+    if (fresh.status === 200 && fresh.body.order && fresh.body.order.walletTxs) swap = fresh.body.order.walletTxs[fresh.body.order.walletTxs.length - 1];
+    else if (fresh.status !== 200 && !(fresh.body.refusal && /cannot build the swap again/.test(fresh.body.refusal.message))) throw new Error(Owner.why(fresh) || "the swap could not be built again");
   }
+  // a swap the wallet already sent is reported again, never sent twice: the chain may simply not show it yet
+  const hash = SENT.get(o.clientId) || (await send(swap));
+  SENT.set(o.clientId, hash);
   const r = await postJson("/api/account/live/order-sent", { order: o.id, hash });
-  if (r.status !== 200) throw new Error(Owner.why(r) || "the account could not take the transaction");
+  if (r.status !== 200) throw new Error(`${Owner.why(r) || "the account could not take the transaction"}. Your wallet sent ${short(hash)}: “Report again” reports that same transaction, it does not send another`);
+  SENT.delete(o.clientId);
   said = `${w.info.name} sent it: ${short(hash)}`;
 }
 
@@ -513,7 +637,7 @@ const UNITS = { spot: "", perp: "contracts", future: "contracts", stock: "shares
 
 /** place an order at an account: the market, buy or sell, how much, market or limit. The account asks the venue for the price and the
  * market's steps, shows what the order is worth, and your signature places it */
-function openTrade(venueId) {
+function openTrade(venueId, preset = {}) {
   const v = A.venues.find((x) => x.id === venueId);
   if (!v || !v.trade) return;
   const cap = A.connectLive.writes.capUsd;
@@ -523,10 +647,14 @@ function openTrade(venueId) {
     <div class="row">${field("Amount", '<input name="amount" inputmode="decimal" placeholder="25" autocomplete="off" required />')}${field("In", select("unit", [["usd", "Dollars"], ["qty", "Units"]]))}</div>
     <div id="tk-limit" hidden>${field("Limit price", '<input name="limitPrice" inputmode="decimal" autocomplete="off" />')}</div>
     <div class="quote real" id="quote"><span class="dim">Pick a market to see its price.</span></div>
+    <div class="path elsewhere" id="elsewhere"></div>
     <details id="signs" hidden><summary>What you sign</summary><pre id="signs-pre"></pre></details>
     <div class="msg" id="modal-msg"></div>
     <div class="end"><button type="button" id="modal-cancel">Cancel</button><button type="submit" class="ink" id="modal-go" disabled>Sign and place</button></div>`;
   const form = $("modal-form");
+  // this ticket's own quote box: once another ticket replaces it, nothing late from this one is written or signed
+  const mine = $("quote");
+  const stale = () => !mine.isConnected;
   let side = "buy";
   let prepared = null;
   let timer = 0;
@@ -536,16 +664,19 @@ function openTrade(venueId) {
   const suggest = async () => {
     const q = form.elements.symbol.value.trim();
     const r = await fetch(`/api/account/markets?${new URLSearchParams({ venue: v.id, q })}`).then((x) => x.json()).catch(() => ({}));
-    if (!r.ok) return;
+    if (stale() || !r.ok) return;
     found = r.markets || [];
-    $("mk-list").innerHTML = found.map((m) => `<option value="${esc(m.symbol)}">${esc(m.name !== m.symbol ? m.name : m.kind)}${m.price ? ` · ${esc(m.price)}` : ""}</option>`).join("");
+    $("mk-list").innerHTML = found.map((m) => `<option value="${esc(m.symbol)}">${esc(m.name !== m.symbol ? m.name : m.kind)}${m.price ? ` · ${esc(px(m.price))}` : ""}</option>`).join("");
   };
   const draft = () => {
     const f = formOf("modal-form");
     const amount = String(f.amount || "").trim();
     return { type: "liveOrder", venue: v.id, symbol: String(f.symbol || "").trim(), side, orderType: f.orderType, ...(f.unit === "qty" ? { qty: amount } : { usd: amount }), limitPrice: f.orderType === "limit" ? String(f.limitPrice || "").trim() : "" };
   };
+  let seq = 0;
   const quote = async () => {
+    if (stale()) return;
+    const my = ++seq;
     prepared = null;
     $("modal-go").disabled = true;
     $("signs").hidden = true;
@@ -554,24 +685,46 @@ function openTrade(venueId) {
     if (!(Number(d.qty || d.usd) > 0) || (d.orderType === "limit" && !(Number(d.limitPrice) > 0))) {
       // the market alone: its price, so the owner knows what to type
       const r = await fetch(`/api/account/market?${new URLSearchParams({ venue: v.id, symbol: d.symbol })}`).then((x) => x.json()).catch(() => ({}));
+      if (stale() || my !== seq) return;
       if (!r.ok) return void ($("quote").innerHTML = `<div class="msg no">${esc((r.refusal && r.refusal.message) || "No such market here.")}</div>`);
       const m = r.market;
+      if (m.kind !== "event") elsewhere(m.base);
       const unit = UNITS[m.kind] || m.base;
       form.elements.unit.options[1].textContent = unit ? unit[0].toUpperCase() + unit.slice(1) : m.base;
-      if (m.price) form.elements.limitPrice.placeholder = String(m.price);
-      return void ($("quote").innerHTML = `<div class="big"><span>${esc(m.name)}</span><span>${m.price ? esc(m.price) : "no price"} ${esc(m.quote)}</span></div>${m.bid || m.ask ? `<div class="path">Bid ${esc(m.bid ?? "—")} · ask ${esc(m.ask ?? "—")}</div>` : ""}${m.open ? "" : `<div class="path"><b>Closed now.</b> ${esc(m.note || "")}</div>`}${m.open && m.note ? `<div class="path">${esc(m.note)}</div>` : ""}<div class="path">Type an amount.</div>`);
+      if (m.price) form.elements.limitPrice.placeholder = String(Number(Number(m.price).toPrecision(10)));
+      return void ($("quote").innerHTML = `<div class="big"><span>${esc(m.name)}</span><span>${m.price ? esc(px(m.price)) : "no price"} ${esc(m.quote)}</span></div>${m.bid || m.ask ? `<div class="path">Bid ${esc(px(m.bid))} · ask ${esc(px(m.ask))}</div>` : ""}${m.open ? "" : `<div class="path"><b>Closed now.</b> ${esc(m.note || "")}</div>`}${m.open && m.note ? `<div class="path">${esc(m.note)}</div>` : ""}<div class="path">Type an amount.</div>`);
     }
     $("quote").innerHTML = `<span class="dim">Asking ${esc(v.name)}…</span>`;
     const r = await Owner.prepare(d);
+    if (stale() || my !== seq) return;
     if (r.status !== 200) return void ($("quote").innerHTML = `<div class="msg no">${esc(Owner.why(r))}</div>`);
     prepared = r.body;
     const a = prepared.action;
     const q = prepared.quote.order;
+    if (q.kind !== "event") elsewhere(q.base);
     const unit = UNITS[q.kind] || q.base;
-    $("quote").innerHTML = `<div class="big"><span>${a.side === "buy" ? "Buy" : "Sell"} ${esc(a.qty)} ${esc(unit === q.base ? q.base : `${unit} · ${q.base}`)}</span><span>≈ ${money(q.notionalUsd)}</span></div><div class="path">${esc(q.name)} at ${esc(a.limitPrice || q.price)} ${esc(q.quote)}${a.orderType === "market" && a.side === "buy" ? ` · up to ${money(q.maxUsd)} if the price moves` : ""}</div>${q.note ? `<div class="path">${esc(q.note)}</div>` : ""}<div class="path">Your signature is good for 10 minutes.</div>`;
+    $("quote").innerHTML = `<div class="big"><span>${a.side === "buy" ? "Buy" : "Sell"} ${esc(a.qty)} ${esc(unit === q.base ? q.base : `${unit} · ${q.base}`)}</span><span>≈ ${money(q.notionalUsd)}</span></div><div class="path">${esc(q.name)} at ${esc(px(a.limitPrice || q.price))} ${esc(q.quote)}${a.orderType === "market" && a.side === "buy" ? ` · up to ${money(q.maxUsd)} if the price moves` : ""}</div>${q.note ? `<div class="path">${esc(q.note)}</div>` : ""}<div class="path">Your signature is good for 10 minutes.</div>`;
     $("signs-pre").textContent = prepared.shown.map((x) => `${x.name}: ${x.value}`).join("\n");
     $("signs").hidden = false;
     $("modal-go").disabled = Owner.role !== "owner";
+  };
+  /* the same thing at the owner's other venues, by the price this order would take there: the best is one click away */
+  let compared = "";
+  const elsewhere = async (base) => {
+    const d = draft();
+    const key = `${base}|${d.side}|${d.usd || ""}`;
+    if (!base || key === compared) return;
+    compared = key;
+    if (connected().filter(canTrade).length < 2) return void ($("elsewhere").innerHTML = "");
+    const r = await fetch(`/api/account/compare?${new URLSearchParams({ base, side: d.side, ...(d.usd ? { usd: d.usd } : {}) })}`).then((x) => x.json()).catch(() => ({}));
+    if (compared !== key || stale() || !r.ok) return;
+    const rows = (r.rows || []).filter((x) => x.open);
+    if (rows.length < 2) return void ($("elsewhere").innerHTML = "");
+    const here = rows.find((x) => x.venue === v.id);
+    const best = rows[0];
+    $("elsewhere").innerHTML = `${here && best.venue === v.id ? "Best price of your accounts." : `${esc(best.venueName)} is ${here ? `${esc(String(Math.abs(here.worse ?? 0).toFixed(2)))}% better` : "where it is"}${d.side === "buy" ? " to buy" : " to sell"}: ${esc(px(best.price))} · <button type="button" class="link" data-there="${esc(best.venue)}" data-symbol="${esc(best.symbol)}">Trade there</button>`}<span class="dim"> · ${rows.filter((x) => x !== best).slice(0, 3).map((x) => `${esc(x.venueName)} ${esc(px(x.price))}${x.ready === false ? " (check)" : ""}`).join(" · ")}</span>`;
+    const b = $("elsewhere").querySelector("button[data-there]");
+    if (b) b.addEventListener("click", () => { const f = formOf("modal-form"); openTrade(b.dataset.there, { symbol: b.dataset.symbol, side, amount: f.amount, unit: f.unit, orderType: f.orderType }); });
   };
   const later = (ms = 350) => { clearTimeout(timer); timer = setTimeout(quote, ms); };
   let sugTimer = 0;
@@ -598,12 +751,22 @@ function openTrade(venueId) {
       } catch (err) {
         flash = `${String((err && err.message) || err).slice(0, 200)}. It waits under Orders: “Send from wallet…”`;
       }
-    } else if (o) said = `${o.side === "buy" ? "Bought" : "Sold"}: ${o.id} · ${o.note}`;
+    } else if (o) said = `${o.status === "filled" ? (o.side === "buy" ? "Bought" : "Sold") : o.status === "partial" ? "Part filled" : ["canceled", "rejected", "expired"].includes(o.status) ? "Not filled" : "Placed"}: ${o.id} · ${o.note}`;
     $("modal").close();
     await load();
   };
   suggest();
-  $("modal").showModal();
+  // opened from another venue's "Trade there": the same order, here
+  if (preset.symbol) {
+    form.elements.symbol.value = preset.symbol;
+    if (preset.side) { side = preset.side; for (const x of $("tk-side").querySelectorAll("button")) x.setAttribute("aria-pressed", String(x.dataset.side === side)); }
+    if (preset.orderType) form.elements.orderType.value = preset.orderType;
+    if (preset.unit) form.elements.unit.value = preset.unit;
+    if (preset.amount) form.elements.amount.value = preset.amount;
+    $("tk-limit").hidden = form.elements.orderType.value !== "limit";
+    later(0);
+  }
+  if (!$("modal").open) $("modal").showModal();
   form.elements.symbol.focus();
 }
 
@@ -617,11 +780,28 @@ const TILES = [
   ["Exchanges", [["exchange", "okx", "OKX"], ["exchange", "kraken", "Kraken"], ["exchange", "coinbase", "Coinbase"], ["exchange", "bybit", "Bybit"], ["exchange", "binance", "Binance"], ["exchange", "", "Another exchange"]]],
   ["Brokers", [["robinhood", "", "Robinhood"], ["alpaca", "", "Alpaca"], ["robinhood-crypto", "", "Robinhood Crypto"]]],
   ["Wallets", [["wallet", "", "Browser wallet"], ["metamask", "", "MetaMask Agent Wallet"], ["wallet", "watch", "Watch an address"]]],
-  ["Markets and tokens", [["kalshi", "", "Kalshi"], ["polymarket", "", "Polymarket"], ["hyperliquid", "", "Hyperliquid"], ["ondo", "", "Ondo · OUSG"]]],
+  ["Markets and tokens", [["kalshi", "", "Kalshi"], ["polymarket-trade", "", "Polymarket"], ["polymarket", "", "Polymarket · by address"], ["hyperliquid", "", "Hyperliquid"], ["ondo", "", "Ondo · OUSG"]]],
 ];
 const HOW = { "key-file": "API key", "sign-in": "Sign in", address: "Address", cli: "mm on this machine" };
 /* the page at each venue where an API key is made (the venues' own account pages) */
-const API_PAGES = { okx: "https://www.okx.com/account/my-api", binance: "https://www.binance.com/en/my/settings/api-management", bybit: "https://www.bybit.com/app/user/api-management", kraken: "https://pro.kraken.com/app/settings/api", alpaca: "https://app.alpaca.markets/", "robinhood-crypto": "https://robinhood.com/account/crypto" };
+const API_PAGES = { okx: "https://www.okx.com/account/my-api", binance: "https://www.binance.com/en/my/settings/api-management", binanceus: "https://www.binance.us/settings/api-management", coinbase: "https://portal.cdp.coinbase.com/api-keys/secret", bybit: "https://www.bybit.com/app/user/api-management", kraken: "https://pro.kraken.com/app/settings/api", kucoin: "https://www.kucoin.com/account/api", bitget: "https://www.bitget.com/account/newapi", alpaca: "https://app.alpaca.markets/dashboard/overview", kalshi: "https://kalshi.com/account/profile", "robinhood-crypto": "https://robinhood.com/account/crypto" };
+/* what to tick when making the key, in each venue's own words (read 2026-10-05): trading on, withdrawals off */
+const KEY_HOW = {
+  okx: "Tick Read and Trade (and Transfer, to move between Funding and Trading). Leave Withdraw off. Add this machine's IP: a trading key with no IP expires after 14 days unused. The passphrase you set goes in \"password\".",
+  binance: "Tick Enable Reading and Enable Spot & Margin Trading; leave Enable Withdrawals off. Binance lets a System-generated key trade only when it is restricted to trusted IPs, so add this machine's IP, or make a Self-generated Ed25519 key and put its private key in \"secret\".",
+  binanceus: "Edit restrictions: keep Enable Read, check Enable Spot Trading, leave withdrawals off. Restrict it to this machine's IP: a key with no IP list that goes unused for 90 days is reset to read-only.",
+  coinbase: "Create a Secret API key with the ECDSA signature algorithm (not Ed25519). Permissions: View and Trade; leave Transfer off. \"apiKey\" is the key's name (organizations/…/apiKeys/…), \"secret\" its private key, line breaks included.",
+  kraken: "Permissions: Query Funds, Query Open Orders & Trades, Query Closed Orders & Trades, Create & Modify Orders, Cancel/Close Orders. Leave Withdraw Funds off.",
+  bybit: "System-generated, Read-Write. Tick Orders and Positions, and spot Trade. Leave Withdrawal off. A key with no IP stops working after 90 days.",
+  kucoin: "API Trading. Permissions: General and Spot (add Margin or Futures if you trade them); leave Withdrawal off. Add this machine's IP: a trading key with no IP is disabled after 30 days unused. The passphrase goes in \"password\".",
+  gate: "API v4 key. Spot: Read and Write; leave Withdrawal off. Bind this machine's IP: without one the key lasts 90 days.",
+  bitget: "Read/write with the Trade permission; leave Withdraw and Transfer off. Bind this machine's IP. The passphrase goes in \"password\".",
+  alpaca: "Generate a key in your Live account (or Paper, to try it first). Alpaca keys have no permissions to choose: any key can trade, and none can move cash.",
+  kalshi: "Create New API Key (Ed25519). If scopes are offered, take read and write::trade and leave write::transfer off.",
+  "robinhood-crypto": "Add key with your Ed25519 public key, and enable reading accounts, holdings, orders, products and quotes, and placing crypto orders.",
+  "polymarket-trade": "Put in the private key of the wallet that signs for your Polymarket account. If the money sits in a Polymarket wallet, add \"funderAddress\" (the address in your profile menu) and \"signatureType\": 1 (Proxy), 2 (Safe) or 3 (Deposit Wallet); leave both empty for a plain wallet. Polymarket checks your location before anything else.",
+};
+const keyHow = (venue) => KEY_HOW[venue] || "Turn on reading and trading; leave withdrawals off. Bind this machine's IP if the exchange offers it.";
 const optionOf = (kind) => ((A.connectLive || {}).options || []).find((o) => o.kind === kind);
 /* an address-based connection numbers itself after the first of its kind */
 const BY_ADDRESS = new Set(["wallet", "polymarket", "hyperliquid", "ondo"]);
@@ -639,7 +819,7 @@ function catalog(owner, wide = "") {
 }
 
 /* what each key file holds, until the server says exactly (an exchange's own list comes from the exchange library) */
-const FIELDS = { exchange: ["apiKey", "secret"], alpaca: ["keyId", "secret"], kalshi: ["keyId", "privateKeyFile"], "robinhood-crypto": ["apiKey", "privateKey"] };
+const FIELDS = { exchange: ["apiKey", "secret"], alpaca: ["keyId", "secret"], kalshi: ["keyId", "privateKeyFile"], "robinhood-crypto": ["apiKey", "privateKey"], "polymarket-trade": ["privateKey", "funderAddress", "signatureType"] };
 /* a shell word, quoted */
 const shq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 /* the one command that makes a key file: the folder, an empty template if there is no file yet (an existing one is never overwritten),
@@ -715,7 +895,7 @@ async function openConnect(o, { exchange = "", watch = false, name = "", back = 
     const page = API_PAGES[o.kind === "exchange" ? exchangeId() : o.kind];
     $("live-body").innerHTML = `${pick ? field("Exchange", select("exchange", EXCHANGES.map((x) => [x.id, x.name]))) : ""}
       <div class="steps">
-        <div class="step"><i>1</i><div>Make a read-only API key at <span id="kf-venue">${esc(vname)}</span><span id="kf-pagewrap"${page ? "" : " hidden"}> · <a href="${esc(page || "#")}" target="_blank" rel="noopener" id="kf-page">open its API page</a></span>.</div></div>
+        <div class="step"><i>1</i><div>Make an API key at <span id="kf-venue">${esc(vname)}</span> that can trade, with withdrawals off<span id="kf-pagewrap"${page ? "" : " hidden"}> · <a href="${esc(page || "#")}" target="_blank" rel="noopener" id="kf-page">open its API page</a></span>.<div class="dim small kf-how" id="kf-how">${esc(keyHow(o.kind === "exchange" ? exchangeId() : o.kind))}</div></div></div>
         <div class="step"><i>2</i><div>Save it here, readable only by you:<div class="pathbox"><code id="kf-path">…</code><button type="button" class="link" data-copy="path">Copy</button></div><div class="kf-cmd"><button type="button" class="sm" data-copy="cmd">Copy setup command</button><span class="dim small" id="kf-fields"></span></div></div></div>
         <div class="step"><i>3</i><div class="msg wait" id="kf-status">Looking for the file…</div></div>
       </div>
@@ -732,6 +912,7 @@ async function openConnect(o, { exchange = "", watch = false, name = "", back = 
       if (pick) {
         // the exchange picked in the list: its name, and its API page when this page knows it
         $("kf-venue").textContent = exchangeName();
+        $("kf-how").textContent = keyHow(exchangeId());
         const p = API_PAGES[exchangeId()];
         $("kf-pagewrap").hidden = !p;
         if (p) $("kf-page").href = p;
@@ -796,7 +977,7 @@ async function openConnect(o, { exchange = "", watch = false, name = "", back = 
     }
   } else if (o.needs === "sign-in") {
     const who = o.label.split(" · ")[0];
-    $("live-body").innerHTML = `<div class="steps"><div class="step"><i>1</i><div>Sign in on ${esc(who)}’s own page and approve. <span class="dim">Reads balances and positions; never places an order.</span></div></div><div class="step"><i>2</i><div><button type="button" class="sm" id="signin-go">Sign in at ${esc(who)}…</button></div></div></div><input type="hidden" name="ref" value="" /><input type="hidden" name="label" value="${esc(who)}" />`;
+    $("live-body").innerHTML = `<div class="steps"><div class="step"><i>1</i><div>Sign in on ${esc(who)}’s own page and approve. <span class="dim">Reads every Robinhood account; trades only in your Agentic account, on your signature or inside a limit you give an agent.</span></div></div><div class="step"><i>2</i><div><button type="button" class="sm" id="signin-go">Sign in at ${esc(who)}…</button></div></div></div><input type="hidden" name="ref" value="" /><input type="hidden" name="label" value="${esc(who)}" />`;
     $("modal-go").disabled = true;
     $("signin-go").addEventListener("click", async () => {
       // the tab opens inside the click, so no popup blocker stops it; it goes to the venue once its address is known

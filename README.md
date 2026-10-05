@@ -185,20 +185,25 @@ owner 签的不只是意图：一笔划转的签名里带着**路线的哈希、
 
 终端 demo 里可插的四个（模拟的，只在 demo 和测试里；只认真实账户的服务器拒绝模拟连接器）：Bybit（`unified`，读和交易）、Kraken（`unified`，读、交易、提币，白名单里只有自己的链上钱包）、OKX 的第二个账户（`okx`，只读）、OKX Wallet（`wallet`，按地址）。
 
-**真实连接：你真的场所**（`src/portfolio/live/`、`account/live-moves.ts`、`adapters/live.ts`）。上面那四个是演示用的；这里接的是用户真实的账户。每个有接口的场所一种连接，页面 Balances 页签上一张卡片：
+**真实连接：你真的场所**（`src/portfolio/live/`、`account/live-moves.ts`、`account/live-orders.ts`、`adapters/live.ts`）。上面那四个是演示用的；这里接的是用户真实的账户。每个有接口的场所一种连接，页面 Accounts 里一行：
 
-| 场所 | 怎么接 | 读 | 写（真钱） |
-|---|---|---|---|
-| 交易所：OKX、Kraken、Coinbase 等，统一接口库覆盖的一百来家 | 本机 home 目录里的钥匙文件 | 余额（交易与资金两个账本）、钥匙权限（Binance、OKX 有接口说） | 提到你自己的地方、账本之间划转、稳定币互换 |
-| MetaMask Agent Wallet | 本机已登录的 `mm` 命令行 | 余额、Guard 策略 | `mm transfer`，还要 MetaMask 自己的开关 `PORTFOLIO_MM_WRITES=1` |
-| 浏览器钱包：OKX Wallet、Binance Wallet、MetaMask 等 | EIP-6963 发现，钱包签一句话证明地址是你的 | 六条 EVM 链上的 USDC、USDT 和链上原生币；Robinhood Chain 上的 Robinhood Stock Tokens | 账户构造交易，钱包自己签、自己发；账户在链上核对是不是那一笔 |
-| Alpaca | 钥匙文件 | 现金、持仓 | 无：它的 API 不动现金 |
-| Robinhood 投资账户 | Robinhood 自己的登录页（它的 Trading MCP 服务器，OAuth：动态注册、PKCE），令牌只在内存里 | 各账户的现金和股票持仓（只调 `get_accounts`、`get_portfolio`、`get_equity_positions`） | 无：钱只在 Robinhood 自己的 app 里进出；这把令牌能在 Agentic 账户里下单，账户层从不调用下单、撤单的工具 |
-| Robinhood Crypto | 钥匙文件：API key 加你自己生成的 Ed25519 私钥 | 购买力、持仓，按 Robinhood 自己的中间价 | 无：它的 API 只读和交易，不动钱 |
-| Robinhood Wallet（自托管） | 地址（手机钱包，没有浏览器扩展，所以只能看，不能证明） | 同浏览器钱包，含 Stock Tokens | 无 |
-| Kalshi | 钥匙 id 加私钥文件（RSA-PSS 或 Ed25519 签名） | 现金、持仓（按成本） | 无：它的 API 不动钱 |
-| Hyperliquid、Polymarket | 地址 | 永续与现货账本；持仓与 pUSD | 无：这两家不服务这台机器所在的地区，按它们的规矩只读 |
-| Ondo（OUSG、rOUSG、USDY） | 地址 | 代币数量，按 Ondo 自己链上预言机的价格 | 无：只能在 Ondo 白名单地址之间转 |
+| 场所 | 怎么接 | 读 | 下单 | 动钱 |
+|---|---|---|---|---|
+| 交易所：OKX、Kraken、Coinbase、Binance、Bybit 等，统一接口库覆盖的一百来家 | 本机 home 目录里的钥匙文件（能交易、不能提币的 key） | 余额（交易与资金两个账本）、钥匙权限（OKX、Binance、Bybit、Coinbase 有接口说） | 现货和 U 本位永续；市价单按最差价格发成成交不了立即撤的限价单 | 提到你自己的地方、账本之间划转、稳定币互换 |
+| Alpaca | 钥匙文件（key 没有权限可选；先用 Paper） | 现金、持仓 | 美股、ETF、加密；市价单按最差价格发成限价单，收盘时只接限价单 | 无：它的 API 不动现金 |
+| Robinhood 投资账户 | Robinhood 自己的登录页（它的 Trading MCP 服务器，OAuth：动态注册、PKCE），令牌只在内存里 | 各账户的现金和股票持仓 | 只在 Agentic 账户里、整股；市价单按最差价格发成限价单 | 无：钱只在 Robinhood 自己的 app 里进出 |
+| Robinhood Crypto | 钥匙文件：API key 加你自己生成的 Ed25519 私钥 | 购买力、持仓，按 Robinhood 自己的中间价 | 加密；市价单按最差价格发成限价单 | 无：它的 API 不动钱 |
+| Kalshi | 钥匙 id 加私钥文件（RSA-PSS 或 Ed25519 签名；权限 `read` + `write::trade`） | 现金、持仓（按成本） | 事件合约，走 2026 年的 V2 下单接口（YES 腿上的买卖；它已经没有市价单，账户的"市价"是成交不了立即撤的限价单） | 无：它的 API 不动钱 |
+| Polymarket | 账户钱包的钥匙文件（Polymarket 钱包的还要 `funderAddress` 和 `signatureType`），或者只填地址看 | 持仓与 pUSD | 事件合约，CLOB V2 的签名订单；每接一次、每下一单之前先问 Polymarket 自己的地区检查，不服务就拒，不找别的路 | 无 |
+| 浏览器钱包：OKX Wallet、Binance Wallet、MetaMask 等 | EIP-6963 发现，钱包签一句话证明地址是你的 | 六条 EVM 链上的 USDC、USDT 和链上原生币；Robinhood Chain 上的 Stock Tokens | 链上换币：LI.FI 找路线，钱包自己签、自己发；买入时先授权到这一单最多花的钱 | 同链发送；**跨链**（下面） |
+| MetaMask Agent Wallet | 本机已登录的 `mm` 命令行 | 余额、Guard 策略 | `mm swap` 和 `mm predict`，还要 MetaMask 自己的开关 `PORTFOLIO_MM_WRITES=1`；从不传 `--yes` | `mm transfer`，同样要那个开关 |
+| Robinhood Wallet（自托管） | 地址（手机钱包，没有浏览器扩展，所以只能看，不能证明） | 同浏览器钱包，含 Stock Tokens | 无 | 无 |
+| Hyperliquid | 地址 | 永续与现货账本 | 无：它不服务这台机器所在的地区，也没有可以事先问的检查，不从这里下单，不找别的路 | 无 |
+| Ondo（OUSG、rOUSG、USDY） | 地址 | 代币数量，按 Ondo 自己链上预言机的价格 | 无：申购赎回在 Ondo 那边 | 无：只能在 Ondo 白名单地址之间转 |
+
+**跨链**（`live/bridge.ts`、`live/wallet-bridge.ts`）：从你证明过的钱包，把美元稳定币挪到另一条链上：同一个钱包在那条链上、另一个证明过的钱包，或者你交易所在那条链上的充值地址。LI.FI 找路线（Across、Stargate、Circle 的 CCTP），每条路线在给钱包看之前，都对着它自己的 calldata 查一遍：付给的就是那个地址（LI.FI 的记录和桥合约自己的收款字段都要对上）、在链上合约算出的最少到账不低于 97%、不带目的链上的调用、带的原生币只是桥费。账户签的是最便宜的那条，执行前再问一次，手续费涨过签的就不发；钱包发出后，交易哈希对着构造的那笔核对（发送人、合约、调用、币、链），对不上不跟；到账以 LI.FI 和链说的为准（到了、换成另一种稳定币到了、退回、还在路上）。"Move…" 里的 "Across chains" 列出各条路线的费用、最少到账和大约多久；交易所提币时 "Fees on every network" 把每条链的手续费并排列出，点哪个就用哪条链。
+
+**比价**（`live/compare.ts`）：同一个币或同一只股票，在你接上的每个场所按这一单会成交的价格排（买看卖一，卖看买一）：BTC、XBT、WBTC、cbBTC 都算 BTC。四秒内没答的场所列在后面，离其他场所价格太远（超过 10%）的标出来让你核对，可能是同名的另一种代币。下单弹窗里市场一选好就显示别处的价格和 "Trade there"；agent 用 `portfolio_live_compare`。手续费不猜。
 
 钥匙文件放在 home 目录里（默认 `~/.buyer-agent-demo/credentials/<场所>/api-key.json`），必须只有本人可读（`chmod 600`），页面只传文件在哪，值不进页面、账本和任何返回。接入时先问场所的公开时钟（不带钥匙），场所不服务这个地区就在这一步停下，钥匙不发出去。对账单页上，真实场所顶替同名的模拟场所，拔掉后模拟的回来；读数缓存半分钟，读失败时保留上一次的数并写明时间和原因。
 
@@ -221,7 +226,7 @@ owner 签的不只是意图：一笔划转的签名里带着**路线的哈希、
 - 场所自己的规矩照旧：钥匙权限、提币白名单（第一次提到新地址，多数交易所要你先在那边加白名单）、它自己的风控。它的拒绝就是答复。
 - 不跟模拟的钱混：账户上只有真实场所，真钱在它们之间一步走完，不经过任何模拟的枢纽。
 
-从这台机器不带钥匙问过一次（2026-10-05）：Binance 回 451、Bybit 回 403，都写明按地区拒绝；OKX、Kraken、Coinbase、Binance.US 正常应答。
+从这台机器不带钥匙问过一次（2026-10-05）：Binance 回 451、Bybit 回 403，都写明按地区拒绝；OKX、Kraken、Coinbase、Binance.US 正常应答。各家的下单接口在 2026-10-05 按它们自己的文档和官方 SDK 核对过（Kalshi 今年把下单换成了 V2、去掉了市价单；Polymarket 4 月 28 日换成 CLOB V2；mm 7.0.0 的 `swap quote --yes` 会直接执行），每家一份规格，测试对着替身逐字段断言请求。
 
 Robinhood 的三条线都是它自己发布的接口（2026-10-05 读）：股票走 5 月 27 日开放的 Trading MCP（`agent.robinhood.com/mcp/trading`，它的授权元数据写明支持动态注册、PKCE、刷新令牌，所以账户层能像 Claude Code 一样自己接上去）；加密走 Crypto Trading API（签名与官方文档的示例逐字节一致，见测试）；Stock Tokens 的清单和报价在 `api.robinhood.com/rhj/` 下，不要钥匙。Robinhood 的 MCP 工具返回什么格式没有公开，股票这条线按它自家 API 常用的字段名读，读不出来时直说读不出来，不当作零。
 
@@ -247,14 +252,14 @@ Robinhood 的三条线都是它自己发布的接口（2026-10-05 读）：股�
 
 `/`（`/account` 也跳到这里）就是 Account，一个页面，从上到下：
 
-- 头部：保守 / 激进两档模式（Conservative：agent 要动的每一笔都等你签；Aggressive：agent 在额度内动钱不再问你。放宽要 owner 签名，收紧不用；真实账户启动时是 Conservative），和真钱开关的状态。
-- 净值、按资产类别的配置条、等你批的卡（浏览器标签页的标题带着等你批的张数）。
-- Accounts：接上的账户（余额、能动什么、`Move…`、Details 里的持仓）；一个都没接时就是一排可以接的场所，点哪个就是哪个的接法：钥匙文件（路径、一条建文件的命令、每两秒检查一次，只看字段名不看值）、场所自己的登录页（Robinhood）、钱包签一句话或只看地址。可以下载 CSV。
-- Activity：真钱的每一笔，谁动的、怎么批的。可以下载 CSV。
-- Agents：一张表一份表单。敲门的 agent 一点 "Let in…" 就进了表单，填名字和额度（哪几个账户之间、单笔、预算、期限）一次存好；也在这里改额度、撤销。
+- 头部：保守 / 激进两档模式（Conservative：agent 的每一单都等你签；Aggressive：agent 在额度内直接下单。放宽要 owner 签名，收紧不用；真实账户启动时是 Conservative），和 "Trading on · up to $100 an order" 或 "Read-only"。
+- 净值、按资产类别的配置条；下面一行是**流动性**：多少美元现成可用（现金和美元稳定币），其中多少能在原地交易、多少能在你的账户之间挪、多少只能在场所自己那里取出（Alpaca、Kalshi、Robinhood 的现金就是这样），展开是每个账户、每个账本或每条链上各有多少。等你批的卡（浏览器标签页的标题带着张数）。
+- Accounts：接上的账户（余额、它交易什么、`Trade…`、`Move…`、Details 里的持仓）；一个都没接时就是一排可以接的场所，点哪个就是哪个的接法：钥匙文件（第一步写着这家要勾哪些权限：能交易、不能提币；路径、一条建文件的命令、每两秒检查一次，只看字段名不看值）、场所自己的登录页（Robinhood）、钱包签一句话或只看地址。可以下载 CSV。
+- Statement：像银行流水，一行一笔交易：成交、提现、划转、跨链、换币，日期、说明、账户、金额（买入是钱出、卖出是钱进）、手续费、状态、谁做的（你，或者哪个 agent，是你批的还是在额度内）。按月份、账户、类型筛选，下载 CSV，打印。最上面是还在进行的：挂着的单（`Cancel`，两单以上有 "Cancel all"）和等你钱包发出的交易。流水从账本文件读回来：每一笔交易每变一次，账本里记一行 `statement`，重启之后以前的流水还在。
+- Agents：一张表一份表单。敲门的 agent 一点 "Let in…" 就进了表单，填名字和交易额度（在哪些账户下单、每单多少、一共多少、期限，可另勾"也能在我的账户之间挪钱"）一次存好；也在这里改额度、撤销。
 - Devices：哪些浏览器能签。
 
-MCP 多了三个工具：`portfolio_account`（这个席位的钥匙有没有被授权、还能花多少）、`portfolio_transfer`（自家场所之间）、`portfolio_pay`（为一个 URL 付钱；AP2 的两份封闭式 mandate 由席位读过商户签的总价之后自己签）。原来的 `portfolio_execute` / `portfolio_order` 也改成签名后从同一个入口进；挂了这一层之后，HTTP 上未签名的写一律被拒绝。只认真实账户的服务器上，`portfolio_transfer` 和 `portfolio_pay` 被拒，真钱走 `portfolio_live_move`：Conservative 下它回一张卡，Aggressive 下额度内直接回付款单。
+下单的 MCP 工具：`portfolio_live_markets`（一个场所交易哪些市场，或者一个市场此刻的价格和规矩）、`portfolio_live_order`、`portfolio_live_cancel`；`portfolio_account` 里有这个席位的交易额度、每个场所它能交易什么、账户上的单（自己的标着 `mine`）。此前加的三个工具：`portfolio_account`（这个席位的钥匙有没有被授权、还能花多少）、`portfolio_transfer`（自家场所之间）、`portfolio_pay`（为一个 URL 付钱；AP2 的两份封闭式 mandate 由席位读过商户签的总价之后自己签）。原来的 `portfolio_execute` / `portfolio_order` 也改成签名后从同一个入口进；挂了这一层之后，HTTP 上未签名的写一律被拒绝。只认真实账户的服务器上，`portfolio_transfer` 和 `portfolio_pay` 被拒，真钱走 `portfolio_live_move`：Conservative 下它回一张卡，Aggressive 下额度内直接回付款单。
 
 ### 十四个 beat
 

@@ -90,6 +90,7 @@ fieldset.chk legend{padding:0;margin-bottom:4px;font-family:"IBM Plex Mono",Menl
 fieldset.chk label{display:inline-flex;flex-direction:row;align-items:center;gap:6px;font-family:"IBM Plex Sans","Helvetica Neue",Arial,sans-serif;font-size:13px;letter-spacing:0;text-transform:none;color:var(--ink)}
 fieldset.chk input{accent-color:var(--ink);margin:0}
 fieldset.chk label.also{margin-top:2px;color:var(--dim)}
+.kf-how{margin-top:4px;line-height:1.45}
 #tk-side{display:flex}
 #tk-side button{flex:1}
 .codeform{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
@@ -144,6 +145,18 @@ details.opts .row{margin-top:10px}
   section .live-t td,section .live-t td.r,section .live-t td.r + td{border:0;padding:0}
   .live-t td:nth-child(3),.live-t td:nth-child(4){grid-column:1/-1;text-align:left}
   .live-t td:last-child .link{margin-left:12px}
+  /* a statement line on a phone: what it was across the top; when, how much and how it stands under it */
+  table.stmt thead{display:none}
+  table.stmt tr,.open-t tr{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 12px;padding:10px 0;border-bottom:1px solid var(--line)}
+  section table.stmt td,section table.stmt td.r,section table.stmt td.r + td,section .open-t td,section .open-t td.r,section .open-t td.r + td{border:0;padding:0}
+  table.stmt td:nth-child(2){grid-column:1/-1;grid-row:1}
+  table.stmt td:nth-child(1){grid-column:1;grid-row:2}
+  table.stmt td:nth-child(1) .why{display:inline;margin-left:6px}
+  table.stmt td:nth-child(4){grid-column:2;grid-row:2;text-align:right}
+  table.stmt td:nth-child(5){grid-column:1/-1;grid-row:3}
+  .open-t td:first-child{grid-column:1/-1}
+  #agents table tr{display:grid;grid-template-columns:minmax(0,1fr);gap:4px;padding:10px 0;border-bottom:1px solid var(--line)}
+  section #agents table td,section #agents table td.r{border:0;padding:0;text-align:left}
   dialog .row{grid-template-columns:1fr}
   td .why{max-width:none}
   .add input.l{width:100%}
@@ -153,3 +166,27 @@ details.opts .row{margin-top:10px}
   .card .mono{margin-left:26px;align-self:center}
   .card .btns{margin-left:auto}
 }
+/* the statement */
+.sub-h{font-family:"IBM Plex Mono",Menlo,monospace;font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:var(--dim);margin:6px 0 4px}
+.open-t{margin-bottom:14px}
+.filters{display:flex;gap:8px;flex-wrap:wrap;margin:4px 0 10px}
+.filters select{font:inherit;font-size:13px;padding:4px 8px;border:1px solid var(--line);border-radius:3px;background:var(--card);color:var(--ink);font-family:"IBM Plex Sans","Helvetica Neue",Arial,sans-serif}
+table.stmt th{font-family:"IBM Plex Mono",Menlo,monospace;font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:var(--dim);font-weight:400;text-align:left;padding-bottom:6px}
+table.stmt th.r{text-align:right}
+table.stmt th.r + th{padding-left:24px}
+.totals{margin-top:8px}
+.print-head{display:none}
+@media print{
+  body[data-print="statement"] main>*:not(#statement-sec){display:none!important}
+  body[data-print="statement"] #statement-tools,body[data-print="statement"] .filters,body[data-print="statement"] #open-now,body[data-print="statement"] .more-btn{display:none!important}
+  body[data-print="statement"] .print-head{display:block;margin-bottom:10px}
+  body[data-print="statement"]{background:#fff;color:#000}
+}
+/* liquidity */
+details.liq{margin:6px 0 2px;font-size:13px}
+details.liq summary{cursor:pointer;color:var(--dim);list-style:none}
+details.liq summary::-webkit-details-marker{display:none}
+details.liq summary b{color:var(--ink);font-weight:500}
+details.liq[open] summary{margin-bottom:6px}
+dialog .elsewhere:empty{display:none}
+dialog .elsewhere{margin-top:-4px;font-size:12px;color:var(--ink)}
