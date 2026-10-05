@@ -119,8 +119,8 @@ export interface LiveOption {
   /** what `connectVenue.connector` carries: `live:exchange:binance`, `live:alpaca`, `live:wallet` … */
   connector: string;
   label: string;
-  /** a key file in the home directory, or an address */
-  needs: "key-file" | "address" | "cli";
+  /** a key file in the home directory, an address, the venue's own command line, or a sign-in on the venue's own page */
+  needs: "key-file" | "address" | "cli" | "sign-in";
   /** what goes in the key file, or what kind of address */
   example: string;
   /** where the key file is looked for when the owner does not say */

@@ -189,8 +189,11 @@ demo 里可插的四个：Bybit（`unified`，读和交易）、Kraken（`unifie
 |---|---|---|---|
 | 交易所：OKX、Kraken、Coinbase 等，统一接口库覆盖的一百来家 | 本机 home 目录里的钥匙文件 | 余额（交易与资金两个账本）、钥匙权限（Binance、OKX 有接口说） | 提到你自己的地方、账本之间划转、稳定币互换 |
 | MetaMask Agent Wallet | 本机已登录的 `mm` 命令行 | 余额、Guard 策略 | `mm transfer`，还要 MetaMask 自己的开关 `PORTFOLIO_MM_WRITES=1` |
-| 浏览器钱包：OKX Wallet、Binance Wallet、MetaMask 等 | EIP-6963 发现，钱包签一句话证明地址是你的 | 六条 EVM 链上的 USDC、USDT 和链上原生币 | 账户构造交易，钱包自己签、自己发；账户在链上核对是不是那一笔 |
+| 浏览器钱包：OKX Wallet、Binance Wallet、MetaMask 等 | EIP-6963 发现，钱包签一句话证明地址是你的 | 六条 EVM 链上的 USDC、USDT 和链上原生币；Robinhood Chain 上的 Robinhood Stock Tokens | 账户构造交易，钱包自己签、自己发；账户在链上核对是不是那一笔 |
 | Alpaca | 钥匙文件 | 现金、持仓 | 无：它的 API 不动现金 |
+| Robinhood 投资账户 | Robinhood 自己的登录页（它的 Trading MCP 服务器，OAuth：动态注册、PKCE），令牌只在内存里 | 各账户的现金和股票持仓（只调 `get_accounts`、`get_portfolio`、`get_equity_positions`） | 无：钱只在 Robinhood 自己的 app 里进出；这把令牌能在 Agentic 账户里下单，账户层从不调用下单、撤单的工具 |
+| Robinhood Crypto | 钥匙文件：API key 加你自己生成的 Ed25519 私钥 | 购买力、持仓，按 Robinhood 自己的中间价 | 无：它的 API 只读和交易，不动钱 |
+| Robinhood Wallet（自托管） | 地址（手机钱包，没有浏览器扩展，所以只能看，不能证明） | 同浏览器钱包，含 Stock Tokens | 无 |
 | Kalshi | 钥匙 id 加私钥文件（RSA-PSS 或 Ed25519 签名） | 现金、持仓（按成本） | 无：它的 API 不动钱 |
 | Hyperliquid、Polymarket | 地址 | 永续与现货账本；持仓与 pUSD | 无：这两家不服务这台机器所在的地区，按它们的规矩只读 |
 | Ondo（OUSG、rOUSG、USDY） | 地址 | 代币数量，按 Ondo 自己链上预言机的价格 | 无：只能在 Ondo 白名单地址之间转 |
@@ -208,6 +211,8 @@ demo 里可插的四个：Bybit（`unified`，读和交易）、Kraken（`unifie
 - 不跟模拟的钱混：真钱只在真实场所之间走一步，不经过模拟的枢纽。
 
 从这台机器不带钥匙问过一次（2026-10-05）：Binance 回 451、Bybit 回 403，都写明按地区拒绝；OKX、Kraken、Coinbase、Binance.US 正常应答。
+
+Robinhood 的三条线都是它自己发布的接口（2026-10-05 读）：股票走 5 月 27 日开放的 Trading MCP（`agent.robinhood.com/mcp/trading`，它的授权元数据写明支持动态注册、PKCE、刷新令牌，所以账户层能像 Claude Code 一样自己接上去）；加密走 Crypto Trading API（签名与官方文档的示例逐字节一致，见测试）；Stock Tokens 的清单和报价在 `api.robinhood.com/rhj/` 下，不要钥匙。Robinhood 的 MCP 工具返回什么格式没有公开，股票这条线按它自家 API 常用的字段名读，读不出来时直说读不出来，不当作零。
 
 **C · agent 对外付款：agent 不付钱，账户替它付**（`account/protocols.ts`、`payees.ts`）。agent 只签一句"为这个 URL 付钱，最多这么多，从这个 float 出"（`agentPay`）；账户自己去问收款方，从收款方自己的质询里读出价格和收款地址，说收款方说的那种协议，用 agent 从来拿不到的钥匙签付款。检查顺序：
 

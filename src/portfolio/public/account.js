@@ -87,7 +87,13 @@ function render() {
   for (const b of $("tabs").querySelectorAll("button")) b.addEventListener("click", () => { tab = b.dataset.tab; flash = ""; said = ""; history.replaceState(null, "", `#${tab}`); render(); });
   $("panel").innerHTML = `<div class="msg ${flash ? "no" : said ? "ok" : ""}" id="flash">${esc(flash || said)}</div>${PANEL[tab](owner)}`;
   WIRE[tab] && WIRE[tab]();
-  $("foot").innerHTML = `${plural(A.venues.length, "venue", "venues")} and every payee are local simulations · each request is built in its venue’s own format, and signed where the account holds the key · nothing here settles anywhere <span class="clock">· simulated clock <button type="button" class="link dim" data-skip="60">+1 hour</button> <button type="button" class="link dim" data-skip="1440">+1 day</button> <button type="button" class="link dim" data-skip="4320">+3 days</button></span>`;
+  $("foot").innerHTML = `${(() => {
+    /* once a real venue is connected, the page no longer says that all of it is simulated */
+    const live = A.venues.filter((v) => v.live);
+    const sim = A.venues.length - live.length;
+    if (!live.length) return `${plural(A.venues.length, "venue", "venues")} and every payee are local simulations · each request is built in its venue’s own format, and signed where the account holds the key · nothing here settles anywhere`;
+    return `${esc(live.map((v) => v.name).join(", "))} ${live.length === 1 ? "is" : "are"} real, read through ${live.length === 1 ? "its" : "their"} own interface${writesOn() ? ", and real money moves there only when you sign a movement" : ", and nothing is sent there"} · ${sim ? `${plural(sim, "venue", "venues")} and every payee are local simulations, which settle nowhere` : "every payee is a local simulation, which settles nowhere"}`;
+  })()} <span class="clock">· simulated clock <button type="button" class="link dim" data-skip="60">+1 hour</button> <button type="button" class="link dim" data-skip="1440">+1 day</button> <button type="button" class="link dim" data-skip="4320">+3 days</button></span>`;
   for (const b of $("foot").querySelectorAll("button[data-skip]")) {
     b.disabled = !owner;
     b.addEventListener("click", () => own({ type: "setPolicy", change: "advance", value: b.dataset.skip }));
@@ -114,8 +120,8 @@ const select = (name, opts, sel) => `<select name="${name}">${opts.map(([v, l, d
 const formOf = (id) => Object.fromEntries(new FormData($(id)).entries());
 
 const PANEL = {
-  balances: (owner) => `<table><thead><tr><th>Venue</th><th class="hide-s">Front line</th><th class="r">Balance</th><th>Money in</th><th>Money out</th><th></th></tr></thead><tbody>${A.venues.map((v) => `<tr><td>${esc(v.name)}${v.live ? '<span class="live">LIVE</span>' : ""}${v.plugged ? `<span class="why">${esc(v.via || "plugged in")}</span>` : ""}</td><td class="dim hide-s">${esc(v.frontLine)}</td><td class="r num2">${money(v.usd)}</td>${v.watchOnly ? `<td colspan="2" class="dim">${canMove(v) ? "Real money · you sign each one" : "Read-only"}${v.asOf ? ` · as of ${nyTime(v.asOf)}` : ""}${v.address ? `<span class="why">${v.proven ? `proven yours: ${esc(v.proven)} signed` : "watched: no wallet signed for it, so nothing is sent to it"}</span>` : ""}${v.readOnlyBecause && writesOn() ? `<span class="why">${esc(v.readOnlyBecause)}</span>` : ""}${v.stale ? `<span class="why">last read failed: ${esc(v.stale)}</span>` : ""}</td>` : v.restricted ? `<td colspan="2" class="dim">${esc(v.restricted)}</td>` : `<td>${runway(v.in)}</td><td>${runway(v.out)}</td>`}<td class="r">${!owner ? "" : v.watchOnly ? `${canMove(v) ? `<button type="button" class="link" data-move="${esc(v.id)}">Move…</button> · ` : ""}<button type="button" class="link dim" data-unplug="${esc(v.id)}">Disconnect</button>` : v.plugged ? `<button type="button" class="link dim" data-unplug="${esc(v.id)}">Unplug</button>` : liveFor(v.id).length ? `<button type="button" class="link dim" data-live="${esc(v.id)}">Connect</button>` : ""}</td></tr>`).join("")}</tbody></table>
-    <p class="plug dim">${A.venues.some((v) => v.live) ? (writesOn() ? `Real-money writes are on: at most ${money(A.connectLive.writes.capUsd)} a movement, each one signed by you. ` : "Venues connected live are read only: this server was started without real-money writes. ") : "Every balance above is simulated. "}${A.connectLive ? `<button type="button" class="link" id="live-open"${owner ? "" : " disabled"}>Connect a real venue…</button> It is read through its own interface, and nothing is sent to it.` : ""}${A.connectable.length ? ` ${plural(A.connectable.length, "demo venue", "demo venues")} can be plugged in too: ${esc(A.connectable.map((c) => c.name).join(", "))}. <button type="button" class="link" id="plug-open"${owner ? "" : " disabled"}>Plug one in…</button>` : ""}</p>`,
+  balances: (owner) => `<table><thead><tr><th>Venue</th><th class="hide-s">Front line</th><th class="r">Balance</th><th>Money in</th><th>Money out</th><th></th></tr></thead><tbody>${A.venues.map((v) => `<tr><td>${esc(v.name)}${v.live ? '<span class="live">LIVE</span>' : ""}${v.plugged ? `<span class="why">${esc(v.via || "plugged in")}</span>` : ""}</td><td class="dim hide-s">${esc(v.frontLine)}</td><td class="r num2">${money(v.usd)}</td>${v.watchOnly ? `<td colspan="2" class="dim">${canMove(v) ? "Real money · you sign each one" : "Read-only"}${v.asOf ? ` · as of ${nyTime(v.asOf)}` : ""}${v.address ? `<span class="why">${v.proven ? `proven yours: ${esc(v.proven)} signed` : "watched: no wallet signed for it, so nothing is sent to it or from it"}</span>` : ""}${v.readOnlyBecause && writesOn() ? `<span class="why">${esc(v.readOnlyBecause)}</span>` : ""}${keyOnlyReads(v) ? '<span class="why">this key only reads: money can be sent to it, nothing leaves it from here</span>' : ""}${v.stale ? `<span class="why">last read failed: ${esc(v.stale)}</span>` : ""}</td>` : v.restricted ? `<td colspan="2" class="dim">${esc(v.restricted)}</td>` : `<td>${runway(v.in)}</td><td>${runway(v.out)}</td>`}<td class="r">${!owner ? "" : v.watchOnly ? `${canMove(v) ? `<button type="button" class="link" data-move="${esc(v.id)}">Move…</button> · ` : ""}<button type="button" class="link dim" data-unplug="${esc(v.id)}">Disconnect</button>` : v.plugged ? `<button type="button" class="link dim" data-unplug="${esc(v.id)}">Unplug</button>` : liveFor(v.id).length ? `<button type="button" class="link dim" data-live="${esc(v.id)}">Connect</button>` : ""}</td></tr>`).join("")}</tbody></table>
+    <p class="plug dim">${A.venues.some((v) => v.live) ? (writesOn() ? `Real-money writes are on: at most ${money(A.connectLive.writes.capUsd)} a movement, each one signed by you. ` : "Venues connected live are read only: this server was started without real-money writes. ") : "Every balance above is simulated. "}${A.connectLive ? `<button type="button" class="link" id="live-open"${owner ? "" : " disabled"}>Connect a real venue…</button> ${writesOn() ? "It is read through its own interface; real money moves only when you sign a movement." : "It is read through its own interface, and nothing is sent to it."}` : ""}${A.connectable.length ? ` ${plural(A.connectable.length, "demo venue", "demo venues")} can be plugged in too: ${esc(A.connectable.map((c) => c.name).join(", "))}. <button type="button" class="link" id="plug-open"${owner ? "" : " disabled"}>Plug one in…</button>` : ""}</p>`,
 
   runways: () => `<table><thead><tr><th>Runway</th><th>Carries</th><th class="r">Fee on $1,000</th><th class="r">Lands</th><th>Who</th></tr></thead><tbody>${A.venues.map((v) => `<tr><td colspan="5" class="group">${esc(v.name)}<span class="dim">${esc(v.frontLine)} · agent key here: ${esc(v.agentKey.model)}. It can ${esc(v.agentKey.can)}; it cannot ${esc(v.agentKey.cannot)}.</span></td></tr>${v.runways.length ? v.runways.map((r) => `<tr><td><b>${esc(r.dir)}</b> · ${esc(r.protocol)}${r.minUsd ? `<span class="why">at least $${r.minUsd}</span>` : ""}${!r.final && r.returnDays ? `<span class="why">can be returned for ${r.returnDays} days</span>` : ""}</td><td class="dim">${esc(r.carries)}${r.chains.length ? `<span class="why">${esc(r.chains.join(" · "))}</span>` : ""}</td><td class="r num2">${r.feeOn1000 ? money(r.feeOn1000) : "free"}</td><td class="r num2">${esc(r.lands)}</td><td>${who(r.access)}${r.why ? `<span class="why">${esc(r.why)}</span>` : ""}${r.opens ? `<span class="why">To open it: ${esc(r.opens)}</span>` : ""}</td></tr>`).join("") : '<tr><td colspan="5" class="dim">No balance to move.</td></tr>'}`).join("")}</tbody></table>`,
 
@@ -403,7 +409,10 @@ async function proveWallet(w) {
 /** the wallet each proven address was proven with, while this page is open */
 const PROVIDERS = new Map();
 const writesOn = () => !!(A.connectLive && A.connectLive.writes && A.connectLive.writes.on);
-const canMove = (v) => writesOn() && !!v.liveCan && !v.readOnlyBecause && (v.liveCan.withdraw !== false || v.liveCan.ledgers.length > 1 || v.liveCan.swap !== false || !!v.liveCan.send);
+const watched = (v) => !!v.address && !v.proven;
+const canMove = (v) => writesOn() && !!v.liveCan && !v.readOnlyBecause && !watched(v) && (v.liveCan.withdraw !== false || (v.liveCan.ledgers.length > 1 && v.liveCan.transfer !== false) || v.liveCan.swap !== false || !!v.liveCan.send);
+/* writes are on, the venue is written, but this key lets nothing leave it: it can still receive */
+const keyOnlyReads = (v) => writesOn() && !!v.liveCan && !v.readOnlyBecause && !watched(v) && !canMove(v);
 const NETWORKS = ["Arbitrum", "Base", "Ethereum", "Optimism", "Polygon", "BNB Chain"];
 
 /** a real-money payment in the Payments tab */
@@ -447,7 +456,7 @@ function openLiveMove(venueId) {
   const v = A.venues.find((x) => x.id === venueId);
   if (!v || !v.liveCan) return;
   const c = v.liveCan;
-  const kinds = [...(c.withdraw !== false && !c.send ? [["withdraw", "Withdraw to a place of yours"]] : []), ...(c.send ? [["send", "Send from this wallet"]] : []), ...(c.ledgers.length > 1 ? [["transfer", "Between its own ledgers"]] : []), ...(c.swap !== false && !c.send ? [["swap", "Swap stablecoins"]] : [])];
+  const kinds = [...(c.withdraw !== false && !c.send ? [["withdraw", "Withdraw to a place of yours"]] : []), ...(c.send ? [["send", "Send from this wallet"]] : []), ...(c.ledgers.length > 1 && c.transfer !== false ? [["transfer", "Between its own ledgers"]] : []), ...(c.swap !== false && !c.send ? [["swap", "Swap stablecoins"]] : [])];
   const dests = A.venues.filter((x) => x.id !== v.id && x.watchOnly && x.liveCan && x.liveCan.receive && !x.readOnlyBecause);
   const cap = A.connectLive.writes.capUsd;
   $("modal-form").innerHTML = `<h2>Move real money · ${esc(v.name)}</h2><div class="dim small">This is the venue itself. Nothing moves until you sign, and the venue’s own checks still apply. At most ${money(cap)} a movement on this server.</div>
@@ -533,11 +542,11 @@ function openLive(venueId) {
   const options = preset ? liveFor(preset.id) : all;
   if (!options.length) return;
   const home = A.connectLive.home;
-  $("modal-form").innerHTML = `<h2>${preset ? `Connect ${esc(preset.name)}` : "Connect a real venue"}</h2><div class="dim small">The real one, read-only. The account reads it through its own interface and sends it nothing${preset ? `; it stands in for the simulated ${esc(preset.name)} until you disconnect it` : ""}.</div>
+  $("modal-form").innerHTML = `<h2>${preset ? `Connect ${esc(preset.name)}` : "Connect a real venue"}</h2><div class="dim small">${writesOn() ? `The real one. The account reads it through its own interface; real money moves only when you sign a movement here, at most ${money(A.connectLive.writes.capUsd)}, and only as far as the venue lets this key` : "The real one, read-only. The account reads it through its own interface and sends it nothing"}${preset ? `; it stands in for the simulated ${esc(preset.name)} until you disconnect it` : ""}.</div>
     ${options.length > 1 ? field("How", select("kind", options.map((o) => [o.kind, o.label]))) : `<input type="hidden" name="kind" value="${esc(options[0].kind)}" />`}
     <div id="live-body"></div>
     <div class="msg" id="modal-msg"></div>
-    <div class="end"><button type="button" id="modal-cancel">Cancel</button><button type="submit" class="ink" id="modal-go"${Owner.role === "owner" ? "" : " disabled"}>Connect, read-only</button></div>`;
+    <div class="end"><button type="button" id="modal-cancel">Cancel</button><button type="submit" class="ink" id="modal-go"${Owner.role === "owner" ? "" : " disabled"}>${writesOn() ? "Connect" : "Connect, read-only"}</button></div>`;
   const form = $("modal-form");
   let proven = null;
   /* "no" a refusal · "ok" done · "wait" the venue or the wallet is being asked */
@@ -547,12 +556,14 @@ function openLive(venueId) {
     const o = kindOf();
     proven = null;
     say("");
+    // a sign-in keeps Connect shut until the venue says yes; any other way of connecting opens it again
+    $("modal-go").disabled = Owner.role !== "owner";
     if (o.needs === "key-file") {
       const pick = o.kind === "exchange" && !preset;
       if (pick && !EXCHANGES) EXCHANGES = ((await (await fetch("/api/account/exchanges")).json()).exchanges) || [];
       $("live-body").innerHTML = `${pick ? field("Exchange", select("exchange", EXCHANGES.map((x) => [x.id, x.name]))) : ""}
         <div class="row">${field("Shown as", '<input name="label" maxlength="40" autocomplete="off" />')}${field("Key file", '<input name="ref" maxlength="160" autocomplete="off" spellcheck="false" />')}</div>
-        <div class="quote"><div class="path"><b>1</b> At the venue, make an API key that can only read.</div><div class="path"><b>2</b> Save it as <span class="mono" id="live-path"></span> holding <span class="mono">${esc(o.example)}</span></div><div class="path"><b>3</b> Run <span class="mono">chmod 600</span> on that file. This page sends where the file is, never what is in it.</div></div>`;
+        <div class="quote"><div class="path"><b>1</b> ${writesOn() ? "At the venue, make an API key. Start with one that can only read: withdrawing or trading needs the key’s own permission, set at the venue." : "At the venue, make an API key that can only read."}</div><div class="path"><b>2</b> Save it as <span class="mono" id="live-path"></span> holding <span class="mono">${esc(o.example)}</span></div><div class="path"><b>3</b> Run <span class="mono">chmod 600</span> on that file. This page sends where the file is, never what is in it.</div></div>`;
       const fill = () => {
         const id = preset ? preset.id : pick ? form.elements.exchange.value : o.kind;
         const name = preset ? preset.name : pick ? (EXCHANGES.find((x) => x.id === id) || {}).name || id : o.label.split(" · ")[0];
@@ -584,6 +595,42 @@ function openLive(venueId) {
           }
         });
       }
+    } else if (o.needs === "sign-in") {
+      const who = o.label.split(" · ")[0];
+      $("live-body").innerHTML = `<div class="quote"><div class="path">${esc(o.example)}</div></div><div><button type="button" id="signin-go">Sign in at ${esc(who)}…</button></div><input type="hidden" name="ref" value="" /><input type="hidden" name="label" value="${esc(preset ? preset.name : who)}" />`;
+      $("modal-go").disabled = true;
+      $("signin-go").addEventListener("click", async () => {
+        // the tab opens inside the click, so no popup blocker stops it; it goes to the venue once its address is known
+        const tab = window.open("about:blank", "_blank");
+        say(`Asking ${who} where to sign in…`, "wait");
+        const r = await fetch("/api/account/signin/start", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ connector: o.kind }) }).then((x) => x.json()).catch(() => ({ ok: false }));
+        if (!r.ok) {
+          if (tab) tab.close();
+          return say((r.refusal && r.refusal.message) || r.error || "the sign-in could not start", "no");
+        }
+        if (tab) {
+          tab.opener = null;
+          tab.location.href = r.url;
+          say(`Sign in on ${who}’s own page, then come back here.`, "wait");
+        } else {
+          $("modal-msg").className = "msg wait";
+          $("modal-msg").innerHTML = `<a href="${esc(r.url)}" target="_blank" rel="noopener">Open ${esc(who)}’s sign-in page</a>, sign in there, then come back here.`;
+        }
+        const until = Date.now() + 15 * 60_000;
+        const poll = async () => {
+          if (!$("modal").open) return;
+          const st = await fetch(`/api/account/signin/status?state=${encodeURIComponent(r.state)}`).then((x) => x.json()).catch(() => ({}));
+          if (st.status === "ready") {
+            form.elements.ref.value = r.state;
+            $("modal-go").disabled = Owner.role !== "owner";
+            return say(`${who} signed you in. Connect it.`, "ok");
+          }
+          if (st.status === "failed") return say(st.error || "the sign-in did not finish", "no");
+          if (Date.now() > until) return say("The sign-in ran out: start it again.", "no");
+          setTimeout(poll, 1500);
+        };
+        poll();
+      });
     } else {
       $("live-body").innerHTML = `<div class="quote"><div class="path">${esc(o.example)}</div></div><input type="hidden" name="ref" value="" /><input type="hidden" name="label" value="${esc(preset ? preset.name : "")}" />`;
     }

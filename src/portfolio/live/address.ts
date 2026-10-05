@@ -1,6 +1,7 @@
 /** Venues that are read by ADDRESS: no key, no credential — what the venue or the chain says about an address.
  *
- *   a wallet        dollar stablecoins and the chain's own coin on six EVM chains, read from the chains (chain.ts)
+ *   a wallet        dollar stablecoins and the chain's own coin on seven EVM chains, read from the chains (chain.ts), and Robinhood's
+ *                   Stock Tokens on Robinhood Chain, priced by Robinhood's own bid (robinhood.ts)
  *   Hyperliquid     POST /info `clearinghouseState` (perps: account value, withdrawable) and `spotClearinghouseState` (spot balances)
  *   Polymarket      GET data-api /v2/positions?user= (title, outcome, current_size, current_value) + pUSD at that address on Polygon
  *   Ondo            OUSG, rOUSG and USDY at an address on Ethereum, priced by Ondo's own on-chain oracle
@@ -12,6 +13,7 @@ import { getAddress, isAddress, type Hex } from "viem";
 import type { Refusal } from "../../core/errors.ts";
 import { no } from "../refuse.ts";
 import { STABLECOINS, type ChainName, type ChainReader, type TokenRef } from "./chain.ts";
+import { stockTokenHoldings } from "./robinhood.ts";
 import { walletWriter } from "./writes.ts";
 import { asRefusal, num, unreachable, venueSaidNo, type Http, type LiveBalance, type LiveProbe, type LiveSource } from "./types.ts";
 
@@ -34,22 +36,23 @@ const probeOf = (req: AddressRequest, note: string, native: unknown): LiveProbe 
 // ---- a wallet -----------------------------------------------------------------------------
 
 export { STABLECOINS };
-const ALL_CHAINS: ChainName[] = ["Ethereum", "Optimism", "BNB Chain", "Polygon", "Base", "Arbitrum"];
+const ALL_CHAINS: ChainName[] = ["Ethereum", "Optimism", "BNB Chain", "Polygon", "Base", "Arbitrum", "Robinhood Chain"];
 
 export async function walletSource(req: AddressRequest): Promise<Opened> {
   const address = checked(req.venue, req.address);
   if (typeof address !== "string") return address;
   const name = req.label || req.proven || "Wallet";
-  let unread: ChainName[] = [];
+  let unread: string[] = [];
   const read = async (): Promise<LiveBalance[]> => {
-    const [tokens, coins] = await Promise.all([req.chain.tokens(address, STABLECOINS), req.chain.native(address, ALL_CHAINS)]);
-    unread = [...new Set([...tokens.failed, ...coins.failed])];
-    if (unread.length === ALL_CHAINS.length) throw no("E_VENUE_UNREACHABLE", { venue: req.venue, message: "none of the chains answered: the public endpoints may be rate-limiting this machine" });
-    return [...tokens.rows, ...coins.rows].filter((b) => b.amount > 0).map((b) => ({ asset: b.asset, amount: b.amount, where: b.chain }));
+    const [tokens, coins, stocks] = await Promise.all([req.chain.tokens(address, STABLECOINS), req.chain.native(address, ALL_CHAINS), stockTokenHoldings(address, req.chain, req.http, Date.now())]);
+    const chains = [...new Set([...tokens.failed, ...coins.failed])];
+    if (chains.length === ALL_CHAINS.length) throw no("E_VENUE_UNREACHABLE", { venue: req.venue, message: "none of the chains answered: the public endpoints may be rate-limiting this machine" });
+    unread = [...chains, ...(stocks.unread ? [stocks.unread] : [])];
+    return [...[...tokens.rows, ...coins.rows].filter((b) => b.amount > 0).map((b) => ({ asset: b.asset, amount: b.amount, where: b.chain })), ...stocks.rows];
   };
   try {
     const first = await read();
-    const source: LiveSource = { name, kind: "agent-wallet", reference: address, via: `${req.proven ?? "an address"} · read from the chains`, address, writer: walletWriter(address, req.chain), probe: probeOf(req, `dollar stablecoins and each chain's own coin on ${ALL_CHAINS.join(", ")}${unread.length ? ` (no answer from ${unread.join(", ")} this time)` : ""}`, { address, chains: ALL_CHAINS, unread }), read };
+    const source: LiveSource = { name, kind: "agent-wallet", reference: address, via: `${req.proven ?? "an address"} · read from the chains`, address, writer: walletWriter(address, req.chain), probe: probeOf(req, `dollar stablecoins and each chain's own coin on ${ALL_CHAINS.join(", ")}, and Robinhood's Stock Tokens${unread.length ? ` (no answer this time: ${unread.join("; ")})` : ""}`, { address, chains: ALL_CHAINS, unread }), read };
     return { source, first };
   } catch (err) {
     return asRefusal(req.venue, name, err);

@@ -19,7 +19,7 @@ import { isRefusal, type Refusal } from "../../core/errors.ts";
 import { canonical } from "../../core/hash.ts";
 import { no } from "../refuse.ts";
 import type { AccountKind } from "../accounts.ts";
-import { CHAINS, type ChainName } from "../live/chain.ts";
+import { STABLECOINS, type ChainName } from "../live/chain.ts";
 import { isStable } from "../live/types.ts";
 import type { Landed, LiveReceipt, LiveWriter, WalletTx } from "../live/writes.ts";
 import type { CardLike, Outcome } from "./exchange.ts";
@@ -69,7 +69,8 @@ export interface LiveEngine {
 }
 
 const KINDS = ["withdraw", "send", "transfer", "swap"] as const;
-const NETWORKS = Object.keys(CHAINS) as ChainName[];
+/** real money moves in dollar stablecoins, so on the chains that carry one (Robinhood Chain is read, not paid on) */
+const NETWORKS = [...new Set(STABLECOINS.map((s) => s.chain))] as ChainName[];
 const TTL_MS = 10 * 60_000;
 const POLL_MS = 20_000;
 const same = (a: string | undefined, b: string | undefined) => (a ?? "").toLowerCase() === (b ?? "").toLowerCase();
@@ -116,6 +117,7 @@ export class LiveMoves {
       if (f.to !== f.from) return no("E_ACCOUNT_BAD_ACTION", { message: `a ${kind} stays at one venue` });
       if (kind === "transfer") {
         const ledgers = from.writer.can.ledgers;
+        if (from.writer.can.transfer === false && ledgers.length > 1) return no("E_VENUE_RAIL_CLOSED", { venue: src.id, message: `${src.name}: this key may not move money between its own ledgers. That is set on the key at the exchange` });
         if (!from.writer.transfer || !ledgers.includes(f.fromLedger) || !ledgers.includes(f.toLedger) || f.fromLedger === f.toLedger) return no("E_VENUE_RAIL_CLOSED", { venue: src.id, message: `${src.name}: money moves here between ${ledgers.join(" and ") || "no ledgers this account knows"}` });
         if (f.asset !== f.toAsset) return no("E_ACCOUNT_BAD_ACTION", { message: "a transfer between ledgers keeps the currency: swap is the other movement" });
       } else {
@@ -129,6 +131,8 @@ export class LiveMoves {
     const network = f.network as ChainName;
     if (kind === "withdraw" && (!from.writer.withdraw || from.writer.can.withdraw === false)) return no("E_VENUE_RAIL_CLOSED", { venue: src.id, message: `${src.name}: this key may not withdraw. That is set on the key at the exchange` });
     if (kind === "send" && !from.writer.can.send) return no("E_VENUE_RAIL_CLOSED", { venue: src.id, message: `${src.name}: money leaves it at the venue, not from here` });
+    // a pasted address is only watched: the account sends nothing from it, as it sends nothing to it
+    if (kind === "send" && from.address !== undefined && !from.proven) return no("E_VENUE_RAIL_CLOSED", { venue: src.id, message: `${src.name} is watched, not proven yours: nothing is sent from it here. Connect it again from the wallet itself` });
     if (f.from === f.to) return no("E_ACCOUNT_BAD_ACTION", { message: "the money leaves for another venue" });
     const dst = m.venue(f.to);
     if (!dst) return no("E_ACCOUNT_DESTINATION", { venue: f.to, message: `"${f.to}" is not a venue connected live: real money goes only to a place of yours the account can see` });

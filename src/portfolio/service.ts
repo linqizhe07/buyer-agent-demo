@@ -60,6 +60,8 @@ import { WalletProofs } from "./live/proof.ts";
 import { publicChain } from "./live/chain.ts";
 import { realMm } from "./live/metamask.ts";
 import { publicPrices } from "./live/prices.ts";
+import { ROBINHOOD_MCP } from "./live/robinhood.ts";
+import { OAuthSignIn } from "./live/signin.ts";
 import { realHttp } from "./live/types.ts";
 import type { AgentAction, Envelope, Hex } from "./account/sign.ts";
 
@@ -430,9 +432,26 @@ export class PortfolioService {
   /** what a live connection reaches: the real network, unless a test handed in stand-ins */
   private liveDeps(): LiveDeps {
     // made once: the chain clients and the price cache are kept between connections
-    return (this.liveMade ??= { home: this.opts.home, http: realHttp, clock: Date.now, mm: realMm(this.opts.mm?.bin, this.opts.mm?.timeoutMs), chain: this.opts.liveDeps?.chain ?? publicChain(), price: this.opts.liveDeps?.price ?? publicPrices({ open: this.opts.liveDeps?.openExchange, clock: this.opts.liveDeps?.clock }), ...this.opts.liveDeps, proofs: this.proofs });
+    return (this.liveMade ??= { home: this.opts.home, http: realHttp, clock: Date.now, mm: realMm(this.opts.mm?.bin, this.opts.mm?.timeoutMs), chain: this.opts.liveDeps?.chain ?? publicChain(), price: this.opts.liveDeps?.price ?? publicPrices({ open: this.opts.liveDeps?.openExchange, clock: this.opts.liveDeps?.clock }), signIn: (kind) => this.signIn(kind), ...this.opts.liveDeps, proofs: this.proofs });
   }
   private liveMade: LiveDeps | undefined;
+
+  /** the sign-in at a venue that speaks OAuth to MCP clients (Robinhood): one per venue, its tokens in memory only */
+  private readonly signIns = new Map<string, OAuthSignIn>();
+  signIn(kind: string): OAuthSignIn | undefined {
+    if (kind !== "robinhood") return undefined;
+    let s = this.signIns.get(kind);
+    if (!s) {
+      const deps = this.liveDeps();
+      s = new OAuthSignIn({ resource: ROBINHOOD_MCP, name: "Robinhood", venue: "robinhood", http: deps.http, clock: deps.clock });
+      this.signIns.set(kind, s);
+    }
+    return s;
+  }
+  /** which sign-in a state that came back belongs to */
+  signInHolding(state: string): OAuthSignIn | undefined {
+    return [...this.signIns.values()].find((s) => s.has(state));
+  }
 
   /** Connect a venue the user REALLY has, read-only. The venue is asked through its own interface (live/): what it holds, and what it says the
    * credential may do. A live connection on the id of a simulated venue takes that venue's place until it is unplugged; either way every
@@ -455,7 +474,9 @@ export class PortfolioService {
     const usd = r2((await adapter.read()).reduce((s, h) => s + h.usd, 0));
     // what this connection may do with the money there: nothing unless the server moves real money, and then only what the owner signs
     const writes = this.opts.liveWrites;
-    const mode = !src.writer ? `read only: ${src.readOnlyBecause ?? "nothing is sent to it from here"}` : !writes ? "read only: this server was started without real-money writes" : src.address !== undefined && !proven && src.writer.can.send === "wallet" ? "watched: no wallet signed for this address, so nothing is sent to or from it" : `real money moves only when you sign it, at most ${cents(writes.capUsd)} a movement`;
+    const can = src.writer?.can;
+    const leaves = !!can && (can.withdraw !== false || (can.ledgers.length > 1 && can.transfer !== false) || can.swap !== false || !!can.send);
+    const mode = !src.writer ? `read only: ${src.readOnlyBecause ?? "nothing is sent to it from here"}` : !writes ? "read only: this server was started without real-money writes" : src.address !== undefined && !proven && src.writer.can.send === "wallet" ? "watched: no wallet signed for this address, so nothing is sent to or from it" : !leaves ? "this key only reads: money can be sent to it, nothing leaves it from here" : `real money moves only when you sign it, at most ${cents(writes.capUsd)} a movement`;
     return { ok: true, summary: `${adapter.account.name} connected live · ${cents(usd)} there now · ${opened.summary} · ${mode}${sim ? " · it stands in for the simulated one until it is unplugged" : ""}`, native: { connector, probe: opened.source.probe.native ?? null } };
   }
 

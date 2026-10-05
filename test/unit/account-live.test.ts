@@ -459,7 +459,7 @@ describe("venues read by address", () => {
     const chain = fakeChain({ "Base:USDC": 210, "Arbitrum:USDC": 640, Ethereum: 0.25, "BNB Chain": 2 }, { down: ["Polygon"] });
     const x = await boot({ chain });
     const said = summary(await x.connect("wallet-0000a1", "live:wallet", ADDRESS, "OKX Wallet"));
-    expect(said).toBe("OKX Wallet connected live · $2,550.00 there now · watched, not proven yours: nobody signed for it · dollar stablecoins and each chain's own coin on Ethereum, Optimism, BNB Chain, Polygon, Base, Arbitrum (no answer from Polygon this time) · read only: this server was started without real-money writes");
+    expect(said).toBe("OKX Wallet connected live · $2,550.00 there now · watched, not proven yours: nobody signed for it · dollar stablecoins and each chain's own coin on Ethereum, Optimism, BNB Chain, Polygon, Base, Arbitrum, Robinhood Chain, and Robinhood's Stock Tokens (no answer this time: Polygon; Robinhood's Stock Token list did not answer) · read only: this server was started without real-money writes");
     const v = (await x.venue("wallet-0000a1"))!;
     expect([v.frontLine, v.live, v.watchOnly, v.in.access, v.out.access]).toEqual(["On-chain", true, "Live · read-only", "closed", "closed"]);
     expect(v.holdings.map((h) => [h.asset, h.amount, h.usd, h.note])).toEqual([["BNB", 2, 1200, "BNB Chain"], ["USDC", 640, 640, "Arbitrum"], ["ETH", 0.25, 500, "Ethereum"], ["USDC", 210, 210, "Base"]]);
@@ -469,7 +469,7 @@ describe("venues read by address", () => {
     expect(code(await x.ag({ type: "agentSendAsset", destination: "self", sourceDex: "metamask", destinationDex: "wallet-0000a1", token: "USDC", amount: "50", fromSubAccount: "", maxFee: "5" }))).toBe("E_VENUE_RAIL_CLOSED");
 
     expect(code(await x.connect("wallet-bad", "live:wallet", "0x1234"))).toBe("E_ACCOUNT_BAD_ACTION");
-    const dark = await boot({ chain: fakeChain({}, { down: ["Ethereum", "Optimism", "BNB Chain", "Polygon", "Base", "Arbitrum"] }) });
+    const dark = await boot({ chain: fakeChain({}, { down: ["Ethereum", "Optimism", "BNB Chain", "Polygon", "Base", "Arbitrum", "Robinhood Chain"] }) });
     expect(code(await dark.connect("wallet-0000a1", "live:wallet", ADDRESS))).toBe("E_VENUE_UNREACHABLE");
   });
 

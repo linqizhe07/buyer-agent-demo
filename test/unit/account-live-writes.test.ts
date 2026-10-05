@@ -10,6 +10,7 @@ import { signAgent, signOwner, simKey, type AgentAction, type OwnerAction } from
 import type { ChainName, ChainReader, Mined } from "../../src/portfolio/live/chain.ts";
 import type { ExchangeClient, OpenExchange } from "../../src/portfolio/live/exchange.ts";
 import type { LiveDeps } from "../../src/portfolio/live/index.ts";
+import { exchangeWriter } from "../../src/portfolio/live/writes.ts";
 import { PortfolioService } from "../../src/portfolio/service.ts";
 
 /** REAL-money writes, against stand-ins for everything real: an exchange that records what it is asked, a chain that holds what the test
@@ -217,6 +218,9 @@ describe("real money at venues connected live", () => {
     await x.own({ type: "connectVenue", venue: "wallet-pasted", connector: "live:wallet", label: "", credentialRef: stranger.address });
     const watched = refusal(await x.prepared({ kind: "withdraw", from: "okx", to: "wallet-pasted", asset: "USDC", network: "Arbitrum", amount: "25" }));
     expect([watched.code, watched.message]).toEqual(["E_ACCOUNT_DESTINATION", "Wallet is watched, not proven yours: real money goes only to an address a wallet signed for. Connect it again from the wallet itself"]);
+    // nor is anything sent from it
+    const fromWatched = refusal(await x.prepared({ kind: "send", from: "wallet-pasted", to: "okx", asset: "USDC", network: "Arbitrum", amount: "5" }));
+    expect([fromWatched.code, fromWatched.message]).toEqual(["E_VENUE_RAIL_CLOSED", "Wallet is watched, not proven yours: nothing is sent from it here. Connect it again from the wallet itself"]);
 
     const w = await x.provenWallet();
     // the signed address is someone else's: nothing is sent
@@ -266,6 +270,39 @@ describe("real money at venues connected live", () => {
     const y = await boot({ exchange: okxStandIn({ perm: "read_only" }) });
     await y.connectOkx();
     expect(refusal(await y.move({ kind: "swap", from: "okx", to: "okx", asset: "USDT", toAsset: "USDC", network: "", amount: "20" })).message).toBe("OKX: this key may not trade, so it cannot swap");
+  });
+
+  it("a key that only reads: nothing leaves the exchange, and the exchange can still receive from your wallet", async () => {
+    const x = await boot({ exchange: okxStandIn({ perm: "read_only" }) });
+    const connected = await x.connectOkx();
+    expect(!isRefusal(connected) && connected.kind === "account" && connected.summary).toContain("· this key only reads: money can be sent to it, nothing leaves it from here");
+    const okx = (await x.svc.accountView())!.venues.find((v) => v.id === "okx")!;
+    expect(okx.liveCan).toEqual({ withdraw: false, ledgers: ["trading", "funding"], transfer: false, swap: false, receive: true, send: false });
+    // asked anyway — by an agent, or a page that did not know — the account says no before OKX is asked
+    const t = refusal(await x.move({ kind: "transfer", from: "okx", to: "okx", fromLedger: "funding", toLedger: "trading", asset: "USDT", network: "", amount: "5" }));
+    expect([t.code, t.message]).toEqual(["E_VENUE_RAIL_CLOSED", "OKX: this key may not move money between its own ledgers. That is set on the key at the exchange"]);
+    await x.provenWallet();
+    expect(refusal(await x.move({ kind: "withdraw", from: "okx", to: "wallet-mine", asset: "USDC", network: "Arbitrum", amount: "5" })).message).toBe("OKX: this key may not withdraw. That is set on the key at the exchange");
+    // the other way it works: your wallet sends to OKX's own deposit address
+    const sent = await x.move({ kind: "send", from: "wallet-mine", to: "okx", asset: "USDC", network: "Arbitrum", amount: "3" });
+    expect(!isRefusal(sent) && sent.kind).toBe("result");
+    expect(x.okx.calls.map((c) => c[0])).toEqual(["fetchDepositAddress", "fetchDepositAddress"]);
+  });
+
+  it("what a key may do is read in each exchange's own terms", () => {
+    const may = (id: string, said: string[]) => {
+      const c = exchangeWriter({ id } as unknown as ExchangeClient, id, id, [], { can: said }, ["spot", "funding"]).can;
+      return [c.withdraw, c.transfer, c.swap];
+    };
+    // Binance: a move between the account's own wallets is a permission of its own, and trading futures is not trading spot
+    expect(may("binance", ["read", "trade spot and margin"])).toEqual([false, false, true]);
+    expect(may("binance", ["read", "move between its own wallets", "withdraw"])).toEqual([true, true, false]);
+    expect(may("binance", ["read", "trade futures"])).toEqual([false, false, false]);
+    // OKX: moving between its own accounts comes with trading
+    expect(may("okx", ["read", "trade"])).toEqual([false, true, true]);
+    expect(may("okx", ["read"])).toEqual([false, false, false]);
+    // an exchange that does not say: its first refusal will
+    expect(may("kraken", [])).toEqual(["unknown", "unknown", "unknown"]);
   });
 
   it("from your own wallet: the account builds the transaction, your wallet sends it, and the chain says whether it was this payment", async () => {
@@ -327,6 +364,8 @@ describe("real money at venues connected live", () => {
     const x = await boot();
     await x.connectOkx();
     await x.own({ type: "connectVenue", venue: "metamask", connector: "live:metamask", label: "", credentialRef: "" });
+    // Robinhood Chain is read, not paid on: it carries no dollar stablecoin this account knows
+    expect(refusal(await x.move({ kind: "send", from: "metamask", to: "okx", asset: "USDC", network: "Robinhood Chain", amount: "10" })).message).toBe("a network is one of Ethereum, Optimism, BNB Chain, Polygon, Base, Arbitrum");
     // OKX takes USDC on Arbitrum and Ethereum here: Base is not one of its networks, and the account says so before anything else
     expect(refusal(await x.move({ kind: "send", from: "metamask", to: "okx", asset: "USDC", network: "Base", amount: "10" })).message).toBe("OKX does not carry USDC on Base: it lists ARBITRUM, ERC20");
     const off = refusal(await x.move({ kind: "send", from: "metamask", to: "okx", asset: "USDC", network: "Arbitrum", amount: "10" }));

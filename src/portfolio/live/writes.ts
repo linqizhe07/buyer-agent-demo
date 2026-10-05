@@ -46,6 +46,8 @@ export interface LiveWriter {
     withdraw: boolean | "unknown";
     /** the venue's own ledgers money moves between */
     ledgers: string[];
+    /** a move between those ledgers: a permission of its own at Binance, part of trading at OKX; `unknown` as for withdraw */
+    transfer: boolean | "unknown";
     swap: boolean | "unknown";
     /** money can be sent to it */
     receive: boolean;
@@ -94,9 +96,23 @@ export const NETWORK_CODES: Record<ChainName, string[]> = {
   Optimism: ["OPTIMISM", "OP"],
   Polygon: ["MATIC", "POLYGON", "POL"],
   "BNB Chain": ["BEP20", "BSC"],
+  // no exchange this account knows lists it as a network
+  "Robinhood Chain": [],
 };
 
 type Net = { fee?: number | undefined; withdraw?: boolean | undefined; deposit?: boolean | undefined };
+
+/** what the key may do, in the exchange's own words (the probe in live/exchange.ts). Each exchange draws the lines in its own place: a move
+ * between a Binance account's own wallets is a permission of its own, at OKX it comes with trading. Where the exchange has no call that
+ * says, its first refusal will. */
+function keyMay(exchange: string, said: string[]): { withdraw: boolean | "unknown"; transfer: boolean | "unknown"; swap: boolean | "unknown" } {
+  if (!said.length) return { withdraw: "unknown", transfer: "unknown", swap: "unknown" };
+  const has = (p: string) => said.includes(p);
+  if (exchange.startsWith("binance")) return { withdraw: has("withdraw"), transfer: has("move between its own wallets"), swap: has("trade spot and margin") };
+  if (exchange.startsWith("okx")) return { withdraw: has("withdraw"), transfer: has("trade"), swap: has("trade") };
+  const all = said.join(" ");
+  return { withdraw: /withdraw/.test(all), transfer: "unknown", swap: /trade/.test(all) };
+}
 
 export function exchangeWriter(client: ExchangeClient, venue: string, name: string, secrets: string[], probe: { can: string[] }, ledgers: string[]): LiveWriter {
   const said = (err: unknown) => redact(String((err as { message?: string })?.message ?? err).replace(/\s+/g, " ").slice(0, 240), secrets);
@@ -121,9 +137,8 @@ export function exchangeWriter(client: ExchangeClient, venue: string, name: stri
     return { code, net: nets[code] ?? {} };
   };
   const has = (what: string) => (client.has?.[what] === true ? true : client.has?.[what] === false ? false : undefined);
-  const can = probe.can.join(" ");
   return {
-    can: { withdraw: probe.can.length ? /withdraw/.test(can) : "unknown", ledgers, swap: probe.can.length ? /trade/.test(can) : "unknown", receive: true, send: false },
+    can: { ...keyMay(client.id, probe.can), ledgers, receive: true, send: false },
     async depositAddress(asset, chain) {
       const n = await network(asset, chain);
       if ("ok" in n) return n;
@@ -214,7 +229,7 @@ export function walletWriter(address: Hex, chain: ChainReader): LiveWriter {
     return { token: t.address, units: parseUnits(String(amount), decimals) };
   };
   return {
-    can: { withdraw: false, ledgers: [], swap: false, receive: true, send: "wallet" },
+    can: { withdraw: false, ledgers: [], transfer: false, swap: false, receive: true, send: "wallet" },
     async depositAddress() {
       return { address };
     },
@@ -249,7 +264,7 @@ export function walletWriter(address: Hex, chain: ChainReader): LiveWriter {
 
 export function mmWriter(address: Hex, run: <T>(args: string[]) => Promise<T>, env: Record<string, string | undefined> = process.env): LiveWriter {
   return {
-    can: { withdraw: false, ledgers: [], swap: false, receive: true, send: "mm" },
+    can: { withdraw: false, ledgers: [], transfer: false, swap: false, receive: true, send: "mm" },
     async depositAddress() {
       return { address };
     },
