@@ -20,7 +20,7 @@ import type { LiveOption, LiveOptions } from "../account/exchange.ts";
 import { hyperliquidSource, ondoSource, polymarketSource, walletSource, type AddressRequest } from "./address.ts";
 import { ALPACA_KEY, alpacaSource } from "./alpaca.ts";
 import type { ChainReader } from "./chain.ts";
-import { defaultKeyRef, loadKeyFile } from "./credentials.ts";
+import { defaultKeyRef, loadKeyFile, type KeyShape } from "./credentials.ts";
 import { EXCHANGE_KEY, exchangeSource, type OpenExchange } from "./exchange.ts";
 import { KALSHI_KEY, kalshiSource } from "./kalshi.ts";
 import { metamaskSource, type RunMm } from "./metamask.ts";
@@ -204,6 +204,25 @@ export const parseConnector = (connector: string): { kind: string; variant: stri
 export function liveOptions(home: string): LiveOptions {
   const options: LiveOption[] = CONNECTORS.map((c) => ({ connector: `live:${c.kind}`, label: c.label, needs: c.needs, example: c.example, ...(c.needs === "key-file" ? { defaultRef: defaultKeyRef("<venue>") } : {}), venues: c.venues, kind: c.kind }));
   return { home, options };
+}
+
+/** the key file each kind of connection reads */
+export const KEY_SHAPES: Record<string, KeyShape> = { exchange: EXCHANGE_KEY, alpaca: ALPACA_KEY, kalshi: KALSHI_KEY, "robinhood-crypto": ROBINHOOD_CRYPTO_KEY };
+
+/** Is a key file ready for a connection? Where it is, whether only its owner can read it, which fields it is missing — the same checks a
+ * connection makes, said before connecting so the page can say what to do next. Field NAMES are said; no value ever leaves this process.
+ * `needs`: the fields this particular exchange asks for (OKX's passphrase), from the exchange library. */
+export function keyFileStatus(home: string, kind: string, venue: string, ref: string, needs: string[] = []): { ready: boolean; path: string; fields: string[]; message: string; missing?: string[]; mode?: string } {
+  const shape = KEY_SHAPES[kind];
+  const where = ref.trim() || defaultKeyRef(venue);
+  const path = where.startsWith("/") ? where : `${home.replace(/\/$/, "")}/${where}`;
+  if (!shape) return { ready: false, path, fields: [], message: `a ${kind} connection does not read a key file` };
+  const extra = needs.filter((n) => (shape.optional ?? []).includes(n) && !shape.required.includes(n));
+  const fields = [...shape.required, ...extra];
+  const r = loadKeyFile(home, where, { ...shape, required: fields }, venue);
+  if (!isRefusal(r)) return { ready: true, path, fields, message: "the key file is ready" };
+  const d = (r.detail ?? {}) as { missing?: string[]; mode?: string };
+  return { ready: false, path, fields, message: r.message, ...(d.missing ? { missing: d.missing } : {}), ...(d.mode ? { mode: d.mode } : {}) };
 }
 
 export async function openLive(req: LiveRequest, deps: LiveDeps): Promise<LiveOpened | Refusal> {

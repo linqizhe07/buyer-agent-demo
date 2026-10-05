@@ -89,7 +89,7 @@ export async function hyperliquidSource(req: AddressRequest): Promise<Opened> {
   };
   try {
     const first = await read();
-    const source: LiveSource = { name, kind: "perp", reference: address, via: "Hyperliquid info API · by address", address, readOnlyBecause: "Hyperliquid moves money only on a signature by the account's own key, and it does not serve this location: it is read, never written", probe: probeOf(req, "the perps account value and the spot balances are two ledgers, reported as the venue reports them", { calls: ["POST /info clearinghouseState", "POST /info spotClearinghouseState"], user: address }), read };
+    const source: LiveSource = { name, kind: "perp", reference: address, via: "Hyperliquid info API · by address", address, readOnlyBecause: "Hyperliquid moves money only on a signature by the account's own key, and it does not serve this location: it is read, never written", noTradeBecause: "Hyperliquid does not serve this location, and it has no check the account could ask first: no order is placed there from here", probe: probeOf(req, "the perps account value and the spot balances are two ledgers, reported as the venue reports them", { calls: ["POST /info clearinghouseState", "POST /info spotClearinghouseState"], user: address }), read };
     return { source, first };
   } catch (err) {
     return asRefusal(req.venue, name, err);
@@ -131,7 +131,7 @@ export async function polymarketSource(req: AddressRequest): Promise<Opened> {
   };
   try {
     const first = await read();
-    const source: LiveSource = { name, kind: "prediction", reference: address, via: "Polymarket Data API · by address", address, readOnlyBecause: "Polymarket does not serve this location: it is read, never written", probe: probeOf(req, `the address is the account wallet Polymarket shows in the profile menu, not the key that signs for it${cashUnread ? " · the cash could not be read from Polygon this time" : ""}`, { calls: ["GET /v2/positions?user=", "balanceOf pUSD on Polygon"], user: address }), read };
+    const source: LiveSource = { name, kind: "prediction", reference: address, via: "Polymarket Data API · by address", address, readOnlyBecause: "money goes in and out of Polymarket at Polymarket", noTradeBecause: "connected by its address, it is only read: to trade, connect Polymarket with the account wallet's key (Polymarket's own location check comes first)", probe: probeOf(req, `the address is the account wallet Polymarket shows in the profile menu, not the key that signs for it${cashUnread ? " · the cash could not be read from Polygon this time" : ""}`, { calls: ["GET /v2/positions?user=", "balanceOf pUSD on Polygon"], user: address }), read };
     return { source, first };
   } catch (err) {
     return asRefusal(req.venue, name, err);
@@ -166,7 +166,7 @@ export async function ondoSource(req: AddressRequest): Promise<Opened> {
   };
   try {
     const first = await read();
-    const source: LiveSource = { name, kind: "rwa", reference: address, via: "Ondo tokens on Ethereum · priced by Ondo's oracle", address, readOnlyBecause: "OUSG moves only between addresses Ondo has allowlisted, and subscribing or redeeming is done at Ondo: it is read, never written", probe: probeOf(req, "OUSG, rOUSG and USDY at this address; the price is the one Ondo publishes on-chain, about once a business day", { tokens: ONDO_TOKENS.map((t) => t.address), oracle: ONDO_ORACLE }), read };
+    const source: LiveSource = { name, kind: "rwa", reference: address, via: "Ondo tokens on Ethereum · priced by Ondo's oracle", address, readOnlyBecause: "OUSG moves only between addresses Ondo has allowlisted, and subscribing or redeeming is done at Ondo: it is read, never written", noTradeBecause: "OUSG is subscribed and redeemed at Ondo, after Ondo's own checks: there is no order interface for the account to call", probe: probeOf(req, "OUSG, rOUSG and USDY at this address; the price is the one Ondo publishes on-chain, about once a business day", { tokens: ONDO_TOKENS.map((t) => t.address), oracle: ONDO_ORACLE }), read };
     return { source, first };
   } catch (err) {
     return asRefusal(req.venue, name, err);

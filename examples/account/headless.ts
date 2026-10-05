@@ -54,7 +54,7 @@ const approve = (o: Outcome): Promise<Outcome> => (!isRefusal(o) && o.kind === "
 const pay = (url: string, maxAmount: string, fromSubAccount: string, close = false) => ask({ type: "agentPay", url, maxAmount, fromSubAccount, ...(close ? { close: true } : {}) });
 
 const show = (what: string, o: Outcome): Outcome => {
-  const line = isRefusal(o) ? `✗ ${o.code} · ${o.message}` : o.kind === "card" ? `▣ ${o.card.id} waits for the owner · ${o.card.reason}` : o.kind === "payment" ? `✓ ${o.payment.id} · ${o.payment.from} → ${o.payment.to} · $${o.payment.amountUsd} · ${o.payment.status}${o.payment.note ? ` · ${o.payment.note}` : ""}` : o.kind === "account" ? `✓ ${o.summary}` : `✓ ${JSON.stringify(o.result).slice(0, 120)}`;
+  const line = isRefusal(o) ? `✗ ${o.code} · ${o.message}` : o.kind === "card" ? `▣ ${o.card.id} waits for the owner · ${o.card.reason}` : o.kind === "payment" ? `✓ ${o.payment.id} · ${o.payment.from} → ${o.payment.to} · $${o.payment.amountUsd} · ${o.payment.status}${o.payment.note ? ` · ${o.payment.note}` : ""}` : o.kind === "account" ? `✓ ${o.summary}` : o.kind === "order" ? `✓ ${o.order.id} · ${o.order.side} ${o.order.qty} ${o.order.symbol} · ${o.order.status}` : `✓ ${JSON.stringify(o.result).slice(0, 120)}`;
   console.log(`${what.padEnd(34)} ${line}`);
   return o;
 };

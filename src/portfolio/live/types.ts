@@ -15,6 +15,7 @@
 import { isRefusal, type Refusal } from "../../core/errors.ts";
 import { no } from "../refuse.ts";
 import type { AccountKind, AssetClass } from "../accounts.ts";
+import type { LiveTrader } from "./trade.ts";
 import type { LiveWriter } from "./writes.ts";
 
 /** what a venue said about the credential or the address it was shown */
@@ -47,10 +48,14 @@ export interface LiveSource {
   address?: string | undefined;
   probe: LiveProbe;
   read(): Promise<LiveBalance[]>;
-  /** how real money is moved here, when it can be; absent: this venue is only ever read */
+  /** how real money is moved here, when it can be; absent: no money is moved here from the account */
   writer?: LiveWriter | undefined;
-  /** why this venue is only read, when it is */
+  /** why no money is moved here, when none is */
   readOnlyBecause?: string | undefined;
+  /** how orders are placed here (trade.ts), when they can be */
+  trader?: LiveTrader | undefined;
+  /** why no order is placed here, when none is */
+  noTradeBecause?: string | undefined;
 }
 
 export interface HttpReply {

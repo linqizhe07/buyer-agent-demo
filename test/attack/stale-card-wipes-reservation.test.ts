@@ -20,7 +20,6 @@ const MIN = 60_000;
 const DAY = 86_400_000;
 const QUOTE = "https://data.sim/v1/quotes?symbol=NVDA";
 const STREAM = "https://infer.sim/v1/stream";
-const ITEM = "https://shop.sim/items/desk-feed-pro";
 const owner = simKey("owner");
 const cc = simKey("agent:claude-code");
 const homes: string[] = [];
@@ -72,8 +71,9 @@ describe("A · a card from before the approval was re-issued", () => {
     expect(code(await answer(stale, "reject"))).toBe("result");
     expect([spend().spentMicro, spend().reservedMicro]).toEqual([5_000_000, 0]);
 
-    // 5 · so a $29 purchase by card fits "what is left of $40", and the owner approves it
-    expect(code(await answer(carded(await pay(ITEM, "30", "")), "approve"))).toBe("payment");
+    // 5 · so a $29 first payment to data.sim fits "what is left of $40", and the owner approves it
+    world.data.priceMicro = 29_000_000;
+    expect(code(await answer(carded(await pay(QUOTE, "30")), "approve"))).toBe("payment");
     // 6 · and the session goes on spending its deposit
     for (let i = 0; i < 5; i++) expect(code(await pay(STREAM, "5"))).toBe("payment");
 

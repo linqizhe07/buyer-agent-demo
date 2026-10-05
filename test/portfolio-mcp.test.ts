@@ -79,7 +79,7 @@ describe("the MCP seat holds an agent key", () => {
     expect(r.body.payment).toMatchObject({ kind: "transfer", from: "okx", to: "hyperliquid", amountUsd: 500, status: "pending" });
     expect(r.body.flight).toMatch(/^CC-\d{4}$/);
     // an outside address is not something this tool can reach
-    const out = await tool("portfolio_transfer", { from: "okx", to: "chase", amount: 100 });
+    const out = await tool("portfolio_transfer", { from: "okx", to: "0x7A11000000000000000000000000000000000001", amount: 100 });
     expect(out.error).toBe(true);
     const a = await tool("portfolio_account");
     expect(a.body.seat.authorised).toBe(true);

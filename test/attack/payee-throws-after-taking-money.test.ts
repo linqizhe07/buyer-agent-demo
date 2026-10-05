@@ -1,9 +1,8 @@
 /** AN ATTACK THAT MUST FAIL (found by an independent review on 2026-10-04, written as it succeeded then, and run with `it.fails`:
  * this test passes only while the attack below does NOT go through) — attacker B, a payee the owner has approved once.
  *
- * The payee TAKES the payment (the token ledger moves, or the card is charged) and then answers with a receipt the account's code trips over:
- * x402 `payer: 5` (payees.ts `sameAddress(res.payer, …)` calls `.toLowerCase()` on a number), ACP a body of `5` (`"status" in final`), AP2 a
- * receipt that is not a string. The throw is caught in `pay()` and turned into "…could not read: nothing further was sent" — but `book()` never
+ * The payee TAKES the payment (the token ledger moves) and then answers with a receipt the account's code trips over: x402 `payer: 5`
+ * (payees.ts `sameAddress(res.payer, …)` calls `.toLowerCase()` on a number), AP2 a receipt that is not a string. The throw is caught in `pay()` and turned into "…could not read: nothing further was sent" — but `book()` never
  * ran: the approval's budget is not charged, no payment row exists, the ledger has no accepted row. The next call passes the same budget check.
  * An agent that retries an error (or one that works with the payee) empties the float past the budget; the books say one payment happened. */
 import { mkdtempSync, rmSync } from "node:fs";
@@ -20,7 +19,6 @@ const START = Date.parse("2026-10-05T14:00:00.000Z");
 const MIN = 60_000;
 const DAY = 86_400_000;
 const QUOTE = "https://data.sim/v1/quotes?symbol=NVDA";
-const ITEM = "https://shop.sim/items/desk-feed-pro";
 const owner = simKey("owner");
 const cc = simKey("agent:claude-code");
 const homes: string[] = [];
@@ -89,26 +87,5 @@ describe("B · the payee takes the money, then sends a receipt the account canno
     expect(x.spend().spentMicro).toBe(9_000_000);
     expect(x.engine.payments.filter((p) => p.kind === "pay")).toHaveLength(1);
     expect(x.svc.rows().filter((r) => r.tool === "agentPay" && r.outcome === "accepted")).toHaveLength(1);
-  });
-
-  it.fails("ACP: the card is charged twice more and neither charge is on the books", async () => {
-    const x = await boot("100");
-    const available = async () => (await x.svc.read("mastercard"))[0]!.amount;
-    const before = await available();
-    expect(code(await x.payOk(ITEM, "30", ""))).toBe("payment");
-    // the shop completes the checkout (its processor charges the card) and answers 200 with a body that is not an object
-    const shop = x.world.shop.handle;
-    hostsOf(x.world).set("shop.sim", async (c) => {
-      const res = await shop(c);
-      return /\/complete$/.test(c.url.pathname) && res.status === 200 ? { ...res, body: 5 } : res;
-    });
-    expect(code(await x.pay(ITEM, "30", ""))).toBe("E_PAYEE_UNVERIFIED");
-    expect(code(await x.pay(ITEM, "30", ""))).toBe("E_PAYEE_UNVERIFIED");
-
-    const charged = before - (await available());
-    expect(charged).toBe(87);
-    const chargedButNotBooked = charged * 1e6 - x.spend().spentMicro;
-    expect([x.spend().spentMicro, chargedButNotBooked]).toEqual([29_000_000, 58_000_000]);
-    expect(x.engine.payments.filter((p) => p.protocol === "acp")).toHaveLength(1);
   });
 });

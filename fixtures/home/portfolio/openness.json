@@ -13,9 +13,7 @@
   ],
   "guard": {
     "defaultCardAboveUsd": 500,
-    "cardAboveUsd": {
-      "mastercard": 200
-    },
+    "cardAboveUsd": {},
     "dailyCapUsd": 40000
   },
   "sessionExpiresAt": "2026-10-16T00:00:00Z",

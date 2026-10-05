@@ -3,7 +3,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { isRefusal, type Refusal } from "../../src/core/errors.ts";
-import { etDate } from "../../src/portfolio/account/calendar.ts";
 import { cardHash, type Outcome } from "../../src/portfolio/account/exchange.ts";
 import { cosign, signAgent, signDevice, signOwner, simKey, ZERO, type AgentAction, type Hex, type OwnerAction, type SimKey } from "../../src/portfolio/account/sign.ts";
 import { PortfolioService } from "../../src/portfolio/service.ts";
@@ -341,7 +340,7 @@ describe("an agent moves money only between the user's own venues, inside an app
     const bn = refusal(await x.transfer(cc, "binance", "hyperliquid", "100"));
     expect([bn.code, bn.message]).toEqual(["E_VENUE_RAIL_CLOSED", "Binance: this key has no withdraw permission"]);
     expect((bn.detail as { opens: string }).opens).toContain("whitelist");
-    expect(code(await x.transfer(cc, "chase", "alpaca", "100", { token: "USD" }))).toBe("E_VENUE_RAIL_CLOSED");
+    expect(code(await x.transfer(cc, "metamask", "alpaca", "100", { token: "USD" }))).toBe("E_VENUE_RAIL_CLOSED");
     expect(code(await x.transfer(cc, "okx", "hyperliquid", "4"))).toBe("E_VENUE_MIN_DEPOSIT");
     expect(code(await x.transfer(cc, "okx", "hyperliquid", "100", { token: "ETH" }))).toBe("E_ACCOUNT_UNPRICED");
     // inside Hyperliquid, perps to spot, is its to do
@@ -399,36 +398,13 @@ describe("what the owner signs", () => {
     expect(code(await x.send(base))).toBe("payment");
   });
 
-  it("a deposit to the broker: started there, on the bank's clock. Sent on Saturday it lands Tuesday, and it can still come back", async () => {
+  it("the broker's cash moves only at the broker, by an ACH with the holder's own bank: not even the owner routes money into it or out of it here", async () => {
     const x = await boot();
-    const p = paid(await x.send({ sourceDex: "chase", destinationDex: "alpaca", token: "USD", amount: "2000" }));
-    expect([p.authority, p.kind, p.status, etDate(Date.parse(p.settlesAt))]).toEqual(["venue", "deposit", "pending", "Tue 6 Oct"]);
-    // the bank is debited, the broker has nothing yet: the money is in flight and nobody can spend it
-    expect([await x.held("chase", "USD"), await x.held("alpaca", "USD")]).toEqual([10400, 5500]);
-    x.setNow(Date.parse(p.settlesAt) - 1);
-    await x.engine.settle();
-    expect(p.status).toBe("pending");
-    await x.pass(1);
-    expect(p.status).toBe("settled");
-    // Friday's sale settled on Monday as well
-    expect(await x.held("alpaca", "USD")).toBe(10000);
-    // an ACH is not final: the bank returns it a week later
-    await x.pass(7 * DAY);
-    const back = x.engine.returnAch(p.id, "R10", "Customer advises not authorized");
-    expect(back.ok).toBe(true);
-    expect([p.status, await x.held("alpaca", "USD"), await x.held("chase", "USD")]).toEqual(["returned", 8000, 12400]);
-    // a transfer on a chain is final
-    const onchain = paid(await x.send({ sourceDex: "hyperliquid", destinationDex: "metamask", amount: "100" }));
-    await x.pass(6 * MIN);
-    expect(isRefusal(x.engine.returnAch(onchain.id))).toBe(true);
-  });
-
-  it("only settled cash leaves the broker", async () => {
-    const x = await boot();
-    const r = refusal(await x.send({ sourceDex: "alpaca", destinationDex: "chase", token: "USD", amount: "6000" }));
-    expect(r.code).toBe("E_VENUE_UNSETTLED");
-    expect(r.message).toContain("withdrawable Mon 5 Oct");
-    expect(code(await x.send({ sourceDex: "alpaca", destinationDex: "chase", token: "USD", amount: "5000" }))).toBe("payment");
+    for (const r of [refusal(await x.send({ sourceDex: "metamask", destinationDex: "alpaca", token: "USD", amount: "2000" })), refusal(await x.send({ sourceDex: "alpaca", destinationDex: "metamask", token: "USD", amount: "500" }))]) {
+      expect([r.code, r.venue]).toEqual(["E_VENUE_RAIL_CLOSED", "alpaca"]);
+      expect(r.message).toContain("only by ACH with your own bank, started at Alpaca");
+    }
+    expect(x.engine.payments).toHaveLength(0);
   });
 
   it("someone else: an address in the book, on its chain, a day after it was added", async () => {
@@ -731,8 +707,6 @@ describe("policy, the ledger and the statement", () => {
       ["Kalshi", "Prediction", "At Kalshi · Tue 6 Oct", "At Kalshi · Tue 6 Oct"],
       ["Polymarket", "Prediction", "USDC · now", "USDC · ~1 min"],
       ["Ondo · OUSG", "RWA", "USDC · now", "USDC · now"],
-      ["Mastercard ··4421", "Card", "—", "—"],
-      ["Chase Checking ··1182", "Bank", "A venue pays out · Tue 6 Oct", "A venue pulls it · Tue 6 Oct"],
     ]);
     expect([v.type, v.signers.threshold, v.activeKeys, v.inFlightUsd]).toEqual(["Separate", 1, 0, 0]);
   });

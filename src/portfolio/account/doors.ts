@@ -19,8 +19,8 @@
  *            the fee, the arrival, the strictest access on the way and a hash
  *            of the route — which is what the owner's signature covers
  *   native   the venue's own request for a leg: Hyperliquid's typed data, a
- *            signed REST call, a CCTP burn, an ACH transfer. It goes on the
- *            ledger row. Nothing is sent anywhere.
+ *            signed REST call, a CCTP burn. It goes on the ledger row.
+ *            Nothing is sent anywhere.
  *
  * Protocol shapes follow the venues' documentation as read on 2026-10-04.
  * Fees and times are the documented ones where a document gives them (CCTP's
@@ -42,8 +42,8 @@ export type Access = "agent" | "owner" | "venue" | "closed";
 const STRICTNESS: Access[] = ["agent", "owner", "venue", "closed"];
 export const strictest = (a: Access, b: Access): Access => (STRICTNESS.indexOf(a) >= STRICTNESS.indexOf(b) ? a : b);
 
-export type FrontLine = "Stocks" | "Exchange" | "On-chain" | "RWA" | "Prediction" | "Bank" | "Card";
-export const FRONT_LINE: Record<AccountKind, FrontLine> = { broker: "Stocks", cex: "Exchange", perp: "Exchange", "agent-wallet": "On-chain", rwa: "RWA", prediction: "Prediction", bank: "Bank", card: "Card" };
+export type FrontLine = "Stocks" | "Exchange" | "On-chain" | "RWA" | "Prediction";
+export const FRONT_LINE: Record<AccountKind, FrontLine> = { broker: "Stocks", cex: "Exchange", perp: "Exchange", "agent-wallet": "On-chain", rwa: "RWA", prediction: "Prediction" };
 
 export interface Rail {
   id: string;
@@ -197,16 +197,6 @@ function rails(a: Account): Pick<Door, "in" | "out" | "inside" | "swap" | "agent
             swap: [],
             agentKey: { model: "API key id + RSA-signed requests", can: "read, trade", cannot: "move money: the API has no such call" },
           };
-    case "bank":
-      return {
-        in: [{ id: "ach", protocol: "ACH credit from a venue's payout", tokens: ["USD"], chains: [], access: "venue", why: "the paying venue starts it", fee: free, etaSec: 0, clock: "ach", final: true }],
-        out: [{ id: "ach", protocol: "ACH debit pulled by a venue", tokens: ["USD"], chains: [], access: "venue", why: "the receiving venue pulls it, on a relationship set up there", opens: "a payment-initiation consent (the read-only aggregation token cannot start a transfer)", fee: free, etaSec: 0, clock: "ach", final: false, returnDays: 60 }],
-        inside: [],
-        swap: [],
-        agentKey: { model: "read-only aggregation token", can: "read balances and transactions", cannot: "start any transfer" },
-      };
-    case "card":
-      return { in: [], out: [], inside: [], swap: [], agentKey: { model: "agentic token with a scope", can: "pay inside the token's categories and limits", cannot: "pay outside them; a card holds no balance to move" } };
   }
 }
 
@@ -226,8 +216,8 @@ export function doorOf(a: Account): Door {
 // ---- routes ---------------------------------------------------------------------
 
 export interface Leg {
-  /** `out` leave a venue · `in` enter one · `bridge` wallet, chain to chain · `swap` one stablecoin into another · `shift` inside one venue · `venue` started at the venue, watched from here */
-  step: "out" | "in" | "bridge" | "swap" | "shift" | "venue";
+  /** `out` leave a venue · `in` enter one · `bridge` wallet, chain to chain · `swap` one stablecoin into another · `shift` inside one venue */
+  step: "out" | "in" | "bridge" | "swap" | "shift";
   venue: string;
   rail: string;
   protocol: string;
@@ -332,18 +322,15 @@ export function plan(req: RouteRequest, venues: VenueView[], nowMs: number): Rou
 
   const outRail = src.id === HUB ? undefined : sd.out[0];
   const inRail = !dd || dd.venue === HUB ? undefined : dd.in[0];
-  if (src.id !== HUB && !outRail) return no("E_VENUE_RAIL_CLOSED", { venue: src.id, message: `${src.name} has no way out for money: a card holds no balance to move` });
+  if (src.id !== HUB && !outRail) return no("E_VENUE_RAIL_CLOSED", { venue: src.id, message: `${src.name} has no way out for money` });
   if (dd && dd.venue !== HUB && !inRail) return no("E_VENUE_RAIL_CLOSED", { venue: dd.venue, message: `${dd.name} takes no deposits` });
 
-  // a rail that keeps bank hours never touches the chain: bank ⇄ broker, bank ⇄ a regulated exchange. One leg, started at the venue
+  // a rail that keeps bank hours never touches the chain: it is an ACH with the user's own bank, started at the venue itself (a broker, a
+  // regulated exchange). The bank is not on this account, so nothing between that venue and the others goes through it
   const fiat = (outRail?.chains.length === 0 ? outRail : undefined) ?? (inRail?.chains.length === 0 ? inRail : undefined);
   if (fiat) {
-    const other = outRail === fiat ? inRail : outRail;
-    if (other && other.chains.length > 0) return no("E_VENUE_CURRENCY", { venue: (outRail === fiat ? dst?.id : src.id) ?? req.to, message: `${src.name} and ${dst?.name ?? req.to} do not share a rail: one moves dollars by ACH, the other moves stablecoins on a chain`, detail: { from: outRail?.protocol, to: inRail?.protocol } });
-    // the venue that is not the bank is where the account holder starts it
-    const at = src.kind === "bank" && dst ? dst : src;
-    const rail = at === dst ? inRail! : outRail!;
-    return finish(req, "USD", "USD", [legOf("venue", at.id, rail, "USD", undefined, usd)], nowMs);
+    const at = fiat === outRail ? src : dst!;
+    return no("E_VENUE_RAIL_CLOSED", { venue: at.id, message: `${at.name} moves dollars only by ACH with your own bank, started at ${at.name}: nothing between it and your other venues goes through the account`, detail: { rail: fiat.protocol, ...(fiat.opens ? { opens: fiat.opens } : {}) } });
   }
 
   // on a chain from here on: the on-chain wallet is the hub every such rail meets at
@@ -495,8 +482,6 @@ export function nativeRequest(leg: Leg, ctx: NativeCtx): Record<string, unknown>
     }
     if (leg.step === "swap") return { type: "order", orders: [{ a: "USDC/USDT (spot)", b: leg.token === "USDT", p: "1.0", s: amount, r: false, t: { limit: { tif: "Ioc" } } }], grouping: "na", ...unsigned, signs: "the API wallet approved at Hyperliquid — an L1 action; built and not signed" };
   }
-  if (leg.step === "venue" && ctx.kind === "broker") return { method: "POST", path: "/v1/accounts/{account_id}/transfers", note: "Broker API shape: only a broker partner may call this; here the account holder starts it at the venue", body: { transfer_type: "ach", relationship_id: `rel-${to}`, amount, direction: leg.protocol.startsWith("ACH to") ? "OUTGOING" : "INCOMING" } };
-  if (leg.step === "venue") return { at: "the venue's own page, by the account holder", action: leg.protocol, amount, note: "there is no API call for this: the account only watches for it" };
   if (leg.step === "in" && leg.protocol.startsWith("on-chain transfer from the float")) return { method: "eth_sendTransaction", call: `transfer(address,uint256) on ${leg.token}`, to, amount, chain: leg.chain, signs: "the float's key, which the account holds" };
   if (ctx.connector === "wallet") return { wallet: leg.venue, method: "eth_sendTransaction", call: `transfer(address,uint256) on ${leg.token}`, to, amount, chain: leg.chain, signs: "the owner, in that wallet: the account holds no key for it" };
   if (leg.step === "bridge") return { command: "mm swap execute", from: leg.protocol, token: leg.token, amount, via: leg.rail };

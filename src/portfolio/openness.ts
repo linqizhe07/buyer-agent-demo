@@ -165,8 +165,6 @@ export interface OpennessRow {
 
 const SECOND_LINE: Record<ScopeEnforcer, string> = {
   venue: "the exchange checks again itself: key permissions, IP, withdrawal whitelist (-2015 · -4026 · 50114)",
-  network: "the issuer / network declines by token scope (rc 57 · 61 · 65 · 54)",
-  bank: "the aggregation token is read-only: any write is a 403",
   issuer: "the transfer-restriction contract reverts: recipient not on the KYC allowlist",
   metamask: "MetaMask Guard: over the 24 h outflow or off the allowlist → MFA by email; malicious transactions are blocked even in beast mode",
 };

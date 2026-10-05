@@ -73,7 +73,7 @@ describe("plugging in a venue the user already has", () => {
     const done = await x.connect("bybit", "unified");
     expect(!isRefusal(done) && done.kind === "account" && done.summary).toBe("Bybit plugged in · the venue says this credential can read, trade · withdrawals stay at the exchange: this key has no withdraw permission · money in: an agent's key may; money out: only at the venue itself");
     const after = await x.engine.view();
-    expect(after.venues).toHaveLength(11);
+    expect(after.venues).toHaveLength(9);
     const bybit = after.venues.find((v) => v.id === "bybit")!;
     // 3,200 USDT and 0.4 ETH, read from the exchange
     expect([bybit.name, bybit.frontLine, bybit.usd, bybit.cashUsd, bybit.plugged]).toEqual(["Bybit", "Exchange", 4176, 3200, true]);
@@ -96,7 +96,7 @@ describe("plugging in a venue the user already has", () => {
     const x = await boot();
     await x.agent("*");
     const standing = x.engine.state.spends.find((s) => s.revokedAt === undefined)!;
-    expect(standing.allow).toEqual(["alpaca", "binance", "okx", "hyperliquid", "metamask", "kalshi", "polymarket", "ondo", "mastercard", "chase"]);
+    expect(standing.allow).toEqual(["alpaca", "binance", "okx", "hyperliquid", "metamask", "kalshi", "polymarket", "ondo"]);
     await x.connect("kraken", "unified");
     await x.connect("okx-wallet", "wallet");
     // neither as a source nor as a place to put money: the agent cannot drain the new exchange, nor park money in a wallet the account holds no key for
@@ -115,7 +115,7 @@ describe("plugging in a venue the user already has", () => {
     expect(code(await x.connect("bybit", "unified", "Bybit · main"))).toBe("account");
     expect((await x.venue("bybit"))!.name).toBe("Bybit · main");
     expect(code(await x.connect("bybit", "unified"))).toBe("E_ACCOUNT_BAD_ACTION");
-    expect((await x.engine.view()).venues).toHaveLength(11);
+    expect((await x.engine.view()).venues).toHaveLength(9);
   });
 
   it("a key that withdraws to the user's own verified address gives the agent a way out — once the owner names the venue in an approval", async () => {
@@ -201,7 +201,7 @@ describe("plugging in a venue the user already has", () => {
     // it can be plugged in again; and a reset starts from the venues the account opened with
     expect(code(await x.connect("kraken", "unified"))).toBe("account");
     x.svc.reset();
-    expect((await x.engine.view()).venues).toHaveLength(10);
+    expect((await x.engine.view()).venues).toHaveLength(8);
   });
 });
 
@@ -235,13 +235,10 @@ describe("the venue's own request on each leg", () => {
     expect(out.legs[0]!.native).toMatchObject({ type: "sendToEvmWithData", hyperliquidChain: "Testnet", signatureChainId: "0x66eee", primaryType: "HyperliquidTransaction:SendToEvmWithData", signature: null });
   });
 
-  it("a deposit at a regulated exchange with no funding API is not given the broker's request", async () => {
+  it("a regulated exchange with no funding API moves dollars only by ACH started there: the account routes nothing into it", async () => {
     const x = await boot();
-    const base = { destination: "self", sourceDex: "chase", destinationDex: "kalshi", token: "USD", amount: "100" };
-    const r = await x.engine.resolve(base, "owner");
-    if (isRefusal(r)) throw new Error(r.message);
-    const p = paid(await x.own({ type: "sendAsset", ...base, fromSubAccount: "", route: r.route.hash, maxFee: String(r.route.feeUsd), deadline: r.route.arrivalMs + MIN }));
-    expect([p.authority, p.legs[0]!.step, p.legs[0]!.venue]).toEqual(["venue", "venue", "kalshi"]);
-    expect(JSON.stringify(p.legs[0]!.native)).not.toContain("/v1/accounts");
+    const r = await x.engine.resolve({ destination: "self", sourceDex: "metamask", destinationDex: "kalshi", token: "USD", amount: "100" }, "owner");
+    expect(isRefusal(r) && [r.code, r.venue, r.message]).toEqual(["E_VENUE_RAIL_CLOSED", "kalshi", "Kalshi moves dollars only by ACH with your own bank, started at Kalshi: nothing between it and your other venues goes through the account"]);
+    expect(x.engine.payments).toHaveLength(0);
   });
 });

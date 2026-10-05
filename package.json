@@ -13,6 +13,7 @@
     "wallet": "tsx src/wallet/server.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
+    "account": "tsx src/portfolio/server.ts",
     "portfolio": "tsx src/portfolio/server.ts",
     "portfolio:demo": "tsx src/portfolio/demo.ts",
     "portfolio:mcp": "tsx src/portfolio/mcp.ts",

@@ -167,6 +167,10 @@ const refusal = (o: Outcome | Refusal | unknown): Refusal => {
   if (!isRefusal(o)) throw new Error(`expected a refusal, got ${JSON.stringify(o).slice(0, 200)}`);
   return o;
 };
+const summary = (o: Outcome): string => {
+  if (isRefusal(o) || o.kind !== "account") throw new Error(`expected a summary, got ${isRefusal(o) ? `${o.code}: ${o.message}` : o.kind}`);
+  return o.summary;
+};
 const paidLive = (o: Outcome) => {
   if (isRefusal(o) || o.kind !== "payment") throw new Error(`expected a payment, got ${isRefusal(o) ? `${o.code}: ${o.message}` : o.kind}`);
   return o.payment;
@@ -179,7 +183,7 @@ describe("real money at venues connected live", () => {
     await x.connectOkx();
     await x.provenWallet();
     const no = refusal(await x.prepared({ kind: "withdraw", from: "okx", to: "wallet-mine", asset: "USDC", network: "Arbitrum", amount: "25" }));
-    expect([no.code, no.message]).toEqual(["E_WALLET_LIVE_WRITES_OFF", "this server moves no real money: it was started without real-money writes. To turn them on, stop it and start it again with: npm run portfolio -- --live-writes"]);
+    expect([no.code, no.message]).toEqual(["E_WALLET_LIVE_WRITES_OFF", "this server moves no real money: it was started read-only. To turn it on, stop it and start it again with: npm run account"]);
     expect(withdraws(x)).toHaveLength(0);
   });
 
@@ -334,8 +338,9 @@ describe("real money at venues connected live", () => {
     expect(code(await x.engine.live.sent("pay-9999", hash))).toBe("E_ACCOUNT_BAD_ACTION");
   });
 
-  it("an agent can only ask: a card every time, showing the address and the fee, and the owner's yes is what moves it", async () => {
+  it("in Conservative mode an agent can only ask: a card every time, showing the address and the fee, and the owner's yes is what moves it", async () => {
     const x = await boot();
+    x.svc.setMode("guard");
     await x.connectOkx();
     const w = await x.provenWallet();
     await x.own({ type: "approveAgent", agentAddress: cc.address, agentName: "Claude Code", validUntil: START + 30 * DAY });
@@ -344,7 +349,7 @@ describe("real money at venues connected live", () => {
     const r = await x.ag(ask);
     if (isRefusal(r) || r.kind !== "card") throw new Error(`expected a card, got ${JSON.stringify(r).slice(0, 200)}`);
     expect([r.card.offer?.payTo, r.card.offer?.network, (r.card as { why?: string }).why, withdraws(x).length]).toEqual([w.address, "Arbitrum", "live", 0]);
-    expect(r.card.reason).toBe("Claude Code asks to send 40 USDC from OKX to OKX Wallet on Arbitrum. This is real money: you sign the address and the fee");
+    expect(r.card.reason).toBe("Claude Code asks to send 40 USDC from OKX to OKX Wallet on Arbitrum");
     const spend = () => x.engine.state.spends.find((s) => s.scope === "venues" && s.revokedAt === undefined)!;
     expect(spend().reservedMicro).toBe(40_000_000);
     // the owner says yes: now it moves, and it counts in the approval
@@ -358,6 +363,35 @@ describe("real money at venues connected live", () => {
     if (isRefusal(r2) || r2.kind !== "card") throw new Error("expected a card");
     await x.own({ type: "approveCard", card: r2.card.id, action: cardHash(r2.card), decision: "reject" });
     expect(withdraws(x).length).toBe(1);
+  });
+
+  it("in Aggressive mode, which only the owner's signature sets, a move inside the agent's limit goes at once — to the owner's own place — and nothing outside it does", async () => {
+    const x = await boot();
+    x.svc.setMode("guard");
+    await x.connectOkx();
+    const w = await x.provenWallet();
+    await x.own({ type: "approveAgent", agentAddress: cc.address, agentName: "Claude Code", validUntil: START + 30 * DAY });
+    await x.own({ type: "approveSpend", agent: cc.address, scope: "venues", allow: "okx,wallet-mine", perPayment: "100", budget: "120", windowHours: 0, validUntil: START + 7 * DAY });
+    expect(summary(await x.own({ type: "setPolicy", change: "mode", value: "open" }))).toBe("Aggressive: agents trade and move inside their limits without asking");
+    const ask = { type: "agentLiveMove" as const, kind: "withdraw", from: "okx", fromLedger: "", to: "wallet-mine", toLedger: "", asset: "USDC", toAsset: "USDC", network: "Arbitrum", amount: "40", maxFee: "0" };
+    const spend = () => x.engine.state.spends.find((s) => s.scope === "venues" && s.revokedAt === undefined)!;
+    const went = await x.ag(ask);
+    expect([code(went), withdraws(x).length, spend().spentMicro, spend().reservedMicro]).toEqual(["payment", 1, 40_000_000, 0]);
+    // the address is the one the wallet signed for, asked of nobody the agent named
+    expect(withdraws(x)[0]![3]).toBe(w.address);
+    if (!isRefusal(went) && went.kind === "payment") expect([went.payment.authority, went.payment.card]).toEqual(["agent", undefined]);
+    // outside the limit nothing goes: per move, then the budget ($40 + $80 is all of $120)
+    expect(code(await x.ag({ ...ask, amount: "150" }))).toBe("E_MANDATE_PER_ORDER_CAP");
+    expect(code(await x.ag({ ...ask, amount: "80" }))).toBe("payment");
+    expect(code(await x.ag({ ...ask, amount: "1" }))).toBe("E_MANDATE_BUDGET");
+    // a fee above what the agent said it would pay stops it
+    await x.own({ type: "approveSpend", agent: cc.address, scope: "venues", allow: "okx,wallet-mine", perPayment: "100", budget: "120", windowHours: 0, validUntil: START + 7 * DAY });
+    expect(code(await x.ag({ ...ask, amount: "10", maxFee: "0.01" }))).toBe("E_ACCOUNT_REQUOTE");
+    expect(withdraws(x).length).toBe(2);
+    // tightening needs no signature, and from then on it is a card again
+    x.svc.setMode("guard");
+    expect(code(await x.ag({ ...ask, amount: "5" }))).toBe("card");
+    expect(withdraws(x).length).toBe(2);
   });
 
   it("the MetaMask Agent Wallet sends only when MetaMask's own switch is on too", async () => {

@@ -4,9 +4,10 @@ const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<
 const money = (n) => "$" + Math.round(Number(n || 0)).toLocaleString("en-US");
 const cents = (n) => "$" + Number(n || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const time = (iso) => String(iso || "").slice(11, 16);
-const KIND = { cex: "CEX", rwa: "RWA", "agent-wallet": "On-chain", prediction: "Prediction", card: "Card", bank: "Bank", broker: "Stocks", perp: "Perp DEX" };
+const KIND = { cex: "CEX", rwa: "RWA", "agent-wallet": "On-chain", prediction: "Prediction", broker: "Stocks", perp: "Perp DEX" };
 const CAP = { read: "Read", trade: "Trade", move: "Transfer", pay: "Pay", subscribe: "Subscribe", redeem: "Redeem" };
-const CLASS_COLOR = { cash: "#1b1b1b", stable: "#8aa37b", crypto: "#e8702a", event: "#9b6b8f", rwa: "#6a7fb5", equity: "#b08a3e" };
+/* the page's own colours, so the bar follows the paper at night too */
+const CLASS_COLOR = { cash: "var(--ink)", stable: "var(--sage)", crypto: "var(--orange)", event: "var(--plum)", rwa: "var(--blue)", equity: "var(--gold)" };
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many || one + "s"}`;
 let O = null;
 let busy = false;
@@ -54,8 +55,8 @@ function renderWorth() {
   $("total").textContent = cents(O.portfolio.totalUsd);
   const pending = O.approvals.filter((a) => a.status === "pending").length;
   $("today").textContent = `Net worth · agent moved ${money(O.daily.used)} today · ${O.counters.refusals} blocked · ${pending} waiting for you`;
-  $("alloc-bar").innerHTML = O.portfolio.byClass.map((c) => `<i style="width:${c.pct}%;background:${CLASS_COLOR[c.class] || "#5a5751"}"></i>`).join("");
-  $("alloc-legend").innerHTML = O.portfolio.byClass.map((c) => `<span style="color:${CLASS_COLOR[c.class] || "#5a5751"}">■ ${esc(c.label)} ${c.pct}% · ${money(c.usd)}</span>`).join("");
+  $("alloc-bar").innerHTML = O.portfolio.byClass.map((c) => `<i style="width:${c.pct}%;background:${CLASS_COLOR[c.class] || "var(--dim)"}"></i>`).join("");
+  $("alloc-legend").innerHTML = O.portfolio.byClass.map((c) => `<span style="color:${CLASS_COLOR[c.class] || "var(--dim)"}">■ ${esc(c.label)} ${c.pct}% · ${money(c.usd)}</span>`).join("");
   const Ld = O.ladder;
   const eta = (s) => (s <= 60 ? "instant" : s < 3600 ? `~${Math.round(s / 60)} min` : s <= 172800 ? "T+1" : `${Math.round(s / 86400)} days`);
   const rowHtml = (r) => {
@@ -75,8 +76,7 @@ function renderAccounts() {
     const writesInScope = a.scope.can.filter((c) => c !== "read");
     const writes = a.reach.filter((c) => c !== "read");
     const can = !writesInScope.length ? '<span class="dim">Read only</span>' : a.revoked ? '<span class="dim">Off · read only</span>' : esc(writes.map((c) => CAP[c]).join(" · "));
-    const credit = a.holdings.find((h) => h.class === "credit");
-    const balance = a.kind === "card" ? `<span class="dim">credit ${money(credit ? credit.usd : 0)}</span>` : a.readError ? '<span class="dim">read failed</span>' : money(a.usd);
+    const balance = a.readError ? '<span class="dim">read failed</span>' : money(a.usd);
     const sw = !writesInScope.length ? '<span class="dim">—</span>' : `<button type="button" class="sw ${a.revoked ? "off" : "on"}" aria-pressed="${!a.revoked}" data-account="${esc(a.id)}" data-on="${a.revoked ? "0" : "1"}">${a.revoked ? "Off" : "On"}</button>`;
     return `<tr class="${a.revoked ? "off" : ""}"><td>${esc(a.name)}${a.live ? ' <span class="live">LIVE</span>' : ""}</td><td class="type dim">${esc(KIND[a.kind] || a.kind)}</td><td class="r mono">${balance}</td><td class="pad">${can}</td><td class="sw">${sw}</td></tr>`;
   }).join("");

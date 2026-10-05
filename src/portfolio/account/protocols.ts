@@ -1,6 +1,6 @@
 /** The agent-payment protocols, as messages: what goes on the wire and what is signed.
  *
- * Four protocols sit at three layers (the split the industry itself draws):
+ * Three protocols sit at two layers (the split the industry itself draws):
  *
  *   settlement  x402 V2, `exact` on EVM    HTTP 402 → an EIP-3009 authorisation in PAYMENT-SIGNATURE → the
  *                                          facilitator verifies and settles → PAYMENT-RESPONSE
@@ -10,14 +10,14 @@
  *                                          cumulative voucher per call
  *   permission  AP2 v0.2                   an OPEN mandate (constraints, the agent's key in `cnf`) and a
  *                                          CLOSED one the agent signs with that key, chained as SD-JWTs
- *   commerce    ACP (2026-01-30)           a checkout session and a delegated payment token with an allowance
  *
  * This file is the codecs only — pure functions over real signatures (secp256k1 through viem,
  * ES256 through Node). Who the payees are and how the account answers them is payees.ts.
  * Shapes follow the specifications as read on 2026-10-04: coinbase/x402 specs v2 and
  * scheme_exact_evm.md; paymentauth.org draft-httpauth-payment-01, draft-evm-charge-00 and
- * draft-evm-session-00; ap2-protocol.org v0.2; agentic-commerce-protocol 2026-01-30. Where a
- * subset was taken, it is said at the function.
+ * draft-evm-session-00; ap2-protocol.org v0.2. Where a subset was taken, it is said at the
+ * function. (ACP, the card-checkout protocol, is not here: a card has no interface an individual
+ * can hand an agent.)
  */
 import { createHash, createHmac, randomBytes, type KeyObject } from "node:crypto";
 import { decodeFunctionData, encodeAbiParameters, encodeFunctionData, encodePacked, keccak256, parseTransaction, recoverTransactionAddress, recoverTypedDataAddress, type Hex } from "viem";
@@ -469,53 +469,4 @@ export function ap2Answer(agentKey: KeyObject, n: Ap2Needs, iat: number): { chec
     checkout: ap2Close("checkout", { checkout_hash: n.checkout.hash }, { ...n.sign.checkout, iat }, n.open.checkout, agentKey, { checkout_jwt: n.checkout.jwt }),
     payment: ap2Close("payment", { transaction_id: n.checkout.hash, payee: n.checkout.merchant, payment_amount: n.checkout.total, payment_instrument: n.instrument }, { ...n.sign.payment, iat }, n.open.payment, agentKey),
   };
-}
-
-// ---- ACP: checkout sessions and a delegated payment token ---------------------------------
-
-export const ACP_VERSION = "2026-01-30";
-
-export interface AcpSession {
-  id: string;
-  status: "not_ready_for_payment" | "ready_for_payment" | "completed" | "canceled" | "expired";
-  currency: string;
-  line_items: Array<{ id: string; item: { id: string; quantity: number }; base_amount: number; total: number }>;
-  totals: Array<{ type: string; display_text: string; amount: number }>;
-  merchant_id: string;
-  order?: { id: string; checkout_session_id: string; permalink_url: string } | undefined;
-}
-
-/** the allowance on a delegated payment token: one use, one merchant, one checkout, up to an amount, until a time */
-export interface AcpAllowance {
-  reason: "one_time";
-  max_amount: number;
-  currency: string;
-  checkout_session_id: string;
-  merchant_id: string;
-  expires_at: string;
-}
-
-/** does a charge fit the allowance the token was issued with? */
-export function acpAllows(a: AcpAllowance, charge: { amount: number; currency: string; merchant_id: string; checkout_session_id: string }, nowIso: string, used: boolean): string | null {
-  if (used) return "token_already_used";
-  if (Date.parse(nowIso) >= Date.parse(a.expires_at)) return "token_expired";
-  if (charge.merchant_id !== a.merchant_id) return "merchant_mismatch";
-  if (charge.checkout_session_id !== a.checkout_session_id) return "checkout_session_mismatch";
-  if (charge.currency !== a.currency) return "currency_mismatch";
-  if (charge.amount > a.max_amount) return "amount_exceeds_allowance";
-  return null;
-}
-
-/** ACP's idempotency rule for a POST: the same key with the same body replays the stored answer; with a different body it is a conflict */
-export class Idempotency {
-  private readonly seen = new Map<string, { body: string; response: unknown }>();
-  check(key: string | undefined, body: unknown): { replay: unknown } | { conflict: true } | null {
-    if (!key) return null;
-    const hit = this.seen.get(key);
-    if (!hit) return null;
-    return hit.body === canonical(body) ? { replay: hit.response } : { conflict: true };
-  }
-  store(key: string | undefined, body: unknown, response: unknown): void {
-    if (key) this.seen.set(key, { body: canonical(body), response });
-  }
 }

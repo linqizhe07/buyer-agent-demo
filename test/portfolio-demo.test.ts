@@ -8,13 +8,12 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
 
 const HEADLINES = [
-  "8 accounts connected in one shape",
+  "6 accounts connected in one shape",
   "raised no card",
-  "four writes across four accounts, zero cards",
+  "three writes across three accounts, zero cards",
   "E_WALLET_SCOPE",
   "E_VENUE_PERMISSION",
   "-2015",
-  "E_VENUE_CARD_DECLINED",
   "E_VENUE_TRANSFER_RESTRICTED",
   "E_VENUE_MARKET_CLOSED",
   "AWAITING_MFA",

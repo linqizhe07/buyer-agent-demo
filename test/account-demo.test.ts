@@ -9,7 +9,7 @@ const ROOT = fileURLToPath(new URL("../", import.meta.url));
 
 /** one line per thing the run has to have shown: what went through, and what was turned away */
 const HEADLINES = [
-  "10 venues on one account",
+  "8 venues on one account",
   "E_ACCOUNT_BAD_SIGNATURE",
   "E_ACCOUNT_UNKNOWN_SIGNER",
   "E_ACCOUNT_OWNER_ONLY",
@@ -29,10 +29,7 @@ const HEADLINES = [
   "E_VENUE_MIN_DEPOSIT",
   "sendToEvmWithData",
   "E_ACCOUNT_REQUOTE",
-  "lands Wed 14 Oct",
-  "E_VENUE_UNSETTLED",
-  "the market is open and the money is still not there",
-  "the bank returns it (R01)",
+  "Alpaca moves dollars only by ACH with your own bank, started at Alpaca",
   "E_MANDATE_BUDGET",
   "E_MANDATE_PER_ORDER_CAP",
   "E_MANDATE_RECIPIENT",
@@ -56,8 +53,7 @@ const HEADLINES = [
   "session closed: $0.03 paid for 3 calls, $0.47 back in float",
   "E_PAYEE_UNVERIFIED",
   "all fifty cents are back",
-  "to merchant_shop_sim via psp.sim over ACP · delegated card token",
-  "token_already_used",
+  "shop.sim is paid in USDC: name the float that pays",
   "over AP2 mandates · EIP-3009",
   "E_MANDATE_INVALID",
   "the closed mandate is not signed by the agent key the open mandate names",

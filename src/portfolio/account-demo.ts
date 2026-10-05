@@ -1,36 +1,34 @@
 /** `npm run account:demo` — the ACCOUNT, in fourteen beats. Each beat lets something through and
- * turns something away; ✓ / ✗ / FAIL lines; exit 0 iff no assertion failed. No port is opened
- * unless `--serve`; the venues and the payees are in-process simulations; nothing leaves the process.
+ * turns something away; ✓ / ✗ / FAIL lines; exit 0 iff no assertion failed. No port is opened; the
+ * venues and the payees are in-process simulations; nothing leaves the process. (The Account page
+ * shows real accounts only, so this run's simulated state is not served to it.)
  *
  * The account is the airport between a trading agent and the user's money. Its functions are the
  * ones on Hyperliquid's own account pages — deposit, withdraw, transfer, swap, send, account type,
- * sub-accounts, agent keys, fee approvals, signers — opened on TEN venues instead of one, and
+ * sub-accounts, agent keys, fee approvals, signers — opened on EIGHT venues instead of one, and
  * extended with the two things a buyer-side account needs: a spending approval, and an answer to the
- * protocols an agent is asked to pay in (x402, MPP, ACP, AP2).
+ * protocols an agent is asked to pay in (x402, MPP, AP2).
  *
  *   npm run account:demo                     headless
- *   npm run account:demo -- --serve --hold   also serve the Account page at :4820 with this run's state (to look at: the
- *                                            browser is not this account's owner, the script's key is)
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Ledger } from "../agent/ledger.ts";
 import { formatRefusal, isRefusal, type Refusal } from "../core/errors.ts";
-import { etDate, marketSession, whenLabel } from "./account/calendar.ts";
+import { etDate, whenLabel } from "./account/calendar.ts";
 import { cardHash, type CardLike, type Outcome } from "./account/exchange.ts";
 import * as X from "./account/protocols.ts";
 import { hlRecover, hlTypedData, signAgent, signerOf, signOwner, simKey, ZERO, type Action, type AgentAction, type AnySig, type Hex, type OwnerAction, type SimKey } from "./account/sign.ts";
-import { defaultHome, startPortfolioServer } from "./server.ts";
+import { defaultHome } from "./server.ts";
 import { loadOpenness, PortfolioService } from "./service.ts";
 
 const argv = process.argv.slice(2);
-const flag = (f: string) => argv.includes(f);
 const value = (f: string) => {
   const i = argv.indexOf(f);
   return i >= 0 ? argv[i + 1] : undefined;
 };
 
-/** a simulated clock, a week after the portfolio demo's: Saturday 10 October 2026, 10:00 in New York. Monday the 12th is a bank holiday on which the stock market trades */
+/** a simulated clock, a week after the portfolio demo's: Saturday 10 October 2026, 10:00 in New York */
 let ms = Date.UTC(2026, 9, 10, 14, 0, 0);
 const now = () => new Date(ms).toISOString();
 const MIN = 60_000;
@@ -60,11 +58,11 @@ const refused = (o: Outcome, want: string): Refusal | undefined => (isRefusal(o)
 const short = (a: string) => `${a.slice(0, 8)}…${a.slice(-4)}`;
 
 export const PROVEN = [
-  "ten venues the user already has — a stock broker, two exchanges, Hyperliquid, the on-chain wallet, two prediction markets, an RWA fund, a card, a bank — each with its own doors: how money gets in, how it gets out, how long that takes, and who may start it (the agent's key, only the owner, only at the venue itself, nobody)",
+  "eight venues the user already has — a stock broker, two exchanges, Hyperliquid, the on-chain wallet, two prediction markets, an RWA fund — each with its own doors: how money gets in, how it gets out, how long that takes, and who may start it (the agent's key, only the owner, only at the venue itself, nobody)",
   "every instruction is signed, the way Hyperliquid's are: an owner action is typed data a person can read; an agent's request is one type under an agent key the owner authorised, with an expiry and a revocation that sticks. The same encoder recovers Hyperliquid's own SDK test signature",
   "one instruction runs once: the same envelope again is the first answer; a used nonce, a stale money instruction, a changed envelope are refused",
   "an agent key moves money only between the user's own venues, through doors that admit an agent: not to an address, not out of Hyperliquid, not past a key that cannot withdraw, not into or out of the broker",
-  "money in flight is in no balance: a chain leg lands in minutes, an ACH sent on the Saturday before a bank holiday lands on Wednesday, and an ACH that landed can still be returned",
+  "money in flight is in no balance: each leg lands when its rail says, a chain leg in seconds to minutes, and the account says how much is on its way",
   "a spending approval is a line many small payments cannot add up past: per payment, in all, which venues or payees, until when; a waiting card holds its share of the budget",
   "a card is answered with the owner's signature over the card and the hash of what it releases; an agent cannot answer its own; an answer is judged again; a card expires",
   "someone else is paid only at an address the owner put in the book, on the chain it was added for, a day after it was added",
@@ -72,7 +70,7 @@ export const PROVEN = [
   "a venue the user already has is plugged in with one owner signature and no code: an exchange wallet by a credential reference, through its own API where the account has its profile and through the unified library otherwise; a self-custody wallet by its address. Its doors are compiled from what the venue says the credential may do, and it is in no spending approval until the owner names it",
   "paying an API: the account asks the payee itself and speaks its protocol (x402, MPP charge, MPP session with an escrow and vouchers). Nothing is sent to a host the owner did not name; the first payment is a card that shows the receiving address, and approving pins it; a changed address, a higher price, a redirect, an unknown escrow contract are refusals",
   "a metered session locks a deposit once and spends from it by signed vouchers; closing sends the rest home, and a payee that goes silent cannot keep it: the escrow returns it after a grace period",
-  "buying something: by card through ACP (a delegated token good for one checkout, one merchant, one amount, once) or from a float under AP2 (open mandates issued from the owner's approval, closed mandates signed by the agent's own key, receipts signed by the merchant and its processor)",
+  "buying something from a float under AP2: open mandates issued from the owner's approval, closed mandates signed by the agent's own key, receipts signed by the merchant and its processor",
   "an app's fee rides on a payment only inside the rate the owner approved for that app",
   "the ledger is evidence: every accepted instruction is a row with its signed envelope, the signatures recover from the file, a changed row breaks the chain, and the account's payments are compared with the venues' own statements",
 ];
@@ -82,9 +80,9 @@ export const NOT_PROVEN = [
   "a plugged-in exchange shows what the exchange says its key may do; through the unified library there is no single call that returns that, so a real connector learns it from the exchange's own endpoint where one exists and from the first refusal where none does. What is plugged in is the wallet (balances, ways in and out, a stablecoin swap), not order routing",
   "the keys are derived from labels in the source: they are public. The demo shows the checks, it does not keep a secret. On the page the owner's key is a real device key the browser will not export — and the first browser to open the page becomes the owner",
   "a float is still a hot key the account holds: what bounds it is its size. Nothing here is enforced by a chain or by a venue on the account's behalf, except the escrow's cap on a session",
-  "the broker's cash moves only at the broker: the account watches for it and cannot start it. Opening that runway takes a broker-partner relationship, not code",
+  "the broker's cash moves only at the broker, by an ACH with the holder's own bank: the account cannot start it, and opening that runway takes a broker-partner relationship, not code. No bank and no card is on the account: a bank needs an aggregator's production access, and a card has no interface an individual can hand an agent",
   "an address the owner approves on a card is trusted because the owner looked at it: nothing here says whose address it is. No sanctions screening, no Travel Rule, no KYC of a payee",
-  "one person holding all ten accounts, in one region, with all of them reachable, is an assumption: a venue's own region rules are the venue's and are not modelled beyond a door that is closed",
+  "one person holding all eight accounts, in one region, with all of them reachable, is an assumption: a venue's own region rules are the venue's and are not modelled beyond a door that is closed",
   "custody, licences and who pays when something goes wrong are not software and are not here",
 ];
 
@@ -97,7 +95,6 @@ async function main(): Promise<number> {
   const svc = await PortfolioService.create({ home, now, venues: "frontline", freshLedger: true, openness: { ...(loadOpenness() as object), sessionExpiresAt: "2026-11-30T00:00:00Z" }, account: { owners: [{ id: owner.address, kind: "eoa", label: "owner", addedAt: now() }] } });
   const engine = svc.account!;
   const world = svc.payees!;
-  const server = flag("--serve") ? await startPortfolioServer({ port: Number(value("--port") ?? 4820), service: svc }) : undefined;
 
   let n = 0;
   const nonce = () => ms + ++n;
@@ -133,17 +130,16 @@ async function main(): Promise<number> {
 
   heading("Setup");
   note(`home ${home} · ledger ${svc.ledgerPath()}`);
-  note(`sim clock ${now()} (${etDate(ms)}, a Saturday in New York) · ten venues and three payees, all local simulations`);
+  note(`sim clock ${now()} (${etDate(ms)}, a Saturday in New York) · eight venues and three payees, all local simulations`);
   note(`keys derived from labels, public by construction: owner ${short(owner.address)} · agent "Claude Code" ${short(cc.address)} · agent "Codex" ${short(codex.address)}`);
-  if (server) note(`page ${server.url}/account`);
 
   try {
     // ---- 1 ------------------------------------------------------------------------
-    heading("Beat 1: The airport · ten venues, each with its doors");
+    heading("Beat 1: The airport · eight venues, each with its doors");
     const v1 = await engine.view();
     for (const v of v1.venues) note(`${v.name.padEnd(26)} ${v.frontLine.padEnd(18)} ${usd(v.usd).padStart(11)}   in: ${`${v.in.text} [${v.in.access}]`.padEnd(36)} out: ${v.out.text} [${v.out.access}]`);
     const door = (id: string) => v1.venues.find((v) => v.id === id)!;
-    check(v1.venues.length === 10 && v1.totalUsd > 0, `10 venues on one account · ${usd(v1.totalUsd)} in all · account type ${v1.type}`, "account");
+    check(v1.venues.length === 8 && v1.totalUsd > 0, `8 venues on one account · ${usd(v1.totalUsd)} in all · account type ${v1.type}`, "account");
     check(door("alpaca").in.access === "venue" && door("alpaca").out.access === "venue", "the broker's cash moves only at the broker: the account can watch that runway, not start it", "doors");
     check(door("binance").out.access === "venue" && door("hyperliquid").out.access === "owner" && door("okx").out.access === "agent", "three exchanges, three different ways out: only at Binance itself (this key cannot withdraw) · only the owner's signature (Hyperliquid) · the agent's key, to a whitelisted address (OKX)", "doors");
     const unsigned = await svc.exchange({ action: { type: "agentSendAsset", destination: "self", sourceDex: "okx", destinationDex: "hyperliquid", token: "USDC", amount: "100", fromSubAccount: "", maxFee: "5", nonce: ms }, nonce: ms, signature: { r: `0x${"00".repeat(32)}`, s: `0x${"00".repeat(32)}`, v: 27 } });
@@ -198,9 +194,6 @@ async function main(): Promise<number> {
     await pass(6 * MIN + 20_000);
     check(p3?.status === "settled" && (await held("hyperliquid", "USDC", "perps")) === 1998.93, `six minutes later it has landed: Hyperliquid perps ${await held("hyperliquid", "USDC", "perps")} USDC (500 less $1.07 of fees), each leg at its own time`, "time");
     note(`the last leg is Circle's ${(p3?.legs[3]?.native as { function?: string } | undefined)?.function ?? "?"}, through Circle's forwarder into the Hyperliquid balance — the default deposit route from Arbitrum on 2026-10-04`);
-    const undo = engine.returnAch(p3?.id ?? "");
-    if (isRefusal(undo)) console.log(`  ${formatRefusal(undo)}`);
-    check(isRefusal(undo), "and it is final: a transfer on a chain cannot be \"returned\" the way a bank payment can (beat 6)", "time");
 
     // ---- 5 ------------------------------------------------------------------------
     heading("Beat 5: Home only · what an agent key can never do");
@@ -218,24 +211,10 @@ async function main(): Promise<number> {
     await pass(5 * MIN);
 
     // ---- 6 ------------------------------------------------------------------------
-    heading("Beat 6: The bank's clock · the runway to the stock market");
-    check(!!refused(show(await transfer(cc, "chase", "alpaca", "100", { token: "USD" })), "E_VENUE_RAIL_CLOSED"), "an agent cannot fund the broker: no trading key and no OAuth scope moves cash there", "broker");
-    const dep = show(await send({ sourceDex: "chase", destinationDex: "alpaca", token: "USD", amount: "2000" }));
-    const p6 = !isRefusal(dep) && dep.kind === "payment" ? dep.payment : undefined;
-    check(p6?.authority === "venue" && p6.status === "pending" && etDate(Date.parse(p6.settlesAt)) === "Wed 14 Oct", "the owner starts a $2,000 ACH at the broker on Saturday: it lands Wednesday 14 October — Monday is a bank holiday, so the bank first sees it on Tuesday", "broker");
-    check((await held("chase", "USD")) === 10400 && (await held("alpaca", "USD")) === 5500, "the bank is debited now and the broker has not settled it: four days in which it cannot be withdrawn (a real broker may lend up to $3,000 of it as buying power at once; this simulation does not)", "time");
-    const unsettled = show(await send({ sourceDex: "alpaca", destinationDex: "chase", token: "USD", amount: "6000" }));
-    check(!!refused(unsettled, "E_VENUE_UNSETTLED"), "only settled cash leaves the broker: Friday's sale is not withdrawable yet", "broker");
-    ms = Date.UTC(2026, 9, 12, 15, 0, 0);
-    await engine.settle();
-    note(`Monday 11:00 in New York: the stock market is in its ${marketSession(ms)} session, and the banks are shut`);
-    check(marketSession(ms) === "regular" && p6?.status === "pending" && (await held("alpaca", "USD")) === 5500, "the market is open and the money is still not there: this is the gap an agent has to plan around", "time");
-    ms = Date.parse(p6?.settlesAt ?? now()) + 1;
-    await engine.settle();
-    check(p6?.status === "settled" && (await held("alpaca", "USD")) === 10000, "Wednesday 09:00: it lands (and Friday's sale has settled too): $10,000 of buying power", "time");
-    await pass(3 * DAY);
-    const returned = engine.returnAch(p6?.id ?? "", "R01", "Insufficient funds");
-    check(!isRefusal(returned) && p6?.status === "returned" && (await held("alpaca", "USD")) === 8000 && (await held("chase", "USD")) === 12400, "three days later the bank returns it (R01): the credit is undone at the broker and the money is back at the bank. An ACH that landed is not final", "time");
+    heading("Beat 6: The stock market · the broker's cash moves only at the broker");
+    const fund = show(await send({ sourceDex: "metamask", destinationDex: "alpaca", amount: "100" }));
+    check(!!refused(fund, "E_VENUE_RAIL_CLOSED"), "not even the owner can fund the broker from here: its cash moves only by an ACH with your own bank, started at Alpaca, and no bank is on this account", "broker");
+    check(!!refused(show(await transfer(cc, "alpaca", "hyperliquid", "100", { token: "USD" })), "E_VENUE_RAIL_CLOSED"), "and an agent cannot take money out of it: no trading key and no OAuth scope moves cash there", "broker");
 
     // ---- 7 ------------------------------------------------------------------------
     heading("Beat 7: Limits · many small ones cannot pass a line a big one cannot");
@@ -351,18 +330,11 @@ async function main(): Promise<number> {
     world.down.clear();
 
     // ---- 12 -----------------------------------------------------------------------
-    heading("Beat 12: Buying something · ACP by card, AP2 from a float");
+    heading("Beat 12: Buying something · AP2 from a float");
     const ITEM = "https://shop.sim/items/desk-feed-pro";
-    const credit = async () => (await svc.read("mastercard"))[0]!.amount;
-    const credit0 = await credit();
-    const bought = await payOk(ITEM, "30", "");
-    show(bought);
-    const acp = lastPaid().native as { allowance: X.AcpAllowance; token: string };
-    check(code(bought) === "payment" && credit0 - (await credit()) === 29 && acp.allowance.max_amount === 2900 && acp.allowance.reason === "one_time", "ACP: a checkout session, then the card goes to the merchant's PROCESSOR, which hands the merchant a token good for this checkout, this merchant, $29.00, once, ten minutes — the merchant never holds the card", "acp");
-    const reuse = await world.psp.charge(acp.token, { amount: 2900, currency: "usd", merchant_id: acp.allowance.merchant_id, checkout_session_id: acp.allowance.checkout_session_id, merchant: "Shop Sim", mcc: "5968" }, ms);
-    check(!reuse.ok && reuse.code === "token_already_used", "the merchant charging that token a second time: token_already_used", "acp");
+    check(!!refused(show(await pay(ITEM, "30", "")), "E_PAYEE_UNSUPPORTED"), "a shop is paid from a float: a payment that names none is refused (no card is on the account)", "ap2");
     world.shop.checkoutCents = 60_000;
-    check(!!refused(show(await pay(ITEM, "30", "")), "E_PAYEE_OVERCHARGE"), "the checkout totals $600 where the agent agreed to $30: E_PAYEE_OVERCHARGE", "acp");
+    check(!!refused(show(await payOk(ITEM, "30", "research", { cnf: cc.jwk })), "E_PAYEE_OVERCHARGE"), "the owner approves the shop at its page's $29; the checkout the merchant then signs totals $600: E_PAYEE_OVERCHARGE, nothing is signed", "ap2");
     world.shop.checkoutCents = undefined;
     const needsOut = await payOk(ITEM, "30", "research", { cnf: cc.jwk });
     const needs = !isRefusal(needsOut) && needsOut.kind === "result" ? (needsOut.result as X.Ap2Needs) : undefined;
@@ -397,7 +369,7 @@ async function main(): Promise<number> {
     await pass(7 * MIN);
     show(await own({ type: "connectVenue", venue: "okx-wallet", connector: "wallet", label: "", credentialRef: "" }));
     check(!!refused(show(await transfer(cc, "okx-wallet", "hyperliquid", "100")), "E_ACCOUNT_OWNER_ONLY"), "a self-custody wallet is plugged in by its address: the account reads it and can send to it, and nothing leaves it unless the owner signs in that wallet", "plug");
-    check(!!refused(show(await own({ type: "connectVenue", venue: "bybit", connector: "unified", label: "", credentialRef: "" })), "E_ACCOUNT_BAD_ACTION") && code(show(await own({ type: "disconnectVenue", venue: "bybit" }))) === "account" && (await engine.view()).venues.length === 12, "plugged in once, and unplugged with one signature: the account stops reading Bybit; the key at Bybit is the owner's to delete there", "plug");
+    check(!!refused(show(await own({ type: "connectVenue", venue: "bybit", connector: "unified", label: "", credentialRef: "" })), "E_ACCOUNT_BAD_ACTION") && code(show(await own({ type: "disconnectVenue", venue: "bybit" }))) === "account" && (await engine.view()).venues.length === 10, "plugged in once, and unplugged with one signature: the account stops reading Bybit; the key at Bybit is the owner's to delete there", "plug");
 
     // ---- 14 -----------------------------------------------------------------------
     heading("Beat 14: The ledger as evidence");
@@ -436,13 +408,8 @@ async function main(): Promise<number> {
 
   heading("Summary");
   const refusals = svc.rows().filter((r) => r.kind === "account-refusal").length;
-  note(`venues ${svc.accounts().length} (10 at the start, 2 plugged in) · payments ${engine.payments.length} · refusals at the account's door ${refusals} · cards ${svc.counters.cards} · loss $0.00 (no money went anywhere the owner had not signed for)`);
+  note(`venues ${svc.accounts().length} (8 at the start, 2 plugged in) · payments ${engine.payments.length} · refusals at the account's door ${refusals} · cards ${svc.counters.cards} · loss $0.00 (no money went anywhere the owner had not signed for)`);
   note(`ledger ${svc.ledgerPath()}`);
-  if (server && flag("--hold")) {
-    note(`holding the page open at ${server.url}/account (Ctrl-C to stop)`);
-    await new Promise<void>((resolve) => process.once("SIGINT", () => resolve()));
-  }
-  await server?.close();
   if (failures.length) {
     console.log(`\nFAILED ASSERTIONS (${failures.length}):`);
     for (const f of failures) console.log(`  - ${f}`);

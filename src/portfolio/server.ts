@@ -1,7 +1,9 @@
-/** The portfolio page — one statement — and the API behind it and the MCP server.
+/** The account page — the user's real accounts on one page — and the API behind it and the MCP server.
  *
- *   npm run portfolio                 → http://127.0.0.1:4820 (simulated MetaMask)
- *   npm run portfolio -- --mm         → the MetaMask account reads the real `mm` CLI (LIVE)
+ *   npm run account                   → http://127.0.0.1:4820 · the Account: real accounts only, connected on the page, trading on
+ *                                       (`npm run portfolio` is the same; `--read-only` places and moves nothing; `--live-cap 100` is the most
+ *                                       one order or movement may be worth)
+ *   npm run account -- --classic      → the original simulated statement (no account layer); `--mm` there reads the real `mm` CLI
  *
  *   GET  /api/overview                 the statement, the liquidity map, the flight board
  *   GET  /api/read?account=binance     holdings (never gated)
@@ -16,13 +18,17 @@
  *   POST /api/revoke  {account} · POST /api/restore {account}   an account's switch
  *   POST /api/reset
  *
- * With the account layer mounted (the default for this server; `--classic` runs the original eight accounts without it):
+ * With the account layer mounted (the default for this server; `--classic` runs the original accounts without it). It holds REAL accounts
+ * only: the venues the owner connects through their own interfaces; no simulated venue is mounted.
  *
- *   GET  /account                      the Account page: balances and runways, payments, agent keys, approvals, sub-accounts, signers
+ *   GET  /                             the page: net worth, accounts, activity, agents, devices (`/account` sends you here)
  *   GET  /api/account                  what that page reads
  *   GET  /api/now                      the service's clock (a signer takes its nonce from here)
  *   POST /api/account/pair   {jwk}     a browser offers the public half of its device key; the first one becomes the owner's device
- *   POST /api/account/prepare {draft}  turn what the owner asked for into the exact action to sign (a movement gets its route, fee and arrival)
+ *   POST /api/account/prepare {draft}  turn what the owner asked for into the exact action to sign (a movement gets its route, fee and arrival;
+ *                                      an order its exact size, price and the most it may be worth)
+ *   GET  /api/account/markets?venue=okx&q=BTC        what a venue connected live trades (a read)
+ *   GET  /api/account/market?venue=okx&symbol=BTC/USDT   one market: a fresh price, the smallest order, the steps, open or not (a read)
  *   POST /api/exchange {action, nonce, signature}   THE door: every instruction, signed — an owner action by an owner key, an agent's by an
  *                                      authorised agent key (200 done · 202 a card is waiting · 401 not a signer · 409 refused)
  *
@@ -106,10 +112,11 @@ export async function startPortfolioServer(opts: PortfolioServerOptions): Promis
     next();
   });
   const file = (name: string, type: string) => (_req: express.Request, res: express.Response) => res.type(type).send(readFileSync(join(PUBLIC, name), "utf8"));
-  app.get("/", file("index.html", "html"));
+  // one page: the account when the layer is mounted, the original simulated statement when it is not (--classic)
+  app.get("/", (req, res) => (svc.account ? file("account.html", "html") : file("index.html", "html"))(req, res));
   app.get("/portfolio.js", file("portfolio.js", "application/javascript"));
   app.get("/portfolio.css", file("portfolio.css", "text/css"));
-  app.get("/account", file("account.html", "html"));
+  app.get("/account", (_req, res) => res.redirect(302, "/"));
   app.get("/account.js", file("account.js", "application/javascript"));
   app.get("/account.css", file("account.css", "text/css"));
   app.get("/owner.js", file("owner.js", "application/javascript"));
@@ -152,6 +159,15 @@ export async function startPortfolioServer(opts: PortfolioServerOptions): Promis
   // the exchanges the unified library covers, for the page's list of real venues (the library is loaded on first ask)
   app.get("/api/account/exchanges", wrap(async (_req, res) => void res.json({ ok: true, exchanges: await exchangeList() })));
 
+  // whether a key file is in place for a connection, before the owner connects it: its place, its permissions, the names of missing fields
+  app.get("/api/account/keyfile", wrap(async (req, res) => {
+    if (!svc.account) return void res.status(404).json({ ok: false, error: "the account layer is not mounted" });
+    const q = (k: string) => (typeof req.query[k] === "string" ? String(req.query[k]).slice(0, 200) : "");
+    const exchange = q("exchange");
+    const needs = q("kind") === "exchange" && exchange ? ((await exchangeList()).find((x) => x.id === exchange)?.needs ?? []) : [];
+    res.json({ ok: true, ...svc.keyFile(q("kind"), q("venue"), q("ref"), needs) });
+  }));
+
   // A wallet shows that an address is the user's by signing the sentence the account writes for it (EIP-4361). Nothing is connected by this:
   // connecting is still the owner's signed instruction, and without a proof the address is simply shown as watched.
   app.post("/api/account/wallet/challenge", (req, res) => {
@@ -192,6 +208,28 @@ export async function startPortfolioServer(opts: PortfolioServerOptions): Promis
     const signIn = svc.signInHolding(state);
     const r = signIn ? await signIn.finish({ state, code: text(q.code), error: text(q.error), error_description: text(q.error_description), iss: text(q.iss) }) : no("E_ACCOUNT_BAD_ACTION", { message: "this sign-in is not one this server started, or it ran out: start it again from the account page" });
     res.status(isRefusal(r) ? 400 : 200).type("html").send(signedInPage(isRefusal(r) ? r.message : undefined));
+  }));
+
+  // the markets a venue connected live trades, and one market with a fresh price: what the order ticket and an agent read before an order
+  app.get("/api/account/markets", wrap(async (req, res) => {
+    if (!svc.account) return void res.status(404).json({ ok: false, error: "the account layer is not mounted" });
+    const q = (k: string) => (typeof req.query[k] === "string" ? String(req.query[k]).slice(0, 120) : "");
+    const r = await svc.liveMarkets(q("venue"), q("q"));
+    res.status(isRefusal(r) ? 409 : 200).json(isRefusal(r) ? { ok: false, refusal: r } : { ok: true, markets: r });
+  }));
+  app.get("/api/account/market", wrap(async (req, res) => {
+    if (!svc.account) return void res.status(404).json({ ok: false, error: "the account layer is not mounted" });
+    const q = (k: string) => (typeof req.query[k] === "string" ? String(req.query[k]).slice(0, 160) : "");
+    const r = await svc.liveMarket(q("venue"), q("symbol"));
+    res.status(isRefusal(r) ? 409 : 200).json(isRefusal(r) ? { ok: false, refusal: r } : { ok: true, market: r });
+  }));
+
+  // the page says which transaction the wallet sent for a DEX order that was waiting for it; the chain decides from then on
+  app.post("/api/account/live/order-sent", wrap(async (req, res) => {
+    if (!svc.account) return void res.status(404).json({ ok: false, error: "the account layer is not mounted" });
+    const { order, hash } = req.body as { order?: unknown; hash?: unknown };
+    const r = await svc.account.trade.sent(String(order ?? ""), String(hash ?? ""));
+    res.status(isRefusal(r) ? 409 : 200).json(isRefusal(r) ? { ok: false, refusal: r } : r);
   }));
 
   // the page says which transaction the wallet sent for a real-money payment that was waiting for it; the chain decides whether it is that one
@@ -333,24 +371,31 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
     return i >= 0 ? args[i + 1] : undefined;
   };
   const port = Number(at("--port") ?? 4820);
-  const live = args.includes("--mm") || process.env.PORTFOLIO_MM === "1";
   const classic = args.includes("--classic");
-  // REAL money at venues connected live: off unless asked for here, in the terminal, where the code the first owner types is printed
+  // the `mm` reads stand in for the simulated statement's MetaMask: a real account connects MetaMask from the page instead
+  const live = (args.includes("--mm") || process.env.PORTFOLIO_MM === "1") && classic;
+  if (!classic && args.includes("--mm")) console.log("--mm is for --classic: on your account, connect MetaMask from the page (it uses the same mm)");
+  // REAL orders and movements at venues connected live: on for the account (an airport where nothing takes off is no airport), off with
+  // --read-only. With them on, the first owner pairs with a code printed here, in the terminal; every order is the owner's signature or
+  // inside a limit the owner signed, and none is worth more than --live-cap
   const capUsd = Number(at("--live-cap") ?? 100);
   if (!(capUsd > 0)) throw new Error("--live-cap is a number of dollars, more than zero");
-  const liveWrites = args.includes("--live-writes") && !classic ? { capUsd, pairingCode: pairingCode() } : undefined;
+  const readOnly = args.includes("--read-only");
+  if (readOnly && args.includes("--live-writes")) throw new Error("--read-only and --live-writes say opposite things: pick one");
+  const liveWrites = !readOnly && !classic ? { capUsd, pairingCode: pairingCode() } : undefined;
   // the fixture's session ends on a fixed date; a server on the real clock gets thirty days from when it starts
   const openness = loadOpenness() as { sessionExpiresAt?: string };
   const month = new Date(Date.now() + 30 * 86_400_000).toISOString();
-  const service = await PortfolioService.create({ home: at("--home") ?? defaultHome(), live, ...(liveWrites ? { liveWrites } : {}), ...(classic ? {} : { venues: "frontline" as const, openness: { ...openness, sessionExpiresAt: (openness.sessionExpiresAt ?? "") > month ? openness.sessionExpiresAt : month } }) });
+  const service = await PortfolioService.create({ home: at("--home") ?? defaultHome(), live, ...(liveWrites ? { liveWrites } : {}), ...(classic ? {} : { venues: "frontline" as const, real: true, openness: { ...openness, sessionExpiresAt: (openness.sessionExpiresAt ?? "") > month ? openness.sessionExpiresAt : month } }) });
   const srv = await startPortfolioServer({ port, service }).catch((e: NodeJS.ErrnoException) => {
     if (e.code !== "EADDRINUSE") throw e;
     // the usual reason: this server is already running in another terminal
     console.error(`port ${port} is already in use: a portfolio server is probably running already. Open http://127.0.0.1:${port}/account, or start a second one: npm run portfolio -- --port ${port + 1} --home <another directory>`);
     process.exit(1);
   });
-  if (liveWrites) console.log(`REAL-MONEY WRITES ARE ON · at most $${liveWrites.capUsd} a movement (--live-cap) · every one is signed by the owner, and money goes only to places shown to be the owner's\n  pairing code: ${liveWrites.pairingCode} — the first browser becomes the owner only with this code, typed on the page`);
-  console.log(`agent portfolio manager at ${srv.url} · ${service.accounts().length} accounts · MetaMask ${live ? "LIVE via mm" : "simulated (--mm for live)"}${classic ? " · classic (no account layer)" : ` · account page ${srv.url}/account`} · ledger ${service.ledgerPath()} · Ctrl-C to stop`);
+  if (liveWrites) console.log(`TRADING IS ON · real orders and movements at the accounts you connect · at most $${liveWrites.capUsd} an order or a movement (--live-cap; --read-only turns it off) · every one is signed by you, or inside a limit you signed for an agent · money leaves a venue only for a place shown to be yours\n  pairing code: ${liveWrites.pairingCode} — the first browser becomes the owner only with this code, typed on the page`);
+  else if (!classic) console.log("read-only: nothing is traded or moved from this server (started with --read-only)");
+  console.log(classic ? `simulated statement at ${srv.url} · ${service.accounts().length} accounts · MetaMask ${live ? "LIVE via mm" : "simulated (--mm for live)"} · no account layer · ledger ${service.ledgerPath()} · Ctrl-C to stop` : `your account at ${srv.url} · real accounts only: connect them on the page · ledger ${service.ledgerPath()} · Ctrl-C to stop`);
   const stop = () => srv.close().then(() => process.exit(0));
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);

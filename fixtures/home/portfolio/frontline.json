@@ -16,7 +16,6 @@
         "price": 150
       }
     ],
-    "linkedBank": "chase",
     "geoblock": {
       "blocked": false
     }

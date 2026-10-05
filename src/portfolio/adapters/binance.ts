@@ -50,13 +50,6 @@ export function binanceAccount(seed: BinanceSeed): AccountAdapter {
       balances[buy] = r8((balances[buy] ?? 0) + received);
       return { ok: true as const, ref: `binance:convert:${++seq}`, received, feeUsd, native: { orderId: String(seq), orderStatus: "SUCCESS", fromAsset: sell, toAsset: buy, fromAmount: String(amount), toAmount: String(received) } };
     },
-    /** the account holder at Binance's own site, where a withdrawal is theirs to start (2FA, whitelist): this key cannot */
-    startAtVenue(direction, asset, amount): VenueResult {
-      if (direction !== "out") return { ok: true as const, native: { address: "deposit address shown at Binance", coin: asset } };
-      if ((balances[asset] ?? 0) < amount) return no("E_VENUE_INSUFFICIENT", { venue: "binance", native: { code: -4026, msg: "You have insufficient balance." } });
-      balances[asset] = r8((balances[asset] ?? 0) - amount);
-      return { ok: true as const, ref: `binance:wd:${++seq}`, counterparty: seed.withdrawWhitelist[0], native: { id: `wd-${seq}`, status: 4, coin: asset, amount: String(amount) } };
-    },
     async read(): Promise<Holding[]> {
       return Object.entries(balances)
         .filter(([, n]) => n > 0)
