@@ -42,7 +42,22 @@ export function ondoAccount(seed: OndoSeed, now: () => string): AccountAdapter {
       if (asset === "USDC") usdc = r2(usdc + amount);
       else if (asset === "OUSG") ousg = r8(ousg + amount);
     },
+    /** the owner's own transfer of the USDC at this address */
+    debit(asset, amount) {
+      if (asset !== "USDC") return no("E_VENUE_REJECTED", { venue: "ondo", native: { error: `no ${asset} to send from this address` } });
+      if (usdc < amount) return no("E_VENUE_INSUFFICIENT", { venue: "ondo", native: { error: "insufficient USDC" } });
+      usdc = r2(usdc - amount);
+      return { ok: true as const, ref: `ondo:owner:${++seq}` };
+    },
     async read(): Promise<Holding[]> {
+      // a redemption whose day has come is paid: the USDC is here
+      const t = Date.parse(now());
+      for (let i = pending.length - 1; i >= 0; i--) {
+        if (t >= Date.parse(pending[i]!.settlesAt)) {
+          usdc = r2(usdc + pending[i]!.usd);
+          pending.splice(i, 1);
+        }
+      }
       const rows: Holding[] = [];
       if (ousg > 0) rows.push({ account: account.id, asset: "OUSG", amount: ousg, usd: r2(ousg * nav()), class: "rwa", note: `NAV $${nav()}` });
       if (usdc > 0) rows.push({ account: account.id, asset: "USDC", amount: usdc, usd: r2(usdc), class: "stable" });

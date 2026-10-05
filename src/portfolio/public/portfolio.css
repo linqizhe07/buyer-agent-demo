@@ -81,3 +81,7 @@ footer{border-top:1px solid var(--line);padding-top:12px;letter-spacing:.02em}
 .parts i.dex{color:var(--blue)}
 .parts i.prediction b{background:var(--plum)}
 .parts i.prediction{color:var(--plum)}
+.pages{display:flex;gap:22px;margin-bottom:10px;font-family:"Source Serif 4",Georgia,"Times New Roman",serif;font-size:18px;font-weight:600}
+.pages a{color:var(--dim);text-decoration:none;padding-bottom:2px;border-bottom:2px solid transparent}
+.pages a[aria-current="page"]{color:var(--ink);border-bottom-color:var(--ink)}
+.pages a:hover{color:var(--ink)}

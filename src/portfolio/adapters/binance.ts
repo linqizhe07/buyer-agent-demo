@@ -4,7 +4,7 @@
  * permission, -4026 for an address outside the whitelist, -2010 for balance.
  * A trade fills at the venue model's price (venues.ts): spread, depth, fee. */
 import { no } from "../refuse.ts";
-import { baseOf, classOf, priceOf, r2, r8, usdOf, type Account, type AccountAdapter, type Holding, type Intent } from "../accounts.ts";
+import { baseOf, classOf, priceOf, r2, r8, usdOf, type Account, type AccountAdapter, type Holding, type Intent, type VenueResult } from "../accounts.ts";
 import { fillAt } from "../venues.ts";
 
 export interface BinanceSeed {
@@ -36,6 +36,27 @@ export function binanceAccount(seed: BinanceSeed): AccountAdapter {
   const insufficient = () => no("E_VENUE_INSUFFICIENT", { venue: "binance", native: { code: -2010, msg: "Account has insufficient balance for requested action." } });
   return {
     account,
+    /** a deposit that reached its confirmations */
+    credit(asset, amount) {
+      balances[asset] = r8((balances[asset] ?? 0) + amount);
+    },
+    /** USDT ⇄ USDC through Convert (getQuote, acceptQuote): a quoted rate, good for ten seconds */
+    convert(sell, buy, amount): VenueResult {
+      if ([sell, buy].sort().join("/") !== "USDC/USDT") return no("E_VENUE_CURRENCY", { venue: "binance", message: `Binance converts USDT and USDC here, not ${sell} for ${buy}`, native: { code: -1121, msg: "Invalid symbol." } });
+      if ((balances[sell] ?? 0) < amount) return insufficient();
+      const feeUsd = r2(amount * 0.0001);
+      const received = r2(amount - feeUsd);
+      balances[sell] = r8((balances[sell] ?? 0) - amount);
+      balances[buy] = r8((balances[buy] ?? 0) + received);
+      return { ok: true as const, ref: `binance:convert:${++seq}`, received, feeUsd, native: { orderId: String(seq), orderStatus: "SUCCESS", fromAsset: sell, toAsset: buy, fromAmount: String(amount), toAmount: String(received) } };
+    },
+    /** the account holder at Binance's own site, where a withdrawal is theirs to start (2FA, whitelist): this key cannot */
+    startAtVenue(direction, asset, amount): VenueResult {
+      if (direction !== "out") return { ok: true as const, native: { address: "deposit address shown at Binance", coin: asset } };
+      if ((balances[asset] ?? 0) < amount) return no("E_VENUE_INSUFFICIENT", { venue: "binance", native: { code: -4026, msg: "You have insufficient balance." } });
+      balances[asset] = r8((balances[asset] ?? 0) - amount);
+      return { ok: true as const, ref: `binance:wd:${++seq}`, counterparty: seed.withdrawWhitelist[0], native: { id: `wd-${seq}`, status: 4, coin: asset, amount: String(amount) } };
+    },
     async read(): Promise<Holding[]> {
       return Object.entries(balances)
         .filter(([, n]) => n > 0)

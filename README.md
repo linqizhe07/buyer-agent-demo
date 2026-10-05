@@ -16,6 +16,7 @@ npm run demo -- --from solana   # 从某个场景续跑
 npm run wallet                  # 智能 agent 钱包骨架：http://127.0.0.1:4810
 npm run portfolio               # agent 组合钱包（英文界面）：http://127.0.0.1:4820（--mm 读真 MetaMask / Polymarket）
 npm run portfolio:demo          # 组合钱包十个 beat，无头，exit 0 当且仅当没有断言失败
+npm run account:demo            # Account（资金的机场）十四个 beat，无头，exit 0 当且仅当没有断言失败
 npm run demo -- --fresh         # 擦掉默认 home 重新种子
 npm run control-room -- --replay ~/.buyer-agent-demo/runs/last.jsonl   # 不开 runner，回放上一次
 npm test                        # 单测 + e2e（spawn 一次完整 demo，断言 exit 0 与关键行）
@@ -78,16 +79,17 @@ npm run wallet          # http://127.0.0.1:4810 · 一页 UI + 内存里的钱�
 ## agent 组合钱包（Agent Portfolio Manager）
 
 ```bash
-npm run portfolio                               # http://127.0.0.1:4820 · 一张对账单（英文界面）：看 · 说 · 批 · MetaMask 与 Polymarket 为模拟
+npm run portfolio                               # http://127.0.0.1:4820 · 一张对账单（英文界面）：看 · 说 · 批 · MetaMask 与 Polymarket 为模拟。默认挂十个场所并带 Account 层（下一节）
+npm run portfolio -- --classic                  # 原来的八个账户，不带签名层
 npm run portfolio -- --mm                       # MetaMask 账户和它的 Polymarket deposit wallet 读真的（mm CLI，只读）
 npm run portfolio:demo                          # 无头：十个 beat，✓/✗/FAIL，exit 0 当且仅当没有断言失败；每次从空账本开始，可重复跑
 npm run portfolio:demo -- --mm --serve --hold   # 现场：live MetaMask / Polymarket + 页面保持
-npm run portfolio:mcp                           # stdio MCP：agent 面（portfolio_overview / read / markets / quote / execute / order / approval / openness）
+npm run portfolio:mcp                           # stdio MCP：agent 面（portfolio_overview / read / markets / quote / execute / order / approval / openness，带 Account 层时再加 account / transfer / pay）
 ```
 
 **界面语言是英文。** 页面、航班里的每一句话、拒绝与卡片的原因、MCP 返回给 agent 的文字，全部是英文（`words.ts`、`router.ts`、`refuse.ts`）；输入框中英文都听得懂。终端 demo 的输出也是英文。本文档和仓库里其余的 demo（十一个场景、控制台、钱包骨架）仍是中文。
 
-**页面是一张对账单，用户只做三件事**：看（净值、配置、八个账户）· 说（跟 agent 一句话，或点一个预设：`Subscribe $5,000 OUSG` / `Sell 3 ETH` / `Buy 1,000 YES · Fed hike` / `Rebalance` / `Pay a bill` / `Withdraw to cold wallet` / `Send to a new address`，或直接说 "sell 1 ETH"、"buy 0.4 ETH"、"fund Polymarket with 300"、"redeem winnings"）· 批（agent 停下来问的那张卡，Approve / Reject）；外加一个 Open / Guard 开关和每个账户的 On / Off。一笔被拆开的单在航班里是一条比例条加每片一行。agent 的回话是白话，没有错误码；页面上的 agent 是关键词脚本（`agent.ts`），不是 LLM。三层、绕过、哈希链这些内部机制只在终端 demo 与账本里。
+**页面是一张对账单，用户只做三件事**：看（净值、配置、八个账户；服务器默认是十个，多出的两个见 Account 一节）· 说（跟 agent 一句话，或点一个预设：`Subscribe $5,000 OUSG` / `Sell 3 ETH` / `Buy 1,000 YES · Fed hike` / `Rebalance` / `Pay a bill` / `Withdraw to cold wallet` / `Send to a new address`，或直接说 "sell 1 ETH"、"buy 0.4 ETH"、"fund Polymarket with 300"、"redeem winnings"）· 批（agent 停下来问的那张卡，Approve / Reject）；外加一个 Open / Guard 开关和每个账户的 On / Off。一笔被拆开的单在航班里是一条比例条加每片一行。agent 的回话是白话，没有错误码；页面上的 agent 是关键词脚本（`agent.ts`），不是 LLM。三层、绕过、哈希链这些内部机制只在终端 demo 与账本里。
 
 **机场、航班号、流动性图**——这个子系统是供 agent 起降的机场：跑道是八条接入轨道，海关是凭据原生权限，塔台是 Open / Guard 与那张卡，廊桥是 stdio MCP，黑匣子是账本。每个 agent 的一次请求是一班，航班号 = agent 代码 + 序号（`PM-0001` 页面脚本、`CC-0004` Claude Code 经 MCP、`TD-0008` 终端 demo），一班分几段（钱碰到的每个账户一段），每条账本行都写着航班与 agent。
 
@@ -114,6 +116,124 @@ npm run portfolio:mcp                           # stdio MCP：agent 面（portfo
 
 边界：除上面 live 的两个账户外，其余账户在进程内模拟（Binance / OKX 的权限错误码形状真实；Mastercard agentic token 格式是示意，拒绝码 57 / 61 / 65 / 54 是真的；Ondo 只模拟白名单转让限制与 T+1；Kalshi 的错误码与 ticker 是示意，费率公式是它公布的）；价格是固定表；桥费、到账时间、提币费、点差、深度、池子的虚拟储备、gas 与预测市场的盘口都是示意的报价表（形状真实，数字不是行情；加息那个市场的 0.73 / 0.74 是构建时真实盘口的镜像），到账时间只是报价、模拟里即时到账；撤销只在钱包这边。DEX 与拆单的边界：订单簿与池子是无状态的（成交不移动价格，没有行情、MEV、滑点保护）；拆出的各片依次成交、不是原子的——一片成了另一片被场所拒了就是部分成交，账本看得见，没有回滚；拆单只在已有库存的场所之间分，不会为了拆单先跨场所搬货；MetaMask 钱包里的 Swaps 报价自带 0.875% 服务费，模拟池子没计这笔费——计上的话 DEX 那片在这个规模上赢不了 CEX，agent wallet 的 `mm swap` 实收多少以 live 报价为准。预测市场的边界：同一个问题在两处按两套规则结算，拆到两边买不是一个头寸，agent 只说明、不对冲；Polymarket 的费率按该市场 `feeSchedule` 的形状写的，精确公式以它的文档为准；它的文档把多数受限地区列为 close-only（只能平掉已有头寸、不能开新仓），这里简化成凭据里整个没有 `trade`；哪些地区受限是场所自己的名单、会变，所以模拟的种子不点名任何地区；Kalshi 没有 live 通道；这只真钱包从没跑过 `mm predict setup`，所以 live 的持仓快照（`mm predict portfolio`）没有实测。live 路径里实测过的：余额、现价、Polymarket 的盘口与下单预估、地区检查；没实测的：桥与 DEX 的真实报价（需要钱包里有钱）。代码在 `src/portfolio/`（`accounts.ts` 账户模型与凭据原生权限 · `adapters/` 八个账户 · `openness.ts` 拨盘与判定 · `portfolio.ts` 聚合与流动性图 · `rails.ts` 轨道报价与流动性阶梯 · `venues.ts` 订单簿、池子、跨场所报价与拆单路由 · `events.ts` 事件合约目录与盘口算术 · `router.ts` 把一笔单写成航班（每片一步、比过什么、钱落在哪）· `service.ts` 航班、一单一卡、路由服务与账本 · `agent.ts` 关键词脚本 agent 与资金路由器（燃油 → 跨链 → 差额）· `words.ts` 白话 · `refuse.ts` 英文的拒绝句子 · `server.ts` API 与对账单页面 · `mcp.ts` agent 面 · `demo.ts` 十个 beat），单测 `test/unit/portfolio.test.ts`，无头 e2e `test/portfolio-demo.test.ts`。
 
+## Account：资金的机场（账户与收付款）
+
+```bash
+npm run portfolio                         # 默认就带这一层：http://127.0.0.1:4820/account
+npm run account:demo                      # 无头：十四个 beat，每个 beat 放行一件事、拒绝一件事；同一个 home 连跑两次，输出逐字节相同
+npm run account:demo -- --serve --hold    # 跑完把这次的状态挂在 /account 上看（只读：页面的浏览器不是这个账户的 owner，脚本的钥匙才是）
+npm run portfolio:mcp                     # agent 的席位持一把 agent 钥匙，每次写都签名
+```
+
+组合钱包回答"agent 在每个账户里能做什么"；Account 回答**钱怎么进出每个场所，以及谁有权让它动**。它是 trading agent 和资金之间的机场：功能照 Hyperliquid 自己的账户页一项一项移过来，但门开在十个场所上（比原来多一个股票券商 Alpaca 和 Hyperliquid 自己），再加上买方账户需要、单个场所不需要的三样：支出授权，替 agent 回答对外付款协议，以及把用户已有的交易所钱包**即插即用**地接进来。界面是英文。
+
+### 从 Hyperliquid 移过来的功能
+
+| Hyperliquid 的按钮，和它今天实际发的动作 | `/account` 上的对应 | 谁能签 |
+|---|---|---|
+| Deposit（CCTP，0.2 USDC，最低 5） | **Deposit**：把钱送进一个场所；先给路线、费用、最低额、到账时间 | owner；agent 只能当作自家场所之间的划转来做 |
+| Withdraw（`sendToEvmWithData`） | **Withdraw**：回到自己的银行或链上钱包 | 只有 owner |
+| Send（`sendAsset` 给别人） | **Send**：付给第三方；地址先进地址簿（绑定链），加入 24 小时后才能用 | 只有 owner |
+| Perps ⇄ Spot、EVM ⇄ Core、子账户充值（都是 `sendAsset`；API wallet 只能发目的地等于来源的 `agentSendAsset`） | **Transfer**：在自己的场所和子账本之间挪 | owner；agent 在支出授权之内 |
+| Swap Stablecoins | **Swap**：USD / USDC / USDT 互换；路线里需要换币时自动插一腿 | owner；agent 在授权之内 |
+| Account Type（`userSetAbstraction`） | **Separate / Unified**：Unified 时 agent 可以不指定来源，由账户在授权点名的场所里挑最快到的 | owner |
+| Sub-Accounts | **Sub-accounts**：每个 agent 一个 float，对外付款从这里出 | owner |
+| API（`approveAgent`） | **Agent keys**：授权、到期、撤销；撤销过的钥匙不能再授权 | owner |
+| Builder Codes（`approveBuilderFee`） | **Approvals**：费率授权，加支出授权（场所之间 / 对外收款方） | owner |
+| Multi-Sig | **Signers**：设备钥匙、共同签名人、门槛 | owner |
+| Deposits and Withdrawals 页签 | **Payments**：每一笔的每一腿、状态、到账时间 | |
+
+没有移的：Link Staking、Earn、Vaults、Staking、Referrals、Outcomes、Portfolio Margin、法币入金小部件。**故意没抄的**：到期时间塞在 agent 名字里（这里是显式字段）；撤销后清掉 nonce 记录（这里不清，所以撤销过的钥匙不能复活）；Send 发往任何地址且没有地址簿；多签只验领签人的 nonce；低于最低额的入金直接丢失（这里在钱离开之前就拒绝）。
+
+### 三层协议
+
+**A · 账户自己的指令协议**（`account/sign.ts`、`exchange.ts`）。形状是 Hyperliquid 的：信封 `{action, nonce, signature}`，EIP-712 类型化数据，真的签名（viem）。两类签名和它一样分开：owner 的动作是逐字段可读的类型化数据，一种动作一个类型；agent 的请求只有一个类型 `Agent(source, actionHash, nonce)`，由 owner 授权过的 agent 钥匙签。类型不重叠，所以 agent 钥匙签不出 owner 的动作。域名是这里自己的（`AgentAccountSignTransaction`，chainId 424242），在这里签的东西在 Hyperliquid 上无效；同一个编码器能恢复出 Hyperliquid 官方 SDK 测试用例里的签名人（一致性测试，只用公开的签名和地址）。nonce 用它的规则（每个签名人保留最高的 100 个；窗口前 2 天、后 1 天），另加几条：确认签名人有权之后才消耗 nonce，而且一条指令上每个算数的签名人的 nonce 都消耗；资金指令只在它自己标注的时刻前后十分钟内有效（不能签好留着以后用）；同一条指令重发返回第一次的结果，只执行一次（两位 owner 换个位置签，不是一条新指令）；进程重启后从账本里读回收过的指令，不收第二次；动作的字段必须恰好是签名覆盖的那些；指令**逐条进门**，一条跑完才收下一条，所以同时到的两条不会各自看到对方花钱之前的预算。owner 在页面上是浏览器里一把不可导出的 P-256 设备钥匙（WebCrypto，服务器只有公钥），在终端 demo 和测试里是一把 EOA。
+
+owner 签的不只是意图：一笔划转的签名里带着**路线的哈希、最高费用、最晚到账时间**，执行时任何一项变了就拒绝，要求重签。人的批准也是一次签名：`approveCard` 同时写明卡号和这张卡将要放行的内容的哈希；放行时所有检查重跑；卡三十分钟过期；等批的卡占着它那份预算。放宽（开到 Open、恢复账户、调时钟、跟页面 agent 说话）要 owner 签，收紧（Guard、关账户）不用。
+
+**B · 场所对接：每个场所一扇门**（`account/doors.ts`、`payments.ts`、`calendar.ts`）。一条指令被拆成几腿，每一腿翻译成该场所自己的请求（记在账本那一行的 `native` 里），链上的路一律经过链上钱包这个枢纽。每条跑道写明谁能发起：`agent` · `owner`（只认 owner 自己的签名）· `venue`（只能在场所自己的页面上发起，账户只能看着它到账）· `closed`。原生请求里**真的签了的**：交易所的 REST 调用（按各家的规则算 HMAC，密钥是模拟的）。**只构造、不签名的**：Hyperliquid 自己的动作和 CCTP 的 burn，前者要 Hyperliquid 账户所有者的钥匙，后者要链上钱包的钥匙，账户层两把都没有。
+
+| 场所 | 钱进来 | 钱出去 | agent 的钥匙在那里是什么 |
+|---|---|---|---|
+| Alpaca（股市） | owner 在券商发起 ACH 拉款，按银行日历到账 | ACH 回关联银行，只能提已结算的现金 | 交易钥匙，动不了现金 |
+| Binance | 充值地址 | 只能在交易所自己那边发起：这把钥匙没有提币权限 | API key：读和现货交易 |
+| OKX | 充值地址 | `asset/withdrawal`，只到白名单里自己的地址 | API key：读、交易、提币分开 |
+| Hyperliquid | CCTP 进 CctpForwarder，0.2 USDC，最低 5 | `sendToEvmWithData`，只有 owner | `approveAgent`：能在自己的余额之间挪，不能提现 |
+| MetaMask Agent Wallet（枢纽） | 链上转账、CCTP 铸币 | 转账、桥；受它自己的 Guard 约束 | 会话加策略 |
+| Polymarket / Kalshi | 桥到 deposit wallet / ACH | 提回再桥 / ACH | CLOB key / RSA key |
+| Ondo OUSG | USDC 到 KYC 地址 | 赎回 T+1，只转白名单地址 | 钱包委托 |
+| Mastercard | — | 只能刷卡付款（经 ACP） | agentic token 的范围 |
+| Chase | 场所付回 | 由场所发起拉款 | 只读的聚合令牌 |
+
+钱离开一处、还没到下一处的时候是**在途**：不在任何余额里，谁也花不了。链上的一腿几秒到几分钟；ACH 按银行日历走，周末和银行假日不动（demo 里周六发起的那笔，因为周一是 Columbus Day，要到周三才到，而周一股市是开的）；到了账的 ACH 还能被银行退回。多腿路线中途被拒是 `stranded`：钱在枢纽钱包里，付款单写明在哪、怎么挪回来。
+
+**即插即用：把你已有的交易所钱包接进来**（`adapters/exchange.ts`、`doors.ts` 的 `EXCHANGES`、`fixtures/home/portfolio/connectable.json`）。Balances 页签底部的 "Plug one in…"，或者 owner 签一条 `connectVenue {venue, connector, label, credentialRef}`，一个新场所就出现在账户里：余额、跑道、agent 的权限一起出现，不改一行代码。`disconnectVenue` 拔掉。
+
+- **连接器**是"怎么跟它说话"的一份声明，四种：`binance`、`okx`（各自的 REST）；`unified`（统一接口库 ccxt 覆盖的任何交易所：请求是库的调用，由库去写交易所自己的请求）；`wallet`（自托管钱包，比如交易所发的钱包 app 或硬件钱包：按地址接入，不交任何钥匙）。
+- **门是编译出来的，不是写死的**：接入时问场所这把钥匙能做什么（读、交易、提币，提币白名单），门照答案生成。没有提币权限的钥匙，出金写的是"在交易所那边发起"；能提到自己验证过的地址的，agent 可以用；自托管钱包进钱 agent 可以做，出钱只有 owner 在那个钱包里签。
+- 页面收的是**凭据放在哪**，不收凭据本身。
+- 新插上的场所**不在任何已有的支出授权里**：授权里的"所有场所"指签字那一刻的场所，之后插上的要 owner 再点名。
+- 有钱在途的时候不能拔；开户时就有的场所不能拔；拔掉不动交易所那边的凭据。
+- 接入的范围是**钱包**：余额、进出、稳定币互换。不含下单路由。
+
+demo 里可插的四个：Bybit（`unified`，读和交易）、Kraken（`unified`，读、交易、提币，白名单里只有自己的链上钱包）、OKX 的第二个账户（`okx`，只读）、OKX Wallet（`wallet`，按地址）。
+
+**C · agent 对外付款：agent 不付钱，账户替它付**（`account/protocols.ts`、`payees.ts`）。agent 只签一句"为这个 URL 付钱，最多这么多，从这个 float 出"（`agentPay`）；账户自己去问收款方，从收款方自己的质询里读出价格和收款地址，说收款方说的那种协议，用 agent 从来拿不到的钥匙签付款。检查顺序：
+
+1. 授权：这个 agent、这个 host。在给这个 host 发出第一个字节之前。
+2. 来源：属于这个 agent 的 float，或者卡。
+3. 收款方的要价：不超过 `maxAmount`；收款地址等于已经钉住的那个。
+4. 额度：单笔、预算、拨盘（会话、Guard 的日上限）、float 余额、应用抽成不超过 owner 给它批的费率。
+5. owner：**第一次付给一个收款方出一张卡**，卡上是付给谁、哪个地址、多少钱；owner 的签名覆盖这些字段，批准即把这个地址钉住。之后地址变了是拒绝，不是再问一次。
+6. 付款，然后把回执对着记账的那本账核对，不听收款方一面之词。
+
+| 协议 | 搭了什么 | 模拟的收款方 |
+|---|---|---|
+| x402 V2 `exact` | 402 与 `PAYMENT-REQUIRED`；float 的钥匙签 EIP-3009 `TransferWithAuthorization`；facilitator 的 verify 与 settle；`PAYMENT-RESPONSE` | `data.sim`，行情接口，每次 $0.01 |
+| MPP `charge` | `WWW-Authenticate: Payment` 质询（id 是对自身参数的 HMAC，对上了规范的测试向量）；`Authorization: Payment` 凭证，EIP-3009 的 nonce 是质询的哈希；`Payment-Receipt` | `infer.sim`，每次 $0.02 |
+| MPP `session` | 托管合约：签一笔 EIP-1559 的 `open` 交易存一次押金，之后每次调用签一张累计凭单（EIP-712 `Voucher`），关闭时收款方按最后一张凭单取走、其余退回；收款方不理时向托管合约申请退出，宽限期后取回 | `infer.sim`，每次 $0.01 |
+| ACP（2026-01-30） | 结账会话；把卡凭据交给商户的支付处理方，换回一枚委托支付令牌（只对这次结账、这家商户、这个金额、一次、十分钟有效）；商户拿这枚令牌扣款，自己看不到卡。每个 POST 带 `Idempotency-Key` | `shop.sim` 与 `psp.sim`，走卡 |
+| AP2 v0.2 | 商户签结账 JWT；账户把 owner 的支出授权写成两份**开放式** mandate（SD-JWT，`cnf` 绑定 agent 的钥匙）；agent 用自己的钥匙签两份**封闭式** mandate（绑定开放式 mandate、校验方和这一次交换）；商户和账户（作为凭据提供方）各自验链；商户和它的处理方各签一张回执 | `shop.sim`，从 float 付 |
+
+一种支付工具配一种协议是这个 demo 的安排（每个协议演一次），协议本身没有这个要求。Visa 的 Trusted Agent Protocol 没搭：这里的卡是 Mastercard 的令牌。
+
+### 页面和 agent 面
+
+`/account`：五个动作（Deposit / Withdraw / Transfer / Swap / Send）各开一个小弹窗，先给路线、费用、到账时间，再让你签；七个页签（Balances · Runways · Payments · Agent keys · Approvals · Sub-accounts · Signers）；等你批的卡在最上面，展开能看到你将要签的每个字段；页脚的模拟时钟可以快进，用来看在途的钱到账。Balances 页签能插拔场所；Approvals 页签里 owner 能关掉一个开着的付款会话；Sub-accounts 页签能把 float 里的钱收回钱包。MCP 多了三个工具：`portfolio_account`（这个席位的钥匙有没有被授权、还能花多少、每个场所的跑道）、`portfolio_transfer`（自家场所之间）、`portfolio_pay`（为一个 URL 付钱；AP2 的两份封闭式 mandate 由席位读过商户签的总价之后自己签）。原来的 `portfolio_execute` / `portfolio_order` 也改成签名后从同一个入口进；挂了这一层之后，HTTP 上未签名的写一律被拒绝。
+
+### 十四个 beat
+
+机场（十个场所的门）→ 钥匙（未授权、到期、撤销、撤销后不能复活；Hyperliquid 一致性）→ 一条指令只执行一次（重放、nonce、过期、被改过的信封）→ 在途（钱离开了，还没到）→ 只能回家（agent 钥匙出不去的几种情况；owner 用自己的签名从 Hyperliquid 提现）→ 银行的时钟（周六的 ACH、周一开市而钱没到、到账、被退回）→ 额度（拆小了也过不去）→ 卡（agent 批不了自己的卡、批准时重查、过期）→ 地址簿（绑定链、冷静期、黑名单）→ float 与 Unified → 付 API（x402、MPP charge、MPP session；地址被换、加价、重定向、陌生的托管合约、收款方失联）→ 买东西（ACP 走卡、AP2 带 mandate）→ 插入一个交易所钱包（一条签名、不改代码；门由钥匙的权限编译；不在旧授权里；自托管钱包按地址）→ 账本当证据（签名能从文件里恢复、改一行断链、和场所流水对账）。
+
+### 对抗审阅之后改掉的
+
+写完之后请了两路独立审阅：一路对着跑起来的服务找洞，一路逐条核对协议原文。找到的问题都修了，每条留了测试；攻击那一路的二十个复现原样留在 `test/attack/`，每个都写成"这次攻击必须失败"。主要的几条：
+
+- 两条指令同时到，各自都通过了同一份预算（两笔 $600 过了 $1,000 的预算）。现在指令逐条进门。
+- 两位 owner 的签名换个位置，被当成一条新指令又执行一次；重启之后旧信封可以重放。现在一条 owner 指令按内容认，账本里收过的不再收。
+- 资金指令可以把时刻标到将来，签好留着以后用。现在只在标注时刻前后十分钟内有效。
+- 收款方回答"付款失败"，却留着那张 EIP-3009 授权事后兑现；或者留着开 session 的那笔交易以后再广播。现在授权在过期之前一直占着预算，被兑现就记账；没被接受的开户交易当场作废（它的交易 nonce 被花掉）。
+- 收款方收了钱、回一个读不懂的回执；商户扣了卡、回答说没扣。现在先记账再说话，卡以发卡方的记录为准。
+- 一个不回应的收款方能让整个账户的入口等下去。现在等三秒。
+- 授权里写"所有场所"，以后插上的场所自动进了授权。现在冻结在签字那一刻。
+- agent 的钥匙被撤销后，它的 float 和它开着的 session 没人能收回。现在 owner 能关 session、能把 float 收回钱包。
+- 协议核对那一路：OKX 提币的手续费是在金额之外另收的；CCTP 的 burn 是真的 calldata（带 `maxFee` 上限和转入 Hyperliquid 的 hook）；Hyperliquid 自己的动作只构造、不签（账户没有那把钥匙）；x402 的校验顺序、MPP 开户必须从零累计开始、AP2 遇到不认识的约束类型一律拒绝；股票卖出的结算日按交易日算（晚上八点以后的成交算下一个交易日）。
+
+### 这一层的诚实边界
+
+- 十个场所、可插的四个和四个收款方全部是本地模拟。请求按各家自己的格式构造，账户手里有钥匙的都真的签了名（哪些只构造不签，见上面 B 层），但**没有一个发给过真的对方**，所以这里没有任何互通性证明。费用、最低额、到账时间是 2026-10-04 从各家文档读来的报价，不是实测。
+- 钥匙是从源码里的标签派生的，是公开的：demo 展示的是检查，不是保密。页面上 owner 的钥匙是浏览器不肯导出的真设备钥匙，但**第一个打开页面的浏览器就成了 owner**（首次使用即信任），抢在人前面的本机进程可以冒领；服务重启之后账户又没有 owner，下一个来问的页面（包括任何一个还开着的旧标签页）就成了 owner。真产品要带外配对。
+- 对账单页上的脚本 agent 仍走旧的进程内路径（划转即时到账，陌生地址出卡）；带钥匙签名的入口走这里的新规则。两套规则并存。
+- float 仍然是账户手里的一把热钥匙，约束它的只有它的大小。除了 session 的托管合约对押金的上限，这里没有一条规则是由链或场所替账户强制的。
+- 券商的现金只能在券商那边动，账户只能看着它到账。开这条跑道要的是券商合作方资格，不是代码。
+- 插上的交易所显示的是交易所对这把钥匙的说法。经统一接口库没有一个调用能返回钥匙的权限：真的连接器在有专门接口的交易所问它（Binance 的 `apiRestrictions`），没有的只能从第一次被拒学到。自托管钱包只按地址接入：没有做浏览器里"连接钱包"的握手，出金那一步在那个钱包里的签名是模拟的。
+- 资金指令的有效期以它自己标注的时刻为准、前后各十分钟：签名人把时刻往后标，最多换来二十分钟。
+- 卡上那个收款地址之所以可信，只因为 owner 看了一眼；没有任何东西说明它是谁的地址。没有制裁筛查、Travel Rule、对收款方的 KYC。
+- 一个人同时持有这十个账户、都在同一个地区可用，是假设。场所自己的地区规则是场所的，这里只表现为一扇关着的门，不提供任何绕过它的办法。
+- 托管、牌照、出了错谁赔，不是软件，这里没有。
+
+代码在 `src/portfolio/account/`（`sign.ts` 钥匙、类型化数据、签名恢复、nonce · `state.ts` agent 钥匙、授权、子账户、签名人、地址簿 · `calendar.ts` 银行日与交易时段 · `doors.ts` 每个场所的跑道与原生请求 · `payments.ts` 在途、到账、退回 · `exchange.ts` 入口与页面视图 · `protocols.ts` 四套协议的编解码 · `payees.ts` 模拟收款方与账户这一侧的付款流程），两个新适配器 `adapters/alpaca.ts`、`adapters/hyperliquid.ts`，即插即用的 `adapters/exchange.ts`，种子 `fixtures/home/portfolio/frontline.json` 与可插场所的目录 `connectable.json`，页面 `public/account.{html,js,css}` 与 `owner.js`，终端 demo `account-demo.ts`。测试：`test/unit/account-{sign,calendar,doors,exchange,protocols,payees,connect}.test.ts`、`test/account-demo.test.ts`、`test/portfolio-mcp.test.ts`、`test/attack/`。
+
 ## 诚实边界
 
 - 模拟器 ≠ 真场所：形状对齐，没有延迟、滑点、部分成交、宕机；Hyperliquid 的 EIP-712 与 Solana 交易用 ed25519 替身；Binance 的 HMAC 签名与权限层级是真实形状；`-4026` 这类白名单错误码是示意。
@@ -133,6 +253,14 @@ npm run portfolio:mcp                           # stdio MCP：agent 面（portfo
 | `src/contract/env-scrub.ts` + home 凭据引用 | dsh 的 `.credentials.yaml` 与子进程 scrub |
 | `src/agent/ledger.ts` | agentpay 的 JSONL 账本 + 哈希链 |
 | 十一个场景的 ✓/✗ | `face/README.md` 的 drill：自动半场 + 手动半场 + "证明了什么 / 没证明什么" |
+| `src/portfolio/account/sign.ts` + `exchange.ts`：签名信封、nonce、卡的答复是 owner 的签名、放行时重查 | R-W1 / R3a（预算卡和审批卡能从 workspace 里被答掉）：答卡改成带外钥匙的签名，放行时重跑 Gate |
+| `account/state.ts` 的支出授权：单笔、预算（含等卡和押金占用的部分）、到期、每次花钱时重验 owner 的签名 | `face/src/budgets.ts` 的 Gate 3 与 agentpay 的 `mandateRejection`：那里的 mandate 是自签的，花钱时不验 |
+| `account/payees.ts` 的 `gate()`：先查授权再联系收款方、钉住 `payTo`、第一次付款出卡、回执对账本核对 | agentpay 的付款方（`MandateWallet`）：x402 现在是 402 说付给谁就付给谁 |
+| `account/payees.ts` 的子账户 float | R-W2（付款钥匙每个 shell 回合都读得到）和 agentpay README 自己写的那句：mandate 约束的是 agent，不是钥匙 |
+| `account/protocols.ts`：MPP、AP2、ACP 的编解码 | agentpay 只有 x402 V2；AP2 在那里只有名字 |
+| `account/doors.ts`：每个场所声明自己的资金跑道和谁能发起 | 场所插件的 manifest：工具分类之外，再声明资金怎么进出 |
+| `adapters/exchange.ts` + `EXCHANGES`：一种场所一份连接器声明，门由钥匙的权限编译，owner 一条签名接入 | 场所插件：接入一个新场所不该要写代码；插件声明怎么说话，权限从场所那边读 |
+| 账本行里嵌签名信封，加哈希链 | agentpay 的账本没有哈希链 |
 
 ## 目录
 
@@ -147,6 +275,6 @@ src/plugins/      五个 stdio MCP 席位；_shared/identity.ts 只有席位能 
 src/runner/       run-demo · beats/ · operator（操作员动作：签发 agent key、旁路、提回）· setup
 src/control-room/ express + SSE 的单页控制台（纸色/墨色/橙/鼠尾草绿）
 src/wallet/       智能 agent 钱包骨架：连接器目录 · 策略编译 · 注资/提回判定 · 一页 UI（:4810）
-src/portfolio/    agent 组合钱包（英文界面）：账户模型 · 八个 adapter（CEX · 链上 · 预测市场 · RWA · 卡 · 银行）· 开放度三层 · 聚合 · 流动性阶梯与轨道报价 · CEX 订单簿 + DEX 池子 + 预测市场盘口的报价与拆单路由 · 航班、一单一卡与账本 · 关键词 agent + 路由器 · API/对账单页面（:4820）· stdio MCP · 十个 beat
-test/             unit（audit · gate · mandates · constraints · ledger · env-scrub · wallet · portfolio）· e2e · portfolio-demo
+src/portfolio/    agent 组合钱包（英文界面）：账户模型 · 十个 adapter（原来的八个：CEX · 链上 · 预测市场 · RWA · 卡 · 银行；Account 层加的两个：券商 · perp DEX）· 开放度三层 · 聚合 · 流动性阶梯与轨道报价 · CEX 订单簿 + DEX 池子 + 预测市场盘口的报价与拆单路由 · 航班、一单一卡与账本 · 关键词 agent + 路由器 · API/对账单页面（:4820）· stdio MCP · 十个 beat · account/（Account 层：签名指令、每个场所的跑道、在途与到账、四套对外付款协议）与它的十三个 beat
+test/             unit（audit · gate · mandates · constraints · ledger · env-scrub · wallet · portfolio · account-*）· attack（独立审阅留下的攻击复现，全部必须失败）· e2e · portfolio-demo · account-demo · portfolio-mcp
 ```

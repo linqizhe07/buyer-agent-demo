@@ -24,16 +24,18 @@
  *   decide(approvalId, …)       the human's answer to a card, as one more leg
  *   read / overview             never gated; one read across every account
  */
-import { readFileSync, rmSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Ledger, type LedgerRow } from "../agent/ledger.ts";
 import { isRefusal, type Refusal } from "../core/errors.ts";
 import { no } from "./refuse.ts";
 import { describeIntent, ENFORCER_LABEL, KIND_LABEL, KIND_ORDER, PRICES, qtyText, r2, SCRIPT_AGENT, usdOf, WRITE_CAPS, type Account, type AccountAdapter, type AgentId, type Capability, type ExecOk, type ExecResult, type Holding, type Intent } from "./accounts.ts";
+import { alpacaAccount, type AlpacaSeed } from "./adapters/alpaca.ts";
 import { bankAccount, type BankSeed } from "./adapters/bank.ts";
 import { binanceAccount, type BinanceSeed } from "./adapters/binance.ts";
 import { mastercardAccount, type MastercardSeed } from "./adapters/mastercard.ts";
+import { hyperliquidAccount, type HyperliquidSeed } from "./adapters/hyperliquid.ts";
 import { kalshiAccount, type KalshiSeed } from "./adapters/kalshi.ts";
 import { metamaskLiveAccount, metamaskSimAccount, type MetamaskSimSeed, type MmLiveOptions } from "./adapters/metamask.ts";
 import { polymarketLiveAccount, polymarketSimAccount, type PolymarketSeed } from "./adapters/polymarket.ts";
@@ -47,6 +49,11 @@ import { eventState, eventSymbol, eventTop, EVENTS, isEventSymbol, PREDICTION_VE
 import { orderPlan, type OrderPlan, type Part } from "./router.ts";
 import type { Side } from "./venues.ts";
 import { cents, detailOf, plainRefusal, routeLine, sayOf, waitWords } from "./words.ts";
+import { AccountEngine, CARD_TTL_MS, type AccountPage, type AccountSeed, type CardOffer, type Outcome } from "./account/exchange.ts";
+import { mountPayees, type PayeeWorld } from "./account/payees.ts";
+import { doorOf, EXCHANGES } from "./account/doors.ts";
+import { isSelfCustody, plug, type PlugSeed } from "./adapters/exchange.ts";
+import type { AgentAction, Envelope, Hex } from "./account/sign.ts";
 
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
 export const FIXTURES = join(ROOT, "fixtures", "home", "portfolio");
@@ -60,7 +67,13 @@ export interface Seeds {
   ondo: OndoSeed;
   mastercard: MastercardSeed;
   chase: BankSeed;
+  /** the two front-line venues the account layer adds; absent in the original eight-account set */
+  alpaca?: AlpacaSeed | undefined;
+  hyperliquid?: HyperliquidSeed | undefined;
 }
+
+/** `classic`: the eight accounts the portfolio demo was built on · `frontline`: those plus a stock broker and Hyperliquid, with the two changes that make them reachable (an OKX key that can withdraw to verified addresses, USDC on Arbitrum in the wallet) */
+export type VenueSet = "classic" | "frontline";
 
 export interface ServiceOptions {
   /** where the ledger goes (`$BUYER_HOME`); never the repo */
@@ -70,9 +83,15 @@ export interface ServiceOptions {
   live?: boolean;
   mm?: MmLiveOptions;
   seeds?: Seeds;
+  /** which accounts are mounted when no seeds are given (default `classic`) */
+  venues?: VenueSet;
+  /** mount the account layer (signed instructions, agent keys, spending approvals, payments with a clock). On by default with `frontline`; the original demo runs without it */
+  account?: AccountSeed | undefined;
   openness?: unknown;
   /** start from an empty ledger even when a file with this name exists: a scripted run on a fixed clock gets the same file name every time and would otherwise append to its previous run */
   freshLedger?: boolean;
+  /** the venues the owner could plug in (default: fixtures `connectable.json`) */
+  connectable?: Record<string, PlugSeed> | undefined;
 }
 
 /** one slice of an order (or any step an agent flies): where, what, and the agent's words for it */
@@ -104,6 +123,18 @@ export interface Approval {
   results?: ExecResult[] | undefined;
   /** lines the agent holds back until the card is approved and the writes have landed (where the proceeds are) */
   notes?: string[] | undefined;
+  /** the account layer: the agent's signed instruction this card would release, and who signed it. Such a card is answered with the owner's signature, not with `decide` */
+  action?: AgentAction | undefined;
+  actionHash?: Hex | undefined;
+  signer?: string | undefined;
+  /** the account layer: a card does not wait for ever */
+  expiresAt?: string | undefined;
+  /** the account layer: what a payee asked for, when the card is about a payment to someone else */
+  offer?: CardOffer | undefined;
+  /** the account layer: what releasing the card produced (the payment, and what it bought), for the agent that asked */
+  outcome?: unknown;
+  /** the account layer: the spending approval this card holds its share of */
+  approval?: string | undefined;
 }
 
 export type Pending = { ok: true; pending: true; approval: Approval };
@@ -183,8 +214,17 @@ export interface Overview {
   ledgerPath: string;
 }
 
-export function loadSeeds(): Seeds {
-  return JSON.parse(readFileSync(join(FIXTURES, "accounts.json"), "utf8")) as Seeds;
+export function loadSeeds(venues: VenueSet = "classic"): Seeds {
+  const base = JSON.parse(readFileSync(join(FIXTURES, "accounts.json"), "utf8")) as Seeds;
+  if (venues === "classic") return base;
+  const f = JSON.parse(readFileSync(join(FIXTURES, "frontline.json"), "utf8")) as { alpaca: AlpacaSeed; hyperliquid: HyperliquidSeed; okx: Partial<OkxSeed>; metamask: { allowlistAdd: string[]; holdingsAdd: MetamaskSimSeed["holdings"] } };
+  return { ...base, alpaca: f.alpaca, hyperliquid: f.hyperliquid, okx: { ...base.okx, ...f.okx }, metamask: { ...base.metamask, allowlist: [...base.metamask.allowlist, ...f.metamask.allowlistAdd], holdings: [...base.metamask.holdings, ...f.metamask.holdingsAdd] } };
+}
+
+/** the venues the user has and has not plugged in: the simulated exchange side of each */
+export function loadConnectable(): Record<string, PlugSeed> {
+  const { note: _note, ...venues } = JSON.parse(readFileSync(join(FIXTURES, "connectable.json"), "utf8")) as Record<string, unknown>;
+  return venues as Record<string, PlugSeed>;
 }
 
 export function loadOpenness(): unknown {
@@ -202,6 +242,18 @@ export class PortfolioService {
   readonly counters = { writes: 0, refusals: 0, cards: 0 };
   readonly now: () => string;
   readonly live: boolean;
+  /** the account layer, when it is mounted */
+  readonly account: AccountEngine | undefined;
+  /** the simulated payees an agent's payment can reach (x402, MPP, ACP, AP2), mounted with the account layer */
+  readonly payees: PayeeWorld | undefined;
+  /** the page's scripted agent, when a server has one: the owner talks to it through a signed instruction */
+  sayHandler: ((text: string) => Promise<unknown>) | undefined;
+  /** how far the simulated clock has been pushed ahead of the one the service was given */
+  private skewMs = 0;
+  /** venues the owner can plug into the account, by id */
+  private catalog: Record<string, PlugSeed> = {};
+  /** the simulated wallet's own allowlist: the hub sends only to what is on it */
+  private walletAllow: string[] = [];
 
   private constructor(
     private readonly opts: ServiceOptions,
@@ -209,15 +261,177 @@ export class PortfolioService {
     /** the accounts that read the real `mm` CLI (`--mm`): the MetaMask wallet and its Polymarket deposit wallet */
     private readonly liveAccounts: { metamask: AccountAdapter; polymarket: AccountAdapter } | undefined,
   ) {
-    this.now = opts.now ?? (() => new Date().toISOString());
+    // the adapters and the ledger keep this one function: with no skew it answers exactly what the given clock answers
+    const base = opts.now ?? (() => new Date().toISOString());
+    this.now = () => (this.skewMs === 0 ? base() : new Date(Date.parse(base()) + this.skewMs).toISOString());
     this.live = liveAccounts !== undefined;
     this.openness = parseOpenness(opts.openness ?? loadOpenness());
     this.ledger = this.openLedger();
     this.mount();
+    this.account = opts.account !== undefined || opts.venues === "frontline" ? new AccountEngine(this.host(), opts.account ?? {}) : undefined;
+    if (this.account) this.catalog = opts.connectable ?? loadConnectable();
+    this.payees = this.account ? mountPayees(this.account) : undefined;
+    if (this.account && !opts.freshLedger) this.rememberNonces(this.account);
+  }
+
+  /** A signature outlives the process that first saw it. On start, every signed envelope in this home's ledgers has its nonce marked used again,
+   * so an instruction — or an approval the owner has since revoked — cannot be replayed into a freshly started, empty account. Each nonce is
+   * remembered exactly (it refuses its own reuse and nothing else), so a row that was tampered with can make the account refuse more, never
+   * less, and cannot lock a signer out. (A scripted run that asks for a fresh ledger declares it starts from nothing.) */
+  private rememberNonces(engine: AccountEngine): void {
+    const dir = join(this.opts.home, "portfolio");
+    for (const name of existsSync(dir) ? readdirSync(dir).sort() : []) {
+      if (!/^ledger-.*\.jsonl$/.test(name)) continue;
+      for (const row of new Ledger(join(dir, name), this.now).all()) if (row.signer && row.envelope) engine.recall(row.signer, row.envelope as Envelope);
+    }
+  }
+
+  /** what the account layer may use of the service: the venues, the dial, the flight board, the ledger */
+  private host(): ConstructorParameters<typeof AccountEngine>[0] {
+    return {
+      now: () => this.now(),
+      adapter: (id) => this.adapters.get(id),
+      accounts: () => this.accounts(),
+      views: () => this.views(),
+      policy: () => this.openness,
+      dailyOutUsd: (now) => this.dailyOutUsd(now),
+      log: (row) => void this.ledger.append(row),
+      openFlight: (agent, request) => this.openFlight(agent, request),
+      say: (no, text, mark = "note", extra = {}) => {
+        const f = this.flight(no);
+        if (!f) return;
+        const leg = this.note(f, text, mark);
+        if (extra.usd !== undefined) leg.usd = extra.usd;
+        if (extra.approvalId !== undefined) leg.approvalId = extra.approvalId;
+        if (extra.account !== undefined) leg.account = extra.account;
+      },
+      raiseCard: (no, c) => {
+        const now = this.now();
+        const approval: Approval = { id: `card-${String(++this.seq).padStart(4, "0")}`, at: now, account: c.account, intent: c.intent, usd: c.usd, reason: c.reason, status: "pending", why: c.why, flight: no, action: c.action, actionHash: c.actionHash, signer: c.signer, expiresAt: c.expiresAt, ...(c.offer ? { offer: c.offer } : {}), ...(c.approval ? { approval: c.approval } : {}) };
+        this.approvals.unshift(approval);
+        this.counters.cards++;
+        const f = this.flight(no);
+        this.ledger.append({ kind: "card", venue: c.account, intentId: approval.id, tool: c.action.type, outcome: "pending", reason: c.reason, notionalUsd: c.usd, flight: no, ...(f ? { agent: f.agent.id } : {}) });
+        if (f) f.legs.push({ seq: f.legs.length + 1, mark: "wait", text: `${describeIntent(c.intent)}: ${waitWords(c.why)}`, account: c.account, intent: c.intent, usd: c.usd, approvalId: approval.id });
+        return approval;
+      },
+      card: (id) => this.approvals.find((x) => x.id === id),
+      cards: () => this.approvals,
+      execute: async (accountId, intent, agent, signer) => {
+        const r = await this.execute(accountId, intent, agent);
+        // a card this raised remembers which agent key asked for it: it is answered only while that key stands
+        if (signer && isPending(r)) r.approval.signer = signer;
+        return r;
+      },
+      order: async (base, side, qty, agent) => {
+        const r = await this.order(base, side, qty, agent);
+        return { flight: r.flight.no, legs: r.flight.legs.map((l) => `${l.mark === "ok" ? "✓" : l.mark === "no" ? "✗" : l.mark === "wait" ? "▣" : "·"} ${l.text}`), outcomes: r.outcomes };
+      },
+      decide: (id, decision) => this.decide(id, decision),
+      closeCard: (id, status, note, outcome) => {
+        const ap = this.approvals.find((x) => x.id === id);
+        if (!ap) return;
+        ap.status = status;
+        ap.decidedAt = this.now();
+        if (outcome !== undefined) ap.outcome = outcome;
+        const f = this.flight(ap.flight);
+        this.ledger.append({ kind: "card", venue: ap.account, intentId: ap.id, outcome: status, reason: note || ap.reason, notionalUsd: ap.usd, flight: ap.flight, ...(f ? { agent: f.agent.id } : {}) });
+        if (f && note) this.note(f, note, "no");
+      },
+      widen: async (change, value) => {
+        if (change === "say") {
+          if (!this.sayHandler) return no("E_ACCOUNT_BAD_ACTION", { message: "no page agent is listening on this service" });
+          return { ok: true, summary: `the owner told the page's agent: ${value.slice(0, 80)}`, data: await this.sayHandler(value) };
+        }
+        if (change === "advance") {
+          const minutes = Number(value);
+          if (!(minutes > 0) || minutes > 60 * 24 * 30) return no("E_ACCOUNT_BAD_ACTION", { message: "the simulated clock moves ahead by 1 minute to 30 days" });
+          return { ok: true, summary: `simulated clock +${minutes} min`, data: { now: await this.advance(minutes * 60_000) } };
+        }
+        if (change === "sim-return") {
+          const r = this.account?.returnAch(value, "R01", "Insufficient funds");
+          return !r ? no("E_ACCOUNT_BAD_ACTION", {}) : isRefusal(r) ? r : { ok: true, summary: `the bank returned ${value}`, data: { payment: r.payment.id, status: r.payment.status } };
+        }
+        if (change === "mode" && value === "open") {
+          this.setMode("open");
+          return { ok: true, summary: "mode → open" };
+        }
+        if (change === "restore") {
+          const r = this.restore(value);
+          return isRefusal(r) ? r : { ok: true, summary: `${this.nameOf(value)} is open to the agent again` };
+        }
+        if (change === "reach") {
+          const [account, caps] = value.split(":");
+          const r = this.setReach(account ?? "", (caps ?? "").split(",").filter(Boolean) as Capability[]);
+          return isRefusal(r) ? r : { ok: true, summary: `reach at ${this.nameOf(account ?? "")} → ${r.reach.join(", ")}` };
+        }
+        if (change === "reset") {
+          this.reset();
+          return { ok: true, summary: "the simulation was reset" };
+        }
+        return no("E_ACCOUNT_BAD_ACTION", { message: `"${change}" is not a policy change the owner signs here` });
+      },
+      connect: (venue, connector, label, credentialRef) => this.plugIn(venue, connector, label, credentialRef),
+      disconnect: (venue) => this.unplug(venue),
+      connectable: () =>
+        Object.entries(this.catalog)
+          .filter(([id]) => !this.adapters.has(id))
+          .map(([id, v]) => ({ id, name: v.name, connector: v.connector, via: isSelfCustody(v) ? "A self-custody wallet · by its address" : (EXCHANGES[v.connector]?.label ?? v.connector), credential: isSelfCustody(v) ? "no key: its address" : (EXCHANGES[v.connector]?.credential ?? "API key"), credentialRef: isSelfCustody(v) ? v.address : `home/credentials/${id}/api-key.json`, asks: isSelfCustody(v) ? "the chain: the address can be read and sent to, and nothing leaves it without your signature in that wallet" : (EXCHANGES[v.connector]?.probe ?? "what the key may do") })),
+    };
+  }
+
+  /** Plug in a venue the owner already has. No code names it: the connector says how it is spoken to, the venue's own answer about the credential
+   * says what may be done there, and the account's doors for it are compiled from that answer. */
+  private plugIn(venue: string, connector: string, label: string, credentialRef: string): Refusal | { ok: true; summary: string; native?: unknown } {
+    if (this.adapters.has(venue)) return no("E_ACCOUNT_BAD_ACTION", { venue, message: `${this.nameOf(venue)} is already on the account` });
+    const seed = this.catalog[venue];
+    if (!seed) return no("E_WALLET_ACCOUNT_UNKNOWN", { venue, message: `nothing answers as "${venue}" with that credential; what can be plugged in: ${Object.keys(this.catalog).join(", ") || "nothing"}`, detail: { connectable: Object.keys(this.catalog) } });
+    if (seed.connector !== connector) return no("E_VENUE_REJECTED", { venue, message: `${seed.name} did not answer through "${connector}": it is reached through "${seed.connector}"`, detail: { connector: seed.connector } });
+    const name = label.trim().slice(0, 40) || seed.name;
+    const { adapter, probe } = plug(venue, { ...seed, name }, credentialRef.trim().slice(0, 120) || `home/credentials/${venue}/api-key.json`);
+    this.adapters.set(venue, adapter);
+    // the hub sends only to destinations on the wallet's own allowlist. In the simulation the owner's signature on this action adds the venue's
+    // deposit destination to it; a real wallet's policy is the wallet's, and the owner adds it there
+    const destination = adapter.account.address ?? venue;
+    if (!this.live && !this.walletAllow.includes(destination)) this.walletAllow.push(destination);
+    const door = doorOf(adapter.account);
+    const who = (x: string | undefined) => (x === "agent" ? "an agent's key may" : x === "owner" ? "yours to sign" : x === "venue" ? "only at the venue itself" : "closed");
+    const said = isSelfCustody(seed) ? `${name} plugged in by its address · ${probe.note}` : `${name} plugged in · the venue says this credential can ${probe.can.join(", ")} · ${probe.note}`;
+    return { ok: true, summary: `${said} · money in: ${who(door.in[0]?.access)}; money out: ${who(door.out[0]?.access)}${this.live ? " · add its deposit address to the wallet's own allowlist before sending there" : ""}`, native: { connector, probe: probe.native } };
+  }
+
+  private unplug(venue: string): Refusal | { ok: true; summary: string } {
+    const a = this.adapters.get(venue);
+    if (!a) return no("E_WALLET_ACCOUNT_UNKNOWN", { venue });
+    if (!a.account.plugged) return no("E_ACCOUNT_BAD_ACTION", { venue, message: `${a.account.name} is one of the venues the account opened with: only a venue that was plugged in can be unplugged` });
+    this.adapters.delete(venue);
+    const listed = this.walletAllow.indexOf(a.account.address ?? venue);
+    if (listed >= 0) this.walletAllow.splice(listed, 1);
+    return { ok: true, summary: `${a.account.name} unplugged: the account no longer reads it or routes through it. The credential at the venue is untouched: delete it there` };
+  }
+
+  /** the account layer's front door: one signed instruction */
+  async exchange(envelope: Envelope): Promise<Outcome> {
+    if (!this.account) return no("E_ACCOUNT_BAD_ACTION", { message: "the account layer is not mounted on this service" });
+    return this.account.exchange(envelope);
+  }
+
+  /** what the Account page reads */
+  async accountView(): Promise<AccountPage | undefined> {
+    return this.account?.view();
+  }
+
+  /** push the simulated clock ahead and land whatever came due on the way */
+  async advance(ms: number): Promise<string> {
+    if (!(ms > 0)) return this.now();
+    this.skewMs += ms;
+    this.ledger.append({ kind: "note", venue: "*", reason: `simulated clock +${Math.round(ms / 60_000)} min → ${this.now()}` });
+    await this.account?.settle();
+    return this.now();
   }
 
   static async create(opts: ServiceOptions): Promise<PortfolioService> {
-    const seeds = opts.seeds ?? loadSeeds();
+    const seeds = opts.seeds ?? loadSeeds(opts.venues);
     const live = opts.live ? { metamask: await metamaskLiveAccount(opts.mm), polymarket: await polymarketLiveAccount(opts.mm) } : undefined;
     return new PortfolioService(opts, seeds, live);
   }
@@ -232,7 +446,12 @@ export class PortfolioService {
   /** the five simulators are rebuilt from the seeds; the live account is kept (its state is MetaMask's, not ours) */
   private mount(): void {
     const s = this.seeds;
-    const list: AccountAdapter[] = [binanceAccount(s.binance), okxAccount(s.okx), this.liveAccounts?.metamask ?? metamaskSimAccount(s.metamask, this.now), this.liveAccounts?.polymarket ?? polymarketSimAccount(s.polymarket, this.now), kalshiAccount(s.kalshi, this.now), ondoAccount(s.ondo, this.now), mastercardAccount(s.mastercard, this.now), bankAccount(s.chase)];
+    // the simulated wallet reads its allowlist from this array, so a venue plugged in later can be added to it
+    this.walletAllow.length = 0;
+    this.walletAllow.push(...s.metamask.allowlist);
+    const list: AccountAdapter[] = [binanceAccount(s.binance), okxAccount(s.okx), this.liveAccounts?.metamask ?? metamaskSimAccount({ ...s.metamask, allowlist: this.walletAllow }, this.now), this.liveAccounts?.polymarket ?? polymarketSimAccount(s.polymarket, this.now), kalshiAccount(s.kalshi, this.now), ondoAccount(s.ondo, this.now), mastercardAccount(s.mastercard, this.now), bankAccount(s.chase)];
+    if (s.alpaca) list.push(alpacaAccount(s.alpaca, this.now));
+    if (s.hyperliquid) list.push(hyperliquidAccount(s.hyperliquid, this.now));
     this.adapters = new Map(list.map((a) => [a.account.id, a]));
   }
 
@@ -323,7 +542,10 @@ export class PortfolioService {
   /** USD the agent moved through the venues in the 24 h before `now` (ok writes only) */
   dailyOutUsd(now: string): number {
     const since = Date.parse(now) - 24 * 3600 * 1000;
-    return r2(this.ledger.byKind("venue").filter((r) => Date.parse(r.ts) > since).reduce((s, r) => s + (r.notionalUsd ?? 0), 0));
+    const moved = this.ledger.byKind("venue").filter((r) => Date.parse(r.ts) > since).reduce((s, r) => s + (r.notionalUsd ?? 0), 0);
+    // what an agent key moved through the account layer counts too; what the owner signed never does
+    const viaAccount = this.account ? this.ledger.byKind("action").filter((r) => r.outcome === "accepted" && r.agent !== undefined && Date.parse(r.ts) > since).reduce((s, r) => s + (r.notionalUsd ?? 0), 0) : 0;
+    return r2(moved + viaAccount);
   }
 
   // ---- flights ------------------------------------------------------------------
@@ -414,7 +636,7 @@ export class PortfolioService {
     }
     if (card) {
       const first = steps[0]!;
-      const approval: Approval = { id: `card-${String(++this.seq).padStart(4, "0")}`, at: now, account: first.account, intent: first.intent, usd: orderUsd, reason: card.reason, status: "pending", why: card.why, flight: f.no, batch: steps.map((s) => ({ ...s })), title: label };
+      const approval: Approval = { id: `card-${String(++this.seq).padStart(4, "0")}`, at: now, account: first.account, intent: first.intent, usd: orderUsd, reason: card.reason, status: "pending", why: card.why, flight: f.no, batch: steps.map((s) => ({ ...s })), title: label, ...this.cardLife(now) };
       this.approvals.unshift(approval);
       this.counters.cards++;
       this.ledger.append({ kind: "card", venue: "*", intentId: approval.id, tool: "portfolio_order", outcome: "pending", reason: card.reason, notionalUsd: orderUsd, args: { slices: steps.map((s) => ({ account: s.account, ...s.intent })) }, ...ctx });
@@ -532,14 +754,39 @@ export class PortfolioService {
       this.ledger.append({ kind: "openness-refusal", venue: accountId, tool, code: v.code, reason: v.message, detail: v.detail, ...ctx });
       return v;
     }
-    if (v.card) {
-      const approval: Approval = { id: `card-${String(++this.seq).padStart(4, "0")}`, at: now, account: accountId, intent, usd: v.usd, reason: v.card.reason, status: "pending", why: v.card.why, flight: f.no };
+    // the account layer: a first payment to a payee the owner has never paid is the owner's to approve, in any mode
+    const newPayee = this.account && intent.kind === "pay" && !this.account.state.payees.includes(intent.merchant) ? { why: "payee" as const, reason: `a first payment to ${intent.merchant} ($${v.usd}): a new payee is approved once` } : null;
+    const card = v.card ?? newPayee;
+    if (card) {
+      const approval: Approval = { id: `card-${String(++this.seq).padStart(4, "0")}`, at: now, account: accountId, intent, usd: v.usd, reason: card.reason, status: "pending", why: card.why, flight: f.no, ...this.cardLife(now) };
       this.approvals.unshift(approval);
       this.counters.cards++;
-      this.ledger.append({ kind: "card", venue: accountId, intentId: approval.id, tool, outcome: "pending", reason: v.card.reason, notionalUsd: v.usd, args: { ...intent }, ...ctx });
+      this.ledger.append({ kind: "card", venue: accountId, intentId: approval.id, tool, outcome: "pending", reason: card.reason, notionalUsd: v.usd, args: { ...intent }, ...ctx });
       return { ok: true, pending: true, approval };
     }
     return this.settle(a, intent, undefined, ctx);
+  }
+
+  /** with the account layer mounted a card expires; without it (the original demo) a card is as it always was */
+  private cardLife(now: string): { expiresAt?: string } {
+    return this.account ? { expiresAt: new Date(Date.parse(now) + CARD_TTL_MS).toISOString() } : {};
+  }
+
+  /** Is what a card would release still allowed, now? The card was raised under the conditions of that moment: the session may have ended since,
+   * the account may have been switched off, the address blocklisted, the day's cap used up. A second card is not asked for; a refusal stops it. */
+  private recheck(ap: Approval, now: string): Refusal | null {
+    const steps: Array<{ account: string; intent: Intent }> = ap.batch ?? [{ account: ap.account, intent: ap.intent }];
+    const orderUsd = ap.batch ? r2(steps.reduce((s, x) => s + usdOf(x.intent), 0)) : undefined;
+    const daily = this.dailyOutUsd(now);
+    let before = 0;
+    for (const s of steps) {
+      const a = this.adapters.get(s.account);
+      if (!a) return no("E_WALLET_ACCOUNT_UNKNOWN", { venue: s.account });
+      const v = evaluate({ intent: s.intent, account: a.account, openness: this.openness, now, dailyOutUsd: daily + before, ...(orderUsd !== undefined ? { orderUsd } : {}) });
+      before += usdOf(s.intent);
+      if (isRefusal(v)) return v;
+    }
+    return null;
   }
 
   private async settle(a: AccountAdapter, intent: Intent, approvalId: string | undefined, ctx: { flight?: string | undefined; agent?: string | undefined }, via?: string): Promise<ExecResult> {
@@ -568,6 +815,7 @@ export class PortfolioService {
   async decide(approvalId: string, decision: "approve" | "reject"): Promise<ExecResult> {
     const ap = this.approvals.find((x) => x.id === approvalId && x.status === "pending");
     if (!ap) return no("E_CARD_NOT_GRANTED", { tool: "portfolio_approve", message: `no pending card ${approvalId}` });
+    if (ap.action) return no("E_ACCOUNT_OWNER_SURFACE", { tool: "portfolio_approve", message: `card ${ap.id} releases a signed instruction: it is answered with the owner's signature (approveCard), not here`, detail: { approval: ap.id } });
     const f = this.flight(ap.flight);
     const ctx = { flight: ap.flight, agent: f?.agent.id };
     ap.decidedAt = this.now();
@@ -583,6 +831,15 @@ export class PortfolioService {
     }
     ap.status = "approved";
     this.ledger.append({ kind: "card", venue: where, intentId: ap.id, outcome: "approved", reason: ap.reason, notionalUsd: ap.usd, ...ctx });
+    const stale = this.recheck(ap, ap.decidedAt);
+    if (stale) {
+      ap.result = stale;
+      this.counters.refusals++;
+      this.ledger.append({ kind: "openness-refusal", venue: where, intentId: ap.id, tool: ap.batch ? "portfolio_order" : `portfolio_${ap.intent.kind}`, code: stale.code, reason: `at approval: ${stale.message}`, detail: stale.detail, ...ctx });
+      if (f) this.note(f, `Approved, but ${plainRefusal(stale, (id) => this.nameOf(id))}`, "no");
+      return stale;
+    }
+    if (this.account && ap.why === "payee" && ap.intent.kind === "pay" && !this.account.state.payees.includes(ap.intent.merchant)) this.account.state = { ...this.account.state, payees: [...this.account.state.payees, ap.intent.merchant] };
     if (ap.batch) {
       // one yes covers every slice of the order
       const results: ExecResult[] = [];
@@ -670,8 +927,10 @@ export class PortfolioService {
     this.flights.length = 0;
     this.flightSeq = 0;
     this.counters.writes = this.counters.refusals = this.counters.cards = 0;
+    this.skewMs = 0;
     this.ledger = this.openLedger();
     this.mount();
+    this.account?.reset();
   }
 
   rows(): readonly LedgerRow[] {

@@ -77,8 +77,8 @@ export function effectiveReach(a: Account, o: Openness): Capability[] {
   return a.scope.can.filter((c) => c === "read" || !r || r.includes(c));
 }
 
-/** why a write waits for the human: a never-used address · a prediction market past its close and not yet resolved · the Guard allowance */
-export type AskReason = "stranger" | "awaiting" | "allowance";
+/** why a write waits for the human: a never-used address · a prediction market past its close and not yet resolved · the Guard allowance · a first payment to a payee the owner has not paid before (the account layer) */
+export type AskReason = "stranger" | "awaiting" | "allowance" | "payee";
 
 export interface Card {
   why: AskReason;

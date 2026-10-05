@@ -6,7 +6,7 @@
  * (Alpaca's 42210000, Binance's -2015, Hyperliquid's sentence) travels in
  * `native` and lands on the ledger row unchanged.
  */
-export type Layer = "MOUNT" | "MANDATE" | "CARD" | "GATE" | "SIGNER" | "WALLET" | "VENUE";
+export type Layer = "MOUNT" | "MANDATE" | "CARD" | "GATE" | "SIGNER" | "WALLET" | "VENUE" | "ACCOUNT" | "PAYEE";
 
 export const CODES = {
   // mount audit — the plugin contract
@@ -23,6 +23,7 @@ export const CODES = {
   E_MANDATE_PER_ORDER_CAP: { layer: "MANDATE", zh: "超过单笔上限" },
   E_MANDATE_RATE: { layer: "MANDATE", zh: "超过授权书的频率上限" },
   E_MANDATE_BUDGET: { layer: "MANDATE", zh: "授权书余额不足" },
+  E_MANDATE_INVALID: { layer: "MANDATE", zh: "mandate 链验不过：封闭式 mandate 和开放式 mandate 或这笔结账对不上" },
   // card — the human
   E_CARD_REJECTED: { layer: "CARD", zh: "人拒绝了这张卡，agent 收到干净错误，不重试" },
   E_CARD_NOT_GRANTED: { layer: "CARD", zh: "没有本次调用的一次性授权记录" },
@@ -70,6 +71,38 @@ export const CODES = {
   E_VENUE_INSUFFICIENT: { layer: "VENUE", zh: "场所账户余额不足" },
   E_VENUE_GEOBLOCKED: { layer: "VENUE", zh: "场所不接这个地区的单" },
   E_VENUE_MARKET_CLOSED: { layer: "VENUE", zh: "市场已截止或已结算，不再接单" },
+  E_VENUE_MIN_DEPOSIT: { layer: "VENUE", zh: "低于场所的最低入金额：发出去场所不入账，所以不发" },
+  E_VENUE_RAIL_CLOSED: { layer: "VENUE", zh: "这条跑道关着" },
+  E_VENUE_CURRENCY: { layer: "VENUE", zh: "这个场所不收这种币，要先换" },
+  E_VENUE_UNSETTLED: { layer: "VENUE", zh: "未结算的现金还不能提" },
+  E_VENUE_RETURNED: { layer: "VENUE", zh: "这笔 ACH 被银行退回了" },
+  // the account — the airport itself: who signed, with which key, and whether that key may ask for this
+  E_ACCOUNT_BAD_SIGNATURE: { layer: "ACCOUNT", zh: "签名和指令对不上" },
+  E_ACCOUNT_UNKNOWN_SIGNER: { layer: "ACCOUNT", zh: "账户不认识这把钥匙" },
+  E_ACCOUNT_AGENT_EXPIRED: { layer: "ACCOUNT", zh: "agent 钥匙已过期" },
+  E_ACCOUNT_AGENT_REVOKED: { layer: "ACCOUNT", zh: "agent 钥匙已被撤销" },
+  E_ACCOUNT_OWNER_ONLY: { layer: "ACCOUNT", zh: "这个动作只有 owner 的钥匙能签" },
+  E_ACCOUNT_OWNER_SURFACE: { layer: "ACCOUNT", zh: "这个操作必须来自 owner 的设备" },
+  E_ACCOUNT_NOT_HOME: { layer: "ACCOUNT", zh: "agent 钥匙只能在用户自己的场所之间挪钱" },
+  E_ACCOUNT_NONCE: { layer: "ACCOUNT", zh: "nonce 用过，或者不在时间窗口内" },
+  E_ACCOUNT_EXPIRED: { layer: "ACCOUNT", zh: "指令已过期：资金指令签完只有几分钟有效" },
+  E_ACCOUNT_THRESHOLD: { layer: "ACCOUNT", zh: "签名人数没到门槛" },
+  E_ACCOUNT_FEE_CAP: { layer: "ACCOUNT", zh: "费率高于 owner 给这个应用批的上限" },
+  E_ACCOUNT_LIMIT: { layer: "ACCOUNT", zh: "超过账户的数量或期限上限" },
+  E_ACCOUNT_DESTINATION: { layer: "ACCOUNT", zh: "收款地址不在这条链的地址簿里" },
+  E_ACCOUNT_DEST_COOLING: { layer: "ACCOUNT", zh: "新加的收款地址还在 24 小时冷静期" },
+  E_ACCOUNT_SOURCE: { layer: "ACCOUNT", zh: "没有指明来源，或者没有开放的来源" },
+  E_ACCOUNT_REQUOTE: { layer: "ACCOUNT", zh: "路线、费用或到账时间在签名之后变了，需要重签" },
+  E_ACCOUNT_CARD_EXPIRED: { layer: "ACCOUNT", zh: "这张卡已过期" },
+  E_ACCOUNT_BAD_ACTION: { layer: "ACCOUNT", zh: "指令格式不对" },
+  E_ACCOUNT_UNPRICED: { layer: "ACCOUNT", zh: "这个资产在这里没有价格，无法判断额度，拒绝" },
+  // the payee — the other side of a payment the agent makes
+  E_PAYEE_CHANGED: { layer: "PAYEE", zh: "收款地址和这个 host 钉住的不一样" },
+  E_PAYEE_OVERCHARGE: { layer: "PAYEE", zh: "收款方要的比授权的多" },
+  E_PAYEE_REJECTED: { layer: "PAYEE", zh: "收款方拒绝了这张付款凭证" },
+  E_PAYEE_UNVERIFIED: { layer: "PAYEE", zh: "收款方的质询或回执验不过" },
+  E_PAYEE_UNSUPPORTED: { layer: "PAYEE", zh: "收款方给的付款方式这个账户都不支持" },
+  E_PAYEE_REDIRECT: { layer: "PAYEE", zh: "收款方把请求转去了别处，不跟" },
 } as const satisfies Record<`E_${Layer}_${string}`, { layer: Layer; zh: string }>;
 
 export type Code = keyof typeof CODES;

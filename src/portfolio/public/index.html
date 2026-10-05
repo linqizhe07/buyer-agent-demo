@@ -11,7 +11,10 @@
 <body>
 <main>
   <header class="top">
-    <div class="mono dim" id="stamp">—</div>
+    <div>
+      <nav class="pages" id="pages" hidden><a href="/" aria-current="page">Statement</a><a href="/account">Account</a></nav>
+      <div class="mono dim" id="stamp">—</div>
+    </div>
     <div class="modes">
       <div class="seg" id="mode"><button type="button" data-mode="open" aria-pressed="false">Open</button><button type="button" data-mode="guard" aria-pressed="false">Guard</button></div>
       <div class="mono dim small" id="mode-note"></div>
@@ -53,6 +56,7 @@
 
   <footer class="mono dim small" id="foot"></footer>
 </main>
+<script src="/owner.js"></script>
 <script src="/portfolio.js"></script>
 </body>
 </html>

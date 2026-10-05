@@ -1,0 +1,30 @@
+{
+  "note": "Venues the user already has and has not plugged into the account yet: the simulated 'exchange side' of each — what it holds, and what it says the key it issued may do. Plugging one in is an owner-signed connectVenue; the account's doors for it are compiled from this answer, and no code names the venue. Balances and permissions are this fixture's; nothing here is a real account, key or address.",
+  "bybit": {
+    "name": "Bybit",
+    "connector": "unified",
+    "balances": { "USDT": 3200, "ETH": 0.4 },
+    "key": { "permissions": ["read", "trade"], "ipBound": "203.0.113.7" }
+  },
+  "kraken": {
+    "name": "Kraken",
+    "connector": "unified",
+    "balances": { "USDC": 1500 },
+    "key": { "permissions": ["read", "trade", "withdraw"], "ipBound": "203.0.113.7", "whitelist": ["metamask"] }
+  },
+  "okx-second": {
+    "name": "OKX · second account",
+    "connector": "okx",
+    "balances": { "USDT": 800 },
+    "key": { "permissions": ["read"] }
+  },
+  "okx-wallet": {
+    "name": "OKX Wallet",
+    "connector": "wallet",
+    "address": "0x0c4b…okxwallet",
+    "holdings": [
+      { "asset": "USDC", "amount": 640, "chain": "Arbitrum" },
+      { "asset": "USDC", "amount": 210, "chain": "Base" }
+    ]
+  }
+}

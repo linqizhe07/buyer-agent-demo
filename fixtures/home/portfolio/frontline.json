@@ -1,0 +1,58 @@
+{
+  "note": "Seeds for the two front-line venues the account layer adds (a stock broker and Hyperliquid) and for the changes to two of the original accounts that make them reachable. Read on top of accounts.json only when the service runs with venues \"frontline\"; the original eight-account demo never opens this file. Balances and stock prices are illustrative numbers, not market data. No region is named anywhere: whether a venue serves a customer is a flag the venue supplies. In the wallet's allowlist, \"floats\" stands for the addresses of the account's own sub-account floats, which the owner allowlists when a sub-account is made.",
+  "alpaca": {
+    "accountNumber": "PA-ILLUSTRATIVE",
+    "cash": 5500,
+    "unsettledUsd": 2500,
+    "positions": [
+      {
+        "symbol": "SPY",
+        "qty": 10,
+        "price": 600
+      },
+      {
+        "symbol": "NVDA",
+        "qty": 20,
+        "price": 150
+      }
+    ],
+    "linkedBank": "chase",
+    "geoblock": {
+      "blocked": false
+    }
+  },
+  "hyperliquid": {
+    "perpsUsdc": 1500,
+    "spotUsdc": 500,
+    "spotUsdt": 0,
+    "marginUsed": 300,
+    "geoblock": {
+      "blocked": false
+    }
+  },
+  "okx": {
+    "permissions": [
+      "read",
+      "trade",
+      "withdraw"
+    ],
+    "withdrawWhitelist": [
+      "metamask"
+    ]
+  },
+  "metamask": {
+    "allowlistAdd": [
+      "hyperliquid",
+      "okx",
+      "binance",
+      "floats"
+    ],
+    "holdingsAdd": [
+      {
+        "asset": "USDC",
+        "amount": 800,
+        "chain": "Arbitrum"
+      }
+    ]
+  }
+}

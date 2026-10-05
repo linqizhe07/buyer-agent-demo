@@ -96,7 +96,7 @@ export function liquidity(accounts: LiquidityInput[]): Liquidity {
       const src: LiquiditySource = { account: a.id, name: a.name, asset: h.asset, chain, usd: h.usd };
       if (a.revoked) stuck.push({ ...src, why: "switched off" });
       else if (a.reach.includes("move")) mobile.push(src);
-      else stuck.push({ ...src, why: a.kind === "bank" ? "read-only; transfers don't go through the agent" : a.kind === "cex" ? "key cannot withdraw" : a.kind === "prediction" ? "pays out by ACH, not through the agent" : "credential cannot transfer out" });
+      else stuck.push({ ...src, why: a.kind === "bank" ? "read-only; transfers don't go through the agent" : a.kind === "cex" ? "key cannot withdraw" : a.kind === "prediction" ? "pays out by ACH, not through the agent" : a.kind === "broker" ? "leaves by ACH started at the broker" : a.kind === "perp" ? "only the owner's key can withdraw" : "credential cannot transfer out" });
     }
   }
   return { mobileUsd: r2(mobile.reduce((s, x) => s + x.usd, 0)), stuckUsd: r2(stuck.reduce((s, x) => s + x.usd, 0)), mobile, stuck };

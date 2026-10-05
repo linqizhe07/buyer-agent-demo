@@ -83,6 +83,13 @@ export function polymarketSimAccount(seed: PolymarketSeed, now: () => string): A
     credit(asset, amount) {
       if (asset === "USDC" || asset === "pUSD") pusd = r2(pusd + amount);
     },
+    /** the owner's own withdrawal, signed by their wallet and relayed */
+    debit(asset, amount) {
+      if (asset !== "pUSD" && asset !== "USDC") return no("E_VENUE_REJECTED", { venue: "polymarket", message: "only pUSD leaves the deposit wallet", native: { error: "unsupported asset" } });
+      if (pusd < amount) return short({ need: amount, have: pusd });
+      pusd = r2(pusd - amount);
+      return { ok: true as const, ref: `polymarket:owner:${++seq}` };
+    },
     async read(): Promise<Holding[]> {
       const rows: Holding[] = [];
       if (pusd > 0) rows.push({ account: account.id, asset: "pUSD", amount: pusd, usd: pusd, class: "stable", note: "Polygon" });

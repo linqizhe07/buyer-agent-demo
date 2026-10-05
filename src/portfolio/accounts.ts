@@ -12,7 +12,8 @@
 import type { Refusal } from "../core/errors.ts";
 import { eventMark, isEventSymbol } from "./events.ts";
 
-export type AccountKind = "cex" | "card" | "bank" | "agent-wallet" | "rwa" | "prediction";
+/** `broker`: a stock-market account at a broker · `perp`: an account at a perp DEX (Hyperliquid) */
+export type AccountKind = "cex" | "card" | "bank" | "agent-wallet" | "rwa" | "prediction" | "broker" | "perp";
 export type Capability = "read" | "trade" | "move" | "pay" | "subscribe" | "redeem";
 export type ScopeEnforcer = "venue" | "network" | "bank" | "issuer" | "metamask";
 
@@ -44,10 +45,16 @@ export interface Account {
   chain?: string | undefined;
   /** a capability this kind of credential normally has that the venue has closed for THIS one, and why — as a phrase after the venue's name (`takes no orders from US-NY`) */
   closed?: Partial<Record<Capability, string>> | undefined;
+  /** the venue itself says it does not serve this customer's region. The list is the venue's and it changes, so no region is named here: reads may still work, every door is closed */
+  restricted?: string | undefined;
+  /** how this venue is reached, when it was plugged in through a connector (account/doors.ts `EXCHANGES`); absent on the venues the simulation starts with */
+  connector?: string | undefined;
+  /** the owner plugged this venue in after the account was opened: it can be unplugged again */
+  plugged?: boolean | undefined;
 }
 
 /** `event`: shares of a prediction-market outcome, worth $1 or $0 at settlement */
-export type AssetClass = "crypto" | "stable" | "cash" | "rwa" | "event" | "credit";
+export type AssetClass = "crypto" | "stable" | "cash" | "rwa" | "event" | "credit" | "equity";
 
 export interface Holding {
   account: string;
@@ -85,6 +92,32 @@ export interface ExecOk {
 
 export type ExecResult = ExecOk | Refusal;
 
+/** one line of a venue's own record of money in and out: what a reconcile reads */
+export interface StatementLine {
+  id: string;
+  at: string;
+  direction: "in" | "out";
+  asset: string;
+  amount: number;
+  status: "pending" | "settled" | "returned";
+  native?: unknown;
+}
+
+/** a venue-side money action that went through, with whatever the venue says about it */
+export interface VenueOk {
+  ok: true;
+  ref?: string | undefined;
+  /** the venue's own request or receipt, verbatim */
+  native?: unknown;
+  /** when the venue says it lands (ISO), where the venue runs the clock itself */
+  settlesAt?: string | undefined;
+  counterparty?: string | undefined;
+  received?: number | undefined;
+  feeUsd?: number | undefined;
+}
+
+export type VenueResult = VenueOk | Refusal;
+
 export interface AccountAdapter {
   readonly account: Account;
   read(): Promise<Holding[]>;
@@ -93,6 +126,16 @@ export interface AccountAdapter {
   execute(intent: Intent): Promise<ExecResult>;
   /** money arriving from another account over a rail (a bridge, a transfer): the service calls this after a successful `move` whose destination is this account's address */
   credit?(asset: string, amount: number, chain?: string): void;
+  /** money leaving under an authority OTHER than the agent's credential — the owner's own signature that the venue accepts (a wallet, Hyperliquid), or the venue's own page. `execute` is the agent's credential; this is not. The balance rule is still the venue's */
+  debit?(asset: string, amount: number, where?: string): VenueResult;
+  /** between the venue's own sub-ledgers: perps ⇄ spot, funding ⇄ trading */
+  shift?(asset: string, amount: number, from: string, to: string): VenueResult;
+  /** one stablecoin into another at the venue */
+  convert?(sell: string, buy: string, amount: number): VenueResult;
+  /** the account holder acting at the venue's OWN page. The account cannot start this; it can only watch for it */
+  startAtVenue?(direction: "in" | "out", asset: string, amount: number): VenueResult;
+  /** the venue's record of money in and out */
+  statement?(): StatementLine[];
   /** candidate routes for an intent, when the provider can quote them itself (the live MetaMask bridge / swap aggregator) */
   quote?(intent: Intent): Promise<RouteQuote[]>;
   /** a real spot price in USD, when the provider has a price feed (the live MetaMask price API) */
@@ -163,8 +206,11 @@ export const KIND_LABEL: Record<AccountKind, string> = {
   rwa: "RWA position",
   card: "Card",
   bank: "Bank account",
+  broker: "Broker account",
+  perp: "Perp DEX account",
 };
-export const KIND_ORDER: AccountKind[] = ["cex", "agent-wallet", "prediction", "rwa", "card", "bank"];
+/** the stock market first, then the exchanges; the six original kinds keep their order */
+export const KIND_ORDER: AccountKind[] = ["broker", "cex", "perp", "agent-wallet", "prediction", "rwa", "card", "bank"];
 export const CAP_LABEL: Record<Capability, string> = { read: "read", trade: "trade", move: "transfer out", pay: "pay", subscribe: "subscribe", redeem: "redeem" };
 export const WRITE_CAPS: Capability[] = ["trade", "move", "pay", "subscribe", "redeem"];
 export const ENFORCER_LABEL: Record<ScopeEnforcer, string> = {
@@ -174,8 +220,8 @@ export const ENFORCER_LABEL: Record<ScopeEnforcer, string> = {
   issuer: "the issuer (transfer-restriction contract)",
   metamask: "MetaMask (Guard policy + MFA)",
 };
-export const CLASS_LABEL: Record<AssetClass, string> = { crypto: "Crypto", stable: "Stablecoins", cash: "Cash", rwa: "RWA", event: "Predictions", credit: "Credit line" };
-export const CLASS_ORDER: AssetClass[] = ["cash", "stable", "crypto", "event", "rwa", "credit"];
+export const CLASS_LABEL: Record<AssetClass, string> = { crypto: "Crypto", stable: "Stablecoins", cash: "Cash", rwa: "RWA", event: "Predictions", credit: "Credit line", equity: "Stocks" };
+export const CLASS_ORDER: AssetClass[] = ["cash", "stable", "crypto", "equity", "event", "rwa", "credit"];
 
 /** demo prices, fixed so a run is reproducible; the live MetaMask read brings its own USD values */
 export const PRICES: Record<string, number> = { BTC: 62150, ETH: 2440, SOL: 148.3, OUSG: 110.42, USDT: 1, USDC: 1, pUSD: 1, USD: 1 };

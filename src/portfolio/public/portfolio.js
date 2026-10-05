@@ -4,16 +4,33 @@ const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<
 const money = (n) => "$" + Math.round(Number(n || 0)).toLocaleString("en-US");
 const cents = (n) => "$" + Number(n || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const time = (iso) => String(iso || "").slice(11, 16);
-const KIND = { cex: "CEX", rwa: "RWA", "agent-wallet": "On-chain", prediction: "Prediction", card: "Card", bank: "Bank" };
+const KIND = { cex: "CEX", rwa: "RWA", "agent-wallet": "On-chain", prediction: "Prediction", card: "Card", bank: "Bank", broker: "Stocks", perp: "Perp DEX" };
 const CAP = { read: "Read", trade: "Trade", move: "Transfer", pay: "Pay", subscribe: "Subscribe", redeem: "Redeem" };
-const CLASS_COLOR = { cash: "#1b1b1b", stable: "#8aa37b", crypto: "#e8702a", event: "#9b6b8f", rwa: "#6a7fb5" };
+const CLASS_COLOR = { cash: "#1b1b1b", stable: "#8aa37b", crypto: "#e8702a", event: "#9b6b8f", rwa: "#6a7fb5", equity: "#b08a3e" };
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many || one + "s"}`;
 let O = null;
 let busy = false;
+let paired = false;
 
 async function load() {
   O = await (await fetch("/api/overview")).json();
+  // with the account layer mounted, this browser's device key is what answers a card, talks to the agent and opens the dial
+  if (O.accountLayer && !paired) {
+    paired = true;
+    await Owner.ready();
+  }
   render();
+}
+
+const post = (path, body) => fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body || {}) });
+
+/** what only the owner may do arrives as a signed action; tightening (Guard, an account off) needs no signature */
+function signed(path, body) {
+  if (path === "/api/approve") return Owner.act({ type: "approveCard", card: body.id, action: (O.approvals.find((a) => a.id === body.id) || {}).hash, decision: body.decision });
+  if (path === "/api/say") return Owner.act({ type: "setPolicy", change: "say", value: body.text });
+  if (path === "/api/restore") return Owner.act({ type: "setPolicy", change: "restore", value: body.account });
+  if (path === "/api/mode" && body.mode === "open") return Owner.act({ type: "setPolicy", change: "mode", value: "open" });
+  return post(path, body);
 }
 
 function render() {
@@ -27,6 +44,7 @@ function render() {
 
 function renderTop() {
   const flights = O.flights || [];
+  $("pages").hidden = !O.accountLayer;
   $("stamp").textContent = `${String(O.now).slice(0, 10)} · ${plural(O.accounts.length, "account")} · AGENT ${O.mode.toUpperCase()}${O.live ? " · METAMASK LIVE" : ""}${flights.length ? ` · ${plural(flights.length, "flight")} today · ${plural((O.agents || []).length, "agent")}` : ""}`.toUpperCase();
   for (const b of $("mode").querySelectorAll("button")) b.setAttribute("aria-pressed", String(b.dataset.mode === O.mode));
   $("mode-note").textContent = O.mode === "open" ? "Open · asks only before a new address or a market past its close" : `Guard · asks above ${money(O.openness.guard.defaultCardAboveUsd)}`;
@@ -104,7 +122,7 @@ async function act(path, body, after) {
   busy = true;
   for (const b of document.querySelectorAll("button")) b.disabled = true;
   try {
-    await fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body || {}) });
+    await (O && O.accountLayer ? signed(path, body || {}) : post(path, body));
     await load();
     if (after) after();
   } finally {
