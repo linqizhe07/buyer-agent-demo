@@ -15,11 +15,14 @@
     "typecheck": "tsc --noEmit",
     "portfolio": "tsx src/portfolio/server.ts",
     "portfolio:demo": "tsx src/portfolio/demo.ts",
-    "portfolio:mcp": "tsx src/portfolio/mcp.ts"
+    "portfolio:mcp": "tsx src/portfolio/mcp.ts",
+    "account:demo": "tsx src/portfolio/account-demo.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
+    "ccxt": "4.5.85",
     "express": "^4.22.0",
+    "viem": "^2.57.3",
     "zod": "^4.5.0"
   },
   "devDependencies": {

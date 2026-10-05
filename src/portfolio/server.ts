@@ -15,7 +15,22 @@
  *   POST /api/mode    {mode}           open | guard
  *   POST /api/revoke  {account} · POST /api/restore {account}   an account's switch
  *   POST /api/reset
+ *
+ * With the account layer mounted (the default for this server; `--classic` runs the original eight accounts without it):
+ *
+ *   GET  /account                      the Account page: balances and runways, payments, agent keys, approvals, sub-accounts, signers
+ *   GET  /api/account                  what that page reads
+ *   GET  /api/now                      the service's clock (a signer takes its nonce from here)
+ *   POST /api/account/pair   {jwk}     a browser offers the public half of its device key; the first one becomes the owner's device
+ *   POST /api/account/prepare {draft}  turn what the owner asked for into the exact action to sign (a movement gets its route, fee and arrival)
+ *   POST /api/exchange {action, nonce, signature}   THE door: every instruction, signed — an owner action by an owner key, an agent's by an
+ *                                      authorised agent key (200 done · 202 a card is waiting · 401 not a signer · 409 refused)
+ *
+ * and the routes above change: /api/execute and /api/order take no unsigned caller (an agent signs `agentExecute` / `agentOrder` at the door);
+ * /api/say, /api/approve, /api/restore, /api/reset and opening the dial are the owner's and arrive as signed actions; tightening (Guard, an
+ * account off) stays free.
  */
+import { randomBytes } from "node:crypto";
 import express from "express";
 import { readFileSync } from "node:fs";
 import type { Server } from "node:http";
@@ -23,11 +38,16 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isRefusal } from "../core/errors.ts";
+import { parseIntent, parseOrder } from "./intents.ts";
+import { no } from "./refuse.ts";
+import { cardHash } from "./account/exchange.ts";
+import type { Envelope } from "./account/sign.ts";
 import { agentCode, PRICES, type AgentId, type Intent } from "./accounts.ts";
 import { AgentSession, PRESETS } from "./agent.ts";
+import { exchangeList } from "./live/exchange.ts";
 import { parseEventSymbol } from "./events.ts";
 import type { OrderPlan } from "./router.ts";
-import { isPending, PortfolioService } from "./service.ts";
+import { isPending, loadOpenness, PortfolioService } from "./service.ts";
 import type { Side } from "./venues.ts";
 
 const PUBLIC = fileURLToPath(new URL("./public/", import.meta.url));
@@ -42,52 +62,7 @@ export interface PortfolioServerHandle {
   close(): Promise<void>;
 }
 
-/** a lenient parse of the intent the MCP server sends; numbers may arrive as strings */
-export function parseIntent(raw: unknown): Intent | null {
-  if (!raw || typeof raw !== "object") return null;
-  const o = raw as Record<string, unknown>;
-  const num = (v: unknown) => (typeof v === "number" ? v : typeof v === "string" && v.trim() !== "" ? Number(v) : NaN);
-  const str = (v: unknown) => (typeof v === "string" ? v.trim() : "");
-  switch (o.kind) {
-    case "trade": {
-      const qty = num(o.qty);
-      const side = str(o.side);
-      if (!str(o.symbol) || !(qty > 0) || (side !== "buy" && side !== "sell")) return null;
-      const chainId = num(o.chainId);
-      return Number.isFinite(chainId) ? { kind: "trade", symbol: str(o.symbol).toUpperCase(), side, qty, chainId } : { kind: "trade", symbol: str(o.symbol).toUpperCase(), side, qty };
-    }
-    case "move": {
-      const amount = num(o.amount);
-      if (!str(o.asset) || !(amount > 0) || !str(o.to)) return null;
-      const chainId = num(o.chainId);
-      return Number.isFinite(chainId) ? { kind: "move", asset: str(o.asset).toUpperCase(), amount, to: str(o.to), chainId } : { kind: "move", asset: str(o.asset).toUpperCase(), amount, to: str(o.to) };
-    }
-    case "pay": {
-      const amountUsd = num(o.amountUsd);
-      if (!str(o.merchant) || !str(o.mcc) || !(amountUsd > 0)) return null;
-      return { kind: "pay", merchant: str(o.merchant), mcc: str(o.mcc), amountUsd };
-    }
-    case "subscribe":
-    case "redeem": {
-      const amountUsd = num(o.amountUsd);
-      if (!str(o.fund) || !(amountUsd > 0)) return null;
-      return { kind: o.kind, fund: str(o.fund).toUpperCase(), amountUsd };
-    }
-    default:
-      return null;
-  }
-}
-
-/** an order for the router: an asset the price table knows or an event contract the catalogue lists, a side, a size */
-export function parseOrder(raw: unknown): { base: string; side: Side; qty: number } | null {
-  if (!raw || typeof raw !== "object") return null;
-  const o = raw as Record<string, unknown>;
-  const base = typeof o.base === "string" ? o.base.trim().toUpperCase() : "";
-  const known = PRICES[base] !== undefined || parseEventSymbol(base) !== undefined;
-  const qty = typeof o.qty === "number" ? o.qty : typeof o.qty === "string" && o.qty.trim() !== "" ? Number(o.qty) : NaN;
-  if (!known || !(qty > 0) || (o.side !== "buy" && o.side !== "sell")) return null;
-  return { base, side: o.side, qty };
-}
+export { parseIntent, parseOrder } from "./intents.ts";
 
 /** an order plan as an agent reads it: every venue's quote, the slices, what was left out and why */
 export function quoteView(p: OrderPlan): Record<string, unknown> {
@@ -128,22 +103,97 @@ export async function startPortfolioServer(opts: PortfolioServerOptions): Promis
   app.get("/", file("index.html", "html"));
   app.get("/portfolio.js", file("portfolio.js", "application/javascript"));
   app.get("/portfolio.css", file("portfolio.css", "text/css"));
+  app.get("/account", file("account.html", "html"));
+  app.get("/account.js", file("account.js", "application/javascript"));
+  app.get("/account.css", file("account.css", "text/css"));
+  app.get("/owner.js", file("owner.js", "application/javascript"));
+  // the owner talks to the page's scripted agent through a signed instruction (setPolicy · say); this is where it lands
+  svc.sayHandler = async (text) => (await agent.say(text.trim().slice(0, 200))).no;
 
   const wrap = (fn: (req: express.Request, res: express.Response) => Promise<void> | void) => (req: express.Request, res: express.Response) => {
     Promise.resolve(fn(req, res)).catch((err: unknown) => res.status(500).json({ ok: false, error: (err as Error).message }));
   };
   const bad = (res: express.Response, error: string) => res.status(400).json({ ok: false, error });
 
-  app.get("/api/overview", wrap(async (_req, res) => void res.json({ ...(await svc.overview()), presets: PRESETS })));
+  /** the owner's routes and the agents' routes are closed to an unsigned caller once the account layer is mounted */
+  const layer = () => svc.account !== undefined;
+  const ownerOnly = (res: express.Response, what: string) => void res.status(401).json({ ok: false, refusal: no("E_ACCOUNT_OWNER_SURFACE", { tool: what, message: `${what} is the owner's: it arrives as a signed action at POST /api/exchange` }) });
+  const signedOnly = (res: express.Response, what: string, as: string) => void res.status(401).json({ ok: false, refusal: no("E_ACCOUNT_BAD_SIGNATURE", { tool: what, message: `${what} takes no unsigned caller: an authorised agent key signs \`${as}\` at POST /api/exchange` }) });
+
+  app.get("/api/overview", wrap(async (_req, res) => {
+    await svc.account?.settle();
+    const o = await svc.overview();
+    // no signed envelope leaves over HTTP: whoever reads this page learns that a row has one, and the ledger file holds it
+    const ledger = layer() ? o.ledger.map(({ envelope, ...row }) => ({ ...row, ...(envelope !== undefined ? { signed: true } : {}) })) : o.ledger;
+    res.json({ ...o, ledger, approvals: layer() ? o.approvals.map((a) => ({ ...a, hash: cardHash(a) })) : o.approvals, presets: PRESETS, accountLayer: layer() });
+  }));
+
+  app.get("/api/now", (_req, res) => void res.json({ ok: true, now: svc.now(), ms: Date.parse(svc.now()) }));
+
+  app.get("/api/account", wrap(async (_req, res) => {
+    const view = await svc.accountView();
+    if (!view) return void res.status(404).json({ ok: false, error: "the account layer is not mounted (--classic)" });
+    res.json({ ok: true, ...view, mode: svc.policy().mode, live: svc.live });
+  }));
+
+  app.post("/api/account/pair", (req, res) => {
+    if (!svc.account) return void res.status(404).json({ ok: false, error: "the account layer is not mounted" });
+    const { jwk, label, code } = req.body as { jwk?: unknown; label?: unknown; code?: unknown };
+    const r = svc.account.pairDevice(jwk, typeof label === "string" && label.trim() ? label.trim().slice(0, 40) : "this browser", typeof code === "string" ? code.slice(0, 20) : undefined);
+    res.status(isRefusal(r) ? 400 : 200).json(isRefusal(r) ? { ok: false, refusal: r } : r);
+  });
+
+  // the exchanges the unified library covers, for the page's list of real venues (the library is loaded on first ask)
+  app.get("/api/account/exchanges", wrap(async (_req, res) => void res.json({ ok: true, exchanges: await exchangeList() })));
+
+  // A wallet shows that an address is the user's by signing the sentence the account writes for it (EIP-4361). Nothing is connected by this:
+  // connecting is still the owner's signed instruction, and without a proof the address is simply shown as watched.
+  app.post("/api/account/wallet/challenge", (req, res) => {
+    if (!svc.account) return void res.status(404).json({ ok: false, error: "the account layer is not mounted" });
+    const { address, wallet, chainId } = req.body as { address?: unknown; wallet?: unknown; chainId?: unknown };
+    const host = req.get("host") ?? "127.0.0.1";
+    const r = svc.proofs.challenge(String(address ?? ""), String(wallet ?? ""), { domain: host, uri: `${req.protocol}://${host}/account` }, Number(chainId) || 1);
+    res.status(isRefusal(r) ? 400 : 200).json(isRefusal(r) ? { ok: false, refusal: r } : { ok: true, address: r.address, message: r.message, expiresAt: r.expiresAt });
+  });
+  app.post("/api/account/wallet/prove", wrap(async (req, res) => {
+    if (!svc.account) return void res.status(404).json({ ok: false, error: "the account layer is not mounted" });
+    const { address, signature } = req.body as { address?: unknown; signature?: unknown };
+    const r = await svc.proofs.prove(String(address ?? ""), String(signature ?? ""));
+    res.status(isRefusal(r) ? 400 : 200).json(isRefusal(r) ? { ok: false, refusal: r } : { ok: true, address: r.address, wallet: r.wallet });
+  }));
+
+  // the page says which transaction the wallet sent for a real-money payment that was waiting for it; the chain decides whether it is that one
+  app.post("/api/account/live/sent", wrap(async (req, res) => {
+    if (!svc.account) return void res.status(404).json({ ok: false, error: "the account layer is not mounted" });
+    const { payment, hash } = req.body as { payment?: unknown; hash?: unknown };
+    const r = await svc.account.live.sent(String(payment ?? ""), String(hash ?? ""));
+    res.status(isRefusal(r) ? 409 : 200).json(isRefusal(r) ? { ok: false, refusal: r } : r);
+  }));
+
+  app.post("/api/account/prepare", wrap(async (req, res) => {
+    if (!svc.account) return void res.status(404).json({ ok: false, error: "the account layer is not mounted" });
+    const draft = (req.body as { draft?: unknown }).draft;
+    if (!draft || typeof draft !== "object") return void bad(res, "need {draft: {type, ...}}");
+    const r = await svc.account.prepare(draft as Record<string, unknown>);
+    res.status(isRefusal(r) ? 409 : 200).json(isRefusal(r) ? { ok: false, refusal: r } : r);
+  }));
+
+  app.post("/api/exchange", wrap(async (req, res) => {
+    const r = await svc.exchange(req.body as Envelope);
+    if (isRefusal(r)) return void res.status(["E_ACCOUNT_BAD_SIGNATURE", "E_ACCOUNT_UNKNOWN_SIGNER", "E_ACCOUNT_AGENT_EXPIRED", "E_ACCOUNT_AGENT_REVOKED"].includes(r.code) ? 401 : 409).json({ ok: false, refusal: r });
+    res.status(r.kind === "card" ? 202 : 200).json(r);
+  }));
   app.get("/api/read", wrap(async (req, res) => void res.json({ ok: true, holdings: await svc.read(typeof req.query.account === "string" ? req.query.account : undefined) })));
 
   app.post("/api/say", wrap(async (req, res) => {
+    if (layer()) return ownerOnly(res, "talking to the page's agent");
     const { text } = req.body as { text?: string };
     if (!text || !text.trim()) return void bad(res, "need {text}");
     res.json({ ok: true, flight: await agent.say(text.trim().slice(0, 200)) });
   }));
 
   app.post("/api/approve", wrap(async (req, res) => {
+    if (layer()) return ownerOnly(res, "answering a card");
     const { id, decision } = req.body as { id?: string; decision?: string };
     if (!id || (decision !== "approve" && decision !== "reject")) return void bad(res, "need {id, decision: approve|reject}");
     const r = await svc.decide(id, decision);
@@ -152,6 +202,7 @@ export async function startPortfolioServer(opts: PortfolioServerOptions): Promis
   }));
 
   app.post("/api/execute", wrap(async (req, res) => {
+    if (layer()) return signedOnly(res, "/api/execute", "agentExecute");
     const { account, intent, agent: who } = req.body as { account?: string; intent?: unknown; agent?: unknown };
     const parsed = parseIntent(intent);
     if (!account || !parsed) return void bad(res, "need {account, intent: {kind: trade|move|pay|subscribe|redeem, ...}}");
@@ -170,6 +221,7 @@ export async function startPortfolioServer(opts: PortfolioServerOptions): Promis
   }));
 
   app.post("/api/order", wrap(async (req, res) => {
+    if (layer()) return signedOnly(res, "/api/order", "agentOrder");
     const o = parseOrder(req.body);
     if (!o) return void bad(res, "need {base: <ETH|BTC|SOL or an event contract like FED-DEC-HIKE25:YES>, side: buy|sell, qty}");
     const r = await svc.order(o.base, o.side, o.qty, parseAgent((req.body as { agent?: unknown }).agent));
@@ -186,6 +238,8 @@ export async function startPortfolioServer(opts: PortfolioServerOptions): Promis
   app.post("/api/mode", (req, res) => {
     const { mode } = req.body as { mode?: string };
     if (mode !== "open" && mode !== "guard") return void bad(res, "mode must be open | guard");
+    // tightening is free; opening the dial is the owner's to sign
+    if (layer() && mode === "open") return ownerOnly(res, "opening the dial");
     svc.setMode(mode);
     res.json({ ok: true, mode });
   });
@@ -199,6 +253,7 @@ export async function startPortfolioServer(opts: PortfolioServerOptions): Promis
   });
 
   app.post("/api/restore", (req, res) => {
+    if (layer()) return ownerOnly(res, "switching an account back on");
     const { account } = req.body as { account?: string };
     if (!account) return void bad(res, "need {account}");
     const r = svc.restore(account);
@@ -207,6 +262,7 @@ export async function startPortfolioServer(opts: PortfolioServerOptions): Promis
   });
 
   app.post("/api/reset", (_req, res) => {
+    if (layer()) return ownerOnly(res, "resetting the simulation");
     svc.reset();
     res.json({ ok: true });
   });
@@ -215,14 +271,23 @@ export async function startPortfolioServer(opts: PortfolioServerOptions): Promis
     const s = app.listen(opts.port, "127.0.0.1", () => resolve(s));
     s.on("error", reject);
   });
+  const bound = server.address();
   return {
-    url: `http://127.0.0.1:${opts.port}`,
+    url: `http://127.0.0.1:${typeof bound === "object" && bound ? bound.port : opts.port}`,
     close: () =>
       new Promise<void>((resolve) => {
         server.close(() => resolve());
         server.closeAllConnections();
       }),
   };
+}
+
+/** eight characters a person can read off a terminal and type: no 0/O, no 1/I/L */
+export function pairingCode(): string {
+  const alphabet = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
+  const bytes = randomBytes(8);
+  const chars = [...bytes].map((b) => alphabet[b % alphabet.length]).join("");
+  return `${chars.slice(0, 4)}-${chars.slice(4)}`;
 }
 
 export function defaultHome(): string {
@@ -237,9 +302,23 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   };
   const port = Number(at("--port") ?? 4820);
   const live = args.includes("--mm") || process.env.PORTFOLIO_MM === "1";
-  const service = await PortfolioService.create({ home: at("--home") ?? defaultHome(), live });
-  const srv = await startPortfolioServer({ port, service });
-  console.log(`agent portfolio manager at ${srv.url} · ${service.accounts().length} accounts · MetaMask ${live ? "LIVE via mm" : "simulated (--mm for live)"} · ledger ${service.ledgerPath()} · Ctrl-C to stop`);
+  const classic = args.includes("--classic");
+  // REAL money at venues connected live: off unless asked for here, in the terminal, where the code the first owner types is printed
+  const capUsd = Number(at("--live-cap") ?? 100);
+  if (!(capUsd > 0)) throw new Error("--live-cap is a number of dollars, more than zero");
+  const liveWrites = args.includes("--live-writes") && !classic ? { capUsd, pairingCode: pairingCode() } : undefined;
+  // the fixture's session ends on a fixed date; a server on the real clock gets thirty days from when it starts
+  const openness = loadOpenness() as { sessionExpiresAt?: string };
+  const month = new Date(Date.now() + 30 * 86_400_000).toISOString();
+  const service = await PortfolioService.create({ home: at("--home") ?? defaultHome(), live, ...(liveWrites ? { liveWrites } : {}), ...(classic ? {} : { venues: "frontline" as const, openness: { ...openness, sessionExpiresAt: (openness.sessionExpiresAt ?? "") > month ? openness.sessionExpiresAt : month } }) });
+  const srv = await startPortfolioServer({ port, service }).catch((e: NodeJS.ErrnoException) => {
+    if (e.code !== "EADDRINUSE") throw e;
+    // the usual reason: this server is already running in another terminal
+    console.error(`port ${port} is already in use: a portfolio server is probably running already. Open http://127.0.0.1:${port}/account, or start a second one: npm run portfolio -- --port ${port + 1} --home <another directory>`);
+    process.exit(1);
+  });
+  if (liveWrites) console.log(`REAL-MONEY WRITES ARE ON · at most $${liveWrites.capUsd} a movement (--live-cap) · every one is signed by the owner, and money goes only to places shown to be the owner's\n  pairing code: ${liveWrites.pairingCode} — the first browser becomes the owner only with this code, typed on the page`);
+  console.log(`agent portfolio manager at ${srv.url} · ${service.accounts().length} accounts · MetaMask ${live ? "LIVE via mm" : "simulated (--mm for live)"}${classic ? " · classic (no account layer)" : ` · account page ${srv.url}/account`} · ledger ${service.ledgerPath()} · Ctrl-C to stop`);
   const stop = () => srv.close().then(() => process.exit(0));
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);

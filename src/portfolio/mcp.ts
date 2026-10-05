@@ -1,14 +1,21 @@
 /** The agent-facing surface: a stdio MCP server any skill-capable agent
- * (Claude Code, Codex, Cursor, …) can mount. It holds no credential and no
- * state — every tool is a call to the running portfolio service (:4820), so the
- * page, the ledger and the agent see one truth.
+ * (Claude Code, Codex, Cursor, …) can mount. It holds no venue credential and
+ * no state — every tool is a call to the running portfolio service (:4820), so
+ * the page, the ledger and the agent see one truth.
  *
  *   npm run portfolio               # the service
  *   npm run portfolio:mcp           # this, over stdio; PORTFOLIO_URL overrides the base
  *
- * Tools: portfolio_overview · portfolio_read · portfolio_markets · portfolio_quote (reads) ·
- * portfolio_execute · portfolio_order (writes) · portfolio_approval ·
+ * Tools: portfolio_overview · portfolio_read · portfolio_markets · portfolio_quote ·
+ * portfolio_account (reads) · portfolio_execute · portfolio_order · portfolio_transfer ·
+ * portfolio_pay · portfolio_live_move (writes; real money only on the owner's signature) · portfolio_approval ·
  * portfolio_openness.
+ *
+ * With the account layer mounted (the service's default) this seat HOLDS AN AGENT KEY and signs
+ * every write with it: the service takes no unsigned write, and what the key may do is what the
+ * owner authorised on the Account page — nothing until then. The key is derived from the seat's
+ * name (`agent:<name>`), like every key in this simulation: it is public by construction. A real
+ * seat generates its key and keeps it in the operating system's key store.
  *
  * Claude Code:  claude mcp add portfolio -- npx tsx src/portfolio/mcp.ts
  */
@@ -16,6 +23,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
+import { ap2Answer, ap2CheckoutHash, jwsParse, type Ap2Needs } from "./account/protocols.ts";
+import { micro, signAgent, simKey, type AgentAction, type SimKey } from "./account/sign.ts";
 
 const BASE = process.env.PORTFOLIO_URL ?? "http://127.0.0.1:4820";
 
@@ -33,6 +42,59 @@ async function call(method: "GET" | "POST", path: string, body?: unknown): Promi
 }
 
 const text = (payload: unknown, isError = false): CallToolResult => ({ isError, content: [{ type: "text", text: JSON.stringify(payload) }] });
+
+// ---- the seat's key ---------------------------------------------------------------------------
+
+/** this seat's agent key: two curves from one label — secp256k1 signs the account's instructions, P-256 signs AP2 mandates */
+const seatKey = (): SimKey => simKey(`agent:${agentOf().id}`);
+
+let layered: boolean | undefined;
+/** does the service take signed instructions (the account layer), or is it the original eight accounts? */
+async function layer(): Promise<boolean> {
+  if (layered === undefined) {
+    const r = await call("GET", "/api/overview");
+    if (r.status < 400) layered = (r.body as { accountLayer?: boolean }).accountLayer === true;
+  }
+  return layered === true;
+}
+
+let lastNonce = 0;
+/** a nonce is the SERVICE's clock (it may run ahead of this machine's: the simulation can skip time), and never the same one twice */
+async function nonce(): Promise<number> {
+  const r = await call("GET", "/api/now");
+  lastNonce = Math.max(Number((r.body as { ms?: number }).ms ?? Date.now()), lastNonce + 1);
+  return lastNonce;
+}
+
+type Unsigned = AgentAction extends infer A ? (A extends unknown ? Omit<A, "nonce"> : never) : never;
+interface DoorAnswer {
+  status: number;
+  body: { ok?: boolean; kind?: string; refusal?: { code: string; message: string; detail?: unknown; native?: unknown }; payment?: Record<string, unknown>; card?: Record<string, unknown>; result?: unknown; flight?: string; data?: unknown; summary?: string };
+}
+
+/** sign one instruction with the seat's key and hand it in at the door */
+async function sign(action: Unsigned): Promise<DoorAnswer> {
+  const envelope = await signAgent(seatKey(), { ...action, nonce: await nonce() } as AgentAction);
+  return (await call("POST", "/api/exchange", envelope)) as DoorAnswer;
+}
+
+/** the door's answer as an agent reads it: a payment, a card that waits for the owner, a result, or a refusal that is not to be retried */
+function answer(r: DoorAnswer): CallToolResult {
+  const b = r.body;
+  if (b.refusal) {
+    const hint = b.refusal.code === "E_ACCOUNT_UNKNOWN_SIGNER" ? { hint: `this seat's key ${seatKey().address} is not authorised on the account. The owner authorises it on the Account page (Agent keys), where it now shows as asking to be let in; then approves what it may move or pay (Approvals).` } : b.refusal.code === "E_MANDATE_NONE" ? { hint: "the owner approves spending on the Account page (Approvals): which venues or payees, how much per payment, how much in all, until when" } : {};
+    return text({ ok: false, code: b.refusal.code, message: b.refusal.message, ...(b.refusal.detail !== undefined ? { detail: b.refusal.detail } : {}), ...(b.refusal.native !== undefined ? { native: b.refusal.native } : {}), ...hint }, true);
+  }
+  if (b.kind === "card" && b.card) {
+    const c = b.card as { id: string; reason: string; usd: number; expiresAt?: string; offer?: unknown };
+    return text({ ok: true, pending: true, card: { id: c.id, reason: c.reason, usd: c.usd, expiresAt: c.expiresAt, ...(c.offer ? { offer: c.offer } : {}) }, flight: b.flight, next: "the owner answers this card on the Account page. Poll portfolio_approval with the card id: once approved, its `outcome` holds the payment and whatever it bought — then do not send the request again. The one exception: if the outcome says mandates are needed (a shop paid from a float), call portfolio_pay once more and this seat signs them." });
+  }
+  if (b.kind === "payment" && b.payment) {
+    const p = b.payment as { id: string; kind: string; from: string; to: string; amountUsd: number; feeUsd: number; receiveUsd: number; status: string; settlesAt: string; protocol?: string; note?: string; legs: Array<{ step: string; venue: string; protocol: string; status: string; settlesAt?: string }> };
+    return text({ ok: true, payment: { id: p.id, kind: p.kind, from: p.from, to: p.to, amountUsd: p.amountUsd, feeUsd: p.feeUsd, arrivesUsd: p.receiveUsd, status: p.status, ...(p.status === "pending" ? { lands: p.settlesAt } : {}), ...(p.protocol ? { protocol: p.protocol } : {}), ...(p.note ? { note: p.note } : {}), legs: p.legs.map((l) => `${l.step} at ${l.venue} · ${l.protocol} · ${l.status}`) }, flight: b.flight, ...(b.data !== undefined ? { data: b.data } : {}) });
+  }
+  return text({ ok: true, ...(b.result !== undefined ? { result: b.result } : {}), ...(b.summary ? { summary: b.summary } : {}), ...(b.flight ? { flight: b.flight } : {}) }, r.status >= 400);
+}
 
 const intentSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("trade"), symbol: z.string(), side: z.enum(["buy", "sell"]), qty: z.number().positive(), chainId: z.number().int().optional() }),
@@ -96,10 +158,16 @@ server.registerTool(
   "portfolio_execute",
   {
     description:
-      "Act at one account: trade {symbol, side, qty, chainId?} (at the on-chain wallet a trade is a DEX swap on chainId's pools; at a prediction market the symbol is an event contract like FED-DEC-HIKE25:YES and qty is shares; to let the wallet pick venues and split, use portfolio_order instead) · move {asset, amount, to, chainId?, fromChainId?} (fromChainId ≠ chainId is a bridge; a move to another connected account's address lands there) · pay {merchant, mcc, amountUsd} · subscribe/redeem {fund, amountUsd} (at a prediction market, redeem claims the winning shares of a settled market: fund is the event id). Each call is one flight under your name. The wallet first checks the credential's native scope and the user's openness dial; in open mode nothing is capped and only the dangerous ones raise a card: a move to a never-used address, an order in a prediction market past its close. A card comes back as {pending: true, approval: {id}} — wait for the human, then poll portfolio_approval. A refusal is {ok: false, code: E_WALLET_* | E_VENUE_* | E_CARD_*, message, native}: do not retry it, tell the user.",
+      "Act at one account: trade {symbol, side, qty, chainId?} (at the on-chain wallet a trade is a DEX swap on chainId's pools; at a prediction market the symbol is an event contract like FED-DEC-HIKE25:YES and qty is shares; to let the wallet pick venues and split, use portfolio_order instead) · subscribe/redeem {fund, amountUsd} (at a prediction market, redeem claims the winning shares of a settled market: fund is the event id) · move {asset, amount, to, chainId?, fromChainId?} and pay {merchant, mcc, amountUsd} ONLY on a service without the account layer — with it (the default) money moves through portfolio_transfer and portfolio_pay, and a move or pay here is refused. Each call is one flight under your name, signed with this seat's key. The wallet first checks the credential's native scope and the user's openness dial; in open mode nothing is capped and only the dangerous ones raise a card: an order in a prediction market past its close. A card comes back as {pending: true, approval: {id}} — wait for the human, then poll portfolio_approval. A refusal is {ok: false, code: E_ACCOUNT_* | E_WALLET_* | E_VENUE_* | E_CARD_*, message, native}: do not retry it, tell the user.",
     inputSchema: { account: z.string(), intent: intentSchema },
   },
   async ({ account, intent }) => {
+    if (await layer()) {
+      const r = await sign({ type: "agentExecute", account, intent });
+      // the older write path answers inside `result`: an ok, a card, or a refusal of its own
+      const inner = r.body.result as { ok?: boolean; pending?: boolean } | undefined;
+      return r.body.refusal || !inner ? answer(r) : text(inner, inner.ok === false);
+    }
     const r = await call("POST", "/api/execute", { account, intent, agent: agentOf() });
     return text(r.body, r.status >= 400);
   },
@@ -138,14 +206,128 @@ server.registerTool(
     inputSchema: orderSchema,
   },
   async ({ base, side, qty }) => {
+    if (await layer()) {
+      const r = await sign({ type: "agentOrder", base, side, qty });
+      return r.body.refusal ? answer(r) : text(r.body.result ?? r.body);
+    }
     const r = await call("POST", "/api/order", { base, side, qty, agent: agentOf() });
     return text(r.body, r.status >= 400);
   },
 );
 
+// ---- the account: what this seat's key may do, and the two ways it moves money -------------------
+
+interface AccountLite {
+  now: string;
+  type: string;
+  totalUsd: number;
+  inFlightUsd: number;
+  venues: Array<{ id: string; name: string; frontLine: string; usd: number; cashUsd: number; restricted?: string; in: { text: string; access: string; why?: string }; out: { text: string; access: string; why?: string }; ledgers: string[]; live?: true; liveCan?: { withdraw: boolean | string; ledgers: string[]; swap: boolean | string; receive: boolean; send: string | false }; readOnlyBecause?: string; proven?: string; address?: string }>;
+  connectLive?: { writes?: { on: boolean; capUsd: number } };
+  payments: Array<{ id: string; kind: string; at: string; from: string; to: string; amountUsd: number; status: string; settlesAt: string; agent?: string; protocol?: string; note?: string }>;
+  keys: Array<{ address: string; name: string; validUntil: string; status: string }>;
+  spend: Array<{ id: string; agent: string; scope: string; allow: string[]; perPaymentUsd: number; budgetUsd: number; spentUsd: number; reservedUsd: number; windowHours: number; validUntil: string; expired: boolean; payTo: Record<string, string> }>;
+  fees: Array<{ builder: string; maxFeeRate: string }>;
+  cards: Array<{ id: string; flight: string; usd: number; reason: string; expiresAt?: string }>;
+  subAccounts: Array<{ name: string; agent: string; address: string; capUsd: number; balanceUsd: number }>;
+  pay: { payees: unknown[]; sessions: unknown[] };
+}
+
+server.registerTool(
+  "portfolio_account",
+  {
+    description:
+      "The ACCOUNT as this seat sees it — read this before moving or paying anything. It returns this seat's own key (its address, and whether the owner has authorised it: an unauthorised key can do nothing, and the owner authorises it on the Account page), what the owner approved it to spend (`venues`: moving money between the user's own venues; `payees`: paying someone else — each with a per-payment maximum, a budget and what is left of it), its sub-accounts (the floats it pays from), every venue's runways (how money gets in and out, how long it takes, and who may start it: `agent` = you, `owner` = only the owner's signature, `venue` = only at the venue's own page, `closed`), the account type (Unified lets you leave the source of a transfer to the account), recent payments with their status (a payment in flight is in no balance until it lands), the payees already paid and the payment sessions open. A venue the owner plugs in later (another exchange wallet, a self-custody wallet) appears here with its runways; it is in none of your approvals until the owner names it. A read.",
+    inputSchema: {},
+    annotations: { readOnlyHint: true },
+  },
+  async () => {
+    const r = await call("GET", "/api/account");
+    if (r.status >= 400) return text({ ok: false, error: "this service runs without the account layer (--classic): use portfolio_execute" }, true);
+    const a = r.body as AccountLite;
+    const me = seatKey().address;
+    const key = a.keys.find((k) => k.address === me);
+    return text({
+      now: a.now,
+      seat: { name: agentOf().name, key: me, authorised: key?.status === "ok", ...(key ? { status: key.status, validUntil: key.validUntil } : { status: "not authorised: the owner adds this key on the Account page (Agent keys)" }) },
+      accountType: a.type,
+      totalUsd: a.totalUsd,
+      inFlightUsd: a.inFlightUsd,
+      approvals: a.spend.filter((s) => s.agent === me).map((s) => ({ scope: s.scope, allow: s.allow, perPaymentUsd: s.perPaymentUsd, budgetUsd: s.budgetUsd, leftUsd: Number((s.budgetUsd - s.spentUsd - s.reservedUsd).toFixed(6)), ...(s.windowHours ? { onePerHours: s.windowHours } : {}), validUntil: s.validUntil, expired: s.expired, ...(s.scope === "payees" ? { pinnedAddresses: s.payTo } : {}) })),
+      floats: a.subAccounts.filter((s) => s.agent === me).map((s) => ({ name: s.name, balanceUsd: s.balanceUsd, capUsd: s.capUsd })),
+      venues: a.venues.map((v) => (v.live ? { id: v.id, name: v.name, frontLine: v.frontLine, usd: v.usd, live: true, realMoney: v.readOnlyBecause ? `read only: ${v.readOnlyBecause}` : !a.connectLive?.writes?.on ? "read only: this server moves no real money" : v.liveCan ? `ask with portfolio_live_move (the owner signs every one): ${[v.liveCan.withdraw !== false && !v.liveCan.send ? "withdraw" : "", v.liveCan.send ? "send" : "", v.liveCan.ledgers.length > 1 ? `transfer between ${v.liveCan.ledgers.join(" and ")}` : "", v.liveCan.swap !== false && !v.liveCan.send ? "swap" : "", v.liveCan.receive ? "receive" : ""].filter(Boolean).join(", ")}` : "read only", ...(v.address ? { address: v.address, proven: v.proven ?? "watched, not proven" } : {}) } : { id: v.id, name: v.name, frontLine: v.frontLine, usd: v.usd, movableUsd: v.cashUsd, ...(v.restricted ? { restricted: v.restricted } : { moneyIn: `${v.in.text} (${v.in.access})`, moneyOut: `${v.out.text} (${v.out.access})${v.out.why ? ` — ${v.out.why}` : ""}` }), ...(v.ledgers.length ? { ledgers: v.ledgers } : {}) })),
+      ...(a.connectLive?.writes?.on ? { realMoney: { on: true, capUsd: a.connectLive.writes.capUsd } } : {}),
+      waitingForOwner: a.cards,
+      payments: a.payments.slice(0, 12).map((p) => ({ id: p.id, kind: p.kind, from: p.from, to: p.to, amountUsd: p.amountUsd, status: p.status, ...(p.status === "pending" ? { lands: p.settlesAt } : {}), ...(p.protocol ? { protocol: p.protocol } : {}), ...(p.note ? { note: p.note } : {}) })),
+      payees: a.pay.payees,
+      sessions: a.pay.sessions,
+      appFees: a.fees,
+    });
+  },
+);
+
+server.registerTool(
+  "portfolio_transfer",
+  {
+    description:
+      "Move dollars BETWEEN THE USER'S OWN VENUES, signed with this seat's key: the one money movement an agent key can sign besides paying. `from` and `to` are venue ledgers — `okx`, `binance`, `hyperliquid` (or `hyperliquid:perps` / `hyperliquid:spot`), `metamask` (the on-chain wallet, the hub every route passes through), `sub:<name>` (one of your floats, filled from `metamask`) — and never an outside address: withdrawing to a bank or sending to someone else is the owner's own signature, and this tool cannot do it. Leave `from` empty only on a Unified account, and the account picks the open source that lands soonest. The account plans the route (swap, way out, bridge, way in), refuses it if it costs more than `maxFeeUsd`, and holds it against the owner's spending approval (both ends must be named in it; per-payment maximum; budget) and the openness dial. It returns a payment that may still be IN FLIGHT: a chain leg lands in seconds to minutes, and the money is in no balance until it does — read portfolio_account to see it land. {pending: true, card} means the owner is asked first. A refusal ({ok: false, code}) is not to be retried: E_ACCOUNT_OWNER_ONLY / E_VENUE_RAIL_CLOSED name a door that is not yours to open, E_MANDATE_* a limit of the approval.",
+    inputSchema: { from: z.string().describe("source ledger, e.g. okx · metamask · hyperliquid:spot; empty on a Unified account"), to: z.string().describe("destination ledger, e.g. hyperliquid · hyperliquid:perps · metamask · sub:research"), amount: z.number().positive().describe("US dollars"), token: z.enum(["USDC", "USDT", "USD"]).optional().describe("what should arrive (default USDC)"), maxFeeUsd: z.number().nonnegative().optional().describe("the most the route may cost (default 5)") },
+  },
+  async ({ from, to, amount, token, maxFeeUsd }) => {
+    if (!(await layer())) return text({ ok: false, error: "this service runs without the account layer (--classic): use portfolio_execute with a move intent" }, true);
+    return answer(await sign({ type: "agentSendAsset", destination: "self", sourceDex: from, destinationDex: to, token: token ?? "USDC", amount: String(amount), fromSubAccount: "", maxFee: String(maxFeeUsd ?? 5) }));
+  },
+);
+
+server.registerTool(
+  "portfolio_live_move",
+  {
+    description:
+      "Ask to move REAL money at venues the owner connected live (portfolio_account marks them `live: true`): withdraw from an exchange to another place of the user's, send from a wallet, transfer between an exchange's own ledgers, or swap one dollar stablecoin for another there. It is never done on your word: every request becomes a card the owner signs, showing the exact destination address and the fee the venue quotes; the answer is {pending: true, card} and portfolio_approval tells you how it went. Money goes only to the user's own places (an exchange's own deposit address, or a wallet that proved it is the user's), at most the server's per-movement cap, and only if this server was started with real-money writes on. Your spending approval (`venues`) must name both venues. A refusal ({ok: false, code}) is not to be retried: E_WALLET_LIVE_WRITES_OFF (the server moves no real money), E_ACCOUNT_DESTINATION (not a place shown to be the user's), E_ACCOUNT_LIMIT (above the cap), E_VENUE_* (the venue's own rule).",
+    inputSchema: {
+      kind: z.enum(["withdraw", "send", "transfer", "swap"]).describe("withdraw: from an exchange · send: from a wallet · transfer: between an exchange's own ledgers · swap: one stablecoin for another at an exchange"),
+      from: z.string().describe("the live venue's id, e.g. okx"),
+      to: z.string().optional().describe("withdraw/send: the live venue it goes to (an exchange, or a proven wallet); the same venue for transfer and swap"),
+      asset: z.enum(["USDC", "USDT"]).describe("what leaves"),
+      toAsset: z.enum(["USDC", "USDT"]).optional().describe("swap: what you get"),
+      network: z.enum(["Arbitrum", "Base", "Ethereum", "Optimism", "Polygon", "BNB Chain"]).optional().describe("withdraw/send: the chain it travels on"),
+      fromLedger: z.string().optional().describe("transfer: e.g. funding"),
+      toLedger: z.string().optional().describe("transfer: e.g. trading"),
+      amount: z.number().positive().describe("in dollars (the stablecoin's units)"),
+    },
+  },
+  async ({ kind, from, to, asset, toAsset, network, fromLedger, toLedger, amount }) => {
+    if (!(await layer())) return text({ ok: false, error: "this service runs without the account layer (--classic)" }, true);
+    return answer(await sign({ type: "agentLiveMove", kind, from, fromLedger: fromLedger ?? "", to: kind === "transfer" || kind === "swap" ? from : (to ?? ""), toLedger: toLedger ?? "", asset, toAsset: toAsset ?? asset, network: network ?? "", amount: String(amount), maxFee: "0" }));
+  },
+);
+
+server.registerTool(
+  "portfolio_pay",
+  {
+    description:
+      "Pay for something at a URL — an API call, a metered service, an item in a shop — up to `maxAmount` dollars, from one of your floats (`from`: the sub-account's name) or by the user's card (`from: \"card\"`). You do not pay yourself and you never hold the float's key: you sign this request, and the ACCOUNT asks the payee, reads the price and the receiving address out of the payee's own answer, and speaks whatever protocol the payee does (x402, MPP charge or session, ACP by card, AP2 with mandates this seat signs with its own key). It pays only a host the owner named in a `payees` spending approval, only inside that approval's per-payment maximum and budget, and only at the address the owner approved for that host. The FIRST payment to a payee comes back as {pending: true, card}: the owner is shown who is paid, where and how much; once they approve, the card's `outcome` (portfolio_approval) holds the payment and the data it bought — do not pay again; if instead it says mandates are needed (a shop paid from a float), call this tool once more. Later payments return {payment, data} at once. A metered service (an MPP session) locks a deposit from the float on the first call and spends from it call by call: when you are done, call again with `close: true` and the rest comes back. Refusals are final: E_PAYEE_OVERCHARGE (it asked for more than maxAmount), E_PAYEE_CHANGED (its address is not the approved one — tell the user, this is what an attack looks like), E_PAYEE_REDIRECT, E_PAYEE_UNVERIFIED, E_MANDATE_* (the approval's limits), E_WALLET_INSUFFICIENT (the float).",
+    inputSchema: { url: z.string().url().describe("https URL of what is being paid for"), maxAmount: z.number().nonnegative().describe("the most this one call may cost, in US dollars"), from: z.string().describe('the float (sub-account name) that pays, or "card"'), close: z.boolean().optional().describe("end the payment session at this URL and bring the unused deposit back") },
+  },
+  async ({ url, maxAmount, from, close }) => {
+    if (!(await layer())) return text({ ok: false, error: "this service runs without the account layer (--classic): use portfolio_execute with a pay intent" }, true);
+    const key = seatKey();
+    const base = { type: "agentPay" as const, url, maxAmount: String(maxAmount), fromSubAccount: from === "card" ? "" : from };
+    const first = await sign({ ...base, ...(close ? { close: true } : {}), ...(from === "card" || close ? {} : { cnf: key.jwk }) });
+    const needs = first.body.result as Ap2Needs | undefined;
+    if (first.body.refusal || needs?.needs !== "mandates") return answer(first);
+    // AP2: the merchant asks for this seat's own signature on what it commits the user to. It signs only what it can read in the merchant's
+    // signed checkout: that checkout, that payee, that total — and only if the total is inside what it was asked to spend
+    const signedTotal = (jwsParse(needs.checkout.jwt)?.payload.totals as Array<{ type: string; amount: number }> | undefined)?.find((t) => t.type === "total")?.amount;
+    if (ap2CheckoutHash(needs.checkout.jwt) !== needs.checkout.hash || signedTotal !== needs.checkout.total.amount || signedTotal * 10_000 > micro(String(maxAmount))) return text({ ok: false, code: "E_PAYEE_OVERCHARGE", message: `the merchant's signed checkout totals $${((signedTotal ?? 0) / 100).toFixed(2)}, which is not what this seat was asked to pay: no mandate was signed` }, true);
+    const now = await call("GET", "/api/now");
+    return answer(await sign({ ...base, mandates: ap2Answer(key.p256, needs, Math.floor(Number((now.body as { ms: number }).ms) / 1000)) }));
+  },
+);
+
 server.registerTool(
   "portfolio_approval",
-  { description: "Status of a card the wallet raised: pending | approved | rejected, with the venue result once decided.", inputSchema: { id: z.string() }, annotations: { readOnlyHint: true } },
+  { description: "Status of a card the wallet raised: pending | approved | rejected, with the venue result once decided. For a card about a transfer or a payment, `outcome` holds what approving it released: the payment and the data it bought, or — at a shop that asks for AP2 mandates — a note that mandates are needed (call portfolio_pay again).", inputSchema: { id: z.string() }, annotations: { readOnlyHint: true } },
   async ({ id }) => {
     const r = await call("GET", "/api/overview");
     if (r.status >= 400) return text(r.body, true);
@@ -166,4 +348,4 @@ server.registerTool(
 );
 
 await server.connect(new StdioServerTransport());
-process.stderr.write(`[agent-portfolio-manager] up (stdio) → ${BASE}\n`);
+process.stderr.write(`[agent-portfolio-manager] up (stdio) → ${BASE} · this seat signs with a key derived from its name (agent:<name>); the owner authorises it on the Account page\n`);

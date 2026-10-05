@@ -1,0 +1,119 @@
+/** LIVE connections: a venue the user really has, read through its own interface.
+ *
+ * Everything in this directory READS. Nothing here places an order, starts a withdrawal or signs a transaction: a live venue on the account is
+ * watch-only, and every runway through it is closed (account/doors.ts). What is real is what the page then shows — the balance the venue
+ * reports, and what the venue says the credential may do.
+ *
+ * A source is reached in one of two ways:
+ *   · a KEY FILE in the home directory (an exchange, a broker): this process reads the file; no page, no agent and no ledger row ever
+ *     carries what is in it;
+ *   · an ADDRESS (a wallet, a perp DEX account, a prediction-market wallet, a token position): public data, read from the venue or the chain.
+ *
+ * The network is injected (`Http`, the exchange client, the chain reader), so the tests run every source against stand-ins and never leave
+ * the process.
+ */
+import { isRefusal, type Refusal } from "../../core/errors.ts";
+import { no } from "../refuse.ts";
+import type { AccountKind, AssetClass } from "../accounts.ts";
+import type { LiveWriter } from "./writes.ts";
+
+/** what a venue said about the credential or the address it was shown */
+export interface LiveProbe {
+  /** what the venue says this credential may do there, in its own words; empty when the venue has no way to say */
+  can: string[];
+  note: string;
+  /** the venue's own answer, with nothing secret in it */
+  native?: unknown;
+}
+
+export interface LiveBalance {
+  asset: string;
+  amount: number;
+  /** what it is worth in dollars, when the venue or a price says so; absent = no price was found, and it counts as nothing */
+  usd?: number | undefined;
+  /** which of the venue's own ledgers, or which chain */
+  where?: string | undefined;
+  class?: AssetClass | undefined;
+}
+
+/** one real account or address: read, never written */
+export interface LiveSource {
+  name: string;
+  kind: AccountKind;
+  /** what stands where a credential would: the key file's path, or the address */
+  reference: string;
+  /** how it was reached, one line */
+  via: string;
+  address?: string | undefined;
+  probe: LiveProbe;
+  read(): Promise<LiveBalance[]>;
+  /** how real money is moved here, when it can be; absent: this venue is only ever read */
+  writer?: LiveWriter | undefined;
+  /** why this venue is only read, when it is */
+  readOnlyBecause?: string | undefined;
+}
+
+export interface HttpReply {
+  status: number;
+  /** the body parsed as JSON, when it is JSON */
+  body: unknown;
+  text: string;
+}
+export type Http = (url: string, init?: { method?: string; headers?: Record<string, string>; body?: string; timeoutMs?: number }) => Promise<HttpReply>;
+
+/** the real network: one request, a timeout, no redirect followed */
+export const realHttp: Http = async (url, init = {}) => {
+  const r = await fetch(url, { method: init.method ?? "GET", ...(init.headers ? { headers: init.headers } : {}), ...(init.body !== undefined ? { body: init.body } : {}), signal: AbortSignal.timeout(init.timeoutMs ?? 10_000), redirect: "error" });
+  const text = await r.text();
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    body = undefined;
+  }
+  return { status: r.status, body, text: text.slice(0, 2000) };
+};
+
+/** take anything secret out of a string before it is shown, logged or thrown */
+export function redact(text: string, secrets: Array<string | undefined>): string {
+  let out = text;
+  for (const s of secrets) if (s && s.length >= 6) out = out.split(s).join("•••");
+  return out;
+}
+
+/** how venues say "not from where you are": Binance answers 451 with "restricted location", Bybit's edge answers 403 with "block access from your country" */
+export const REGION = /restricted (location|jurisdiction|region|countr)|unavailable from a restricted|(block(ed|s)?|den(y|ied)) access from your (country|region)|not available in your (country|region|jurisdiction)|not (permitted|supported|eligible) in your|eligibility|geo-?block| 451 /i;
+
+/** A venue's answer that is not a yes, as one of the account's refusals. The venue's own words go with it. A venue that does not serve this
+ * location is the venue's rule: it is reported as that, and nothing here looks for another way in. */
+export function venueSaidNo(venue: string, name: string, status: number, text: string, secrets: Array<string | undefined> = []): Refusal {
+  const said = redact(text.replace(/\s+/g, " ").trim().slice(0, 220), secrets);
+  const native = { status, said };
+  if (status === 451 || REGION.test(text)) return no("E_VENUE_GEOBLOCKED", { venue, message: `${name} does not serve this location: that is its own rule, and the account does not look for a way around it`, native });
+  if (status === 401) return no("E_VENUE_UNAUTHORIZED", { venue, message: `${name} does not accept this key`, native });
+  if (status === 403) return no("E_VENUE_PERMISSION", { venue, message: `${name} refused: the key lacks the permission to read, or this machine's IP is not on the key's list`, native });
+  if (status === 429) return no("E_VENUE_UNREACHABLE", { venue, message: `${name} is rate-limiting this machine: try again in a minute`, native });
+  if (status >= 500 || status === 0) return no("E_VENUE_UNREACHABLE", { venue, message: `${name} did not answer`, native });
+  return no("E_VENUE_REJECTED", { venue, message: `${name} refused the request (HTTP ${status})`, native });
+}
+
+/** a thrown network failure (DNS, timeout, reset) as a refusal */
+export function unreachable(venue: string, name: string, err: unknown, secrets: Array<string | undefined> = []): Refusal {
+  const e = err as { name?: string; message?: string };
+  return no("E_VENUE_UNREACHABLE", { venue, message: `${name} could not be reached${e?.name === "TimeoutError" ? ": no answer in time" : ""}`, native: { error: redact(String(e?.message ?? err).slice(0, 200), secrets) } });
+}
+
+/** whatever was thrown while a venue was being read, as a refusal: the venue's own no if it was one, otherwise "it answered something this could not read" */
+export function asRefusal(venue: string, name: string, err: unknown, secrets: Array<string | undefined> = []): Refusal {
+  if (isRefusal(err)) return err;
+  return no("E_VENUE_REJECTED", { venue, message: `${name} answered in a way this connection could not read`, native: { error: redact(String((err as { message?: string })?.message ?? err).slice(0, 200), secrets) } });
+}
+
+export const num = (v: unknown): number => {
+  const n = typeof v === "number" ? v : typeof v === "string" && v.trim() !== "" ? Number(v) : NaN;
+  return Number.isFinite(n) ? n : 0;
+};
+
+/** dollar stablecoins count one for one; everything else needs a price from somewhere */
+export const STABLES = new Set(["USD", "USDC", "USDC.E", "USDT", "USDT0", "USD₮0", "USD₮", "FDUSD", "PYUSD", "DAI", "TUSD", "USDP", "PUSD"]);
+export const isStable = (asset: string): boolean => STABLES.has(asset.toUpperCase());

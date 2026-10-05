@@ -28,7 +28,7 @@
 import { execFile } from "node:child_process";
 import { no } from "../refuse.ts";
 import { evmAddressOf, keyFromSeed } from "../../core/ed25519.ts";
-import { baseOf, chainName, classOf, priceOf, r2, r8, usdOf, type Account, type AccountAdapter, type Holding, type Intent, type RouteQuote } from "../accounts.ts";
+import { baseOf, chainName, classOf, priceOf, r2, r8, usdOf, type Account, type AccountAdapter, type Holding, type Intent, type RouteQuote, type VenueResult } from "../accounts.ts";
 import { bridgeQuotes } from "../rails.ts";
 import { chainKey, dexChains, dexVenue, fillAt, type Fill } from "../venues.ts";
 
@@ -79,6 +79,13 @@ export function metamaskSimAccount(seed: MetamaskSimSeed, now: () => string): Ac
   return {
     account,
     credit,
+    /** the owner's own transaction from their wallet: Guard is the agent's policy, not the owner's */
+    debit(asset, amount, chain = "Base"): VenueResult {
+      const h = holdings.find((x) => x.asset === asset && x.chain === chain);
+      if (!h || h.amount < amount) return insufficient({ chain, asset });
+      h.amount = r8(h.amount - amount);
+      return { ok: true as const, ref: `metamask:owner:${++seq}` };
+    },
     async read(): Promise<Holding[]> {
       return holdings.filter((h) => h.amount > 0).map((h) => ({ account: account.id, asset: h.asset, amount: h.amount, usd: r2(h.amount * priceOf(h.asset)), class: classOf(h.asset), note: h.chain }));
     },
@@ -165,7 +172,7 @@ export function mm<T>(bin: string, args: string[], timeoutMs: number): Promise<T
   });
 }
 
-interface MmShow {
+export interface MmShow {
   address: string;
   tradingMode: string;
   policyYaml?: string;
@@ -173,14 +180,14 @@ interface MmShow {
   name?: string | null;
 }
 
-interface MmBalance {
+export interface MmBalance {
   currency: string;
   totalValue: string;
   chains: unknown[];
 }
 
 /** a defensive read of `mm wallet balance`: the per-chain shape is not pinned, so take what looks like {symbol, balance, value} */
-function holdingsOf(b: MmBalance): Holding[] {
+export function holdingsOf(b: MmBalance): Holding[] {
   const rows: Holding[] = [];
   const walk = (v: unknown, chain: string | undefined) => {
     if (Array.isArray(v)) return v.forEach((x) => walk(x, chain));

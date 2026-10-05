@@ -107,6 +107,12 @@ export function routesToHub(a: RailAccount, h: Pick<Holding, "asset" | "usd" | "
     }
     case "bank":
       return [route("ach", "ACH to an on-ramp", 0, 86400, false, "read-only; transfers don't go through the agent")];
+    case "broker":
+      // cash at a broker leaves by ACH to the linked bank, and only the account holder can start that, at the broker
+      return [route("ach", "ACH to the linked bank", 0, 86400, false, "started at the broker, not through the agent")];
+    case "perp":
+      // a perp DEX lets an agent key trade and move between its own balances; a withdrawal is the owner's signature
+      return [route("withdraw", "withdraw over CCTP", 0.2, 300, false, "only the owner's key can withdraw")];
     case "card":
       return [];
   }

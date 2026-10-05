@@ -6,7 +6,8 @@
  * in cents, and settle by the exchange's own rulebook. The fee is Kalshi's
  * published 0.07 × C × P × (1 − P), rounded up to the cent. Error codes are
  * illustrative; the shapes are real. */
-import { priceOf, r2, r8, type Account, type AccountAdapter, type Holding, type Intent } from "../accounts.ts";
+import { priceOf, r2, r8, type Account, type AccountAdapter, type Holding, type Intent, type VenueResult } from "../accounts.ts";
+import { achArrival } from "../account/calendar.ts";
 import { eventState, parseEventSymbol } from "../events.ts";
 import { no } from "../refuse.ts";
 import { fillAt } from "../venues.ts";
@@ -40,6 +41,19 @@ export function kalshiAccount(seed: KalshiSeed, now: () => string): AccountAdapt
   const reject = (code: string, message: string, native: string) => no("E_VENUE_REJECTED", { venue: "kalshi", message, native: { error: { code, message: native } } });
   return {
     account,
+    /** an ACH deposit that settled */
+    credit(asset, amount) {
+      if (asset === "USD") usd = r2(usd + amount);
+    },
+    /** the account holder at Kalshi's own page: deposits and payouts go by ACH, and only from there */
+    startAtVenue(direction, asset, amount): VenueResult {
+      if (asset !== "USD" || !(amount > 0)) return reject("invalid_request", "Kalshi moves US dollars by ACH", "unsupported currency");
+      if (direction === "out") {
+        if (usd < amount) return no("E_VENUE_INSUFFICIENT", { venue: "kalshi", native: { error: { code: "insufficient_balance", message: "insufficient balance" } } });
+        usd = r2(usd - amount);
+      }
+      return { ok: true as const, ref: `kalshi:ach:${++seq}`, settlesAt: new Date(achArrival(Date.parse(now()))).toISOString(), native: { status: "pending", type: direction === "in" ? "deposit" : "withdrawal", amount } };
+    },
     async read(): Promise<Holding[]> {
       const rows: Holding[] = [];
       if (usd > 0) rows.push({ account: account.id, asset: "USD", amount: usd, usd, class: "cash" });

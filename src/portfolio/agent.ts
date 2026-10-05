@@ -117,7 +117,7 @@ function routeToOndo(usdWanted: number, ctx: PlanContext): Plan {
     const cex = closed.find((it) => it.route.id === "withdraw" && it.usd >= need);
     notes.push(cex ? `The missing ${amount(need)}: open withdrawals on the ${cex.name} key and it arrives in ${etaLabel(cex.route.etaSec)} for about ${cents(cexWithdrawFee(need))}; ACH from the bank is T+1. Neither goes through me.` : `The missing ${amount(need)} has to come from somewhere else; not through me.`);
     // money the agent could move but that is parked for something else: say it is there rather than take it
-    const parked = ctx.liquidity.mobile.filter((s) => s.account !== "ondo" && s.account !== "metamask");
+    const parked = ctx.liquidity.mobile.filter((s) => ctx.accounts.find((a) => a.id === s.account)?.kind === "prediction");
     if (parked.length) notes.push(`${parked.map((s) => `${s.name} holds ${money(s.usd)} ${s.asset}`).join("; ")}: it could come over in minutes, but it is parked for betting. Say so and I'll move it.`);
   }
   return { narration, steps, notes };

@@ -18,7 +18,11 @@ export type LedgerKind =
   | "bypass"
   | "reconcile"
   | "note"
-  | "openness-refusal";
+  | "openness-refusal"
+  /** the account: a signed instruction it took, one it refused, and a payment's life (pending · settled · returned …) */
+  | "action"
+  | "account-refusal"
+  | "payment";
 
 export interface LedgerRowInput {
   kind: LedgerKind;
@@ -37,6 +41,10 @@ export interface LedgerRowInput {
   /** the portfolio manager: which flight (one agent request) and which agent this row belongs to */
   flight?: string | undefined;
   agent?: string | undefined;
+  /** the account: the signed envelope this row is evidence of, who signed it, and the payment it belongs to */
+  envelope?: unknown;
+  signer?: string | undefined;
+  payment?: string | undefined;
 }
 
 export interface LedgerRow extends LedgerRowInput {

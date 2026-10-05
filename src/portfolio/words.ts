@@ -73,6 +73,8 @@ export function routeLine(native: unknown): string | undefined {
 export function waitWords(why: AskReason): string {
   if (why === "stranger") return "a new address, needs your OK";
   if (why === "awaiting") return "this market is past its close and not yet resolved, needs your OK";
+  if (why === "payee") return "a first payment to this payee, needs your OK";
+  if (why === "live") return "real money, needs your signature every time";
   return "above the no-ask limit, needs your OK";
 }
 
@@ -115,6 +117,83 @@ export function plainRefusal(r: Refusal, nameOf: (id: string) => string): string
       return `${who} rejected it`;
     case "E_CARD_REJECTED":
       return "you rejected it; nothing moved";
+    case "E_VENUE_AGENT_NO_WITHDRAW":
+      return `${who} lets only you withdraw; not done`;
+    case "E_VENUE_MIN_DEPOSIT":
+      return `below ${who}'s minimum, so it was not sent`;
+    case "E_VENUE_RAIL_CLOSED":
+      return `that runway at ${who} is closed; not done`;
+    case "E_VENUE_CURRENCY":
+      return `${who} doesn't take that currency; swap first`;
+    case "E_VENUE_UNSETTLED":
+      return `that cash at ${who} hasn't settled yet; not done`;
+    case "E_VENUE_RETURNED":
+      return "the bank returned it; the money is back where it started";
+    case "E_ACCOUNT_UNKNOWN_SIGNER":
+      return "this key isn't authorised on your account; not done";
+    case "E_ACCOUNT_AGENT_EXPIRED":
+      return "this agent's key has expired; not done";
+    case "E_ACCOUNT_AGENT_REVOKED":
+      return "this agent's key was revoked; not done";
+    case "E_ACCOUNT_OWNER_ONLY":
+    case "E_ACCOUNT_OWNER_SURFACE":
+      return "that one is yours to sign; not done";
+    case "E_ACCOUNT_NOT_HOME":
+      return "I can only move money between your own accounts; not done";
+    case "E_ACCOUNT_NONCE":
+    case "E_ACCOUNT_EXPIRED":
+    case "E_ACCOUNT_BAD_SIGNATURE":
+      return "the request was stale or didn't check out; not done";
+    case "E_ACCOUNT_THRESHOLD":
+      return "it needs another signer; not done";
+    case "E_ACCOUNT_FEE_CAP":
+      return "the fee is above what you approved; not done";
+    case "E_ACCOUNT_DESTINATION":
+      return "that address isn't in your address book for this chain; not done";
+    case "E_ACCOUNT_DEST_COOLING":
+      return "that address is too new to use yet; not done";
+    case "E_ACCOUNT_SOURCE":
+      return "no open source for the money; not done";
+    case "E_ACCOUNT_REQUOTE":
+      return "the route changed since it was signed; it needs signing again";
+    case "E_ACCOUNT_CARD_EXPIRED":
+      return "the card expired; nothing moved";
+    case "E_ACCOUNT_UNPRICED":
+      return "no price for that asset here; not done";
+    case "E_ACCOUNT_CREDENTIAL":
+      return "the key for that connection isn't usable; nothing was connected";
+    case "E_VENUE_UNREACHABLE":
+      return `${who} did not answer; nothing was done`;
+    case "E_MANDATE_NONE":
+      return "you haven't approved this kind of spending; not done";
+    case "E_MANDATE_EXPIRED":
+      return "the spending approval has expired; not done";
+    case "E_MANDATE_RECIPIENT":
+      return "that payee isn't in the spending approval; not done";
+    case "E_MANDATE_PER_ORDER_CAP":
+      return "above the per-payment limit you approved; not done";
+    case "E_MANDATE_RATE":
+      return "too soon after the last refill; not done";
+    case "E_MANDATE_BUDGET":
+      return "the budget you approved is used up; not done";
+    case "E_MANDATE_INVALID":
+      return "the mandate for this purchase didn't check out; not paid";
+    case "E_WALLET_FLOAT_CAP":
+      return "over the float you gave this agent; not done";
+    case "E_WALLET_INSUFFICIENT":
+      return "not enough in the agent's float; not done";
+    case "E_PAYEE_CHANGED":
+      return "the payee's address changed; not paid";
+    case "E_PAYEE_OVERCHARGE":
+      return "the payee asked for more than agreed; not paid";
+    case "E_PAYEE_REJECTED":
+      return "the payee turned the payment down";
+    case "E_PAYEE_UNVERIFIED":
+      return "the payee's request didn't check out; not paid";
+    case "E_PAYEE_UNSUPPORTED":
+      return "the payee takes no payment method I have; not paid";
+    case "E_PAYEE_REDIRECT":
+      return "the payee sent me somewhere else; not paid";
     default:
       return "not done";
   }
