@@ -123,7 +123,12 @@ npm run portfolio                         # 默认就带这一层：http://127.0
 npm run account:demo                      # 无头：十四个 beat，每个 beat 放行一件事、拒绝一件事；同一个 home 连跑两次，输出逐字节相同
 npm run account:demo -- --serve --hold    # 跑完把这次的状态挂在 /account 上看（只读：页面的浏览器不是这个账户的 owner，脚本的钥匙才是）
 npm run portfolio:mcp                     # agent 的席位持一把 agent 钥匙，每次写都签名
+npx tsx examples/account/headless.ts      # 一个脚本从头走到尾：owner 签、agent 签、时间流逝，不起服务不开浏览器
+npx tsx examples/account/agent-seat.ts whoami   # 扮演一个 agent，对跑着的服务发签名指令
+npm run portfolio -- --live-writes --live-cap 50  # 允许动真钱：配对码在终端，每笔 owner 签名，每笔最多 $50
 ```
+
+做法手册在 [COOKBOOK.md](COOKBOOK.md)：每件事怎么做、会看到什么、什么会被拒，配两个能直接跑的示例（`examples/account/`）。
 
 组合钱包回答"agent 在每个账户里能做什么"；Account 回答**钱怎么进出每个场所，以及谁有权让它动**。它是 trading agent 和资金之间的机场：功能照 Hyperliquid 自己的账户页一项一项移过来，但门开在十个场所上（比原来多一个股票券商 Alpaca 和 Hyperliquid 自己），再加上买方账户需要、单个场所不需要的三样：支出授权，替 agent 回答对外付款协议，以及把用户已有的交易所钱包**即插即用**地接进来。界面是英文。
 
@@ -178,6 +183,32 @@ owner 签的不只是意图：一笔划转的签名里带着**路线的哈希、
 
 demo 里可插的四个：Bybit（`unified`，读和交易）、Kraken（`unified`，读、交易、提币，白名单里只有自己的链上钱包）、OKX 的第二个账户（`okx`，只读）、OKX Wallet（`wallet`，按地址）。
 
+**真实连接：你真的场所**（`src/portfolio/live/`、`account/live-moves.ts`、`adapters/live.ts`）。上面那四个是演示用的；这里接的是用户真实的账户。每个有接口的场所一种连接，页面上每一行的 "Connect"：
+
+| 场所 | 怎么接 | 读 | 写（真钱） |
+|---|---|---|---|
+| 交易所：OKX、Kraken、Coinbase 等，统一接口库覆盖的一百来家 | 本机 home 目录里的钥匙文件 | 余额（交易与资金两个账本）、钥匙权限（Binance、OKX 有接口说） | 提到你自己的地方、账本之间划转、稳定币互换 |
+| MetaMask Agent Wallet | 本机已登录的 `mm` 命令行 | 余额、Guard 策略 | `mm transfer`，还要 MetaMask 自己的开关 `PORTFOLIO_MM_WRITES=1` |
+| 浏览器钱包：OKX Wallet、Binance Wallet、MetaMask 等 | EIP-6963 发现，钱包签一句话证明地址是你的 | 六条 EVM 链上的 USDC、USDT 和链上原生币 | 账户构造交易，钱包自己签、自己发；账户在链上核对是不是那一笔 |
+| Alpaca | 钥匙文件 | 现金、持仓 | 无：它的 API 不动现金 |
+| Kalshi | 钥匙 id 加私钥文件（RSA-PSS 或 Ed25519 签名） | 现金、持仓（按成本） | 无：它的 API 不动钱 |
+| Hyperliquid、Polymarket | 地址 | 永续与现货账本；持仓与 pUSD | 无：这两家不服务这台机器所在的地区，按它们的规矩只读 |
+| Ondo（OUSG、rOUSG、USDY） | 地址 | 代币数量，按 Ondo 自己链上预言机的价格 | 无：只能在 Ondo 白名单地址之间转 |
+| Chase、Mastercard | 没有接 | | 银行要聚合商的生产资格；卡没有给个人的接口 |
+
+钥匙文件放在 home 目录里（默认 `~/.buyer-agent-demo/credentials/<场所>/api-key.json`），必须只有本人可读（`chmod 600`），页面只传文件在哪，值不进页面、账本和任何返回。接入时先问场所的公开时钟（不带钥匙），场所不服务这个地区就在这一步停下，钥匙不发出去。真实场所顶替同名的模拟场所，拔掉后模拟的回来；读数缓存半分钟，读失败时保留上一次的数并写明时间和原因。
+
+**用真钱**默认关。`npm run portfolio -- --live-writes` 打开，`--live-cap 50` 改每笔上限（默认 $100）。打开之后：
+
+- 服务在终端打印一个配对码，第一个浏览器要输入这个码才成为 owner（不再是"谁先打开谁就是"）。
+- 每一笔都是 owner 的一次签名，签的是**账户替你向目的地场所要来的那个地址**、场所报的手续费上限、十分钟的有效期；执行前再问一次场所，地址或手续费变了就不执行。签名里的链名是 "Live · real money"。
+- 钱只去你自己的地方：交易所自己给的充值地址，或签过那句话的钱包。粘贴进来的地址只能看，不能收钱。
+- agent 只能请求（`agentLiveMove`、MCP 的 `portfolio_live_move`），每一次都变成一张卡，卡上是地址和手续费，owner 签了才走；它的支出授权照样要覆盖两端。
+- 场所自己的规矩照旧：钥匙权限、提币白名单（第一次提到新地址，多数交易所要你先在那边加白名单）、它自己的风控。它的拒绝就是答复。
+- 不跟模拟的钱混：真钱只在真实场所之间走一步，不经过模拟的枢纽。
+
+从这台机器不带钥匙问过一次（2026-10-05）：Binance 回 451、Bybit 回 403，都写明按地区拒绝；OKX、Kraken、Coinbase、Binance.US 正常应答。
+
 **C · agent 对外付款：agent 不付钱，账户替它付**（`account/protocols.ts`、`payees.ts`）。agent 只签一句"为这个 URL 付钱，最多这么多，从这个 float 出"（`agentPay`）；账户自己去问收款方，从收款方自己的质询里读出价格和收款地址，说收款方说的那种协议，用 agent 从来拿不到的钥匙签付款。检查顺序：
 
 1. 授权：这个 agent、这个 host。在给这个 host 发出第一个字节之前。
@@ -228,6 +259,9 @@ demo 里可插的四个：Bybit（`unified`，读和交易）、Kraken（`unifie
 - 券商的现金只能在券商那边动，账户只能看着它到账。开这条跑道要的是券商合作方资格，不是代码。
 - 插上的交易所显示的是交易所对这把钥匙的说法。经统一接口库没有一个调用能返回钥匙的权限：真的连接器在有专门接口的交易所问它（Binance 的 `apiRestrictions`），没有的只能从第一次被拒学到。自托管钱包只按地址接入：没有做浏览器里"连接钱包"的握手，出金那一步在那个钱包里的签名是模拟的。
 - 资金指令的有效期以它自己标注的时刻为准、前后各十分钟：签名人把时刻往后标，最多换来二十分钟。
+- 真实连接和真钱写入只对着替身测过：替身交易所、替身链、本地生成又丢掉的测试钱包，外加一次不带钥匙的公开时钟请求。**没有一把真钥匙、一个真钱包在这里用过**。接上你自己的账户之前，先用只读钥匙；要写，先用一个小上限和一个小金额。
+- 钱包证明用的是 `personal_sign`。Binance Wallet 和 OKX Wallet 的文档没写它的行为；不支持的钱包只能按地址"看"，不能收钱。合约钱包（Safe 之类）的签名这里验不了，也只能看。
+- Kalshi 的持仓按它报的成本显示，不是市值；Hyperliquid 的永续账本是一个账户价值，不拆开持仓。
 - 卡上那个收款地址之所以可信，只因为 owner 看了一眼；没有任何东西说明它是谁的地址。没有制裁筛查、Travel Rule、对收款方的 KYC。
 - 一个人同时持有这十个账户、都在同一个地区可用，是假设。场所自己的地区规则是场所的，这里只表现为一扇关着的门，不提供任何绕过它的办法。
 - 托管、牌照、出了错谁赔，不是软件，这里没有。

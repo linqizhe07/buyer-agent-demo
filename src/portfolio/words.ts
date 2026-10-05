@@ -74,6 +74,7 @@ export function waitWords(why: AskReason): string {
   if (why === "stranger") return "a new address, needs your OK";
   if (why === "awaiting") return "this market is past its close and not yet resolved, needs your OK";
   if (why === "payee") return "a first payment to this payee, needs your OK";
+  if (why === "live") return "real money, needs your signature every time";
   return "above the no-ask limit, needs your OK";
 }
 
@@ -159,6 +160,10 @@ export function plainRefusal(r: Refusal, nameOf: (id: string) => string): string
       return "the card expired; nothing moved";
     case "E_ACCOUNT_UNPRICED":
       return "no price for that asset here; not done";
+    case "E_ACCOUNT_CREDENTIAL":
+      return "the key for that connection isn't usable; nothing was connected";
+    case "E_VENUE_UNREACHABLE":
+      return `${who} did not answer; nothing was done`;
     case "E_MANDATE_NONE":
       return "you haven't approved this kind of spending; not done";
     case "E_MANDATE_EXPIRED":

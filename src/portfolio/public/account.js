@@ -66,12 +66,20 @@ function render() {
   for (const b of $("mode").querySelectorAll("button")) b.setAttribute("aria-pressed", String(b.dataset.mode === A.mode));
   $("mode-note").textContent = A.mode === "open" ? "Open · an agent key still needs your approval to move anything" : "Guard · asks above the no-ask limit";
   $("total").textContent = money(A.totalUsd);
-  $("sub").textContent = `Across ${plural(A.venues.length, "venue")}${A.inFlightUsd ? ` · ${money(A.inFlightUsd)} in flight` : ""}${A.heldUsd ? ` · ${fine(A.heldUsd)} held in a session’s escrow` : ""} · ${plural(A.activeKeys, "agent key")} · ${A.cards.length} waiting for you`;
+  $("sub").textContent = `Across ${plural(A.venues.length, "venue")}${A.inFlightUsd ? ` · ${money(A.inFlightUsd)} in flight` : ""}${A.heldUsd ? ` · ${fine(A.heldUsd)} held in a session’s escrow` : ""}${A.liveUsd ? ` · ${money(A.liveUsd)} of it is live` : ""} · ${plural(A.activeKeys, "agent key")} · ${A.cards.length} waiting for you`;
   for (const b of $("type").querySelectorAll("button")) b.setAttribute("aria-pressed", String((b.dataset.type === "unifiedAccount") === (A.type === "Unified")));
   $("type-note").textContent = A.type === "Unified" ? "Unified · an agent may leave the source to the account, along routes you approved" : "Separate · every movement names where the money comes from";
   const owner = Owner.role === "owner";
   $("banner").hidden = owner;
-  $("banner").textContent = Owner.role === "pending" ? "This browser is not a signer of this account yet. The owner’s device makes it one under Signers." : owner ? "" : "This browser could not make a device key, so it can look but not sign.";
+  if (Owner.role === "needs-code") {
+    $("banner").innerHTML = `<form id="code-form" class="codeform"><span>This server moves real money. To become its owner, type the pairing code it printed in its terminal.</span><input name="code" placeholder="XXXX-XXXX" maxlength="9" autocomplete="off" spellcheck="false" required /><button type="submit" class="ink">Pair</button><span class="msg" id="code-msg"></span></form>`;
+    $("code-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const r = await Owner.ready($("code-form").elements.code.value);
+      if (r.refusal) return void ($("code-msg").className = "msg no", $("code-msg").textContent = r.refusal);
+      await load();
+    });
+  } else $("banner").textContent = Owner.role === "pending" ? "This browser is not a signer of this account yet. The owner’s device makes it one under Signers." : owner ? "" : "This browser could not make a device key, so it can look but not sign.";
   for (const b of document.querySelectorAll("#acts button, #type button, #mode button[data-mode=open]")) b.disabled = !owner;
   renderWaiting(owner);
   const counts = { payments: pendingPay || "", keys: A.keys.filter((k) => k.status === "ok").length || "", approvals: A.spend.length + A.fees.length || "", subs: A.subAccounts.length || "", signers: A.signers.owners.length };
@@ -106,8 +114,8 @@ const select = (name, opts, sel) => `<select name="${name}">${opts.map(([v, l, d
 const formOf = (id) => Object.fromEntries(new FormData($(id)).entries());
 
 const PANEL = {
-  balances: (owner) => `<table><thead><tr><th>Venue</th><th class="hide-s">Front line</th><th class="r">Balance</th><th>Money in</th><th>Money out</th></tr></thead><tbody>${A.venues.map((v) => `<tr><td>${esc(v.name)}${v.plugged ? `<span class="why">${esc(v.via || "plugged in")}${owner ? ` · <button type="button" class="link dim" data-unplug="${esc(v.id)}">Unplug</button>` : ""}</span>` : ""}</td><td class="dim hide-s">${esc(v.frontLine)}</td><td class="r num2">${money(v.usd)}</td>${v.restricted ? `<td colspan="2" class="dim">${esc(v.restricted)}</td>` : `<td>${runway(v.in)}</td><td>${runway(v.out)}</td>`}</tr>`).join("")}</tbody></table>
-    ${A.connectable.length ? `<p class="plug dim">${plural(A.connectable.length, "more venue of yours is", "more venues of yours are")} not on this account: ${esc(A.connectable.map((c) => c.name).join(", "))}. <button type="button" class="link" id="plug-open"${owner ? "" : " disabled"}>Plug one in…</button></p>` : ""}`,
+  balances: (owner) => `<table><thead><tr><th>Venue</th><th class="hide-s">Front line</th><th class="r">Balance</th><th>Money in</th><th>Money out</th><th></th></tr></thead><tbody>${A.venues.map((v) => `<tr><td>${esc(v.name)}${v.live ? '<span class="live">LIVE</span>' : ""}${v.plugged ? `<span class="why">${esc(v.via || "plugged in")}</span>` : ""}</td><td class="dim hide-s">${esc(v.frontLine)}</td><td class="r num2">${money(v.usd)}</td>${v.watchOnly ? `<td colspan="2" class="dim">${canMove(v) ? "Real money · you sign each one" : "Read-only"}${v.asOf ? ` · as of ${nyTime(v.asOf)}` : ""}${v.address ? `<span class="why">${v.proven ? `proven yours: ${esc(v.proven)} signed` : "watched: no wallet signed for it, so nothing is sent to it"}</span>` : ""}${v.readOnlyBecause && writesOn() ? `<span class="why">${esc(v.readOnlyBecause)}</span>` : ""}${v.stale ? `<span class="why">last read failed: ${esc(v.stale)}</span>` : ""}</td>` : v.restricted ? `<td colspan="2" class="dim">${esc(v.restricted)}</td>` : `<td>${runway(v.in)}</td><td>${runway(v.out)}</td>`}<td class="r">${!owner ? "" : v.watchOnly ? `${canMove(v) ? `<button type="button" class="link" data-move="${esc(v.id)}">Move…</button> · ` : ""}<button type="button" class="link dim" data-unplug="${esc(v.id)}">Disconnect</button>` : v.plugged ? `<button type="button" class="link dim" data-unplug="${esc(v.id)}">Unplug</button>` : liveFor(v.id).length ? `<button type="button" class="link dim" data-live="${esc(v.id)}">Connect</button>` : ""}</td></tr>`).join("")}</tbody></table>
+    <p class="plug dim">${A.venues.some((v) => v.live) ? (writesOn() ? `Real-money writes are on: at most ${money(A.connectLive.writes.capUsd)} a movement, each one signed by you. ` : "Venues connected live are read only: this server was started without real-money writes. ") : "Every balance above is simulated. "}${A.connectLive ? `<button type="button" class="link" id="live-open"${owner ? "" : " disabled"}>Connect a real venue…</button> It is read through its own interface, and nothing is sent to it.` : ""}${A.connectable.length ? ` ${plural(A.connectable.length, "demo venue", "demo venues")} can be plugged in too: ${esc(A.connectable.map((c) => c.name).join(", "))}. <button type="button" class="link" id="plug-open"${owner ? "" : " disabled"}>Plug one in…</button>` : ""}</p>`,
 
   runways: () => `<table><thead><tr><th>Runway</th><th>Carries</th><th class="r">Fee on $1,000</th><th class="r">Lands</th><th>Who</th></tr></thead><tbody>${A.venues.map((v) => `<tr><td colspan="5" class="group">${esc(v.name)}<span class="dim">${esc(v.frontLine)} · agent key here: ${esc(v.agentKey.model)}. It can ${esc(v.agentKey.can)}; it cannot ${esc(v.agentKey.cannot)}.</span></td></tr>${v.runways.length ? v.runways.map((r) => `<tr><td><b>${esc(r.dir)}</b> · ${esc(r.protocol)}${r.minUsd ? `<span class="why">at least $${r.minUsd}</span>` : ""}${!r.final && r.returnDays ? `<span class="why">can be returned for ${r.returnDays} days</span>` : ""}</td><td class="dim">${esc(r.carries)}${r.chains.length ? `<span class="why">${esc(r.chains.join(" · "))}</span>` : ""}</td><td class="r num2">${r.feeOn1000 ? money(r.feeOn1000) : "free"}</td><td class="r num2">${esc(r.lands)}</td><td>${who(r.access)}${r.why ? `<span class="why">${esc(r.why)}</span>` : ""}${r.opens ? `<span class="why">To open it: ${esc(r.opens)}</span>` : ""}</td></tr>`).join("") : '<tr><td colspan="5" class="dim">No balance to move.</td></tr>'}`).join("")}</tbody></table>`,
 
@@ -115,6 +123,7 @@ const PANEL = {
     const dest = p.external ? `${p.external.label} (${p.external.chain})` : nameOf(p.to);
     const status = p.status === "pending" ? (p.heldUsd !== undefined ? "Session open" : `In flight · lands ${lands(p.settlesAt)}`) : p.status[0].toUpperCase() + p.status.slice(1);
     const by = p.authority === "agent" ? `${keyName(p.agent)}${p.flight ? ` · ${p.flight}` : ""}` : p.authority === "venue" ? `You, at ${nameOf(p.legs[0].venue)}` : "You";
+    if (p.live) return liveRow(p);
     return `<tr><td class="num2 dim">${nyDay(p.at)} ${nyTime(p.at)}</td><td>${esc(p.kind[0].toUpperCase() + p.kind.slice(1))} · ${esc(nameOf(p.from))}${p.kind === "swap" ? ` · ${esc(p.sourceToken)} → ${esc(p.token)}` : ` → ${esc(dest)}`}<span class="why">${esc(p.note || p.legs.map((l) => l.protocol).join(" · "))}</span></td><td class="r num2">${fine(p.amountUsd)}${p.heldUsd !== undefined ? '<span class="why">deposit</span>' : ""}</td><td class="r num2 hide-s">${p.feeUsd ? fine(p.feeUsd) : "—"}</td><td><span class="st ${esc(p.status)}">${esc(status)}</span>${p.status === "settled" && p.authority === "venue" && !p.legs[p.legs.length - 1].final ? `<span class="why"><button type="button" class="link dim" data-return="${esc(p.id)}">simulate the bank returning it</button></span>` : ""}</td><td class="dim hide-s">${esc(by)}</td></tr>`;
   }).join("")}</tbody></table>` : '<p class="empty">Nothing has moved yet.</p>'),
 
@@ -149,9 +158,26 @@ const submit = (id, fn) => { const f = $(id); if (f) f.addEventListener("submit"
 const WIRE = {
   balances: () => {
     on("#plug-open", "click", () => openPlug());
+    on("#live-open", "click", () => openLive());
+    on("button[data-live]", "click", (b) => openLive(b.dataset.live));
+    on("button[data-move]", "click", (b) => openLiveMove(b.dataset.move));
     on("button[data-unplug]", "click", (b) => own({ type: "disconnectVenue", venue: b.dataset.unplug }));
   },
-  payments: () => on("button[data-return]", "click", (b) => own({ type: "setPolicy", change: "sim-return", value: b.dataset.return })),
+  payments: () => {
+    on("button[data-return]", "click", (b) => own({ type: "setPolicy", change: "sim-return", value: b.dataset.return }));
+    on("button[data-wallet-send]", "click", async (b) => {
+      const p = A.payments.find((x) => x.id === b.dataset.walletSend);
+      const tx = p && p.legs[0].native && p.legs[0].native.walletTx;
+      if (!tx) return;
+      b.disabled = true;
+      try {
+        await sendFromWallet(p.id, tx);
+      } catch (err) {
+        flash = String((err && err.message) || err).slice(0, 200);
+      }
+      await load();
+    });
+  },
   keys: () => {
     on("button[data-revoke]", "click", (b) => own({ type: "approveAgent", agentAddress: ZERO, agentName: b.dataset.revoke, validUntil: 0 }));
     on("button[data-fill]", "click", (b) => { $("key-form").elements.address.value = b.dataset.fill; $("key-form").elements.name.focus(); });
@@ -333,6 +359,258 @@ function openPlug() {
     history.replaceState(null, "", "#balances");
     await load();
   };
+  $("modal").showModal();
+}
+
+// ---- a real venue, read-only ------------------------------------------------------------
+
+/** the live connections that are the real side of a venue already on the account */
+const liveFor = (venueId) => ((A.connectLive || {}).options || []).filter((o) => o.venues.includes(venueId));
+
+/* Wallets this browser has, as they announce themselves (EIP-6963): the listener is added first and never removed, then the page asks, and
+   every wallet answers again. window.ethereum is used only when nothing announced itself, as the EIP says. */
+const WALLETS = new Map();
+window.addEventListener("eip6963:announceProvider", (e) => { const d = e.detail; if (d && d.info && d.provider) WALLETS.set(d.info.uuid || d.info.rdns || d.info.name, d); });
+window.dispatchEvent(new Event("eip6963:requestProvider"));
+const findWallets = async () => {
+  window.dispatchEvent(new Event("eip6963:requestProvider"));
+  await new Promise((r) => setTimeout(r, 120));
+  const found = [...WALLETS.values()];
+  const eth = window.ethereum;
+  if (!found.length && eth) found.push({ info: { name: eth.isOkxWallet || eth.isOKExWallet ? "OKX Wallet" : eth.isBinance ? "Binance Wallet" : eth.isCoinbaseWallet ? "Coinbase Wallet" : eth.isMetaMask ? "MetaMask" : "Browser wallet" }, provider: eth });
+  return found;
+};
+const hexOf = (text) => "0x" + [...new TextEncoder().encode(text)].map((b) => b.toString(16).padStart(2, "0")).join("");
+const postJson = async (path, body) => { const r = await fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }); return { status: r.status, body: await r.json().catch(() => ({})) }; };
+
+/** ask the wallet for its address, then for its signature on the sentence the account wrote: that is what shows the address is yours */
+async function proveWallet(w) {
+  const accounts = await w.provider.request({ method: "eth_requestAccounts" });
+  const address = accounts && accounts[0];
+  if (!address) throw new Error("the wallet gave no address");
+  const chainId = parseInt(await w.provider.request({ method: "eth_chainId" }).catch(() => "0x1"), 16) || 1;
+  const c = await postJson("/api/account/wallet/challenge", { address, wallet: w.info.name, chainId });
+  if (c.status !== 200) throw new Error(Owner.why(c) || "no sentence to sign");
+  const signature = await w.provider.request({ method: "personal_sign", params: [hexOf(c.body.message), address] });
+  const p = await postJson("/api/account/wallet/prove", { address, signature });
+  if (p.status !== 200) throw new Error(Owner.why(p) || "the signature did not check");
+  PROVIDERS.set(String(p.body.address).toLowerCase(), w);
+  return { address: p.body.address, wallet: w.info.name };
+}
+
+// ---- real money -------------------------------------------------------------------------
+
+/** the wallet each proven address was proven with, while this page is open */
+const PROVIDERS = new Map();
+const writesOn = () => !!(A.connectLive && A.connectLive.writes && A.connectLive.writes.on);
+const canMove = (v) => writesOn() && !!v.liveCan && !v.readOnlyBecause && (v.liveCan.withdraw !== false || v.liveCan.ledgers.length > 1 || v.liveCan.swap !== false || !!v.liveCan.send);
+const NETWORKS = ["Arbitrum", "Base", "Ethereum", "Optimism", "Polygon", "BNB Chain"];
+
+/** a real-money payment in the Payments tab */
+function liveRow(p) {
+  const what = p.kind === "swap" ? `Swap at ${nameOf(p.from)} · ${p.sourceToken} → ${p.token}` : p.kind === "transfer" && p.from === p.to ? `Transfer at ${nameOf(p.from)} · ${p.legs[0].fromLedger} → ${p.legs[0].toLedger}` : `${p.kind[0].toUpperCase() + p.kind.slice(1)} · ${nameOf(p.from)} → ${nameOf(p.to)}${p.live.network ? ` · ${p.live.network}` : ""}`;
+  const status = p.status === "authorized" ? "Waiting for your wallet" : p.status === "pending" ? "On its way" : p.status[0].toUpperCase() + p.status.slice(1);
+  const wallet = p.status === "authorized" && p.legs[0].native && p.legs[0].native.walletTx;
+  return `<tr><td class="num2 dim">${nyDay(p.at)} ${nyTime(p.at)}</td><td>${esc(what)}<span class="live">LIVE</span><span class="why">${esc(p.note || "")}${p.live.toAddress ? ` · to ${esc(short(p.live.toAddress))}` : ""}</span></td><td class="r num2">${fine(p.amountUsd)}</td><td class="r num2 hide-s">${p.feeUsd ? fine(p.feeUsd) : "—"}</td><td><span class="st ${esc(p.status === "authorized" ? "pending" : p.status)}">${esc(status)}</span>${wallet ? `<span class="why"><button type="button" class="link" data-wallet-send="${esc(p.id)}">Send from wallet…</button></span>` : ""}</td><td class="dim hide-s">${p.authority === "agent" ? `${esc(keyName(p.agent))} · you approved` : "You"}</td></tr>`;
+}
+
+/** the wallet that proved `address`, asked again if this page has forgotten it; it has to answer with that same address */
+async function walletFor(address) {
+  const known = PROVIDERS.get(address.toLowerCase());
+  if (known) return known;
+  for (const w of await findWallets()) {
+    const accounts = await w.provider.request({ method: "eth_requestAccounts" }).catch(() => []);
+    if ((accounts || []).some((a) => a.toLowerCase() === address.toLowerCase())) {
+      PROVIDERS.set(address.toLowerCase(), w);
+      return w;
+    }
+  }
+  throw new Error(`no wallet in this browser answers for ${short(address)}: open this page where that wallet is installed`);
+}
+
+/** the account built the transaction; the wallet shows it to you and sends it; the page tells the account which transaction it was */
+async function sendFromWallet(paymentId, tx) {
+  const w = await walletFor(tx.from);
+  try {
+    await w.provider.request({ method: "wallet_switchEthereumChain", params: [{ chainId: tx.chainIdHex }] });
+  } catch (err) {
+    throw new Error(`${w.info.name} did not switch to the right network: ${(err && err.message) || err}`);
+  }
+  const hash = await w.provider.request({ method: "eth_sendTransaction", params: [{ from: tx.from, to: tx.to, data: tx.data, value: tx.value }] });
+  const r = await postJson("/api/account/live/sent", { payment: paymentId, hash });
+  if (r.status !== 200) throw new Error(Owner.why(r) || "the account could not take the transaction");
+  said = `${w.info.name} sent it: ${short(hash)}. It lands when the chain says so`;
+}
+
+/** move real money at a venue connected live: what is possible there, the address and fee the account finds, then your signature */
+function openLiveMove(venueId) {
+  const v = A.venues.find((x) => x.id === venueId);
+  if (!v || !v.liveCan) return;
+  const c = v.liveCan;
+  const kinds = [...(c.withdraw !== false && !c.send ? [["withdraw", "Withdraw to a place of yours"]] : []), ...(c.send ? [["send", "Send from this wallet"]] : []), ...(c.ledgers.length > 1 ? [["transfer", "Between its own ledgers"]] : []), ...(c.swap !== false && !c.send ? [["swap", "Swap stablecoins"]] : [])];
+  const dests = A.venues.filter((x) => x.id !== v.id && x.watchOnly && x.liveCan && x.liveCan.receive && !x.readOnlyBecause);
+  const cap = A.connectLive.writes.capUsd;
+  $("modal-form").innerHTML = `<h2>Move real money · ${esc(v.name)}</h2><div class="dim small">This is the venue itself. Nothing moves until you sign, and the venue’s own checks still apply. At most ${money(cap)} a movement on this server.</div>
+    ${field("What", select("kind", kinds))}
+    <div id="move-body"></div>
+    <div class="quote real" id="quote"><span class="dim">Fill it in to see where it goes and what it costs.</span></div>
+    <details id="signs" hidden><summary>What you sign</summary><pre id="signs-pre"></pre></details>
+    <div class="msg" id="modal-msg"></div>
+    <div class="end"><button type="button" id="modal-cancel">Cancel</button><button type="submit" class="ink" id="modal-go" disabled>Sign and send</button></div>`;
+  const form = $("modal-form");
+  let prepared = null;
+  let timer = 0;
+  const say = (text, state) => { $("modal-msg").className = `msg${text && state ? ` ${state}` : ""}`; $("modal-msg").textContent = text || ""; };
+  const body = () => {
+    const k = form.elements.kind.value;
+    const assets = [["USDC", "USDC"], ["USDT", "USDT"]];
+    $("move-body").innerHTML = k === "transfer"
+      ? `<div class="row">${field("From", select("fromLedger", c.ledgers.map((l) => [l, l])))}${field("To", select("toLedger", c.ledgers.map((l) => [l, l]), c.ledgers[1]))}</div><div class="row">${field("Currency", select("asset", assets))}${field("Amount", '<input name="amount" inputmode="decimal" placeholder="50" autocomplete="off" required />')}</div>`
+      : k === "swap"
+        ? `<div class="row">${field("Sell", select("asset", assets, "USDT"))}${field("Buy", select("toAsset", assets, "USDC"))}</div>${field("Amount", '<input name="amount" inputmode="decimal" placeholder="50" autocomplete="off" required />')}`
+        : `${dests.length ? field("To", select("to", dests.map((d) => [d.id, `${d.name}${d.address ? (d.proven ? " · proven yours" : " · watched") : ""}`, !!d.address && !d.proven]))) : '<div class="path dim">Connect the place it should go first: another exchange, or your wallet (connected from the wallet itself, so it is proven yours).</div>'}<div class="row">${field("Network", select("network", NETWORKS.map((n) => [n, n])))}${field("Currency", select("asset", assets))}</div>${field("Amount", '<input name="amount" inputmode="decimal" placeholder="25" autocomplete="off" required />')}`;
+    for (const el of form.querySelectorAll("#move-body select, #move-body input")) el.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(quote, 300); });
+    quote();
+  };
+  const draft = () => {
+    const f = formOf("modal-form");
+    const k = f.kind;
+    return { type: "liveMove", kind: k, from: v.id, to: k === "transfer" || k === "swap" ? v.id : f.to || "", fromLedger: f.fromLedger || "", toLedger: f.toLedger || "", asset: f.asset || "USDC", toAsset: k === "swap" ? f.toAsset : f.asset || "USDC", network: k === "transfer" || k === "swap" ? "" : f.network || "", amount: String(f.amount || "").trim() };
+  };
+  const quote = async () => {
+    prepared = null;
+    $("modal-go").disabled = true;
+    $("signs").hidden = true;
+    const d = draft();
+    if (!(Number(d.amount) > 0)) return void ($("quote").innerHTML = '<span class="dim">Fill it in to see where it goes and what it costs.</span>');
+    $("quote").innerHTML = `<span class="dim">Asking ${esc(v.name)}…</span>`;
+    const r = await Owner.prepare(d);
+    if (r.status !== 200) return void ($("quote").innerHTML = `<div class="msg no">${esc(Owner.why(r))}</div>`);
+    prepared = r.body;
+    const a = prepared.action;
+    const to = A.venues.find((x) => x.id === a.to) || {};
+    $("quote").innerHTML = `<div class="big"><span>${esc(a.amount)} ${esc(a.asset)}${a.kind === "swap" ? ` → ${esc(a.toAsset)}` : ""}</span><span>${a.kind === "send" ? "network fee: your wallet shows it" : `fee at most ${esc(a.maxFee)} ${esc(a.asset)}`}</span></div>${a.toAddress ? `<div class="path"><b>To</b> ${esc(to.name || a.to)} · <span class="mono">${esc(a.toAddress)}</span> on ${esc(a.network)}</div><div class="path">${to.address ? "The address your wallet signed for." : `The deposit address ${esc(to.name || a.to)} gave just now. It is asked again before anything is sent.`}</div>` : `<div class="path">${a.kind === "transfer" ? `${esc(a.fromLedger)} → ${esc(a.toLedger)} at ${esc(v.name)}` : `a market order at ${esc(v.name)}`}</div>`}<div class="path">Real money, sent by ${esc(v.name)}${c.send === "wallet" ? " — your wallet asks you to confirm it" : ""}. It cannot be called back. Your signature is good for ten minutes.</div>`;
+    $("signs-pre").textContent = prepared.shown.map((x) => `${x.name}: ${x.value}`).join("\n");
+    $("signs").hidden = false;
+    $("modal-go").disabled = Owner.role !== "owner";
+  };
+  form.elements.kind.addEventListener("change", body);
+  $("modal-cancel").addEventListener("click", () => $("modal").close());
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    if (!prepared) return;
+    $("modal-go").disabled = true;
+    say(`Sending it to ${v.name}…`, "wait");
+    const r = await Owner.submit(prepared);
+    if (r.status >= 400 || (r.body && r.body.ok === false)) {
+      say(Owner.why(r) || "Refused", "no");
+      return void quote();
+    }
+    const out = r.body.kind === "result" ? r.body.result : null;
+    if (out && out.wallet) {
+      try {
+        say("Waiting for your wallet…", "wait");
+        await sendFromWallet(out.payment.id, out.wallet);
+      } catch (err) {
+        flash = `${String((err && err.message) || err).slice(0, 200)}. The payment waits under Payments: “Send from wallet…”`;
+      }
+    } else said = r.body.payment ? `${r.body.payment.note || "Sent"}` : "";
+    $("modal").close();
+    tab = "payments";
+    history.replaceState(null, "", "#payments");
+    await load();
+  };
+  body();
+  $("modal").showModal();
+}
+
+let EXCHANGES = null;
+const slug = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
+
+function openLive(venueId) {
+  const all = (A.connectLive || {}).options || [];
+  const preset = venueId ? A.venues.find((v) => v.id === venueId) : null;
+  const options = preset ? liveFor(preset.id) : all;
+  if (!options.length) return;
+  const home = A.connectLive.home;
+  $("modal-form").innerHTML = `<h2>${preset ? `Connect ${esc(preset.name)}` : "Connect a real venue"}</h2><div class="dim small">The real one, read-only. The account reads it through its own interface and sends it nothing${preset ? `; it stands in for the simulated ${esc(preset.name)} until you disconnect it` : ""}.</div>
+    ${options.length > 1 ? field("How", select("kind", options.map((o) => [o.kind, o.label]))) : `<input type="hidden" name="kind" value="${esc(options[0].kind)}" />`}
+    <div id="live-body"></div>
+    <div class="msg" id="modal-msg"></div>
+    <div class="end"><button type="button" id="modal-cancel">Cancel</button><button type="submit" class="ink" id="modal-go"${Owner.role === "owner" ? "" : " disabled"}>Connect, read-only</button></div>`;
+  const form = $("modal-form");
+  let proven = null;
+  /* "no" a refusal · "ok" done · "wait" the venue or the wallet is being asked */
+  const say = (text, state) => { $("modal-msg").className = `msg${text && state ? ` ${state}` : ""}`; $("modal-msg").textContent = text || ""; };
+  const kindOf = () => options.find((o) => o.kind === form.elements.kind.value) || options[0];
+  const body = async () => {
+    const o = kindOf();
+    proven = null;
+    say("");
+    if (o.needs === "key-file") {
+      const pick = o.kind === "exchange" && !preset;
+      if (pick && !EXCHANGES) EXCHANGES = ((await (await fetch("/api/account/exchanges")).json()).exchanges) || [];
+      $("live-body").innerHTML = `${pick ? field("Exchange", select("exchange", EXCHANGES.map((x) => [x.id, x.name]))) : ""}
+        <div class="row">${field("Shown as", '<input name="label" maxlength="40" autocomplete="off" />')}${field("Key file", '<input name="ref" maxlength="160" autocomplete="off" spellcheck="false" />')}</div>
+        <div class="quote"><div class="path"><b>1</b> At the venue, make an API key that can only read.</div><div class="path"><b>2</b> Save it as <span class="mono" id="live-path"></span> holding <span class="mono">${esc(o.example)}</span></div><div class="path"><b>3</b> Run <span class="mono">chmod 600</span> on that file. This page sends where the file is, never what is in it.</div></div>`;
+      const fill = () => {
+        const id = preset ? preset.id : pick ? form.elements.exchange.value : o.kind;
+        const name = preset ? preset.name : pick ? (EXCHANGES.find((x) => x.id === id) || {}).name || id : o.label.split(" · ")[0];
+        form.elements.label.value = name;
+        form.elements.ref.value = `credentials/${id}/api-key.json`;
+        $("live-path").textContent = `${home}/${form.elements.ref.value}`;
+      };
+      if (pick) form.elements.exchange.addEventListener("change", fill);
+      form.elements.ref.addEventListener("input", () => ($("live-path").textContent = `${home}/${form.elements.ref.value}`));
+      fill();
+    } else if (o.needs === "address") {
+      const wallets = await findWallets();
+      $("live-body").innerHTML = `${wallets.length ? `<div class="wallets">${wallets.map((w, i) => `<button type="button" data-wallet="${i}">${/^data:image\//.test(w.info.icon || "") ? `<img src="${esc(w.info.icon)}" alt="" width="18" height="18" />` : ""}${esc(w.info.name)}</button>`).join("")}</div><div class="path dim">Pick a wallet and it is asked for its address, then to sign one sentence that shows the address is yours. Nothing is approved or moved.</div>` : '<div class="path dim">No wallet was found in this browser. Open this page in the browser where your wallet is installed, or paste an address below: it is then watched, not proven yours.</div>'}
+        <div class="row">${field("Address", '<input name="ref" maxlength="80" autocomplete="off" spellcheck="false" placeholder="0x…" />')}${field("Shown as", '<input name="label" maxlength="40" autocomplete="off" />')}</div>
+        <div class="path dim">${esc(o.example)}</div>`;
+      form.elements.label.value = preset ? preset.name : "";
+      form.elements.ref.addEventListener("input", () => { proven = null; });
+      for (const b of $("live-body").querySelectorAll("button[data-wallet]")) {
+        b.addEventListener("click", async () => {
+          const w = wallets[Number(b.dataset.wallet)];
+          say(`Waiting for ${w.info.name}…`, "wait");
+          try {
+            proven = await proveWallet(w);
+            form.elements.ref.value = proven.address;
+            if (!form.elements.label.value) form.elements.label.value = w.info.name;
+            say(`${w.info.name} signed: ${short(proven.address)} is yours.`, "ok");
+          } catch (err) {
+            say(String((err && err.message) || err).slice(0, 200), "no");
+          }
+        });
+      }
+    } else {
+      $("live-body").innerHTML = `<div class="quote"><div class="path">${esc(o.example)}</div></div><input type="hidden" name="ref" value="" /><input type="hidden" name="label" value="${esc(preset ? preset.name : "")}" />`;
+    }
+  };
+  if (form.elements.kind.addEventListener) form.elements.kind.addEventListener("change", body);
+  $("modal-cancel").addEventListener("click", () => $("modal").close());
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const o = kindOf();
+    const ref = (form.elements.ref.value || "").trim();
+    const label = (form.elements.label.value || "").trim();
+    const exchangeId = o.kind === "exchange" ? (preset ? preset.id : form.elements.exchange.value) : "";
+    if (o.needs === "address" && !/^0x[0-9a-fA-F]{40}$/.test(ref)) return say("An address is 0x and forty hex digits.", "no");
+    const venue = preset ? preset.id : o.kind === "exchange" ? (label && slug(label) !== slug((EXCHANGES.find((x) => x.id === exchangeId) || {}).name || "") ? slug(label) : exchangeId) : o.needs === "address" ? `${o.kind}-${ref.slice(2, 8).toLowerCase()}` : o.kind;
+    $("modal-go").disabled = true;
+    say("Asking the venue…", "wait");
+    const r = await Owner.act({ type: "connectVenue", venue, connector: o.kind === "exchange" ? `live:exchange:${exchangeId}` : `live:${o.kind}`, label, credentialRef: ref });
+    $("modal-go").disabled = Owner.role !== "owner";
+    if (r.status >= 400) return say(Owner.why(r) || "Refused", "no");
+    $("modal").close();
+    flash = "";
+    said = r.body.summary || "";
+    tab = "balances";
+    history.replaceState(null, "", "#balances");
+    await load();
+  };
+  body();
   $("modal").showModal();
 }
 

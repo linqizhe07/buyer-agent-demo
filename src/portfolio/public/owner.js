@@ -39,18 +39,20 @@ const Owner = (() => {
     return { status: r.status, body: await r.json().catch(() => ({})) };
   }
 
-  /** offer this browser's public key; the first device to do so becomes the owner's device */
-  async function ready() {
+  /** offer this browser's public key; the first device to do so becomes the owner's device — on a server that moves real money, only with
+      the code that server printed in its terminal (`code`) */
+  async function ready(code) {
     try {
       const k = await key();
       const jwk = await crypto.subtle.exportKey("jwk", k.publicKey);
-      const r = await post("/api/account/pair", { jwk: { kty: jwk.kty, crv: jwk.crv, x: jwk.x, y: jwk.y }, label: "this browser" });
-      role = r.status === 200 ? r.body.role : "none";
+      const r = await post("/api/account/pair", { jwk: { kty: jwk.kty, crv: jwk.crv, x: jwk.x, y: jwk.y }, label: "this browser", ...(code ? { code } : {}) });
+      if (r.status !== 200) return { role, refusal: why(r) };
+      role = r.body.role;
       kid = r.body.kid || "";
     } catch {
       role = "none";
     }
-    return role;
+    return { role };
   }
 
   async function sign(prepared) {

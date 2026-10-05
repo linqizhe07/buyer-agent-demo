@@ -30,6 +30,7 @@
  * /api/say, /api/approve, /api/restore, /api/reset and opening the dial are the owner's and arrive as signed actions; tightening (Guard, an
  * account off) stays free.
  */
+import { randomBytes } from "node:crypto";
 import express from "express";
 import { readFileSync } from "node:fs";
 import type { Server } from "node:http";
@@ -43,6 +44,7 @@ import { cardHash } from "./account/exchange.ts";
 import type { Envelope } from "./account/sign.ts";
 import { agentCode, PRICES, type AgentId, type Intent } from "./accounts.ts";
 import { AgentSession, PRESETS } from "./agent.ts";
+import { exchangeList } from "./live/exchange.ts";
 import { parseEventSymbol } from "./events.ts";
 import type { OrderPlan } from "./router.ts";
 import { isPending, loadOpenness, PortfolioService } from "./service.ts";
@@ -136,10 +138,37 @@ export async function startPortfolioServer(opts: PortfolioServerOptions): Promis
 
   app.post("/api/account/pair", (req, res) => {
     if (!svc.account) return void res.status(404).json({ ok: false, error: "the account layer is not mounted" });
-    const { jwk, label } = req.body as { jwk?: unknown; label?: unknown };
-    const r = svc.account.pairDevice(jwk, typeof label === "string" && label.trim() ? label.trim().slice(0, 40) : "this browser");
+    const { jwk, label, code } = req.body as { jwk?: unknown; label?: unknown; code?: unknown };
+    const r = svc.account.pairDevice(jwk, typeof label === "string" && label.trim() ? label.trim().slice(0, 40) : "this browser", typeof code === "string" ? code.slice(0, 20) : undefined);
     res.status(isRefusal(r) ? 400 : 200).json(isRefusal(r) ? { ok: false, refusal: r } : r);
   });
+
+  // the exchanges the unified library covers, for the page's list of real venues (the library is loaded on first ask)
+  app.get("/api/account/exchanges", wrap(async (_req, res) => void res.json({ ok: true, exchanges: await exchangeList() })));
+
+  // A wallet shows that an address is the user's by signing the sentence the account writes for it (EIP-4361). Nothing is connected by this:
+  // connecting is still the owner's signed instruction, and without a proof the address is simply shown as watched.
+  app.post("/api/account/wallet/challenge", (req, res) => {
+    if (!svc.account) return void res.status(404).json({ ok: false, error: "the account layer is not mounted" });
+    const { address, wallet, chainId } = req.body as { address?: unknown; wallet?: unknown; chainId?: unknown };
+    const host = req.get("host") ?? "127.0.0.1";
+    const r = svc.proofs.challenge(String(address ?? ""), String(wallet ?? ""), { domain: host, uri: `${req.protocol}://${host}/account` }, Number(chainId) || 1);
+    res.status(isRefusal(r) ? 400 : 200).json(isRefusal(r) ? { ok: false, refusal: r } : { ok: true, address: r.address, message: r.message, expiresAt: r.expiresAt });
+  });
+  app.post("/api/account/wallet/prove", wrap(async (req, res) => {
+    if (!svc.account) return void res.status(404).json({ ok: false, error: "the account layer is not mounted" });
+    const { address, signature } = req.body as { address?: unknown; signature?: unknown };
+    const r = await svc.proofs.prove(String(address ?? ""), String(signature ?? ""));
+    res.status(isRefusal(r) ? 400 : 200).json(isRefusal(r) ? { ok: false, refusal: r } : { ok: true, address: r.address, wallet: r.wallet });
+  }));
+
+  // the page says which transaction the wallet sent for a real-money payment that was waiting for it; the chain decides whether it is that one
+  app.post("/api/account/live/sent", wrap(async (req, res) => {
+    if (!svc.account) return void res.status(404).json({ ok: false, error: "the account layer is not mounted" });
+    const { payment, hash } = req.body as { payment?: unknown; hash?: unknown };
+    const r = await svc.account.live.sent(String(payment ?? ""), String(hash ?? ""));
+    res.status(isRefusal(r) ? 409 : 200).json(isRefusal(r) ? { ok: false, refusal: r } : r);
+  }));
 
   app.post("/api/account/prepare", wrap(async (req, res) => {
     if (!svc.account) return void res.status(404).json({ ok: false, error: "the account layer is not mounted" });
@@ -253,6 +282,14 @@ export async function startPortfolioServer(opts: PortfolioServerOptions): Promis
   };
 }
 
+/** eight characters a person can read off a terminal and type: no 0/O, no 1/I/L */
+export function pairingCode(): string {
+  const alphabet = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
+  const bytes = randomBytes(8);
+  const chars = [...bytes].map((b) => alphabet[b % alphabet.length]).join("");
+  return `${chars.slice(0, 4)}-${chars.slice(4)}`;
+}
+
 export function defaultHome(): string {
   return process.env.BUYER_HOME ?? join(homedir(), ".buyer-agent-demo");
 }
@@ -266,11 +303,21 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const port = Number(at("--port") ?? 4820);
   const live = args.includes("--mm") || process.env.PORTFOLIO_MM === "1";
   const classic = args.includes("--classic");
+  // REAL money at venues connected live: off unless asked for here, in the terminal, where the code the first owner types is printed
+  const capUsd = Number(at("--live-cap") ?? 100);
+  if (!(capUsd > 0)) throw new Error("--live-cap is a number of dollars, more than zero");
+  const liveWrites = args.includes("--live-writes") && !classic ? { capUsd, pairingCode: pairingCode() } : undefined;
   // the fixture's session ends on a fixed date; a server on the real clock gets thirty days from when it starts
   const openness = loadOpenness() as { sessionExpiresAt?: string };
   const month = new Date(Date.now() + 30 * 86_400_000).toISOString();
-  const service = await PortfolioService.create({ home: at("--home") ?? defaultHome(), live, ...(classic ? {} : { venues: "frontline" as const, openness: { ...openness, sessionExpiresAt: (openness.sessionExpiresAt ?? "") > month ? openness.sessionExpiresAt : month } }) });
-  const srv = await startPortfolioServer({ port, service });
+  const service = await PortfolioService.create({ home: at("--home") ?? defaultHome(), live, ...(liveWrites ? { liveWrites } : {}), ...(classic ? {} : { venues: "frontline" as const, openness: { ...openness, sessionExpiresAt: (openness.sessionExpiresAt ?? "") > month ? openness.sessionExpiresAt : month } }) });
+  const srv = await startPortfolioServer({ port, service }).catch((e: NodeJS.ErrnoException) => {
+    if (e.code !== "EADDRINUSE") throw e;
+    // the usual reason: this server is already running in another terminal
+    console.error(`port ${port} is already in use: a portfolio server is probably running already. Open http://127.0.0.1:${port}/account, or start a second one: npm run portfolio -- --port ${port + 1} --home <another directory>`);
+    process.exit(1);
+  });
+  if (liveWrites) console.log(`REAL-MONEY WRITES ARE ON · at most $${liveWrites.capUsd} a movement (--live-cap) · every one is signed by the owner, and money goes only to places shown to be the owner's\n  pairing code: ${liveWrites.pairingCode} — the first browser becomes the owner only with this code, typed on the page`);
   console.log(`agent portfolio manager at ${srv.url} · ${service.accounts().length} accounts · MetaMask ${live ? "LIVE via mm" : "simulated (--mm for live)"}${classic ? " · classic (no account layer)" : ` · account page ${srv.url}/account`} · ledger ${service.ledgerPath()} · Ctrl-C to stop`);
   const stop = () => srv.close().then(() => process.exit(0));
   process.on("SIGINT", stop);

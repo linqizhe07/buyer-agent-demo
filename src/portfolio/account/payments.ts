@@ -77,6 +77,8 @@ export interface Payment {
   heldUsd?: number | undefined;
   /** where the money is while it is not at its destination, and what to do about it */
   note?: string | undefined;
+  /** REAL money at venues connected live: it lands when the venue or the chain says so, never by the simulation's clock */
+  live?: { kind: string; toAddress?: Hex | undefined; network?: string | undefined; txHash?: Hex | undefined } | undefined;
 }
 
 export interface Money {
@@ -250,7 +252,7 @@ export async function settleDue(payments: Payment[], nowMs: number, m: Money): P
   const out: Advance[] = [];
   for (const p of payments) {
     // a payment session's deposit is not on a clock: it comes back when the session is closed (payees.ts)
-    if (p.status !== "pending" || p.heldUsd !== undefined) continue;
+    if (p.status !== "pending" || p.heldUsd !== undefined || p.live) continue;
     for (;;) {
       const i = p.legs.findIndex((l) => l.status === "pending");
       if (i < 0) break;

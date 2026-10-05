@@ -172,7 +172,7 @@ export function mm<T>(bin: string, args: string[], timeoutMs: number): Promise<T
   });
 }
 
-interface MmShow {
+export interface MmShow {
   address: string;
   tradingMode: string;
   policyYaml?: string;
@@ -180,14 +180,14 @@ interface MmShow {
   name?: string | null;
 }
 
-interface MmBalance {
+export interface MmBalance {
   currency: string;
   totalValue: string;
   chains: unknown[];
 }
 
 /** a defensive read of `mm wallet balance`: the per-chain shape is not pinned, so take what looks like {symbol, balance, value} */
-function holdingsOf(b: MmBalance): Holding[] {
+export function holdingsOf(b: MmBalance): Holding[] {
   const rows: Holding[] = [];
   const walk = (v: unknown, chain: string | undefined) => {
     if (Array.isArray(v)) return v.forEach((x) => walk(x, chain));

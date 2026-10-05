@@ -8,7 +8,8 @@
  *
  * Tools: portfolio_overview · portfolio_read · portfolio_markets · portfolio_quote ·
  * portfolio_account (reads) · portfolio_execute · portfolio_order · portfolio_transfer ·
- * portfolio_pay (writes) · portfolio_approval · portfolio_openness.
+ * portfolio_pay · portfolio_live_move (writes; real money only on the owner's signature) · portfolio_approval ·
+ * portfolio_openness.
  *
  * With the account layer mounted (the service's default) this seat HOLDS AN AGENT KEY and signs
  * every write with it: the service takes no unsigned write, and what the key may do is what the
@@ -221,7 +222,8 @@ interface AccountLite {
   type: string;
   totalUsd: number;
   inFlightUsd: number;
-  venues: Array<{ id: string; name: string; frontLine: string; usd: number; cashUsd: number; restricted?: string; in: { text: string; access: string; why?: string }; out: { text: string; access: string; why?: string }; ledgers: string[] }>;
+  venues: Array<{ id: string; name: string; frontLine: string; usd: number; cashUsd: number; restricted?: string; in: { text: string; access: string; why?: string }; out: { text: string; access: string; why?: string }; ledgers: string[]; live?: true; liveCan?: { withdraw: boolean | string; ledgers: string[]; swap: boolean | string; receive: boolean; send: string | false }; readOnlyBecause?: string; proven?: string; address?: string }>;
+  connectLive?: { writes?: { on: boolean; capUsd: number } };
   payments: Array<{ id: string; kind: string; at: string; from: string; to: string; amountUsd: number; status: string; settlesAt: string; agent?: string; protocol?: string; note?: string }>;
   keys: Array<{ address: string; name: string; validUntil: string; status: string }>;
   spend: Array<{ id: string; agent: string; scope: string; allow: string[]; perPaymentUsd: number; budgetUsd: number; spentUsd: number; reservedUsd: number; windowHours: number; validUntil: string; expired: boolean; payTo: Record<string, string> }>;
@@ -253,7 +255,8 @@ server.registerTool(
       inFlightUsd: a.inFlightUsd,
       approvals: a.spend.filter((s) => s.agent === me).map((s) => ({ scope: s.scope, allow: s.allow, perPaymentUsd: s.perPaymentUsd, budgetUsd: s.budgetUsd, leftUsd: Number((s.budgetUsd - s.spentUsd - s.reservedUsd).toFixed(6)), ...(s.windowHours ? { onePerHours: s.windowHours } : {}), validUntil: s.validUntil, expired: s.expired, ...(s.scope === "payees" ? { pinnedAddresses: s.payTo } : {}) })),
       floats: a.subAccounts.filter((s) => s.agent === me).map((s) => ({ name: s.name, balanceUsd: s.balanceUsd, capUsd: s.capUsd })),
-      venues: a.venues.map((v) => ({ id: v.id, name: v.name, frontLine: v.frontLine, usd: v.usd, movableUsd: v.cashUsd, ...(v.restricted ? { restricted: v.restricted } : { moneyIn: `${v.in.text} (${v.in.access})`, moneyOut: `${v.out.text} (${v.out.access})${v.out.why ? ` — ${v.out.why}` : ""}` }), ...(v.ledgers.length ? { ledgers: v.ledgers } : {}) })),
+      venues: a.venues.map((v) => (v.live ? { id: v.id, name: v.name, frontLine: v.frontLine, usd: v.usd, live: true, realMoney: v.readOnlyBecause ? `read only: ${v.readOnlyBecause}` : !a.connectLive?.writes?.on ? "read only: this server moves no real money" : v.liveCan ? `ask with portfolio_live_move (the owner signs every one): ${[v.liveCan.withdraw !== false && !v.liveCan.send ? "withdraw" : "", v.liveCan.send ? "send" : "", v.liveCan.ledgers.length > 1 ? `transfer between ${v.liveCan.ledgers.join(" and ")}` : "", v.liveCan.swap !== false && !v.liveCan.send ? "swap" : "", v.liveCan.receive ? "receive" : ""].filter(Boolean).join(", ")}` : "read only", ...(v.address ? { address: v.address, proven: v.proven ?? "watched, not proven" } : {}) } : { id: v.id, name: v.name, frontLine: v.frontLine, usd: v.usd, movableUsd: v.cashUsd, ...(v.restricted ? { restricted: v.restricted } : { moneyIn: `${v.in.text} (${v.in.access})`, moneyOut: `${v.out.text} (${v.out.access})${v.out.why ? ` — ${v.out.why}` : ""}` }), ...(v.ledgers.length ? { ledgers: v.ledgers } : {}) })),
+      ...(a.connectLive?.writes?.on ? { realMoney: { on: true, capUsd: a.connectLive.writes.capUsd } } : {}),
       waitingForOwner: a.cards,
       payments: a.payments.slice(0, 12).map((p) => ({ id: p.id, kind: p.kind, from: p.from, to: p.to, amountUsd: p.amountUsd, status: p.status, ...(p.status === "pending" ? { lands: p.settlesAt } : {}), ...(p.protocol ? { protocol: p.protocol } : {}), ...(p.note ? { note: p.note } : {}) })),
       payees: a.pay.payees,
@@ -273,6 +276,29 @@ server.registerTool(
   async ({ from, to, amount, token, maxFeeUsd }) => {
     if (!(await layer())) return text({ ok: false, error: "this service runs without the account layer (--classic): use portfolio_execute with a move intent" }, true);
     return answer(await sign({ type: "agentSendAsset", destination: "self", sourceDex: from, destinationDex: to, token: token ?? "USDC", amount: String(amount), fromSubAccount: "", maxFee: String(maxFeeUsd ?? 5) }));
+  },
+);
+
+server.registerTool(
+  "portfolio_live_move",
+  {
+    description:
+      "Ask to move REAL money at venues the owner connected live (portfolio_account marks them `live: true`): withdraw from an exchange to another place of the user's, send from a wallet, transfer between an exchange's own ledgers, or swap one dollar stablecoin for another there. It is never done on your word: every request becomes a card the owner signs, showing the exact destination address and the fee the venue quotes; the answer is {pending: true, card} and portfolio_approval tells you how it went. Money goes only to the user's own places (an exchange's own deposit address, or a wallet that proved it is the user's), at most the server's per-movement cap, and only if this server was started with real-money writes on. Your spending approval (`venues`) must name both venues. A refusal ({ok: false, code}) is not to be retried: E_WALLET_LIVE_WRITES_OFF (the server moves no real money), E_ACCOUNT_DESTINATION (not a place shown to be the user's), E_ACCOUNT_LIMIT (above the cap), E_VENUE_* (the venue's own rule).",
+    inputSchema: {
+      kind: z.enum(["withdraw", "send", "transfer", "swap"]).describe("withdraw: from an exchange · send: from a wallet · transfer: between an exchange's own ledgers · swap: one stablecoin for another at an exchange"),
+      from: z.string().describe("the live venue's id, e.g. okx"),
+      to: z.string().optional().describe("withdraw/send: the live venue it goes to (an exchange, or a proven wallet); the same venue for transfer and swap"),
+      asset: z.enum(["USDC", "USDT"]).describe("what leaves"),
+      toAsset: z.enum(["USDC", "USDT"]).optional().describe("swap: what you get"),
+      network: z.enum(["Arbitrum", "Base", "Ethereum", "Optimism", "Polygon", "BNB Chain"]).optional().describe("withdraw/send: the chain it travels on"),
+      fromLedger: z.string().optional().describe("transfer: e.g. funding"),
+      toLedger: z.string().optional().describe("transfer: e.g. trading"),
+      amount: z.number().positive().describe("in dollars (the stablecoin's units)"),
+    },
+  },
+  async ({ kind, from, to, asset, toAsset, network, fromLedger, toLedger, amount }) => {
+    if (!(await layer())) return text({ ok: false, error: "this service runs without the account layer (--classic)" }, true);
+    return answer(await sign({ type: "agentLiveMove", kind, from, fromLedger: fromLedger ?? "", to: kind === "transfer" || kind === "swap" ? from : (to ?? ""), toLedger: toLedger ?? "", asset, toAsset: toAsset ?? asset, network: network ?? "", amount: String(amount), maxFee: "0" }));
   },
 );
 

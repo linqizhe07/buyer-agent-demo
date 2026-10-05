@@ -53,6 +53,14 @@ import { AccountEngine, CARD_TTL_MS, type AccountPage, type AccountSeed, type Ca
 import { mountPayees, type PayeeWorld } from "./account/payees.ts";
 import { doorOf, EXCHANGES } from "./account/doors.ts";
 import { isSelfCustody, plug, type PlugSeed } from "./adapters/exchange.ts";
+import { liveAccount } from "./adapters/live.ts";
+import { liveOptions, openLive, type LiveDeps } from "./live/index.ts";
+import type { LiveVenue } from "./account/live-moves.ts";
+import { WalletProofs } from "./live/proof.ts";
+import { publicChain } from "./live/chain.ts";
+import { realMm } from "./live/metamask.ts";
+import { publicPrices } from "./live/prices.ts";
+import { realHttp } from "./live/types.ts";
 import type { AgentAction, Envelope, Hex } from "./account/sign.ts";
 
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
@@ -92,6 +100,11 @@ export interface ServiceOptions {
   freshLedger?: boolean;
   /** the venues the owner could plug in (default: fixtures `connectable.json`) */
   connectable?: Record<string, PlugSeed> | undefined;
+  /** stand-ins for what a live connection reaches — the exchange library, HTTP, the chain, the real clock — so tests never leave the process */
+  liveDeps?: Partial<LiveDeps> | undefined;
+  /** REAL money at venues connected live (the server's `--live-writes`): the most one movement may be, and the code the first owner types.
+   * Absent: live venues are read, and nothing moves at them */
+  liveWrites?: { capUsd: number; pairingCode: string } | undefined;
 }
 
 /** one slice of an order (or any step an agent flies): where, what, and the agent's words for it */
@@ -254,6 +267,12 @@ export class PortfolioService {
   private catalog: Record<string, PlugSeed> = {};
   /** the simulated wallet's own allowlist: the hub sends only to what is on it */
   private walletAllow: string[] = [];
+  /** a simulated venue whose place a live connection has taken: it comes back when the live one is unplugged */
+  private readonly shadowed = new Map<string, AccountAdapter>();
+  /** what real money can be asked of each venue connected live, and how */
+  private readonly liveVenues = new Map<string, LiveVenue>();
+  /** wallets that proved an address is the user's, by signing the sentence the account wrote */
+  readonly proofs: WalletProofs;
 
   private constructor(
     private readonly opts: ServiceOptions,
@@ -265,6 +284,7 @@ export class PortfolioService {
     const base = opts.now ?? (() => new Date().toISOString());
     this.now = () => (this.skewMs === 0 ? base() : new Date(Date.parse(base()) + this.skewMs).toISOString());
     this.live = liveAccounts !== undefined;
+    this.proofs = opts.liveDeps?.proofs ?? new WalletProofs(opts.liveDeps?.clock);
     this.openness = parseOpenness(opts.openness ?? loadOpenness());
     this.ledger = this.openLedger();
     this.mount();
@@ -371,8 +391,11 @@ export class PortfolioService {
         }
         return no("E_ACCOUNT_BAD_ACTION", { message: `"${change}" is not a policy change the owner signs here` });
       },
-      connect: (venue, connector, label, credentialRef) => this.plugIn(venue, connector, label, credentialRef),
+      connect: (venue, connector, label, credentialRef) => (connector.startsWith("live:") ? this.plugLive(venue, connector, label, credentialRef) : this.plugIn(venue, connector, label, credentialRef)),
       disconnect: (venue) => this.unplug(venue),
+      live: () => ({ ...liveOptions(this.opts.home), writes: this.liveWritesView() }),
+      liveMoney: () => ({ writes: () => this.liveWritesView(), venue: (id) => (this.adapters.get(id)?.account.watchOnly ? this.liveVenues.get(id) : undefined), realNow: () => this.liveDeps().clock() }),
+      pairingCode: () => this.opts.liveWrites?.pairingCode,
       connectable: () =>
         Object.entries(this.catalog)
           .filter(([id]) => !this.adapters.has(id))
@@ -400,10 +423,58 @@ export class PortfolioService {
     return { ok: true, summary: `${said} · money in: ${who(door.in[0]?.access)}; money out: ${who(door.out[0]?.access)}${this.live ? " · add its deposit address to the wallet's own allowlist before sending there" : ""}`, native: { connector, probe: probe.native } };
   }
 
+  private liveWritesView(): { on: boolean; capUsd: number; turnOn: string } {
+    return { on: this.opts.liveWrites !== undefined, capUsd: this.opts.liveWrites?.capUsd ?? 0, turnOn: "npm run portfolio -- --live-writes" };
+  }
+
+  /** what a live connection reaches: the real network, unless a test handed in stand-ins */
+  private liveDeps(): LiveDeps {
+    // made once: the chain clients and the price cache are kept between connections
+    return (this.liveMade ??= { home: this.opts.home, http: realHttp, clock: Date.now, mm: realMm(this.opts.mm?.bin, this.opts.mm?.timeoutMs), chain: this.opts.liveDeps?.chain ?? publicChain(), price: this.opts.liveDeps?.price ?? publicPrices({ open: this.opts.liveDeps?.openExchange, clock: this.opts.liveDeps?.clock }), ...this.opts.liveDeps, proofs: this.proofs });
+  }
+  private liveMade: LiveDeps | undefined;
+
+  /** Connect a venue the user REALLY has, read-only. The venue is asked through its own interface (live/): what it holds, and what it says the
+   * credential may do. A live connection on the id of a simulated venue takes that venue's place until it is unplugged; either way every
+   * door through it is shut, because the account sends a live venue nothing. */
+  private async plugLive(venue: string, connector: string, label: string, credentialRef: string): Promise<Refusal | { ok: true; summary: string; native?: unknown }> {
+    if (!/^[a-z0-9][a-z0-9-]{0,39}$/.test(venue)) return no("E_ACCOUNT_BAD_ACTION", { venue, message: "a venue's id is lower-case letters, digits and dashes" });
+    const sim = this.adapters.get(venue);
+    if (sim?.account.watchOnly) return no("E_ACCOUNT_BAD_ACTION", { venue, message: `${sim.account.name} is already connected live: unplug it before connecting it again` });
+    const deps = this.liveDeps();
+    const opened = await openLive({ venue, connector, label: label.trim().slice(0, 40) || sim?.account.name || "", reference: credentialRef.trim().slice(0, 200) }, deps);
+    if (isRefusal(opened)) return opened;
+    const adapter = await liveAccount(venue, opened.source, { connector, first: opened.first, clock: deps.clock, ...(opened.price ? { price: opened.price } : {}) });
+    const src = opened.source;
+    // who showed the address is the user's: the wallet that signed the account's sentence, or the mm session on this machine
+    const proven = src.address === undefined ? undefined : connector === "live:metamask" ? "the mm session on this machine" : deps.proofs.proven(src.address)?.wallet;
+    Object.assign(adapter.account, { ...(proven ? { proven } : {}), ...(src.writer ? { liveCan: src.writer.can } : {}), ...(src.readOnlyBecause ? { readOnlyBecause: src.readOnlyBecause } : {}) });
+    this.liveVenues.set(venue, { id: venue, name: adapter.account.name, kind: adapter.account.kind, ...(src.address ? { address: src.address } : {}), ...(proven ? { proven } : {}), ...(src.writer ? { writer: src.writer } : {}), ...(src.readOnlyBecause ? { readOnlyBecause: src.readOnlyBecause } : {}), via: src.via });
+    if (sim) this.shadowed.set(venue, sim);
+    this.adapters.set(venue, adapter);
+    const usd = r2((await adapter.read()).reduce((s, h) => s + h.usd, 0));
+    // what this connection may do with the money there: nothing unless the server moves real money, and then only what the owner signs
+    const writes = this.opts.liveWrites;
+    const mode = !src.writer ? `read only: ${src.readOnlyBecause ?? "nothing is sent to it from here"}` : !writes ? "read only: this server was started without real-money writes" : src.address !== undefined && !proven && src.writer.can.send === "wallet" ? "watched: no wallet signed for this address, so nothing is sent to or from it" : `real money moves only when you sign it, at most ${cents(writes.capUsd)} a movement`;
+    return { ok: true, summary: `${adapter.account.name} connected live · ${cents(usd)} there now · ${opened.summary} · ${mode}${sim ? " · it stands in for the simulated one until it is unplugged" : ""}`, native: { connector, probe: opened.source.probe.native ?? null } };
+  }
+
   private unplug(venue: string): Refusal | { ok: true; summary: string } {
     const a = this.adapters.get(venue);
     if (!a) return no("E_WALLET_ACCOUNT_UNKNOWN", { venue });
     if (!a.account.plugged) return no("E_ACCOUNT_BAD_ACTION", { venue, message: `${a.account.name} is one of the venues the account opened with: only a venue that was plugged in can be unplugged` });
+    this.liveVenues.delete(venue);
+    // a live connection that stood in for a simulated venue: the simulated one comes back
+    const sim = this.shadowed.get(venue);
+    if (sim) {
+      this.shadowed.delete(venue);
+      this.adapters.set(venue, sim);
+      return { ok: true, summary: `${a.account.name} disconnected: the account no longer reads the real venue, and the simulated one is back. The key at the venue is untouched: delete it there` };
+    }
+    if (a.account.watchOnly) {
+      this.adapters.delete(venue);
+      return { ok: true, summary: `${a.account.name} disconnected: the account no longer reads it. ${a.account.address ? "Nothing was ever held for it here" : "The key at the venue is untouched: delete it there"}` };
+    }
     this.adapters.delete(venue);
     const listed = this.walletAllow.indexOf(a.account.address ?? venue);
     if (listed >= 0) this.walletAllow.splice(listed, 1);
@@ -446,6 +517,9 @@ export class PortfolioService {
   /** the five simulators are rebuilt from the seeds; the live account is kept (its state is MetaMask's, not ours) */
   private mount(): void {
     const s = this.seeds;
+    // a fresh mount is the simulation from its seeds: whatever was connected live is gone with the rest
+    this.shadowed.clear();
+    this.liveVenues?.clear();
     // the simulated wallet reads its allowlist from this array, so a venue plugged in later can be added to it
     this.walletAllow.length = 0;
     this.walletAllow.push(...s.metamask.allowlist);

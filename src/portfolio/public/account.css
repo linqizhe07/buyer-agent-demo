@@ -49,8 +49,20 @@ h3:first-child{margin-top:8px}
 .empty{color:var(--dim);padding:14px 0;font-size:14px}
 .msg{font-size:13px;margin-top:10px;min-height:18px}
 .msg.no::before{content:"✗";display:inline-block;background:var(--ink);color:var(--paper);border-radius:2px;font-size:11px;width:16px;line-height:16px;text-align:center;margin-right:8px}
+.msg.wait{color:var(--dim)}
 .msg.ok::before{content:"✓";display:inline-block;background:var(--sage);color:var(--paper);border-radius:2px;font-size:11px;width:16px;line-height:16px;text-align:center;margin-right:8px}
 .plug{margin:14px 0 0;font-size:13px}
+.wallets{display:flex;gap:8px;flex-wrap:wrap}
+#move-body,#live-body{display:flex;flex-direction:column;gap:14px}
+dialog .quote.real{border:1px solid var(--orange);border-radius:4px;padding:10px 12px;background:var(--card)}
+dialog .quote .mono{font-family:"IBM Plex Mono",Menlo,monospace;font-size:11px;word-break:break-all;color:var(--ink)}
+.codeform{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.codeform input{font:inherit;font-family:"IBM Plex Mono",Menlo,monospace;font-size:14px;padding:6px 10px;border:1px solid var(--ink);border-radius:3px;background:var(--card);width:130px;text-transform:uppercase}
+.codeform .msg{margin-top:0}
+.wallets button{display:inline-flex;align-items:center;gap:8px;padding:7px 12px;font-size:14px}
+.wallets img{border-radius:4px}
+dialog .path.dim{color:var(--dim)}
+#panel td .live{margin-left:8px}
 dialog .quote .path b{font-weight:500;color:var(--ink)}
 dialog{border:1px solid var(--ink);border-radius:4px;background:var(--paper);color:var(--ink);padding:0;width:min(480px,calc(100vw - 32px));box-shadow:0 12px 40px rgba(27,27,27,.18)}
 dialog::backdrop{background:rgba(27,27,27,.28)}

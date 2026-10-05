@@ -101,7 +101,11 @@ export type OwnerAction =
   | { type: "setPolicy"; change: string; value: string; nonce: number }
   /** plug a venue the user already has into the account: which one, how it is reached, and where its credential lives (a reference, never the value) */
   | { type: "connectVenue"; venue: string; connector: string; label: string; credentialRef: string; nonce: number }
-  | { type: "disconnectVenue"; venue: string; nonce: number };
+  | { type: "disconnectVenue"; venue: string; nonce: number }
+  /** REAL money at venues connected live: the owner signs the exact destination address the venue gave, the most the venue may charge, and
+   * the moment after which it is void. `kind`: withdraw (from an exchange) · send (from a wallet) · transfer (between an exchange's own
+   * ledgers) · swap (one dollar stablecoin for another at an exchange) */
+  | { type: "liveMove"; kind: string; from: string; fromLedger: string; to: string; toLedger: string; asset: string; toAsset: string; network: string; amount: string; toAddress: string; maxFee: string; deadline: number; nonce: number };
 
 export type AgentAction =
   | { type: "agentSendAsset"; destination: string; sourceDex: string; destinationDex: string; token: string; amount: string; fromSubAccount: string; maxFee: string; nonce: number }
@@ -113,14 +117,16 @@ export type AgentAction =
   | { type: "agentPay"; url: string; maxAmount: string; fromSubAccount: string; builder?: { b: Hex; f: number } | undefined; cnf?: Jwk | undefined; mandates?: { checkout: string; payment: string } | undefined; close?: boolean | undefined; nonce: number }
   /** the older single-account write (trade · subscribe · redeem), now under the agent's key */
   | { type: "agentExecute"; account: string; intent: Record<string, unknown>; nonce: number }
-  | { type: "agentOrder"; base: string; side: string; qty: number; nonce: number };
+  | { type: "agentOrder"; base: string; side: string; qty: number; nonce: number }
+  /** an agent asking for real money to move at venues connected live: it is never done on the agent's word — the owner is asked, every time */
+  | { type: "agentLiveMove"; kind: string; from: string; fromLedger: string; to: string; toLedger: string; asset: string; toAsset: string; network: string; amount: string; maxFee: string; nonce: number };
 
 export type Action = OwnerAction | AgentAction;
 
-export const OWNER_TYPES = ["sendAsset", "swap", "approveAgent", "approveBuilderFee", "approveSpend", "createSubAccount", "userSetAbstraction", "convertToMultiSigUser", "setDestination", "approveCard", "setPolicy", "connectVenue", "disconnectVenue"] as const;
-export const AGENT_TYPES = ["agentSendAsset", "agentSwap", "agentPay", "agentExecute", "agentOrder"] as const;
+export const OWNER_TYPES = ["sendAsset", "swap", "approveAgent", "approveBuilderFee", "approveSpend", "createSubAccount", "userSetAbstraction", "convertToMultiSigUser", "setDestination", "approveCard", "setPolicy", "connectVenue", "disconnectVenue", "liveMove"] as const;
+export const AGENT_TYPES = ["agentSendAsset", "agentSwap", "agentPay", "agentExecute", "agentOrder", "agentLiveMove"] as const;
 /** an instruction that moves money is good for minutes after it is signed, not for the two days of the nonce window */
-export const MONEY_TYPES: ReadonlySet<string> = new Set(["sendAsset", "swap", "approveCard", "agentSendAsset", "agentSwap", "agentPay", "agentExecute", "agentOrder"]);
+export const MONEY_TYPES: ReadonlySet<string> = new Set(["sendAsset", "swap", "approveCard", "agentSendAsset", "agentSwap", "agentPay", "agentExecute", "agentOrder", "liveMove", "agentLiveMove"]);
 export const MONEY_TTL_MS = 10 * 60_000;
 
 export function isOwnerAction(a: { type: string }): a is OwnerAction {
@@ -166,7 +172,10 @@ const OWNER_FIELDS: Record<OwnerAction["type"], { primary: string; fields: Field
   setPolicy: { primary: "AccountTransaction:SetPolicy", fields: [{ name: "change", type: "string" }, { name: "value", type: "string" }, NONCE] },
   connectVenue: { primary: "AccountTransaction:ConnectVenue", fields: [{ name: "venue", type: "string" }, { name: "connector", type: "string" }, { name: "label", type: "string" }, { name: "credentialRef", type: "string" }, NONCE] },
   disconnectVenue: { primary: "AccountTransaction:DisconnectVenue", fields: [{ name: "venue", type: "string" }, NONCE] },
+  liveMove: { primary: "AccountTransaction:LiveMove", fields: [{ name: "kind", type: "string" }, { name: "from", type: "string" }, { name: "fromLedger", type: "string" }, { name: "to", type: "string" }, { name: "toLedger", type: "string" }, { name: "asset", type: "string" }, { name: "toAsset", type: "string" }, { name: "network", type: "string" }, { name: "amount", type: "string" }, { name: "toAddress", type: "string" }, { name: "maxFee", type: "string" }, { name: "deadline", type: "uint64" }, NONCE] },
 };
+/** what the owner's signature says about the money: a live move is real money, and the signed text says so */
+export const LIVE_CHAIN = "Live · real money";
 
 const AGENT_TYPE = { Agent: [{ name: "source", type: "string" }, { name: "actionHash", type: "bytes32" }, { name: "nonce", type: "uint64" }] } as const;
 const AGENT_SOURCE = "sim";
@@ -207,7 +216,7 @@ export function malformed(action: Action): string | null {
 export function ownerTypedData(action: OwnerAction): TypedData {
   const def = OWNER_FIELDS[action.type];
   const fields = [CHAIN_FIELD, ...def.fields];
-  return { domain: ACCOUNT_DOMAIN, types: { [def.primary]: fields }, primaryType: def.primary, message: messageOf(fields, { ...action, accountChain: ACCOUNT_CHAIN }) };
+  return { domain: ACCOUNT_DOMAIN, types: { [def.primary]: fields }, primaryType: def.primary, message: messageOf(fields, { ...action, accountChain: action.type === "liveMove" ? LIVE_CHAIN : ACCOUNT_CHAIN }) };
 }
 
 /** the fields of an owner action in signing order, as text: what the approval surface renders */

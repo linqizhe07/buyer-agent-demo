@@ -51,6 +51,18 @@ export interface Account {
   connector?: string | undefined;
   /** the owner plugged this venue in after the account was opened: it can be unplugged again */
   plugged?: boolean | undefined;
+  /** a LIVE venue, connected read-only: the account shows what the real venue reports and sends it nothing, so every door through it is shut */
+  watchOnly?: string | undefined;
+  /** when a live venue's balances were last read from it */
+  asOf?: string | undefined;
+  /** the last refresh of a live venue failed, and why: the balances shown are the ones read at `asOf` */
+  stale?: string | undefined;
+  /** a live venue reached by address: who showed the address is the user's (the wallet that signed); absent, it is only watched */
+  proven?: string | undefined;
+  /** what real money can be asked of a live venue, when the server moves real money at all */
+  liveCan?: { withdraw: boolean | "unknown"; ledgers: string[]; swap: boolean | "unknown"; receive: boolean; send: "wallet" | "mm" | false } | undefined;
+  /** why a live venue is only ever read */
+  readOnlyBecause?: string | undefined;
 }
 
 /** `event`: shares of a prediction-market outcome, worth $1 or $0 at settlement */

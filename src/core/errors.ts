@@ -76,6 +76,7 @@ export const CODES = {
   E_VENUE_CURRENCY: { layer: "VENUE", zh: "这个场所不收这种币，要先换" },
   E_VENUE_UNSETTLED: { layer: "VENUE", zh: "未结算的现金还不能提" },
   E_VENUE_RETURNED: { layer: "VENUE", zh: "这笔 ACH 被银行退回了" },
+  E_VENUE_UNREACHABLE: { layer: "VENUE", zh: "场所没有应答" },
   // the account — the airport itself: who signed, with which key, and whether that key may ask for this
   E_ACCOUNT_BAD_SIGNATURE: { layer: "ACCOUNT", zh: "签名和指令对不上" },
   E_ACCOUNT_UNKNOWN_SIGNER: { layer: "ACCOUNT", zh: "账户不认识这把钥匙" },
@@ -96,6 +97,7 @@ export const CODES = {
   E_ACCOUNT_CARD_EXPIRED: { layer: "ACCOUNT", zh: "这张卡已过期" },
   E_ACCOUNT_BAD_ACTION: { layer: "ACCOUNT", zh: "指令格式不对" },
   E_ACCOUNT_UNPRICED: { layer: "ACCOUNT", zh: "这个资产在这里没有价格，无法判断额度，拒绝" },
+  E_ACCOUNT_CREDENTIAL: { layer: "ACCOUNT", zh: "这个连接要用的凭据不在说好的地方，或者不能用" },
   // the payee — the other side of a payment the agent makes
   E_PAYEE_CHANGED: { layer: "PAYEE", zh: "收款地址和这个 host 钉住的不一样" },
   E_PAYEE_OVERCHARGE: { layer: "PAYEE", zh: "收款方要的比授权的多" },

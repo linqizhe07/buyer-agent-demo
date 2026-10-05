@@ -74,6 +74,8 @@ export interface Door {
   frontLine: FrontLine;
   /** the venue itself does not serve this customer's region: every rail is closed */
   restricted?: string | undefined;
+  /** a live venue connected read-only: the account sends it nothing, so every rail is closed */
+  watchOnly?: string | undefined;
   in: Rail[];
   out: Rail[];
   /** sub-ledgers money moves between at once, and who may move it */
@@ -93,6 +95,7 @@ export const CCTP_FORWARD_FEE = 0.2;
 export const CCTP_DOMAIN: Record<string, number> = { Ethereum: 0, Optimism: 2, Arbitrum: 3, Base: 6, Polygon: 7, HyperEVM: 19 };
 const free = () => 0;
 const whyRegion = "the venue does not serve this region";
+export const whyWatchOnly = "a live venue, connected read-only: the account reads it and sends it nothing";
 
 /** How one kind of exchange account is reached. Plugging in an exchange the account has never seen is picking one of these and handing over a
  * credential REFERENCE: no line of code names the new exchange. Its doors then follow from what the exchange says that key may do — `rails`
@@ -210,6 +213,11 @@ function rails(a: Account): Pick<Door, "in" | "out" | "inside" | "swap" | "agent
 export function doorOf(a: Account): Door {
   const r = rails(a);
   const door: Door = { venue: a.id, name: a.name, frontLine: FRONT_LINE[a.kind], ...r };
+  // a live venue is read, not written: whatever its key could do there, the account starts nothing through it
+  if (a.watchOnly !== undefined) {
+    const shut = (x: Rail): Rail => ({ ...x, access: "closed", why: whyWatchOnly, opens: "nothing yet: live connections are read-only" });
+    return { ...door, watchOnly: a.watchOnly, in: r.in.map(shut), out: r.out.map(shut), inside: r.inside.map((x) => ({ ...x, access: "closed" as const })), swap: r.swap.map((x) => ({ ...x, access: "closed" as const })), agentKey: { model: a.address ? "none: an address the account reads" : "a read-only connection with the key in the home directory", can: "nothing: no agent key reaches a live venue", cannot: "trade, move or pay there" } };
+  }
   if (a.restricted === undefined) return door;
   const shut = (x: Rail): Rail => ({ ...x, access: "closed", why: whyRegion, opens: undefined });
   return { ...door, restricted: a.restricted, in: r.in.map(shut), out: r.out.map(shut), inside: r.inside.map((x) => ({ ...x, access: "closed" as const })), swap: r.swap.map((x) => ({ ...x, access: "closed" as const })) };
@@ -319,7 +327,7 @@ export function plan(req: RouteRequest, venues: VenueView[], nowMs: number): Rou
     const shift = sd.inside.find((x) => x.from === (req.fromLedger ?? "") && x.to === (req.toLedger ?? ""));
     if (!shift) return no("E_VENUE_RAIL_CLOSED", { venue: src.id, message: `${src.name} has no transfer from "${req.fromLedger ?? "?"}" to "${req.toLedger ?? "?"}"`, detail: { inside: sd.inside.map((x) => `${x.from} → ${x.to}`) } });
     const token = req.token ?? "USDC";
-    return finish(req, token, token, [{ step: "shift", venue: src.id, rail: "inside", protocol: shift.protocol, token, fromLedger: shift.from, toLedger: shift.to, feeUsd: 0, etaSec: 0, access: shift.access, ...(shift.access === "closed" ? { why: sd.restricted ? whyRegion : "this key cannot transfer inside the venue" } : {}), final: true }], nowMs);
+    return finish(req, token, token, [{ step: "shift", venue: src.id, rail: "inside", protocol: shift.protocol, token, fromLedger: shift.from, toLedger: shift.to, feeUsd: 0, etaSec: 0, access: shift.access, ...(shift.access === "closed" ? { why: sd.watchOnly ? whyWatchOnly : sd.restricted ? whyRegion : "this key cannot transfer inside the venue" } : {}), final: true }], nowMs);
   }
 
   const outRail = src.id === HUB ? undefined : sd.out[0];
@@ -354,7 +362,7 @@ export function plan(req: RouteRequest, venues: VenueView[], nowMs: number): Rou
     const sw = sd.swap.find((x) => x.pair.includes(token) && x.pair.includes(wantToken));
     if (!sw) return no("E_VENUE_CURRENCY", { venue: dd?.venue ?? src.id, message: `${src.name} holds ${token}, ${dd?.name ?? "the destination"} takes ${wantToken}, and ${src.name} cannot swap one for the other`, detail: { holds: token, takes: wantToken } });
     if (usd < sw.minUsd) return no("E_VENUE_MIN_DEPOSIT", { venue: src.id, message: `${src.name}: a swap is at least $${sw.minUsd}`, detail: { minUsd: sw.minUsd, amountUsd: usd } });
-    legs.push({ step: "swap", venue: src.id, rail: "swap", protocol: sw.protocol, token: wantToken, feeUsd: r2((usd * sw.feeBps) / 10_000), etaSec: 0, access: sw.access, ...(sw.access === "closed" ? { why: sd.restricted ? whyRegion : "this key cannot trade here" } : {}), final: true });
+    legs.push({ step: "swap", venue: src.id, rail: "swap", protocol: sw.protocol, token: wantToken, feeUsd: r2((usd * sw.feeBps) / 10_000), etaSec: 0, access: sw.access, ...(sw.access === "closed" ? { why: sd.watchOnly ? whyWatchOnly : sd.restricted ? whyRegion : "this key cannot trade here" } : {}), final: true });
     token = wantToken;
   }
 

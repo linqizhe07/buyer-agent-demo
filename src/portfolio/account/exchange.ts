@@ -31,9 +31,10 @@ import { r2, type Account, type AccountAdapter, type AgentId, type ExecResult, t
 import { evaluate, type AskReason, type Openness } from "../openness.ts";
 import { parseIntent, parseOrder } from "../intents.ts";
 import { achArrival, etDate, whenLabel } from "./calendar.ts";
-import { doorOf, plan, type Door, type Leg, type Rail, type Route, type RouteRequest, type VenueView } from "./doors.ts";
+import { doorOf, plan, type Door, type Leg, type Rail, type Route, type RouteRequest, type VenueView, whyWatchOnly } from "./doors.ts";
 import { heldUsd, inFlightUsd, launch, newPayment, returnPayment, settleDue, type Advance, type Authority, type Money, type Payment, type PaymentKind } from "./payments.ts";
 import { actionHash, isAgentAction, isDeviceSig, isJwk, isOwnerAction, kidOf, malformed, micro, MONEY_TTL_MS, MONEY_TYPES, NonceBook, ownerTypedData, shownFields, signerOf, type Action, type AgentAction, type AnySig, type Envelope, type Hex, type Jwk, type OwnerAction, type SendAsset } from "./sign.ts";
+import { LiveMoves, type LiveMoney } from "./live-moves.ts";
 import { activeAgents, agentStatus, applyOwner, covers, deviceKeys, emptyState, isOwner, spendFor, type AccountState, type AgentKey, type OwnerKey, type SpendApproval, type SubAccount } from "./state.ts";
 
 const HUB = "metamask";
@@ -101,10 +102,40 @@ export interface Host {
   /** a change only the owner signs: opening the dial, switching an account back on, widening reach — and the owner's own acts on the simulation (talking to the page's agent, pushing the clock) */
   widen(change: string, value: string): Promise<Refusal | { ok: true; summary: string; data?: unknown }>;
   /** plug in a venue the owner names, and unplug one that was plugged in */
-  connect(venue: string, connector: string, label: string, credentialRef: string): Refusal | { ok: true; summary: string; native?: unknown };
+  connect(venue: string, connector: string, label: string, credentialRef: string): Refusal | { ok: true; summary: string; native?: unknown } | Promise<Refusal | { ok: true; summary: string; native?: unknown }>;
   disconnect(venue: string): Refusal | { ok: true; summary: string };
   /** the venues the owner could plug in, and how each is reached */
   connectable(): Connectable[];
+  /** the LIVE connections this service can make: real venues, read through their own interfaces (absent on a host that has none) */
+  live?(): LiveOptions;
+  /** real money at venues connected live: whether this server moves it, and the venues (absent: none) */
+  liveMoney?(): LiveMoney;
+  /** when the server moves real money, the code it printed in its terminal: the first device becomes the owner only with it */
+  pairingCode?(): string | undefined;
+}
+
+/** one way of connecting a real venue, as the page offers it */
+export interface LiveOption {
+  /** what `connectVenue.connector` carries: `live:exchange:binance`, `live:alpaca`, `live:wallet` … */
+  connector: string;
+  label: string;
+  /** a key file in the home directory, or an address */
+  needs: "key-file" | "address" | "cli";
+  /** what goes in the key file, or what kind of address */
+  example: string;
+  /** where the key file is looked for when the owner does not say */
+  defaultRef?: string | undefined;
+  /** the venues already on the account that this is the real side of */
+  venues: string[];
+  kind: string;
+}
+
+export interface LiveOptions {
+  /** the home directory key files live in */
+  home: string;
+  options: LiveOption[];
+  /** whether this server moves real money, the most one movement may be, and how to turn it on */
+  writes?: { on: boolean; capUsd: number; turnOn: string } | undefined;
 }
 
 export interface Connectable {
@@ -189,12 +220,17 @@ export class AccountEngine {
   private readonly taken = new Set<string>();
   private seq = 0;
   private payer: Payer | undefined;
+  /** the door for REAL money at venues connected live (account/live-moves.ts) */
+  readonly live: LiveMoves;
+  /** wrong pairing codes since the server started: after a few, none is accepted until it restarts */
+  private codeMisses = 0;
 
   constructor(
     readonly host: Host,
     private readonly seed: AccountSeed = {},
   ) {
     this.state = { ...emptyState(), owners: [...(seed.owners ?? [])] };
+    this.live = new LiveMoves(this as never);
   }
 
   /** everything but the nonce books goes back to the start: an old signed envelope must not come back to life with the account */
@@ -244,11 +280,22 @@ export class AccountEngine {
 
   /** A browser offers the public half of its device key. The first one becomes the owner's device (trust on first use: whoever opens the
    * page first holds the account — a real product pairs out of band); a later one waits until the owner makes it a signer. */
-  pairDevice(jwk: unknown, label = "this browser"): { ok: true; kid: string; role: "owner" | "pending" } | Refusal {
+  pairDevice(jwk: unknown, label = "this browser", code?: string): { ok: true; kid: string; role: "owner" | "pending" | "needs-code" } | Refusal {
     if (!isJwk(jwk)) return no("E_ACCOUNT_BAD_ACTION", { message: "a device key is a P-256 public key (JWK)" });
     const kid = kidOf(jwk);
     const id = `device:${kid}`;
     if (isOwner(this.state, id)) return { ok: true, kid, role: "owner" };
+    // a server that moves real money does not hand the account to the first browser to ask: the owner types the code its terminal printed
+    const expected = this.host.pairingCode?.();
+    if (this.state.owners.length === 0 && expected !== undefined) {
+      if (code === undefined || code === "") return { ok: true, kid, role: "needs-code" };
+      if (this.codeMisses >= 5) return no("E_ACCOUNT_OWNER_SURFACE", { message: "too many wrong pairing codes: restart the server for a new one" });
+      const plain = (x: string) => x.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+      if (plain(code) !== plain(expected)) {
+        this.codeMisses++;
+        return no("E_ACCOUNT_OWNER_SURFACE", { message: `that is not the pairing code this server printed in its terminal (${5 - this.codeMisses} tries left)` });
+      }
+    }
     if (this.state.owners.length === 0) {
       this.state = { ...this.state, owners: [{ id, kind: "device", label, jwk: { kty: "EC", crv: "P-256", x: jwk.x, y: jwk.y }, addedAt: this.host.now() }] };
       this.host.log({ kind: "action", venue: "*", tool: "account_pair", signer: id, reason: `the first device to open the account became its owner's device (${label})` });
@@ -366,15 +413,19 @@ export class AccountEngine {
       case "connectVenue":
       case "disconnectVenue": {
         // a venue with money on its way to it or from it stays plugged in until that has landed
-        const busy = action.type === "disconnectVenue" && this.payments.find((p) => p.status === "pending" && (p.from === action.venue || p.to === action.venue));
-        if (busy) return no("E_ACCOUNT_BAD_ACTION", { venue: action.venue, message: `${this.name(action.venue)} has a payment in flight (${busy.id}): it can be unplugged when that has landed`, detail: { payment: busy.id } });
-        const r = action.type === "connectVenue" ? this.host.connect(action.venue, action.connector, action.label, action.credentialRef) : this.host.disconnect(action.venue);
+        const busy = this.host.adapter(action.venue) ? this.payments.find((p) => p.status === "pending" && (p.from === action.venue || p.to === action.venue)) : undefined;
+        if (busy) return no("E_ACCOUNT_BAD_ACTION", { venue: action.venue, message: `${this.name(action.venue)} has a payment in flight (${busy.id}): it can be ${action.type === "connectVenue" ? "connected live" : "unplugged"} when that has landed`, detail: { payment: busy.id } });
+        const r = action.type === "connectVenue" ? await this.host.connect(action.venue, action.connector, action.label, action.credentialRef) : this.host.disconnect(action.venue);
         if (isRefusal(r)) return r;
         this.host.log({ kind: "action", venue: action.venue, tool: action.type, signer, envelope, outcome: "ok", reason: r.summary, ...("native" in r && r.native !== undefined ? { native: r.native } : {}) });
         return { ok: true, kind: "account", summary: r.summary };
       }
       case "approveCard":
         return this.answerCard(action, envelope, signer);
+      case "liveMove":
+        return this.live.owner(action, { signer, envelope, hash });
+      case "agentLiveMove":
+        return this.live.agent(action, { signer, envelope, hash, agent: agent! });
       case "sendAsset":
         return this.move(action, { signer, authority: "owner", envelope, hash });
       case "swap":
@@ -625,7 +676,7 @@ export class AccountEngine {
     const door = doorOf(a.account);
     const sw = door.swap.find((s) => s.pair.includes(sell) && s.pair.includes(buy) && sell !== buy);
     if (!sw) return no("E_VENUE_CURRENCY", { venue, message: `${a.account.name} does not swap ${sell} for ${buy}`, detail: { swaps: door.swap.map((s) => s.pair.join("/")) } });
-    if (sw.access === "closed") return no("E_VENUE_RAIL_CLOSED", { venue, message: `${a.account.name}: ${door.restricted ? "the venue does not serve this region" : "this key cannot trade here"}` });
+    if (sw.access === "closed") return no("E_VENUE_RAIL_CLOSED", { venue, message: `${a.account.name}: ${door.watchOnly ? whyWatchOnly : door.restricted ? "the venue does not serve this region" : "this key cannot trade here"}` });
     if (who.authority === "agent" && sw.access !== "agent") return no("E_ACCOUNT_OWNER_ONLY", { venue, message: `a swap at ${a.account.name} is the owner's to sign` });
     if (usd < sw.minUsd) return no("E_VENUE_MIN_DEPOSIT", { venue, message: `${a.account.name}: a swap is at least $${sw.minUsd}`, detail: { minUsd: sw.minUsd } });
     const expected = r2(usd - (usd * sw.feeBps) / 10_000);
@@ -702,7 +753,10 @@ export class AccountEngine {
     const status = agentStatus(this.state, card.signer ?? "", now);
     let again: Outcome;
     if (!key || status !== "ok") again = no(status === "expired" ? "E_ACCOUNT_AGENT_EXPIRED" : "E_ACCOUNT_AGENT_REVOKED", { detail: { signer: card.signer } });
-    else if (card.action.type === "agentSendAsset" || (card.action.type === "agentPay" && this.payer)) {
+    else if (card.action.type === "agentLiveMove") {
+      release();
+      again = await this.live.release(card, { signer: key.address, agent: key });
+    } else if (card.action.type === "agentSendAsset" || (card.action.type === "agentPay" && this.payer)) {
       // what the card held of the budget goes back first: the instruction is then judged against the approval like any other — every limit of it
       release();
       again = card.action.type === "agentSendAsset" ? await this.move(card.action, { signer: key.address, authority: "agent", agent: key, envelope, hash: card.actionHash! }, card) : await this.payer!.pay(card.action, { signer: key.address, agent: key, envelope, hash: actionHash(card.action) }, card);
@@ -722,6 +776,7 @@ export class AccountEngine {
   async settle(): Promise<void> {
     this.record(await settleDue(this.payments, this.nowMs(), this.money()));
     this.payer?.tick(this.nowMs());
+    await this.live.poll();
   }
 
   private record(events: Advance[]): void {
@@ -799,7 +854,7 @@ export class AccountEngine {
       const stable = (h: Holding) => h.class === "stable" || h.class === "cash";
       const rail = (dir: string, x: Rail): RunwayRow => ({ dir, protocol: x.protocol, carries: x.tokens.join(" · "), chains: x.chains, feeOn1000: x.fee(1000, x.chains[0]), lands: x.clock === "ach" ? etDate(achArrival(now)) : eta(x.etaSec), access: x.access, ...(x.why ? { why: x.why } : {}), ...(x.opens ? { opens: x.opens } : {}), ...(x.minUsd !== undefined ? { minUsd: x.minUsd } : {}), final: x.final, ...(x.returnDays ? { returnDays: x.returnDays } : {}) });
       const runways: RunwayRow[] = [...d.in.map((x) => rail("In", x)), ...d.out.map((x) => rail("Out", x)), ...d.inside.map((x) => ({ dir: "Inside", protocol: x.protocol, carries: `${x.from} → ${x.to}`, chains: [], feeOn1000: 0, lands: "now", access: x.access, final: true })), ...d.swap.map((x) => ({ dir: "Swap", protocol: x.protocol, carries: x.pair.join(" ⇄ "), chains: [], feeOn1000: r2((1000 * x.feeBps) / 10_000), lands: "now", access: x.access, minUsd: x.minUsd, final: true }))];
-      return { id: v.id, name: v.name, frontLine: d.frontLine, usd: r2(v.holdings.filter((h) => h.class !== "credit").reduce((s, h) => s + h.usd, 0)), cashUsd: r2(v.holdings.filter((h) => stable(h) && !h.inTransit).reduce((s, h) => s + h.usd, 0)), holdings: v.holdings.map((h) => ({ asset: h.asset, amount: h.amount, usd: h.usd, note: h.note, inTransit: h.inTransit === true })), ...(d.restricted ? { restricted: d.restricted } : {}), ...(v.plugged ? { plugged: true, via: v.connector === "wallet" ? "plugged in by address" : `plugged in · ${v.scope.limits[0] ?? ""}` } : {}), in: label(d.in[0], v.name, v.kind === "bank", true), out: label(d.out[0], v.name, v.kind === "bank"), fiat: (d.in[0] ?? d.out[0])?.chains.length === 0, ledgers: [...new Set(d.inside.flatMap((x) => (x.from === "chain" ? [] : [x.from, x.to])))], swaps: d.swap.map((x) => ({ pair: x.pair, feeBps: x.feeBps, minUsd: x.minUsd, access: x.access })), agentKey: d.agentKey, runways };
+      return { id: v.id, name: v.name, frontLine: d.frontLine, usd: r2(v.holdings.filter((h) => h.class !== "credit").reduce((s, h) => s + h.usd, 0)), cashUsd: r2(v.holdings.filter((h) => stable(h) && !h.inTransit).reduce((s, h) => s + h.usd, 0)), holdings: v.holdings.map((h) => ({ asset: h.asset, amount: h.amount, usd: h.usd, note: h.note, inTransit: h.inTransit === true })), ...(d.restricted ? { restricted: d.restricted } : {}), ...(v.plugged ? { plugged: true, via: v.watchOnly ? `${v.provider} · ${v.scope.limits[0] ?? ""}` : v.connector === "wallet" ? "plugged in by address" : `plugged in · ${v.scope.limits[0] ?? ""}` } : {}), ...(v.watchOnly ? { live: true as const, watchOnly: v.watchOnly, ...(v.asOf ? { asOf: v.asOf } : {}), ...(v.stale ? { stale: v.stale } : {}), ...(v.proven ? { proven: v.proven } : {}), ...(v.liveCan ? { liveCan: v.liveCan } : {}), ...(v.readOnlyBecause ? { readOnlyBecause: v.readOnlyBecause } : {}), ...(v.address ? { address: v.address } : {}) } : v.live ? { live: true as const } : {}), in: label(d.in[0], v.name, v.kind === "bank", true), out: label(d.out[0], v.name, v.kind === "bank"), fiat: (d.in[0] ?? d.out[0])?.chains.length === 0, ledgers: [...new Set(d.inside.flatMap((x) => (x.from === "chain" ? [] : [x.from, x.to])))], swaps: d.swap.map((x) => ({ pair: x.pair, feeBps: x.feeBps, minUsd: x.minUsd, access: x.access })), agentKey: d.agentKey, runways };
     });
     const owners = this.state.owners.map((o) => ({ id: o.id, kind: o.kind, label: o.label }));
     return {
@@ -817,6 +872,8 @@ export class AccountEngine {
       cards: this.host.cards().filter((c) => c.status === "pending").map((c) => ({ id: c.id, flight: c.flight, usd: c.usd, reason: c.reason, hash: cardHash(c), ...(c.expiresAt ? { expiresAt: c.expiresAt } : {}), shown: c.action ? [...Object.entries(c.offer ?? {}).map(([name, value]) => ({ name, value: String(value) })), ...Object.entries(c.action).filter(([k]) => k !== "type" && k !== "mandates" && k !== "cnf").map(([name, value]) => ({ name, value: typeof value === "object" ? JSON.stringify(value) : String(value) }))] : [{ name: "account", value: c.account }, { name: "what", value: JSON.stringify(c.intent) }] })),
       pay: this.payer?.view() ?? { payees: [], sessions: [] },
       connectable: this.host.connectable(),
+      liveUsd: r2(venues.filter((v) => "live" in v && v.live).reduce((s, v) => s + v.usd, 0)),
+      ...(this.host.live ? { connectLive: this.host.live() } : {}),
       subAccounts: this.state.subAccounts.map((s) => ({ id: s.id, name: s.name, agent: s.agent, agentName: this.state.agents.find((k) => k.address === s.agent)?.name ?? s.agent, address: s.address, capUsd: s.capMicro / 1e6, balanceUsd: s.balanceMicro / 1e6 })),
       signers: { owners, threshold: this.state.threshold, pendingDevices: this.state.pendingDevices.map((d) => ({ kid: d.kid, at: d.at })) },
       destinations: this.state.destinations.map((d) => ({ ...d, usable: now >= Date.parse(d.usableAt), usableOn: etDate(Date.parse(d.usableAt)) })),
@@ -852,6 +909,14 @@ export class AccountEngine {
       // a leg out of a wallet the account holds no key for is signed in that wallet: the page says so before the owner signs here
       const inWallet = route.legs.find((l) => l.step === "out" && this.host.adapter(l.venue)?.account.connector === "wallet");
       quote = { words: routeWords(route, (id) => this.name(id), this.nowMs()), feeUsd: route.feeUsd, receiveUsd: route.receiveUsd, lands: whenLabel(this.nowMs(), route.arrivalMs), access: route.access, ...(route.access === "venue" ? { startAt: this.name(route.legs[0]!.venue) } : {}), ...(inWallet ? { signAt: this.name(inWallet.venue) } : {}), final: route.legs[route.legs.length - 1]!.final, legs: route.legs.map((l) => ({ step: l.step, venue: this.name(l.venue), protocol: l.protocol, feeUsd: l.feeUsd })) };
+    } else if (type === "liveMove") {
+      // real money: the destination address is asked of the destination venue here, never taken from the page
+      const r = await this.live.prepare(draft);
+      if (isRefusal(r)) return r;
+      action = { ...r, nonce };
+      const fee = Number(r.maxFee);
+      const writes = this.host.liveMoney?.().writes();
+      quote = { words: `${r.kind} ${r.amount} ${r.asset}${r.kind === "swap" ? ` for ${r.toAsset}` : ""}`, feeUsd: fee, receiveUsd: r2(Math.max(0, Number(r.amount) - fee)), lands: r.kind === "transfer" || r.kind === "swap" ? "at once" : "when the venue has sent it", access: "owner", final: true, legs: [], live: { toAddress: r.toAddress, network: r.network, capUsd: writes?.capUsd ?? 0 } };
     } else if (isOwnerAction({ type })) {
       action = { ...draft, type, nonce } as unknown as OwnerAction;
     } else return no("E_ACCOUNT_BAD_ACTION", { message: `"${type}" is not something the owner signs` });
@@ -870,7 +935,7 @@ export interface Prepared {
   domain: { name: string; version: string; chainId: number };
   accountChain: string;
   shown: Array<{ name: string; value: string }>;
-  quote?: { words: string; feeUsd: number; receiveUsd: number; lands: string; access: string; startAt?: string; signAt?: string; final: boolean; legs: Array<{ step: string; venue: string; protocol: string; feeUsd: number }> } | undefined;
+  quote?: { words: string; feeUsd: number; receiveUsd: number; lands: string; access: string; startAt?: string; signAt?: string; live?: { toAddress: string; network: string; capUsd: number }; final: boolean; legs: Array<{ step: string; venue: string; protocol: string; feeUsd: number }> } | undefined;
 }
 
 /** one rail of a venue as the Runways tab shows it */
@@ -903,7 +968,7 @@ export interface AccountPage {
   inFlightUsd: number;
   /** what open payment sessions hold in escrow that is still the user's */
   heldUsd: number;
-  venues: Array<{ id: string; name: string; frontLine: string; usd: number; cashUsd: number; holdings: Array<{ asset: string; amount: number; usd: number; note?: string | undefined; inTransit: boolean }>; restricted?: string; /** the owner plugged it in: it can be unplugged */ plugged?: boolean; via?: string; in: RunwayLabel; out: RunwayLabel; /** it moves dollars by ACH, not stablecoins on a chain */ fiat: boolean; ledgers: string[]; swaps: Array<{ pair: [string, string]; feeBps: number; minUsd: number; access: string }>; agentKey: Door["agentKey"]; runways: RunwayRow[] }>;
+  venues: Array<{ id: string; name: string; frontLine: string; usd: number; cashUsd: number; holdings: Array<{ asset: string; amount: number; usd: number; note?: string | undefined; inTransit: boolean }>; restricted?: string; /** the owner plugged it in: it can be unplugged */ plugged?: boolean; via?: string; /** its balances are the real venue's */ live?: true; /** connected read-only: every door through it is shut */ watchOnly?: string; asOf?: string; stale?: string; proven?: string; liveCan?: Account["liveCan"]; readOnlyBecause?: string; address?: string; in: RunwayLabel; out: RunwayLabel; /** it moves dollars by ACH, not stablecoins on a chain */ fiat: boolean; ledgers: string[]; swaps: Array<{ pair: [string, string]; feeBps: number; minUsd: number; access: string }>; agentKey: Door["agentKey"]; runways: RunwayRow[] }>;
   payments: Payment[];
   keys: Array<{ address: string; name: string; code: string; validUntil: string; approvedAt: string; status: string }>;
   requests: AccountState["requests"];
@@ -918,6 +983,10 @@ export interface AccountPage {
   pay: PayView;
   /** venues the owner has and could plug in */
   connectable: Connectable[];
+  /** how much of the total is real money at venues connected live */
+  liveUsd: number;
+  /** the real venues this service can connect, read-only */
+  connectLive?: LiveOptions | undefined;
 }
 
 export type { Jwk };

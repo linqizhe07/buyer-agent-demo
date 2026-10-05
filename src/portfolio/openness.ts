@@ -78,7 +78,8 @@ export function effectiveReach(a: Account, o: Openness): Capability[] {
 }
 
 /** why a write waits for the human: a never-used address · a prediction market past its close and not yet resolved · the Guard allowance · a first payment to a payee the owner has not paid before (the account layer) */
-export type AskReason = "stranger" | "awaiting" | "allowance" | "payee";
+/** `live`: real money at a venue connected live — the owner signs every one */
+export type AskReason = "stranger" | "awaiting" | "allowance" | "payee" | "live";
 
 export interface Card {
   why: AskReason;
