@@ -85,30 +85,5 @@
       "0x5a1e…kyc",
       "wallet-main"
     ]
-  },
-  "mastercard": {
-    "last4": "4421",
-    "creditLimitUsd": 5000,
-    "availableUsd": 4300,
-    "token": {
-      "id": "agt_7f3a",
-      "maxPerTxnUsd": 500,
-      "dailyUsd": 1500,
-      "mccAllow": {
-        "4816": "network services",
-        "5734": "software stores",
-        "5968": "subscriptions",
-        "7372": "software / SaaS"
-      },
-      "expiresAt": "2026-12-31T00:00:00Z"
-    }
-  },
-  "chase": {
-    "name": "Chase Checking",
-    "mask": "··1182",
-    "aggregator": "open-banking aggregation token (Plaid-shaped)",
-    "balances": {
-      "USD": 12400
-    }
   }
 }

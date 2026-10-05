@@ -4,7 +4,7 @@
  * was shown and never passed. Here money that has left one place and not yet
  * reached the next is IN FLIGHT — it is in no balance, nothing can spend it —
  * and each leg of a route lands when its rail says it does: seconds for a
- * chain, a bank day for an ACH.
+ * chain, minutes for an exchange's withdrawal.
  *
  *   authorized  approved, nothing has left yet (a card is waiting)
  *   pending     in flight; the leg that is flying says where
@@ -13,8 +13,6 @@
  *   stranded    a later leg was refused after an earlier one landed: the money
  *               is still the user's, sitting at the hub, and the payment says
  *               where and how to bring it back
- *   returned    the other side sent it back — which can happen AFTER settled
- *               (an ACH can be returned for weeks)
  *   unknown     the venue did not answer; reconcile decides
  *
  * A leg starts when the one before it lands, at THAT instant (not at whatever
@@ -24,13 +22,12 @@
 import { isRefusal, type Refusal } from "../../core/errors.ts";
 import { no } from "../refuse.ts";
 import { chainIdOf, r2, type AccountAdapter } from "../accounts.ts";
-import { achArrival } from "./calendar.ts";
 import { nativeRequest, type Leg, type Route } from "./doors.ts";
 import type { Hex } from "./sign.ts";
 
-export type PaymentStatus = "authorized" | "pending" | "settled" | "failed" | "stranded" | "returned" | "unknown";
+export type PaymentStatus = "authorized" | "pending" | "settled" | "failed" | "stranded" | "unknown";
 export type PaymentKind = "deposit" | "withdraw" | "transfer" | "send" | "swap" | "pay" | "refill";
-export type Authority = "owner" | "agent" | "venue";
+export type Authority = "owner" | "agent";
 
 export interface PaymentLeg extends Leg {
   status: "waiting" | "pending" | "settled" | "failed";
@@ -78,7 +75,7 @@ export interface Payment {
   /** where the money is while it is not at its destination, and what to do about it */
   note?: string | undefined;
   /** REAL money at venues connected live: it lands when the venue or the chain says so, never by the simulation's clock */
-  live?: { kind: string; toAddress?: Hex | undefined; network?: string | undefined; txHash?: Hex | undefined } | undefined;
+  live?: { kind: string; toAddress?: Hex | undefined; network?: string | undefined; txHash?: Hex | undefined; /** a bridge: the chain it lands on, and the bridge that carries it */ toNetwork?: string | undefined; tool?: string | undefined; /** a wallet's transaction: the latest it is to be sent, and the hash the wallet reported for it */ sendBy?: string | undefined; reported?: Hex | undefined; /** given up on for not being sent in time */ expired?: boolean | undefined } | undefined;
 }
 
 export interface Money {
@@ -163,24 +160,6 @@ async function startLeg(p: Payment, i: number, atMs: number, m: Money): Promise<
       lands(atMs);
       return null;
     }
-    case "venue": {
-      // the account holder at the venue's own page. The bank is the other side of the ACH: it is debited when the pull is made, credited when the payout lands
-      const inbound = leg.venue === p.to;
-      const bank = m.adapter(inbound ? p.from : p.to);
-      if (inbound) {
-        const d = bank?.debit?.("USD", amount) ?? no("E_VENUE_RAIL_CLOSED", { venue: p.from });
-        if (isRefusal(d)) return failLeg(leg, d);
-      }
-      const r = a.startAtVenue?.(inbound ? "in" : "out", "USD", amount) ?? no("E_VENUE_RAIL_CLOSED", { venue: leg.venue });
-      if (isRefusal(r)) {
-        if (inbound) bank?.credit?.("USD", amount);
-        return failLeg(leg, r);
-      }
-      leg.ref = r.ref;
-      leg.native = r.native ?? leg.native;
-      lands(r.settlesAt ? Date.parse(r.settlesAt) : achArrival(atMs));
-      return null;
-    }
     case "out": {
       if (viaCredential) {
         const r = await a.execute({ kind: "move", asset: leg.token, amount, to, ...(leg.chain && chainIdOf(leg.chain) !== undefined ? { fromChainId: chainIdOf(leg.chain), chainId: chainIdOf(leg.chain) } : {}) });
@@ -222,7 +201,6 @@ function landLeg(p: Payment, i: number, m: Money): void {
   if (leg.step === "in") m.adapter(leg.venue)?.credit?.(leg.token, after, leg.toLedger ?? (m.adapter(leg.venue)?.account.kind === "agent-wallet" ? leg.chain : undefined));
   else if (leg.step === "bridge") hub?.credit?.(leg.token, after, leg.chain);
   else if (leg.step === "out" && leg.venue !== HUB && (!next || next.venue === HUB)) hub?.credit?.(leg.token, after, leg.chain);
-  else if (leg.step === "venue") m.adapter(p.to)?.credit?.("USD", after);
 }
 
 export interface Advance {
@@ -281,22 +259,6 @@ export async function settleDue(payments: Payment[], nowMs: number, m: Money): P
     }
   }
   return out;
-}
-
-/** The other side sent it back (an ACH return): undo the credit, give the source its money back. Possible after `settled`. */
-export function returnPayment(p: Payment, code: string, description: string, m: Money): Refusal | null {
-  if (p.status !== "settled" && p.status !== "pending") return no("E_ACCOUNT_BAD_ACTION", { message: `payment ${p.id} is ${p.status}: there is nothing to return` });
-  const last = p.legs[p.legs.length - 1]!;
-  if (last.final) return no("E_ACCOUNT_BAD_ACTION", { message: `payment ${p.id} travelled on a final rail (${last.protocol}): it cannot come back` });
-  if (p.status === "settled") {
-    const d = m.adapter(p.to)?.debit?.(p.token, p.receiveUsd);
-    if (!d || isRefusal(d)) return no("E_VENUE_RETURNED", { venue: p.to, message: `the return of ${p.id} could not be taken back from ${p.to}: the money was already used there`, native: { return_code: code } });
-  }
-  m.adapter(p.from)?.credit?.(p.sourceToken, p.amountUsd);
-  for (const l of p.legs) if (l.status === "pending") l.status = "failed";
-  p.status = "returned";
-  p.note = `returned by the bank: ${code} ${description}`;
-  return null;
 }
 
 /** money that has left somewhere and is not anywhere yet */

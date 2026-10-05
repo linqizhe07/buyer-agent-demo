@@ -25,11 +25,6 @@ export function parseIntent(raw: unknown): Intent | null {
       const chainId = num(o.chainId);
       return Number.isFinite(chainId) ? { kind: "move", asset: str(o.asset).toUpperCase(), amount, to: str(o.to), chainId } : { kind: "move", asset: str(o.asset).toUpperCase(), amount, to: str(o.to) };
     }
-    case "pay": {
-      const amountUsd = num(o.amountUsd);
-      if (!str(o.merchant) || !str(o.mcc) || !(amountUsd > 0)) return null;
-      return { kind: "pay", merchant: str(o.merchant), mcc: str(o.mcc), amountUsd };
-    }
     case "subscribe":
     case "redeem": {
       const amountUsd = num(o.amountUsd);

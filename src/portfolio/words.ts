@@ -103,8 +103,6 @@ export function plainRefusal(r: Refusal, nameOf: (id: string) => string): string
       return `${who} refused: this credential lacks the permission`;
     case "E_VENUE_WITHDRAW_WHITELIST":
       return `${who} refused: the address is not on its withdrawal whitelist`;
-    case "E_VENUE_CARD_DECLINED":
-      return "the card issuer declined";
     case "E_VENUE_TRANSFER_RESTRICTED":
       return "the token contract refused: the recipient is not on the issuer's allowlist";
     case "E_VENUE_INSUFFICIENT":
@@ -113,6 +111,8 @@ export function plainRefusal(r: Refusal, nameOf: (id: string) => string): string
       return `${who} refused: it takes no orders from this region`;
     case "E_VENUE_MARKET_CLOSED":
       return `${who} refused: this market takes no more orders`;
+    case "E_VENUE_ORDER_INVALID":
+      return `${who} does not take the order as written: its size or price`;
     case "E_VENUE_REJECTED":
       return `${who} rejected it`;
     case "E_CARD_REJECTED":
@@ -125,10 +125,6 @@ export function plainRefusal(r: Refusal, nameOf: (id: string) => string): string
       return `that runway at ${who} is closed; not done`;
     case "E_VENUE_CURRENCY":
       return `${who} doesn't take that currency; swap first`;
-    case "E_VENUE_UNSETTLED":
-      return `that cash at ${who} hasn't settled yet; not done`;
-    case "E_VENUE_RETURNED":
-      return "the bank returned it; the money is back where it started";
     case "E_ACCOUNT_UNKNOWN_SIGNER":
       return "this key isn't authorised on your account; not done";
     case "E_ACCOUNT_AGENT_EXPIRED":

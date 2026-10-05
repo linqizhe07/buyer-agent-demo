@@ -94,13 +94,6 @@ export function exchangeWallet(id: string, seed: ExchangeWalletSeed, credentialR
       balances[buy] = r8((balances[buy] ?? 0) + received);
       return { ok: true as const, ref: `${id}:order:${++seq}`, received, feeUsd, native: { id: `order-${seq}`, status: "closed", symbol: "USDC/USDT", filled: received } };
     },
-    /** the account holder at the exchange's own site, where a withdrawal is theirs to start */
-    startAtVenue(direction, asset, amount): VenueResult {
-      if (direction !== "out") return { ok: true as const, native: { address: `deposit address shown at ${seed.name}`, coin: asset } };
-      if ((balances[asset] ?? 0) < amount) return short();
-      balances[asset] = r8((balances[asset] ?? 0) - amount);
-      return { ok: true as const, ref: `${id}:wd:${++seq}`, native: { id: `wd-${seq}`, status: "ok" } };
-    },
   };
   const words = [...seed.key.permissions];
   return { adapter, probe: { can: words, note: perms.has("withdraw") ? `withdrawals only to ${whitelist?.length ? `its verified addresses (${whitelist.join(", ")})` : "addresses verified at the exchange"}` : "withdrawals stay at the exchange: this key has no withdraw permission", native: { permissions: seed.key.permissions, ...(seed.key.ipBound ? { ipRestrict: true } : {}), ...(whitelist ? { withdrawWhitelist: whitelist } : {}) } } };

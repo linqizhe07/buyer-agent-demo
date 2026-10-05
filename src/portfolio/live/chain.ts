@@ -5,7 +5,8 @@
  * A token's decimals are read from the token itself rather than assumed: the same dollar is 6 decimals on one chain and 18 on another.
  * A chain that does not answer is left out and named, so one slow endpoint does not blank the wallet.
  *
- * Only `eth_call` and `eth_getBalance` are ever sent: nothing here can sign, and nothing here sends a transaction.
+ * Only reads are ever sent (`eth_call`, `eth_getBalance`, a transaction and its receipt by hash): nothing here can sign, and nothing here
+ * sends a transaction.
  */
 import { createPublicClient, erc20Abi, formatUnits, http, parseAbi, type Chain, type Hex, type PublicClient } from "viem";
 
@@ -43,6 +44,18 @@ export interface ChainReader {
   decimals(chain: ChainName, token: Hex): Promise<number | undefined>;
   /** a transaction once it is mined; `undefined` while it is not (or the chain does not answer) */
   receipt(chain: ChainName, hash: Hex): Promise<Mined | undefined>;
+  /** a transaction by its hash, mined or still waiting to be: who sent it, where, the call and the coin it carries; `undefined` when the
+   * chain does not know it (or does not answer). Optional: a reader without it leaves a sent transaction to be judged by its receipt */
+  transaction?(chain: ChainName, hash: Hex): Promise<SentTx | undefined>;
+}
+
+/** a transaction as it was sent: what a wallet's transaction is checked against before the account follows it */
+export interface SentTx {
+  from: Hex;
+  to: Hex | null;
+  data: Hex;
+  value: bigint;
+  chainId?: number | undefined;
 }
 
 /** Dollar stablecoins by chain, read 2026-10-05. USDC: Circle's own addresses (developers.circle.com), except BNB Chain's, which is
@@ -123,6 +136,14 @@ export function publicChain(env: Record<string, string | undefined> = process.en
       try {
         const r = await client(chain).getTransactionReceipt({ hash });
         return { status: r.status, from: r.from, to: r.to, logs: r.logs.map((l) => ({ address: l.address, topics: [...l.topics] as Hex[], data: l.data })) };
+      } catch {
+        return undefined;
+      }
+    },
+    async transaction(chain, hash) {
+      try {
+        const t = await client(chain).getTransaction({ hash });
+        return { from: t.from, to: t.to ?? null, data: t.input, value: t.value, ...(t.chainId !== undefined ? { chainId: t.chainId } : {}) };
       } catch {
         return undefined;
       }

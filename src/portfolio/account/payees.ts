@@ -8,33 +8,30 @@
  *   402 + PAYMENT-REQUIRED            x402 V2 `exact`      data.sim    $0.01 a quote
  *   402 + WWW-Authenticate: Payment   MPP `charge`         infer.sim   $0.02 an answer
  *                                     MPP `session`        infer.sim   a deposit once, then a voucher a call
- *   200 + a checkout                  ACP, by card         shop.sim    a delegated token at psp.sim
- *                                     AP2, from a float    shop.sim    two mandates, then an EIP-3009 payment
+ *   200 + a checkout                  AP2, from a float    shop.sim    two mandates, then an EIP-3009 payment
  *
  * (One protocol per instrument is this demo's pairing, so that each is shown once; neither protocol asks for it.)
  *
  * The order of the checks is the point:
- *   1. the approval     this agent, this host — before one byte goes to the host. (The one host the owner does not name is the payment
- *                       processor a merchant names for a card: it is shown on the first card and pinned together with the merchant.)
- *   2. the source       a float that is this agent's, or the card
+ *   1. the approval     this agent, this host — before one byte goes to the host
+ *   2. the source       a float that is this agent's
  *   3. the payee's ask  its price against `maxAmount`; its address against the one pinned for it
  *   4. the limits       per payment, budget, the dial (session, Guard's cap), the float's balance, an app's
  *                       fee against the rate the owner approved for it
  *   5. the owner        the FIRST payment to a payee is a card that shows who is paid, where and how much;
  *                       the owner's signature covers those fields, and approving pins that address. After
  *                       that, a different address is a refusal, not a question
- *   6. the payment      signed by the float's key (or charged to the card's token). The receipt is checked
+ *   6. the payment      signed by the float's key. The receipt is checked
  *                       against the ledger the money moved on, not taken on the payee's word
  *
  * Everything on the other side is SIMULATED, in this process: the hosts, the facilitator, the token ledger,
- * the escrow contract, the payment processor. The messages and the signatures are real (protocols.ts).
+ * the escrow contract. The messages and the signatures are real (protocols.ts).
  * No request leaves the process: the `.sim` hosts exist only inside it.
  */
 import { keccak256, stringToHex } from "viem";
 import { isRefusal, type Refusal } from "../../core/errors.ts";
 import { canonical } from "../../core/hash.ts";
 import { no } from "../refuse.ts";
-import type { ExecResult, Intent } from "../accounts.ts";
 import { evaluate } from "../openness.ts";
 import { plainRefusal } from "../words.ts";
 import { agentIdOf, CARD_TTL_MS, slug, type AccountEngine, type CardLike, type CardOffer, type Outcome, type PayAction, type Payer, type PayView } from "./exchange.ts";
@@ -44,7 +41,6 @@ import { isJwk, micro, simKey, unmicro, ZERO, type Envelope, type Hex, type Jwk 
 import { covers, spendFor, type AgentKey, type SpendApproval, type SubAccount } from "./state.ts";
 
 const HUB = "metamask";
-const CARD = "mastercard";
 const CHAIN = X.X402_USDC;
 /** what the page calls the simulated chain */
 const NETWORK = "Base Sepolia";
@@ -54,7 +50,7 @@ const TERMS = { network: CHAIN.network, asset: CHAIN.asset, extra: { name: CHAIN
 const ISSUER = simKey("account:mandate-issuer");
 const CP_AUD = "credential-provider";
 const GRACE_MS = 15 * 60_000;
-const LABEL: Record<string, string> = { x402: "x402 · EIP-3009", "mpp-charge": "MPP charge · EIP-3009", "mpp-session": "MPP session · escrow + vouchers", acp: "ACP · delegated card token", ap2: "AP2 mandates · EIP-3009" };
+const LABEL: Record<string, string> = { x402: "x402 · EIP-3009", "mpp-charge": "MPP charge · EIP-3009", "mpp-session": "MPP session · escrow + vouchers", ap2: "AP2 mandates · EIP-3009" };
 
 const usd = (m: number): string => `$${(m / 1e6).toFixed(m % 10_000 === 0 ? 2 : 4)}`;
 const short = (a: string): string => (a.startsWith("0x") && a.length > 14 ? `${a.slice(0, 8)}…${a.slice(-4)}` : a);
@@ -419,82 +415,29 @@ class InferApi {
   };
 }
 
-type CardRail = (i: Intent) => Promise<ExecResult>;
-
-/** psp.sim — the merchant's payment processor, the one ACP hands a card credential to. It issues a token bound to one checkout and charges it once. */
-class Psp {
-  private readonly tokens = new Map<string, { allowance: X.AcpAllowance; used: boolean }>();
-  private readonly idem = new X.Idempotency();
-  private seq = 0;
-
-  constructor(private readonly card: CardRail) {}
-
-  readonly handle: Handler = (c) => {
-    if (c.method !== "POST" || c.url.pathname !== "/agentic_commerce/delegate_payment") return json(404, { type: "invalid_request", code: "not_found", message: "not found" });
-    const bad = acpHeaders(c);
-    if (bad) return bad;
-    const key = c.header("idempotency-key");
-    const seen = this.idem.check(key, c.body);
-    if (seen) return "conflict" in seen ? json(422, { type: "invalid_request", code: "idempotency_conflict", message: "this Idempotency-Key was used with a different body" }) : json(201, seen.replay, { "Idempotent-Replayed": "true" });
-    const b = c.body as { payment_method?: { type?: string }; allowance?: X.AcpAllowance } | undefined;
-    const a = b?.allowance;
-    if (b?.payment_method?.type !== "card" || !a || a.reason !== "one_time" || !(a.max_amount > 0) || !a.checkout_session_id || !a.merchant_id || !a.expires_at) return json(400, { type: "invalid_request", code: "invalid_allowance", message: "a delegated payment needs a card and a one-time allowance bound to a checkout session and a merchant" });
-    const out = { id: `vt_${String(++this.seq).padStart(6, "0")}`, created: iso(c.nowMs), metadata: {} };
-    this.tokens.set(out.id, { allowance: a, used: false });
-    this.idem.store(key, c.body, out);
-    return json(201, out);
-  };
-
-  /** the merchant charges a token: the allowance decides first, then the card network */
-  async charge(token: string, charge: { amount: number; currency: string; merchant_id: string; checkout_session_id: string; merchant: string; mcc: string }, nowMs: number): Promise<{ ok: true; ref: string; native: unknown } | { ok: false; code: string; message: string; native?: unknown }> {
-    const t = this.tokens.get(token);
-    if (!t) return { ok: false, code: "token_unknown", message: "no such delegated payment token" };
-    const why = X.acpAllows(t.allowance, charge, iso(nowMs), t.used);
-    if (why) return { ok: false, code: why, message: `the token's allowance does not cover this charge: ${why}` };
-    const r = await this.card({ kind: "pay", merchant: charge.merchant, mcc: charge.mcc, amountUsd: charge.amount / 100 });
-    if (isRefusal(r)) return { ok: false, code: "payment_declined", message: r.message, native: r.native };
-    t.used = true;
-    return { ok: true, ref: r.ref, native: r.native };
-  }
-}
-
-/** ACP: the headers every request carries. This server takes the stricter reading: an Idempotency-Key on every POST */
-function acpHeaders(c: Call): SimResponse | null {
-  if (c.header("api-version") !== X.ACP_VERSION) return json(400, { type: "invalid_request", code: "unsupported_api_version", message: `API-Version ${X.ACP_VERSION} is required` });
-  if (!/^Bearer \S+/.test(c.header("authorization") ?? "")) return json(401, { type: "invalid_request", code: "unauthorized", message: "a bearer key is required" });
-  if (c.method === "POST" && !c.header("idempotency-key")) return json(400, { type: "invalid_request", code: "idempotency_key_required", message: "Idempotency-Key is required on POST" });
-  return null;
-}
-
-/** what shop.sim's item page says: the offer, who the merchant is, and the two ways it can be checked out */
+/** what shop.sim's item page says: the offer, who the merchant is, and how it can be checked out */
 export interface ShopPage {
   item: { id: string; title: string; price: { amount: number; currency: string } };
   merchant: { id: string; name: string; website: string; jwk: Jwk; processor_jwk: Jwk };
   checkout: {
-    acp?: { api_version: string; sessions: string; delegate_payment: string } | undefined;
     ap2?: { checkouts: string; settles: Omit<X.X402Requirements, "amount"> } | undefined;
   };
 }
 
-/** shop.sim — a merchant selling a data subscription. It takes a card through ACP, and USDC from an agent that brings AP2 mandates. */
+/** shop.sim — a merchant selling a data subscription. It takes USDC from an agent that brings AP2 mandates. */
 class Shop {
   readonly key = simKey("payee:shop.sim");
   private readonly processor = simKey("payee:shop.sim/processor");
   readonly merchant = { id: "merchant_shop_sim", name: "Shop Sim", website: "https://shop.sim" };
   payTo: string = this.key.address;
-  /** where the page says a card credential is to be sent */
-  processorUrl = "https://psp.sim/agentic_commerce/delegate_payment";
   priceCents = 2900;
   /** a different total at checkout than on the page */
   checkoutCents: number | undefined;
-  private readonly sessions = new Map<string, X.AcpSession>();
   private readonly checkouts = new Map<string, { jwt: string; hash: string; nonce: string; items: Array<{ id: string; quantity: number }>; cents: number; done: boolean }>();
-  private readonly idem = new X.Idempotency();
   private seq = 0;
 
   constructor(
     private readonly chain: SimChain,
-    private readonly psp: Psp,
     /** the agent providers whose open mandates this merchant accepts */
     private readonly trusted: Jwk[],
   ) {}
@@ -504,7 +447,7 @@ class Shop {
   }
 
   private page(id: string): ShopPage {
-    return { item: { id, title: "Desk Feed Pro · 30 days", price: { amount: this.priceCents, currency: "usd" } }, merchant: { ...this.merchant, jwk: this.key.jwk, processor_jwk: this.processor.jwk }, checkout: { acp: { api_version: X.ACP_VERSION, sessions: "https://shop.sim/checkout_sessions", delegate_payment: this.processorUrl }, ap2: { checkouts: "https://shop.sim/ap2/checkouts", settles: this.settles() } } };
+    return { item: { id, title: "Desk Feed Pro · 30 days", price: { amount: this.priceCents, currency: "usd" } }, merchant: { ...this.merchant, jwk: this.key.jwk, processor_jwk: this.processor.jwk }, checkout: { ap2: { checkouts: "https://shop.sim/ap2/checkouts", settles: this.settles() } } };
   }
 
   readonly handle: Handler = async (c) => {
@@ -514,33 +457,6 @@ class Shop {
     if (c.method !== "POST") return json(404, { error: "not found" });
     const items = ((c.body as { items?: Array<{ id?: unknown; quantity?: unknown }> } | undefined)?.items ?? []).map((i) => ({ id: String(i.id), quantity: Number(i.quantity) }));
     const total = this.checkoutCents ?? this.priceCents;
-
-    // ---- ACP: a checkout session, then its completion with a delegated payment token
-    if (path === "/checkout_sessions" || /^\/checkout_sessions\/[^/]+\/complete$/.test(path)) {
-      const bad = acpHeaders(c);
-      if (bad) return bad;
-      const key = `${path}|${c.header("idempotency-key") ?? ""}`;
-      const seen = this.idem.check(key, c.body);
-      if (seen) return "conflict" in seen ? json(422, { type: "invalid_request", code: "idempotency_conflict", message: "this Idempotency-Key was used with a different body" }) : json(path === "/checkout_sessions" ? 201 : 200, seen.replay, { "Idempotent-Replayed": "true" });
-      if (path === "/checkout_sessions") {
-        if (items.length !== 1 || items[0]!.id !== "desk-feed-pro" || items[0]!.quantity !== 1) return json(400, { type: "invalid_request", code: "invalid_item", message: "one desk-feed-pro" });
-        const s: X.AcpSession = { id: `cs_${String(++this.seq).padStart(6, "0")}`, status: "ready_for_payment", currency: "usd", line_items: [{ id: "line_1", item: { id: "desk-feed-pro", quantity: 1 }, base_amount: total, total }], totals: [{ type: "total", display_text: "Total", amount: total }], merchant_id: this.merchant.id };
-        this.sessions.set(s.id, s);
-        this.idem.store(key, c.body, s);
-        return json(201, s);
-      }
-      const s = this.sessions.get(path.split("/")[2] ?? "");
-      if (!s) return json(404, { type: "invalid_request", code: "session_not_found", message: "no such checkout session" });
-      if (s.status !== "ready_for_payment") return json(400, { type: "invalid_request", code: "session_not_ready", message: `the session is ${s.status}` });
-      const token = String((c.body as { payment_data?: { token?: unknown } } | undefined)?.payment_data?.token ?? "");
-      const paid = await this.psp.charge(token, { amount: s.totals[0]!.amount, currency: s.currency, merchant_id: s.merchant_id, checkout_session_id: s.id, merchant: this.merchant.name, mcc: "5968" }, c.nowMs);
-      if (!paid.ok) return json(400, { type: "invalid_request", code: paid.code, message: paid.message, ...(paid.native !== undefined ? { native: paid.native } : {}) });
-      s.status = "completed";
-      s.order = { id: `order_${s.id.slice(3)}`, checkout_session_id: s.id, permalink_url: `https://shop.sim/orders/${s.id.slice(3)}` };
-      const out = { ...s, payment: { reference: paid.ref, native: paid.native } };
-      this.idem.store(key, c.body, out);
-      return json(200, out);
-    }
 
     // ---- AP2: a checkout the merchant signs, then its completion with the agent's mandates and a payment credential
     if (path === "/ap2/checkouts") {
@@ -599,24 +515,18 @@ export class PayeeWorld {
   escrow!: SimEscrow;
   data!: DataApi;
   infer!: InferApi;
-  psp!: Psp;
   shop!: Shop;
   /** hosts that have stopped answering */
   readonly down = new Set<string>();
   /** every request the account sent out: the proof that nothing goes to a host the owner did not name */
   readonly sent: Array<{ method: string; host: string; path: string; status: number }> = [];
-  /** what the card's issuer authorised: the account learns of a charge from here, not from what a merchant says */
-  readonly cardAuths: Array<{ merchant: string; usd: number; ref: string }> = [];
   /** how long a payee is waited for (real milliseconds); one that takes longer has not answered. Every instruction after this one waits behind it, so it is short */
   timeoutMs = 3000;
   /** a payee that never answers */
   readonly hung = new Set<string>();
   private hosts = new Map<string, Handler>();
 
-  constructor(
-    private readonly floats: FloatBook,
-    private readonly card: CardRail,
-  ) {
+  constructor(private readonly floats: FloatBook) {
     this.reset();
   }
 
@@ -625,13 +535,11 @@ export class PayeeWorld {
     this.escrow = new SimEscrow(this.chain);
     this.data = new DataApi(this.chain);
     this.infer = new InferApi(this.chain, this.escrow);
-    this.psp = new Psp(this.card);
-    this.shop = new Shop(this.chain, this.psp, [ISSUER.jwk]);
-    this.hosts = new Map<string, Handler>([["data.sim", this.data.handle], ["infer.sim", this.infer.handle], ["psp.sim", this.psp.handle], ["shop.sim", this.shop.handle]]);
+    this.shop = new Shop(this.chain, [ISSUER.jwk]);
+    this.hosts = new Map<string, Handler>([["data.sim", this.data.handle], ["infer.sim", this.infer.handle], ["shop.sim", this.shop.handle]]);
     this.down.clear();
     this.hung.clear();
     this.sent.length = 0;
-    this.cardAuths.length = 0;
   }
 
   /** one request, one answer. A redirect comes back as it is: nothing here follows one */
@@ -673,8 +581,6 @@ interface Ctx {
   flight: string;
   /** a signed authorisation that has been handed to the payee: from here the ledger, not the payee's answer, says whether it was paid */
   handed?: { o: Offer; from: string; nonce: Hex; validBefore: number; native: unknown } | undefined;
-  /** a card charge that may have been made: how many authorisations the issuer had recorded before, and the amount to look for */
-  charging?: { o: Offer; before: number; cents: number; native: unknown } | undefined;
 }
 
 /** what a payee asked for, in the terms every check and every card uses */
@@ -813,15 +719,15 @@ export class SimPayer implements Payer {
       out = await (action.close ? this.close(c) : this.ask(c));
     } catch (err) {
       // whatever a payee sends, the door answers with a refusal, never with an exception — and if something had been handed over by then,
-      // the ledger (or the card's issuer) is asked what became of it before anything is said
+      // the ledger is asked what became of it before anything is said
       out = this.afterTrouble(c, err instanceof Error ? err.message.slice(0, 80) : "error");
     }
     if (isRefusal(out) && (out.detail as { paid?: boolean } | undefined)?.paid !== true) e.host.say(flight, `${c.host}: ${plainRefusal(out, (id) => e.name(id))}`, "no");
     return out;
   }
 
-  /** something went wrong while a payee was being answered. If an authorisation was handed over or a card may have been charged, find out which
-   * from the ledger or the issuer, and book it or set it aside; only then answer. */
+  /** something went wrong while a payee was being answered. If an authorisation was handed over, find out from the ledger whether it was used,
+   * and book it or set it aside; only then answer. */
   private afterTrouble(c: Ctx, what: string): Refusal {
     const unread = `${c.host} answered with something this account could not read (${what})`;
     if (c.handed) {
@@ -831,11 +737,6 @@ export class SimPayer implements Payer {
         return no("E_PAYEE_UNVERIFIED", { venue: c.host, message: `${unread}; it took ${usd(h.o.amountMicro)}, which is on the ledger`, detail: { paid: true, thrown: true } });
       }
       return no("E_PAYEE_UNVERIFIED", { venue: c.host, message: `${unread}; nothing has moved; ${this.hold(c, h.o, h.from, h.nonce, h.validBefore, h.native)}`, detail: { thrown: true } });
-    }
-    const charged = c.charging ? this.world.cardAuths.slice(c.charging.before).find((a) => Math.round(a.usd * 100) === c.charging!.cents) : undefined;
-    if (c.charging && charged) {
-      this.book(c, c.charging.o, { ref: charged.ref, native: c.charging.native, note: `${c.host} charged the card and its answer could not be read` });
-      return no("E_PAYEE_UNVERIFIED", { venue: c.host, message: `${unread}; the card was charged ${usd(c.charging.o.amountMicro)}, which is on the ledger`, detail: { paid: true, thrown: true } });
     }
     return no("E_PAYEE_UNVERIFIED", { venue: c.host, message: `${unread}: nothing further was sent`, detail: { thrown: true } });
   }
@@ -848,7 +749,7 @@ export class SimPayer implements Payer {
     if (first.status === 402 && first.headers["payment-required"]) return this.x402(c, first);
     if (first.status === 402 && first.headers["www-authenticate"]) return this.mpp(c, first);
     const page = first.body as Partial<ShopPage> | undefined;
-    if (first.status === 200 && page?.checkout && page.item && page.merchant) return c.sub ? this.ap2(c, page as ShopPage) : this.acp(c, page as ShopPage);
+    if (first.status === 200 && page?.checkout && page.item && page.merchant) return c.sub ? this.ap2(c, page as ShopPage) : no("E_PAYEE_UNSUPPORTED", { venue: c.host, message: `${c.host} is paid in USDC: name the float that pays` });
     if (first.status === 200) return { ok: true, kind: "result", result: { paid: false, data: first.body }, flight: c.flight };
     return no("E_PAYEE_UNSUPPORTED", { venue: c.host, message: `${c.host} answered ${first.status} with no payment method this account speaks`, detail: { status: first.status } });
   }
@@ -871,10 +772,10 @@ export class SimPayer implements Payer {
     const hold = (opt.hold ?? o.amountMicro) + fee;
     const limit = opt.inSession ? (o.amountMicro > spend.perPaymentMicro ? no("E_MANDATE_PER_ORDER_CAP", { detail: { approval: spend.id, perPayment: spend.perPaymentMicro / 1e6, amount: o.amountMicro / 1e6 } }) : null) : covers(spend, c.host, hold, c.now);
     if (limit) return limit;
-    // the dial: an ended session, an instrument switched off, Guard's daily cap — and Guard's allowance, which asks
-    const instrument = e.host.adapter(c.sub ? HUB : CARD)?.account;
-    if (!instrument) return no("E_WALLET_ACCOUNT_UNKNOWN", { venue: c.sub ? HUB : CARD });
-    const v = evaluate({ intent: { kind: "pay", merchant: c.host, mcc: o.mcc, amountUsd: o.amountMicro / 1e6 }, account: c.sub ? { ...instrument, scope: { ...instrument.scope, can: [...new Set([...instrument.scope.can, "pay" as const])] } } : instrument, openness: e.host.policy(), now: e.host.now(), dailyOutUsd: e.host.dailyOutUsd(e.host.now()) });
+    // the dial: an ended session, the wallet switched off, Guard's daily cap — and Guard's allowance, which asks
+    const instrument = e.host.adapter(HUB)?.account;
+    if (!instrument) return no("E_WALLET_ACCOUNT_UNKNOWN", { venue: HUB });
+    const v = evaluate({ intent: { kind: "pay", merchant: c.host, mcc: o.mcc, amountUsd: o.amountMicro / 1e6 }, account: { ...instrument, scope: { ...instrument.scope, can: [...new Set([...instrument.scope.can, "pay" as const])] } }, openness: e.host.policy(), now: e.host.now(), dailyOutUsd: e.host.dailyOutUsd(e.host.now()) });
     if (isRefusal(v)) return v;
     if (c.sub) {
       const have = this.float(c).balanceMicro;
@@ -892,18 +793,18 @@ export class SimPayer implements Payer {
     if (opt.noCard || (pinned !== undefined && !v.card)) return null;
     const first = pinned === undefined;
     const session = o.depositMicro !== undefined;
-    const offer: CardOffer = { payee: c.host, payTo: o.payTo.toLowerCase(), amount: `${unmicro(o.amountMicro)} ${c.sub ? "USDC" : "USD"}${session ? " a call" : ""}`, protocol: LABEL[o.protocol] ?? o.protocol, network: o.network, ...(session ? { deposit: `up to ${unmicro(o.depositMicro!)} USDC, locked when the session opens; what is not used comes back`, escrow: (o.escrow ?? "").toLowerCase() } : {}) };
-    const reason = first ? `a first payment to ${c.host}: ${usd(o.amountMicro)}${session ? ` a call, from a deposit of up to ${usd(o.depositMicro!)} locked in escrow ${short(o.escrow ?? "")},` : ""} to ${short(o.payTo)} over ${offer.protocol} (${o.network}). Approving it pins that ${c.sub ? "address" : "merchant and processor"} for ${c.host}` : (v.card?.reason ?? "needs your OK");
-    const card = e.host.raiseCard(c.flight, { account: c.sub ? HUB : CARD, intent: { kind: "pay", merchant: c.host, mcc: o.mcc, amountUsd: o.amountMicro / 1e6 }, usd: o.amountMicro / 1e6, reason, why: first ? "payee" : "allowance", action: c.action, actionHash: hash, signer: c.who.signer, expiresAt: iso(c.now + CARD_TTL_MS), offer, approval: spend.id });
+    const offer: CardOffer = { payee: c.host, payTo: o.payTo.toLowerCase(), amount: `${unmicro(o.amountMicro)} USDC${session ? " a call" : ""}`, protocol: LABEL[o.protocol] ?? o.protocol, network: o.network, ...(session ? { deposit: `up to ${unmicro(o.depositMicro!)} USDC, locked when the session opens; what is not used comes back`, escrow: (o.escrow ?? "").toLowerCase() } : {}) };
+    const reason = first ? `a first payment to ${c.host}: ${usd(o.amountMicro)}${session ? ` a call, from a deposit of up to ${usd(o.depositMicro!)} locked in escrow ${short(o.escrow ?? "")},` : ""} to ${short(o.payTo)} over ${offer.protocol} (${o.network}). Approving it pins that address for ${c.host}` : (v.card?.reason ?? "needs your OK");
+    const card = e.host.raiseCard(c.flight, { account: HUB, intent: { kind: "pay", merchant: c.host, mcc: o.mcc, amountUsd: o.amountMicro / 1e6 }, usd: o.amountMicro / 1e6, reason, why: first ? "payee" : "allowance", action: c.action, actionHash: hash, signer: c.who.signer, expiresAt: iso(c.now + CARD_TTL_MS), offer, approval: spend.id });
     // the card holds its share of the budget while it waits
     e.patchSpend(spend.id, (x) => ({ ...x, reservedMicro: x.reservedMicro + o.amountMicro }));
     e.host.log({ kind: "action", venue: c.host, tool: "agentPay", signer: c.who.signer, envelope: c.who.envelope, outcome: "card", notionalUsd: o.amountMicro / 1e6, reason, flight: c.flight, agent: slug(c.who.agent.name), intentId: card.id, detail: offer });
     return { ok: true, kind: "card", pending: true, card, flight: c.flight };
   }
 
-  /** a payee is pinned per instrument: an address for what a float pays it, a merchant id for what the card pays it */
+  /** a payee is pinned by its host: the address the floats pay it at */
   private pinKey(c: Ctx): string {
-    return c.sub ? c.host : `${c.host} (card)`;
+    return c.host;
   }
 
   /** what a ledger row carries as proof: the agent's own signed envelope — or, when a card released it, the card, whose rows hold the agent's envelope and the owner's */
@@ -921,7 +822,7 @@ export class SimPayer implements Payer {
   private fee(c: Ctx, o: Offer): number | Refusal {
     const b = c.action.builder;
     if (!b) return 0;
-    if (!c.sub) return no("E_ACCOUNT_BAD_ACTION", { message: "an app's fee is paid from a float, not from the card" });
+    if (!c.sub) return no("E_ACCOUNT_BAD_ACTION", { message: "an app's fee is paid from a float" });
     const approval = this.engine.state.fees.find((f) => f.builder === String(b.b).toLowerCase());
     const rate = Number(b.f) / 100_000;
     if (!Number.isInteger(b.f) || b.f < 0) return no("E_ACCOUNT_BAD_ACTION", { message: "a builder fee is a whole number of tenths of a basis point" });
@@ -937,12 +838,12 @@ export class SimPayer implements Payer {
     let feeMicro = 0;
     const fee = this.fee(c, o);
     if (c.sub && typeof fee === "number" && fee > 0 && this.world.chain.transfer(this.float(c).address, c.action.builder!.b, fee, "builder fee")) feeMicro = fee;
-    const leg: PaymentLeg = { step: "out", venue: c.sub ? HUB : CARD, rail: o.protocol, protocol: LABEL[o.protocol] ?? o.protocol, token: c.sub ? "USDC" : "USD", ...(c.sub ? { chain: o.network } : {}), feeUsd: feeMicro / 1e6, etaSec: 0, access: "agent", final: true, status: "settled", startedAt: at, settlesAt: at, ref: r.ref, native: r.native };
-    const p: Payment = { id: e.nextPaymentId(), kind: "pay", at, from: c.sub ? `sub:${c.sub}` : CARD, to: c.host, external: { label: c.host, address: o.payTo.toLowerCase(), chain: o.network }, sourceToken: leg.token, token: leg.token, amountUsd: o.amountMicro / 1e6, feeUsd: feeMicro / 1e6, receiveUsd: o.amountMicro / 1e6, legs: [leg], status: "settled", settlesAt: at, settledAt: at, signer: c.who.signer, authority: "agent", agent: c.who.agent.address, flight: c.flight, action: c.who.hash, approval: c.spendId, protocol: o.protocol, ...(c.released ? { card: c.released.id } : {}), ...(r.note ? { note: r.note } : {}) };
+    const leg: PaymentLeg = { step: "out", venue: HUB, rail: o.protocol, protocol: LABEL[o.protocol] ?? o.protocol, token: "USDC", chain: o.network, feeUsd: feeMicro / 1e6, etaSec: 0, access: "agent", final: true, status: "settled", startedAt: at, settlesAt: at, ref: r.ref, native: r.native };
+    const p: Payment = { id: e.nextPaymentId(), kind: "pay", at, from: `sub:${c.sub}`, to: c.host, external: { label: c.host, address: o.payTo.toLowerCase(), chain: o.network }, sourceToken: leg.token, token: leg.token, amountUsd: o.amountMicro / 1e6, feeUsd: feeMicro / 1e6, receiveUsd: o.amountMicro / 1e6, legs: [leg], status: "settled", settlesAt: at, settledAt: at, signer: c.who.signer, authority: "agent", agent: c.who.agent.address, flight: c.flight, action: c.who.hash, approval: c.spendId, protocol: o.protocol, ...(c.released ? { card: c.released.id } : {}), ...(r.note ? { note: r.note } : {}) };
     e.payments.unshift(p);
     e.patchSpend(c.spendId, (x) => ({ ...x, spentMicro: x.spentMicro + o.amountMicro + feeMicro, last: { ...x.last, [c.host]: c.now } }));
     this.met(c.host, o, o.amountMicro, at);
-    const words = `${usd(o.amountMicro)} to ${c.host} · ${leg.protocol} · from ${c.sub ? `float "${c.sub}"` : e.name(CARD)}${feeMicro ? ` · app fee ${usd(feeMicro)}` : ""}`;
+    const words = `${usd(o.amountMicro)} to ${c.host} · ${leg.protocol} · from float "${c.sub}"${feeMicro ? ` · app fee ${usd(feeMicro)}` : ""}`;
     e.host.log({ kind: "action", venue: c.host, tool: "agentPay", signer: c.who.signer, ...this.evidence(c), outcome: "accepted", notionalUsd: p.amountUsd, reason: `${p.id} · ${words}`, payment: p.id, flight: c.flight, agent: slug(c.who.agent.name), venueOrderId: r.ref, native: r.native });
     e.host.say(c.flight, r.note ? `Paid ${words}, but ${r.note}` : `Paid ${words}`, r.note ? "no" : "ok", { usd: p.amountUsd, account: leg.venue });
     return { ok: true, kind: "payment", payment: p, flight: c.flight, ...(r.data !== undefined ? { data: r.data } : {}) };
@@ -1221,51 +1122,6 @@ export class SimPayer implements Payer {
     if (flight) e.host.say(flight, note[0]!.toUpperCase() + note.slice(1), "ok", { usd: paidMicro / 1e6, account: HUB });
   }
 
-  // ---- ACP: by card ---------------------------------------------------------------------------------
-
-  private async acp(c: Ctx, page: ShopPage): Promise<Outcome> {
-    const acp = page.checkout.acp;
-    if (!acp || acp.api_version !== X.ACP_VERSION) return no("E_PAYEE_UNSUPPORTED", { venue: c.host, message: `${c.host} has no ACP ${X.ACP_VERSION} checkout: a card cannot pay here` });
-    if (hostOf(acp.sessions) !== c.host) return no("E_PAYEE_REDIRECT", { venue: c.host, message: `${c.host}'s checkout lives at another host: not followed`, detail: { sessions: acp.sessions } });
-    const psp = hostOf(acp.delegate_payment);
-    if (!psp) return no("E_PAYEE_UNVERIFIED", { venue: c.host, message: `${c.host} names no payment processor a token could be issued at` });
-    // every POST carries an Idempotency-Key made from the agent's own instruction: the same instruction again replays, it does not buy twice
-    const post = (url: string, step: string, body: unknown) => this.fetch({ method: "POST", url, headers: { Authorization: "Bearer sim-agent-platform", "API-Version": X.ACP_VERSION, "Content-Type": "application/json", "Idempotency-Key": `${c.who.hash}:${step}` }, body }, c);
-    const made = await post(acp.sessions, "session", { items: [{ id: page.item.id, quantity: 1 }] });
-    const session = made.body as X.AcpSession | undefined;
-    const total = minor(session?.totals?.find?.((t) => t.type === "total")?.amount);
-    if (made.status !== 201 || !session || session.status !== "ready_for_payment" || Number.isNaN(total)) return no("E_PAYEE_REJECTED", { venue: c.host, message: `${c.host} did not open a checkout session (${(made.body as { code?: string } | undefined)?.code ?? made.status})`, detail: { status: made.status, body: made.body } });
-    if (session.merchant_id !== page.merchant.id) return no("E_PAYEE_UNVERIFIED", { venue: c.host, message: `${c.host}'s checkout session belongs to another merchant than its page names` });
-    // who is paid by card is the merchant AND the processor the card credential is handed to: both are shown on the first card, both are pinned
-    const o: Offer = { protocol: "acp", payTo: `${session.merchant_id} via ${psp}`, amountMicro: total * 10_000, network: "card", mcc: "5968" };
-    const stop = this.gate(c, o);
-    if (stop) return stop;
-    // the card credential goes to the merchant's PROCESSOR, never to the merchant, with an allowance: this session, this merchant, this total, once, ten minutes.
-    // (A subset: a real delegate_payment carries the network token's number and cryptogram; here it is a reference to the agentic token the account holds.)
-    const card = this.engine.host.adapter(CARD)!.account;
-    const allowance: X.AcpAllowance = { reason: "one_time", max_amount: total, currency: session.currency, checkout_session_id: session.id, merchant_id: session.merchant_id, expires_at: iso(c.now + 10 * 60_000) };
-    const token = await post(acp.delegate_payment, "delegate", { payment_method: { type: "card", card_number_type: "network_token", token_ref: card.credentialRef, display_brand: "mastercard", display_last4: card.name.slice(-4) }, allowance, risk_signals: [], metadata: { source: "agent-account", agent: c.who.agent.name } });
-    const vt = (token.body as { id?: string } | undefined)?.id;
-    if (token.status !== 201 || !vt) return no("E_PAYEE_REJECTED", { venue: psp, message: `${psp} did not issue a payment token (${(token.body as { code?: string } | undefined)?.code ?? token.status})`, detail: { status: token.status, body: token.body } });
-    const before = this.world.cardAuths.length;
-    const sent = { protocol: "acp", apiVersion: X.ACP_VERSION, session: { id: session.id, totals: session.totals, merchant_id: session.merchant_id }, allowance, token: vt };
-    c.charging = { o, before, cents: total, native: sent };
-    const done = await post(`${acp.sessions}/${session.id}/complete`, "complete", { payment_data: { token: vt, provider: psp } });
-    // whether the card was charged is the issuer's to say, not the merchant's
-    const charged = this.world.cardAuths.slice(before).find((a) => Math.round(a.usd * 100) === total);
-    const body = done.body !== null && typeof done.body === "object" ? (done.body as Record<string, unknown>) : {};
-    const final = body as Partial<X.AcpSession> & { payment?: { reference?: unknown; native?: unknown }; code?: string; message?: string; native?: unknown };
-    if (charged && (done.status !== 200 || final.status !== "completed" || !final.order)) {
-      this.book(c, o, { ref: charged.ref, native: sent, note: `${c.host} charged the card and did not complete the order` });
-      return no("E_PAYEE_UNVERIFIED", { venue: c.host, message: `${c.host} charged the card ${usd(o.amountMicro)} and did not complete the order: the charge is on the ledger; dispute it with the card's issuer`, detail: { paid: true } });
-    }
-    if (done.status !== 200 || final.status !== "completed" || !final.order) {
-      const err = final as { code?: string; message?: string; native?: unknown };
-      return err.code === "payment_declined" ? no("E_VENUE_CARD_DECLINED", { venue: CARD, message: err.message ?? "the card issuer declined", native: err.native }) : no("E_PAYEE_REJECTED", { venue: c.host, message: `${c.host} did not complete the checkout (${err.code ?? done.status}${err.message ? `: ${err.message}` : ""})`, detail: { status: done.status } });
-    }
-    return this.book(c, o, { ref: charged?.ref ?? String(final.payment?.reference ?? final.order.id), native: { ...sent, order: final.order, card: final.payment?.native ?? null }, data: { order: final.order, item: page.item } });
-  }
-
   // ---- AP2: from a float, with the agent's own signature on what it commits to ---------------------------
 
   private async ap2(c: Ctx, page: ShopPage): Promise<Outcome> {
@@ -1359,11 +1215,7 @@ export function mountPayees(engine: AccountEngine): PayeeWorld {
     balance: (address) => engine.state.subAccounts.find((s) => s.address === address)?.balanceMicro,
     add: (address, delta) => void (engine.state = { ...engine.state, subAccounts: engine.state.subAccounts.map((s) => (s.address === address ? { ...s, balanceMicro: s.balanceMicro + delta } : s)) }),
   };
-  const world: PayeeWorld = new PayeeWorld(floats, async (intent) => {
-    const r = (await engine.host.adapter(CARD)?.execute(intent)) ?? no("E_WALLET_ACCOUNT_UNKNOWN", { venue: CARD });
-    if (!isRefusal(r) && intent.kind === "pay") world.cardAuths.push({ merchant: intent.merchant, usd: intent.amountUsd, ref: r.ref });
-    return r;
-  });
+  const world = new PayeeWorld(floats);
   engine.usePayer(new SimPayer(engine, world));
   return world;
 }

@@ -61,8 +61,9 @@ export interface FeeApproval {
 export interface SpendApproval {
   id: string;
   agent: Hex;
-  /** `venues`: moving money between the user's own venues · `payees`: paying someone else */
-  scope: "venues" | "payees";
+  /** `venues`: moving money between the user's own venues · `trade`: placing orders at them (dollars of orders, not dollars sent) ·
+   * `payees`: paying someone else */
+  scope: "venues" | "trade" | "payees";
   /** venue ids, or payee hosts; `*` is every own venue (never every payee) */
   allow: string[];
   perPaymentMicro: number;
@@ -195,10 +196,11 @@ export function applyOwner(state: AccountState, action: OwnerAction, envelope: E
     }
     case "approveSpend": {
       const agent = action.agent.toLowerCase() as Hex;
-      if (action.scope !== "venues" && action.scope !== "payees") return bad('a spending approval covers "venues" or "payees"');
+      if (action.scope !== "venues" && action.scope !== "trade" && action.scope !== "payees") return bad('a spending approval covers "venues", "trade" or "payees"');
       // `*` (every venue of the user's own) is written out as the venues on the account NOW: a venue plugged in later is not in it
       const named = action.allow.split(",").map((x) => x.trim()).filter(Boolean);
-      const allow = action.scope === "venues" && named.includes("*") ? [...new Set([...venuesNow, ...named.filter((x) => x !== "*")])] : named;
+      const ownVenues = action.scope === "venues" || action.scope === "trade";
+      const allow = ownVenues && named.includes("*") ? [...new Set([...venuesNow, ...named.filter((x) => x !== "*")])] : named;
       const perPayment = micro(action.perPayment);
       const budget = micro(action.budget);
       if (Number.isNaN(perPayment) || Number.isNaN(budget)) return bad("the amounts of a spending approval are plain decimals");
@@ -275,15 +277,15 @@ export function applyOwner(state: AccountState, action: OwnerAction, envelope: E
 export function spendFor(s: AccountState, agent: string, scope: SpendApproval["scope"], nowMs: number): SpendApproval | Refusal {
   const all = s.spends.filter((x) => x.agent === agent.toLowerCase() && x.scope === scope);
   const live = all.find((x) => x.revokedAt === undefined);
-  if (!live) return no("E_MANDATE_NONE", { message: scope === "venues" ? "the owner has not approved this agent to move money between venues" : "the owner has not approved this agent to pay anyone", detail: { scope, hadOne: all.length > 0 } });
+  if (!live) return no("E_MANDATE_NONE", { message: scope === "venues" ? "the owner has not approved this agent to move money between venues" : scope === "trade" ? "the owner has not approved this agent to trade: it gets a trading limit on the account page (Agents)" : "the owner has not approved this agent to pay anyone", detail: { scope, hadOne: all.length > 0 } });
   if (nowMs >= live.validUntil) return no("E_MANDATE_EXPIRED", { detail: { approval: live.id, validUntil: new Date(live.validUntil).toISOString() } });
   return live;
 }
 
 /** Does this approval cover a payment of `amount` to `target` now? The answer names the limit that said no. */
 export function covers(a: SpendApproval, target: string, amountMicro: number, nowMs: number): Refusal | null {
-  if (!a.allow.includes(target) && !(a.scope === "venues" && a.allow.includes("*"))) return no("E_MANDATE_RECIPIENT", { message: `"${target}" is not in the spending approval (${a.allow.join(", ")})`, detail: { approval: a.id, allow: a.allow, target } });
-  if (amountMicro > a.perPaymentMicro) return no("E_MANDATE_PER_ORDER_CAP", { detail: { approval: a.id, perPayment: a.perPaymentMicro / 1e6, amount: amountMicro / 1e6 } });
+  if (!a.allow.includes(target) && !(a.scope === "venues" && a.allow.includes("*"))) return no("E_MANDATE_RECIPIENT", { message: a.scope === "trade" ? `the trading limit does not cover "${target}" (it covers ${a.allow.join(", ")})` : `"${target}" is not in the spending approval (${a.allow.join(", ")})`, detail: { approval: a.id, allow: a.allow, target } });
+  if (amountMicro > a.perPaymentMicro) return no("E_MANDATE_PER_ORDER_CAP", { ...(a.scope === "trade" ? { message: `an order of $${(amountMicro / 1e6).toFixed(2)} is more than the $${(a.perPaymentMicro / 1e6).toFixed(2)} an order the trading limit allows` } : {}), detail: { approval: a.id, perPayment: a.perPaymentMicro / 1e6, amount: amountMicro / 1e6 } });
   const left = a.budgetMicro - a.spentMicro - a.reservedMicro;
   if (amountMicro > left) return no("E_MANDATE_BUDGET", { message: `the spending approval has $${(left / 1e6).toFixed(2)} left of $${(a.budgetMicro / 1e6).toFixed(2)}; $${(amountMicro / 1e6).toFixed(2)} is more than that`, detail: { approval: a.id, budget: a.budgetMicro / 1e6, spent: a.spentMicro / 1e6, reserved: a.reservedMicro / 1e6, amount: amountMicro / 1e6 } });
   const last = a.last[target];

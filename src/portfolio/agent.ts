@@ -63,7 +63,7 @@ export interface PlanContext {
   liveBridge?: { quotes?: RouteQuote[] | undefined; error?: string | undefined } | undefined;
 }
 
-export const PRESETS = ["Subscribe $5,000 OUSG", "Sell 3 ETH", "Buy 1,000 YES · Fed hike", "Rebalance", "Pay a bill", "Withdraw to cold wallet", "Send to a new address"];
+export const PRESETS = ["Subscribe $5,000 OUSG", "Sell 3 ETH", "Buy 1,000 YES · Fed hike", "Rebalance", "Withdraw to cold wallet", "Send to a new address"];
 const COLD = "0x9C0d4E3b7a2f1c8d9e0f1a2b3c4d5e6f7a8b9c0d";
 const STRANGER = "0x7a11…stranger";
 const BASE = 8453;
@@ -115,7 +115,7 @@ function routeToOndo(usdWanted: number, ctx: PlanContext): Plan {
   const narration = `Subscribe ${money(usdWanted)} OUSG. Fuel: ${fuel.length ? fuel.join("; ") : "no stablecoins I can move"}.` + (need > 0 ? ` Still ${amount(need)} short: ${closed.map((it) => `${it.name} ${money(it.usd)} (${it.route.why ?? "closed"})`).join(", ") || "no other source"}. Those runways are closed right now.` : "");
   if (need > 0) {
     const cex = closed.find((it) => it.route.id === "withdraw" && it.usd >= need);
-    notes.push(cex ? `The missing ${amount(need)}: open withdrawals on the ${cex.name} key and it arrives in ${etaLabel(cex.route.etaSec)} for about ${cents(cexWithdrawFee(need))}; ACH from the bank is T+1. Neither goes through me.` : `The missing ${amount(need)} has to come from somewhere else; not through me.`);
+    notes.push(cex ? `The missing ${amount(need)}: open withdrawals on the ${cex.name} key and it arrives in ${etaLabel(cex.route.etaSec)} for about ${cents(cexWithdrawFee(need))}; an ACH from your bank is T+1. Neither goes through me.` : `The missing ${amount(need)} has to come from somewhere else; not through me.`);
     // money the agent could move but that is parked for something else: say it is there rather than take it
     const parked = ctx.liquidity.mobile.filter((s) => ctx.accounts.find((a) => a.id === s.account)?.kind === "prediction");
     if (parked.length) notes.push(`${parked.map((s) => `${s.name} holds ${money(s.usd)} ${s.asset}`).join("; ")}: it could come over in minutes, but it is parked for betting. Say so and I'll move it.`);
@@ -178,11 +178,8 @@ export function plan(text: string, ctx: PlanContext): Plan {
   if (/winnings|claim|兑付|领奖/.test(t)) return redeemWinnings(ctx);
   if (/guard|tighten|收紧|保守|严一点/.test(t)) return { narration: "Tightening to Guard: above the no-ask limit I ask you first.", steps: [], mode: "guard" };
   if (/\bopen\b|loosen|放开|全开|松一点/.test(t)) return { narration: "Opening up: I do whatever the credentials allow, and only stop to ask before something dangerous (a new address, a market past its close).", steps: [], mode: "open" };
-  if (/账单|付|\bpay\b|\bbill\b|支付/.test(t)) {
-    const usd = n ?? 120;
-    const merchant = /github/.test(t) ? "GitHub" : "Anthropic";
-    return { narration: `Pay $${usd} to ${merchant} with the Mastercard agentic token.`, steps: [{ account: "mastercard", intent: { kind: "pay", merchant, mcc: "7372", amountUsd: usd }, say: `Pay ${merchant} · Mastercard` }] };
-  }
+  // no card is on the account: a card network has no interface an individual can hand an agent
+  if (/账单|付|\bpay\b|\bbill\b|支付/.test(t)) return { narration: "I pay no bills: there is no card on this account, because a card has no interface an agent can be handed.", steps: [] };
   if (/赎回|redeem/.test(t)) {
     const usd = n ?? 500;
     return { narration: `Redeem $${usd} OUSG; it settles T+1.`, steps: [{ account: "ondo", intent: { kind: "redeem", fund: "OUSG", amountUsd: usd }, say: "Redeem OUSG · Ondo" }] };

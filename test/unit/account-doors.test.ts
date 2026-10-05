@@ -4,9 +4,7 @@ import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { isRefusal } from "../../src/core/errors.ts";
 import { binanceSign, cctpForwardHook, CCTP_DOMAIN, doorOf, nativeRequest, okxSign, plan, routeHash, type Route, type VenueView } from "../../src/portfolio/account/doors.ts";
-import { etDate } from "../../src/portfolio/account/calendar.ts";
 import { alpacaAccount } from "../../src/portfolio/adapters/alpaca.ts";
-import { bankAccount } from "../../src/portfolio/adapters/bank.ts";
 import { hyperliquidAccount } from "../../src/portfolio/adapters/hyperliquid.ts";
 import { okxAccount } from "../../src/portfolio/adapters/okx.ts";
 import { loadSeeds, PortfolioService } from "../../src/portfolio/service.ts";
@@ -26,14 +24,14 @@ const route = (r: Route | ReturnType<typeof plan>): Route => {
 const steps = (r: Route) => r.legs.map((l) => `${l.step}:${l.venue}${l.chain ? `@${l.chain}` : ""}`);
 
 describe("the front line", () => {
-  it("is ten venues: the eight the demo had, a stock broker and Hyperliquid", () => {
-    expect(svc.accounts().map((a) => a.id)).toEqual(["alpaca", "binance", "okx", "hyperliquid", "metamask", "kalshi", "polymarket", "ondo", "mastercard", "chase"]);
-    expect(venues.map((v) => doorOf(v).frontLine)).toEqual(["Stocks", "Exchange", "Exchange", "Exchange", "On-chain", "Prediction", "Prediction", "RWA", "Card", "Bank"]);
+  it("is eight venues: the six the demo had, a stock broker and Hyperliquid — and no bank and no card, which have no interface to reach", () => {
+    expect(svc.accounts().map((a) => a.id)).toEqual(["alpaca", "binance", "okx", "hyperliquid", "metamask", "kalshi", "polymarket", "ondo"]);
+    expect(venues.map((v) => doorOf(v).frontLine)).toEqual(["Stocks", "Exchange", "Exchange", "Exchange", "On-chain", "Prediction", "Prediction", "RWA"]);
   });
 
-  it("leaves the original eight untouched when nobody asks for it", async () => {
+  it("leaves the original six untouched when nobody asks for it", async () => {
     const classic = await PortfolioService.create({ home: mkdtempSync(join(tmpdir(), "account-classic-")), now: clock });
-    expect(classic.accounts().map((a) => a.id)).toEqual(["binance", "okx", "metamask", "kalshi", "polymarket", "ondo", "mastercard", "chase"]);
+    expect(classic.accounts().map((a) => a.id)).toEqual(["binance", "okx", "metamask", "kalshi", "polymarket", "ondo"]);
     expect(loadSeeds().okx.permissions).toEqual(["read", "trade"]);
     expect(loadSeeds("frontline").okx.permissions).toEqual(["read", "trade", "withdraw"]);
   });
@@ -66,13 +64,6 @@ describe("each venue's doors, read off its credential", () => {
     expect(door("okx").out[0]!.why).toContain("verified");
     // the same adapter with the original key: the door is the venue's
     expect(doorOf(okxAccount(loadSeeds().okx).account).out[0]!.access).toBe("venue");
-  });
-
-  it("the bank and the card: nothing an agent can start", () => {
-    expect(door("chase").out[0]!.access).toBe("venue");
-    expect(door("chase").out[0]!.opens).toContain("payment-initiation");
-    expect(door("mastercard").in).toEqual([]);
-    expect(door("mastercard").out).toEqual([]);
   });
 
   it("a venue that does not serve the customer's region has every door closed, and no region is named", () => {
@@ -130,20 +121,12 @@ describe("a movement is legs through the hub", () => {
     expect(r.feeUsd).toBe(0.23);
   });
 
-  it("bank → broker: one leg on the bank's clock, started at the broker. Sent on a Saturday, it lands Tuesday", () => {
-    const r = route(plan({ from: "chase", to: "alpaca", amountUsd: 2000 }, venues, nowMs));
-    expect(steps(r)).toEqual(["venue:alpaca"]);
-    expect([r.access, r.token, r.feeUsd]).toEqual(["venue", "USD", 0]);
-    expect(etDate(r.arrivalMs)).toBe("Tue 6 Oct");
-    const back = route(plan({ from: "alpaca", to: "chase", amountUsd: 1000 }, venues, nowMs));
-    expect(steps(back)).toEqual(["venue:alpaca"]);
-    expect(back.legs[0]!.protocol).toBe("ACH to the linked bank");
-  });
-
-  it("broker → Hyperliquid: no shared rail, said plainly", () => {
-    const r = plan({ from: "alpaca", to: "hyperliquid", amountUsd: 500 }, venues, nowMs);
-    expect(isRefusal(r) && r.code).toBe("E_VENUE_CURRENCY");
-    expect(isRefusal(r) && r.message).toContain("do not share a rail");
+  it("the broker's cash moves only by ACH with the holder's own bank, started at the broker: no route into it or out of it goes through the account", () => {
+    for (const r of [plan({ from: "metamask", to: "alpaca", amountUsd: 2000 }, venues, nowMs), plan({ from: "alpaca", to: "hyperliquid", amountUsd: 500 }, venues, nowMs)]) {
+      expect(isRefusal(r) && [r.code, r.venue]).toEqual(["E_VENUE_RAIL_CLOSED", "alpaca"]);
+      expect(isRefusal(r) && r.message).toBe("Alpaca moves dollars only by ACH with your own bank, started at Alpaca: nothing between it and your other venues goes through the account");
+      expect(isRefusal(r) && (r.detail as { opens?: string }).opens).toContain("broker-partner");
+    }
   });
 
   it("wallet → the RWA issuer: the money is on Base, the issuer is on Ethereum, so the wallet bridges", () => {
@@ -179,11 +162,13 @@ describe("a movement is legs through the hub", () => {
     expect(routeHash({ ...a, legs: [...a.legs].reverse() })).not.toBe(a.hash);
   });
 
-  it("an unknown venue, a zero amount and a card are refused", () => {
+  it("an unknown venue and a zero amount are refused — and so is a card or a bank, which are not on the account", () => {
     expect(isRefusal(plan({ from: "nowhere", to: "okx", amountUsd: 1 }, venues, nowMs))).toBe(true);
     expect(isRefusal(plan({ from: "okx", to: "metamask", amountUsd: 0 }, venues, nowMs))).toBe(true);
-    const card = plan({ from: "mastercard", to: "okx", amountUsd: 10 }, venues, nowMs);
-    expect(isRefusal(card) && card.code).toBe("E_VENUE_RAIL_CLOSED");
+    for (const gone of ["mastercard", "chase"]) {
+      const r = plan({ from: gone, to: "okx", amountUsd: 10 }, venues, nowMs);
+      expect(isRefusal(r) && r.code).toBe("E_WALLET_ACCOUNT_UNKNOWN");
+    }
   });
 });
 
@@ -232,30 +217,22 @@ describe("each leg in the venue's own words", () => {
 describe("the venues themselves", () => {
   const seeds = loadSeeds("frontline");
 
-  it("the broker: unsettled cash is not withdrawable, and an ACH started there lands on a bank day", async () => {
+  it("the broker: unsettled cash is shown as not withdrawable yet, and the agent's key moves no cash", async () => {
     const a = alpacaAccount(seeds.alpaca!, clock);
     const rows = await a.read();
     expect(rows.map((h) => [h.asset, h.usd, h.class, h.inTransit ?? false])).toEqual([["USD", 5500, "cash", false], ["USD (unsettled)", 2500, "cash", true], ["SPY", 6000, "equity", false], ["NVDA", 3000, "equity", false]]);
     // the sale was on Friday: it settles Monday
     expect(rows[1]!.note).toBe("tradable now · withdrawable Mon 5 Oct");
-    const tooMuch = a.debit!("USD", 6000);
-    expect(isRefusal(tooMuch) && tooMuch.code).toBe("E_VENUE_UNSETTLED");
-    const wayTooMuch = a.debit!("USD", 9000);
-    expect(isRefusal(wayTooMuch) && wayTooMuch.code).toBe("E_VENUE_INSUFFICIENT");
     // the agent's key cannot move cash at all
-    const viaKey = await a.execute({ kind: "move", asset: "USD", amount: 100, to: "chase" });
+    const viaKey = await a.execute({ kind: "move", asset: "USD", amount: 100, to: "bank" });
     expect(isRefusal(viaKey) && viaKey.code).toBe("E_VENUE_PERMISSION");
-    const started = a.startAtVenue!("in", "USD", 2000);
-    expect(started.ok === true && started.settlesAt).toBe("2026-10-06T13:00:00.000Z");
-    expect(a.statement!().map((l) => [l.direction, l.amount, l.status])).toEqual([["in", 2000, "pending"]]);
   });
 
-  it("the broker: on Monday morning the sale has settled and the cash can leave", async () => {
+  it("the broker: on Monday morning the sale has settled", async () => {
     let t = NOW;
     const a = alpacaAccount(seeds.alpaca!, () => t);
     t = "2026-10-05T13:00:00.000Z";
     expect((await a.read())[0]).toMatchObject({ asset: "USD", usd: 8000 });
-    expect(a.debit!("USD", 6000).ok).toBe(true);
   });
 
   it("Hyperliquid: an API wallet cannot withdraw; the owner's withdrawal leaves the margin behind", async () => {
@@ -287,14 +264,5 @@ describe("the venues themselves", () => {
     expect((await o.execute({ kind: "move", asset: "USDT", amount: 100, to: "metamask" })).ok).toBe(true);
     const cv = o.convert!("USDT", "USDC", 1000);
     expect(cv.ok === true && cv.received).toBe(999.9);
-  });
-
-  it("the bank: an ACH debit without the money comes back R01", () => {
-    const b = bankAccount(seeds.chase);
-    expect(b.debit!("USD", 1000).ok).toBe(true);
-    const nsf = b.debit!("USD", 1_000_000);
-    expect(isRefusal(nsf) && [nsf.code, (nsf.native as { return_code: string }).return_code]).toEqual(["E_VENUE_RETURNED", "R01"]);
-    // the original seed object is not what holds the balance
-    expect(seeds.chase.balances.USD).toBe(12400);
   });
 });

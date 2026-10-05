@@ -19,10 +19,14 @@ export type LedgerKind =
   | "reconcile"
   | "note"
   | "openness-refusal"
-  /** the account: a signed instruction it took, one it refused, and a payment's life (pending · settled · returned …) */
+  /** the account: a signed instruction it took, one it refused, a payment's life (pending · settled · returned …), and an order's at a
+   * real venue (placed · filled · canceled …) */
   | "action"
   | "account-refusal"
-  | "payment";
+  | "payment"
+  | "order"
+  /** one line of the account's statement: a transaction as it stands now (account/statement.ts) */
+  | "statement";
 
 export interface LedgerRowInput {
   kind: LedgerKind;

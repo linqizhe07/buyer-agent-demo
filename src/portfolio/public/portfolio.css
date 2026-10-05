@@ -1,4 +1,6 @@
-:root{--paper:#f6f1e7;--ink:#1b1b1b;--dim:#5a5751;--line:#e6dfd1;--rule:#1b1b1b;--sage:#8aa37b;--orange:#e8702a;--blue:#6a7fb5;--plum:#9b6b8f;--card:#fffdf8}
+:root{color-scheme:light;--paper:#f6f1e7;--ink:#1b1b1b;--dim:#5a5751;--line:#e6dfd1;--rule:#1b1b1b;--sage:#8aa37b;--orange:#e8702a;--blue:#6a7fb5;--plum:#9b6b8f;--gold:#b08a3e;--card:#fffdf8}
+/* the same paper and ink at night: the paper goes dark, the ink goes light, the accents stay */
+@media (prefers-color-scheme:dark){:root{color-scheme:dark;--paper:#151410;--ink:#ebe5d8;--dim:#a19b8f;--line:#2d2a24;--rule:#ebe5d8;--sage:#9db88d;--orange:#ef8a4c;--blue:#8fa3d8;--plum:#bf91b3;--gold:#c9a35a;--card:#1d1b16}}
 *{box-sizing:border-box}
 html,body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.55 "IBM Plex Sans","Helvetica Neue",Helvetica,Arial,"PingFang SC",sans-serif}
 main{max-width:1120px;margin:0 auto;padding:48px 40px 72px;display:flex;flex-direction:column;gap:30px}

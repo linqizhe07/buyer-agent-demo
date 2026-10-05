@@ -52,8 +52,8 @@ const ATTACKER = "0xd759…attacker";
 const FED = "FED-DEC-HIKE25:YES";
 
 export const PROVEN = [
-  "eight accounts the user already has — two CEXs, the on-chain agent wallet, two prediction markets, an RWA position, a card, a bank — come in as one shape; in front of the agent a credential is only a reference",
-  "open mode: four writes across four accounts with zero cards. The agent's reach is the edge of each credential's native scope",
+  "six accounts the user already has — two CEXs, the on-chain agent wallet, two prediction markets, an RWA position — come in as one shape; in front of the agent a credential is only a reference",
+  "open mode: three writes across three accounts with zero cards. The agent's reach is the edge of each credential's native scope",
   "liquidity = amount × time × cost: one ladder to Ethereum (now / minutes / T+1 / closed), and a closed runway still carries its quote (how long and how much if it were opened)",
   "cross-chain with quotes and a choice of route: three bridges and the CEX hops are compared, the cheapest open one is taken, its fee comes out of what arrives, and the gap is stated with its reason",
   "execution liquidity: one order is quoted at both CEX books and at the DEX pools on each chain (spread, depth, taker or LP fee, gas); a venue that does not hold the asset says so",
@@ -64,13 +64,13 @@ export const PROVEN = [
   "one order, one card: in Guard a split order is judged as a whole (splitting cannot slip it under the allowance), asks once, and one yes fills every slice",
   "routing is the tower's service: an agent arriving over MCP gets the same route through portfolio_quote / portfolio_order, and the flight is logged under its own name",
   "every flight has a number (agent code + sequence) and every ledger row says which agent's which flight it belongs to",
-  "the edge is held by the credential and the venue, and the wallet neither adds to it nor takes from it: the wallet's pre-check (E_WALLET_SCOPE) and the venue's own second line once the wallet is bypassed (-2015 / 403 / 404 / rc 57 / revert) draw the same line",
+  "the edge is held by the credential and the venue, and the wallet neither adds to it nor takes from it: the wallet's pre-check (E_WALLET_SCOPE) and the venue's own second line once the wallet is bypassed (-2015 / 404 / revert) draw the same line",
   "open mode still asks before the dangerous ones: a transfer to a never-used address, an order in a prediction market that is past its close and not yet resolved. A blocklisted address is refused outright; MetaMask's own Guard still sends an over-the-line transfer to MFA",
   "guard tightens with one switch: a card above the no-ask allowance, an account switched off keeps reads only, reach narrows per account; reads never stop in any mode",
   "every step — read, intent, card, fill, refusal, bypass — is a row on one hash-chained ledger",
 ];
 export const NOT_PROVEN = [
-  "the accounts are local simulations: the permission error codes of Binance / OKX have the real shape; the Mastercard agentic token's format is illustrative (the decline codes are real); Ondo simulates only the allowlist transfer restriction and T+1; Kalshi's error codes and tickers are illustrative",
+  "the accounts are local simulations: the permission error codes of Binance / OKX have the real shape; Ondo simulates only the allowlist transfer restriction and T+1; Kalshi's error codes and tickers are illustrative",
   "bridge fees, arrival times, withdrawal fees, spreads, depth, the pools' virtual reserves, gas and the prediction markets' books are illustrative tables (real shapes, not market data); an arrival time is only a quote, the simulation delivers at once",
   "books and pools are stateless: a fill does not move a price; there is no market data, no MEV, no slippage protection. Slices settle one after another, not atomically: one filled and another refused is a partial fill (visible on the ledger, not rolled back)",
   "a question listed at two venues settles by two sets of rules: buying it at both is not one position. The agent says so; it does not hedge it",
@@ -94,21 +94,21 @@ async function main(): Promise<number> {
 
   try {
     // ---- 1 ------------------------------------------------------------------------
-    heading("Beat 1: Connect · eight accounts, one shape");
+    heading("Beat 1: Connect · six accounts, one shape");
     const accounts = svc.accounts();
     for (const a of accounts) note(`${a.id.padEnd(10)} ${a.kind.padEnd(12)} can ${a.scope.can.map((c) => CAP_LABEL[c]).join("/").padEnd(34)} ${a.scope.enforcedBy.padEnd(8)} ${a.credentialKind} · ref ${a.credentialRef}`);
-    check(accounts.map((a) => a.id).sort().join(",") === "binance,chase,kalshi,mastercard,metamask,okx,ondo,polymarket", "8 accounts connected in one shape: binance okx metamask kalshi polymarket ondo mastercard chase", "account");
+    check(accounts.map((a) => a.id).sort().join(",") === "binance,kalshi,metamask,okx,ondo,polymarket", "6 accounts connected in one shape: binance okx metamask kalshi polymarket ondo", "account");
     check(accounts.every((a) => a.credentialRef.length > 0) && !/"secret"|"apiKey"|"passphrase"|"token":/.test(JSON.stringify(accounts)), "credentials are references only: no key, secret or token value in the agent-facing view", "account");
     check(accounts.every((a) => a.scope.can.includes("read") && a.scope.limits.length > 0), "every account declares its credential's native scope (layer 1) and who enforces it", "account");
 
     // ---- 2 ------------------------------------------------------------------------
-    heading("Beat 2: One read · eight accounts, no card");
+    heading("Beat 2: One read · six accounts, no card");
     tick();
     const o2 = await svc.overview();
-    note(`total $${o2.portfolio.totalUsd.toLocaleString("en-US")} · credit available $${o2.portfolio.creditAvailableUsd} · ${o2.portfolio.byClass.map((c) => `${c.label} ${c.pct}%`).join(" · ")}`);
+    note(`total $${o2.portfolio.totalUsd.toLocaleString("en-US")} · ${o2.portfolio.byClass.map((c) => `${c.label} ${c.pct}%`).join(" · ")}`);
     for (const a of o2.portfolio.byAccount) note(`${a.name.padEnd(28)} $${String(a.usd).padStart(10)} ${a.live ? " LIVE" : ""}  ${a.holdings.map((h) => `${h.amount} ${h.asset}`).join(" · ")}`);
-    check(o2.counters.cards === 0 && o2.approvals.length === 0, "one read across 8 accounts raised no card", "read");
-    check(o2.portfolio.totalUsd > 0 && ["rwa", "cash", "event"].every((c) => o2.portfolio.byClass.some((x) => x.class === c)), "the total spans crypto, stablecoins, prediction-market positions, RWA and bank cash; the card's credit is shown, not summed", "read");
+    check(o2.counters.cards === 0 && o2.approvals.length === 0, "one read across 6 accounts raised no card", "read");
+    check(o2.portfolio.totalUsd > 0 && ["rwa", "cash", "event"].every((c) => o2.portfolio.byClass.some((x) => x.class === c)), "the total spans crypto, stablecoins, cash at a prediction market, prediction-market positions and RWA", "read");
     const mm = o2.accounts.find((a) => a.id === "metamask")!;
     const pmAcct = o2.accounts.find((a) => a.id === "polymarket")!;
     if (live) {
@@ -125,7 +125,7 @@ async function main(): Promise<number> {
     const mobileAt = (o: typeof before, id: string) => o.liquidity.mobile.filter((s) => s.account === id).reduce((s, x) => s + x.usd, 0);
     const mmMobile = mobileAt(before, "metamask");
     const pmMobile = mobileAt(before, "polymarket");
-    check(rowUsd("now") === 3000 && rowUsd("closed") === 20400 && rowUsd("t1") > 1900 && (live || rowUsd("minutes") === 1800), "the liquidity ladder to Ethereum: $3,000 now (Ondo USDC), $1,800 in minutes (MetaMask USDC over a bridge, Polymarket pUSD withdrawn and bridged), the OUSG T+1, $20,400 closed", "liquidity");
+    check(rowUsd("now") === 3000 && rowUsd("closed") === 8000 && rowUsd("t1") > 1900 && (live || rowUsd("minutes") === 1800), "the liquidity ladder to Ethereum: $3,000 now (Ondo USDC), $1,800 in minutes (MetaMask USDC over a bridge, Polymarket pUSD withdrawn and bridged), the OUSG T+1, $8,000 closed", "liquidity");
     check(closedRow !== undefined && closedRow.items.every((it) => !it.open && it.route.why !== undefined) && closedRow.items.find((it) => it.account === "binance")?.route.feeUsd === 9.5 && closedRow.items.find((it) => it.account === "kalshi")?.route.why === "pays out by ACH, not through the agent", "a closed runway keeps its quote: opening WITHDRAW on the Binance key would bring its $5,000 over in ~10 min for $9.50; Kalshi's cash pays out by ACH only", "liquidity");
     const bridged = Math.min(2000, mmMobile);
     const movedBridge = !live && bridged > 0 ? bridged : 0;
@@ -154,7 +154,7 @@ async function main(): Promise<number> {
     if (!live) check(flight.legs.some((l) => l.mark === "note" && l.text.includes("Polymarket holds $600 pUSD") && l.text.includes("parked for betting")), "money it could move but that is parked for something else is named, not taken: Polymarket's $600 pUSD stays where it is", "liquidity");
     const after = await svc.overview();
     const ousg = after.accounts.find((a) => a.id === "ondo")!.holdings.find((h) => h.asset === "OUSG")!.amount;
-    check(ousg > 18 + (3000 + arrived) / 110.42 - 0.01 && after.liquidity.mobileUsd === mmMobile - movedBridge + pmMobile && after.liquidity.stuckUsd === 20400, `after the flight Ondo holds ${ousg.toFixed(2)} OUSG and $${mmMobile - movedBridge + pmMobile} of mobile liquidity is left; the stuck $20,400 is still stuck`, "liquidity");
+    check(ousg > 18 + (3000 + arrived) / 110.42 - 0.01 && after.liquidity.mobileUsd === mmMobile - movedBridge + pmMobile && after.liquidity.stuckUsd === 8000, `after the flight Ondo holds ${ousg.toFixed(2)} OUSG and $${mmMobile - movedBridge + pmMobile} of mobile liquidity is left; the stuck $8,000 is still stuck`, "liquidity");
     check(svc.rows().filter((r) => r.flight === flight.no).length >= (movedBridge > 0 ? 8 : 3) && (movedBridge === 0 || svc.rows().some((r) => r.kind === "funding" && r.flight === flight.no && r.notionalUsd === arrived)), movedBridge > 0 ? "every ledger row of the flight carries its number and agent; the bridge's arrival ($1,199 after the fee) is a funding row" : "every ledger row of the flight carries its number and agent", "ledger");
 
     // ---- 4 ------------------------------------------------------------------------
@@ -180,7 +180,7 @@ async function main(): Promise<number> {
     }
     const after4 = await svc.overview();
     const onchainUsdc = mobileAt(after4, "metamask");
-    if (!live) check(onchainUsdc === 2438.67 && f2.legs.some((l) => l.text.includes("free to move")) && after4.liquidity.stuckUsd === r2(20400 + 3658.52 + 1218.72), "where it sells decides whether the money can move afterwards: the DEX slice's $2,438.67 USDC is on Base (mobile liquidity again), the two CEX slices' USDT is stuck behind keys that cannot withdraw", "liquidity");
+    if (!live) check(onchainUsdc === 2438.67 && f2.legs.some((l) => l.text.includes("free to move")) && after4.liquidity.stuckUsd === r2(8000 + 3658.52 + 1218.72), "where it sells decides whether the money can move afterwards: the DEX slice's $2,438.67 USDC is on Base (mobile liquidity again), the two CEX slices' USDT is stuck behind keys that cannot withdraw", "liquidity");
     check(svc.rows().filter((r) => r.flight === f2.no && r.kind === "venue").length === fills.length && svc.counters.cards === 0, "every slice is its own ledger row under the same flight; open mode raised no card", "ledger");
     tick();
     const f3 = await pm.say("Sell 0.05 BTC");
@@ -244,7 +244,6 @@ async function main(): Promise<number> {
       ["binance", { kind: "trade", symbol: "BTCUSDT", side: "sell", qty: 0.05 }],
       ["okx", { kind: "trade", symbol: "ETH-USDT", side: "buy", qty: 0.5 }],
       ["ondo", { kind: "redeem", fund: "OUSG", amountUsd: 500 }],
-      ["mastercard", { kind: "pay", merchant: "Anthropic · Claude Max", mcc: "7372", amountUsd: 120 }],
     ];
     const results6: ExecuteOutcome[] = [];
     for (const [acct, intent] of writes) {
@@ -253,8 +252,8 @@ async function main(): Promise<number> {
       results6.push(r);
       show(r);
     }
-    check(results6.every((r) => !isRefusal(r) && !isPending(r)), "SELL on Binance · BUY on OKX · redeem OUSG at Ondo (T+1) · pay with the Mastercard token: all four went through", "open");
-    check(svc.counters.cards === cards6 && cards6 === 0, "four writes across four accounts, zero cards — and none in the three beats before", "open");
+    check(results6.every((r) => !isRefusal(r) && !isPending(r)), "SELL on Binance · BUY on OKX · redeem OUSG at Ondo (T+1): all three went through", "open");
+    check(svc.counters.cards === cards6 && cards6 === 0, "three writes across three accounts, zero cards — and none in the three beats before", "open");
 
     // ---- 7 ------------------------------------------------------------------------
     heading("Beat 7: The edge of open · the credential and the venue each say no");
@@ -275,9 +274,7 @@ async function main(): Promise<number> {
       }
     };
     await tryEdge("binance", { kind: "move", asset: "BTC", amount: 0.1, to: COLD }, "E_WALLET_SCOPE", "Binance: the key has no WITHDRAW — the wallet's pre-check says so before the exchange has to (E_WALLET_SCOPE)", true);
-    await tryEdge("chase", { kind: "pay", merchant: "Landlord", mcc: "6513", amountUsd: 2000 }, "E_WALLET_SCOPE", "bank: an aggregation token is read-only — no openness setting can make it pay (E_WALLET_SCOPE)", true);
     await tryEdge("kalshi", { kind: "move", asset: "USD", amount: 100, to: "wallet-main" }, "E_WALLET_SCOPE", "Kalshi: the API key trades, it does not move money — payouts go by ACH from the account page (E_WALLET_SCOPE)", true);
-    await tryEdge("mastercard", { kind: "pay", merchant: "Lucky Star Casino", mcc: "7995", amountUsd: 900 }, "E_VENUE_CARD_DECLINED", "Mastercard: pay IS in scope, so the wallet lets it through — the issuer declines rc 57 (MCC outside the agentic token)", false);
     await tryEdge("ondo", { kind: "move", asset: "OUSG", amount: 5, to: COLD }, "E_VENUE_TRANSFER_RESTRICTED", "Ondo: a known destination, open mode, no card — the OUSG contract reverts: cold wallet not on the issuer allowlist", false);
     if (live) {
       await tryEdge("polymarket", { kind: "trade", symbol: FED, side: "buy", qty: 10 }, "E_WALLET_SCOPE", "Polymarket LIVE: this credential has no `trade` — the wallet's pre-check says so (E_WALLET_SCOPE), and the venue's own line is the region", true);
@@ -290,7 +287,7 @@ async function main(): Promise<number> {
       check(!isRefusal(r) && !isPending(r) && r.status === "pending", "MetaMask (sim): the portfolio wallet raised no card (a known destination), MetaMask's own Guard did — the cold wallet is not on ITS allowlist → AWAITING_MFA, the card in the user's inbox", "metamask");
     }
     note(`refusals in this beat: ${refusals7.join(", ")}`);
-    check(refusals7.filter((c) => c.startsWith("E_WALLET_")).length >= 3 && refusals7.filter((c) => c.startsWith("E_VENUE_")).length >= 5, `the floor held: wallet pre-checks and venue second lines agree, with the wallet bypassed ${live ? "four" : "three"} times`, "edge");
+    check(refusals7.filter((c) => c.startsWith("E_WALLET_")).length >= 2 && refusals7.filter((c) => c.startsWith("E_VENUE_")).length >= 4, `the floor held: wallet pre-checks and venue second lines agree, with the wallet bypassed ${live ? "three times" : "twice"}`, "edge");
 
     // ---- 8 ------------------------------------------------------------------------
     heading("Beat 8: What open mode still asks about · the dangerous ones");
@@ -336,10 +333,6 @@ async function main(): Promise<number> {
       check(!isRefusal(a) && a.status === "filled", "the human approves → the same intent fills at Binance", "guard");
     }
     tick();
-    const g2 = await svc.execute("mastercard", { kind: "pay", merchant: "GitHub", mcc: "7372", amountUsd: 40 });
-    show(g2);
-    check(!isRefusal(g2) && !isPending(g2) && g2.status === "authorized", "guard: $40 is inside the card's no-ask allowance $200 → no card, authorized", "guard");
-    tick();
     const cardsBefore = svc.counters.cards;
     // a little more ETH than any one venue still holds, so the order has to be split
     const ethHeld = (await svc.overview()).accounts.flatMap((a) => a.holdings.filter((h) => h.asset === "ETH").map((h) => h.amount));
@@ -381,7 +374,7 @@ async function main(): Promise<number> {
     const kinds = new Map<string, number>();
     for (const r of svc.rows()) kinds.set(r.kind, (kinds.get(r.kind) ?? 0) + 1);
     note(`rows by kind: ${[...kinds.entries()].map(([k, n]) => `${k} ${n}`).join(" · ")}`);
-    check((kinds.get("bypass") ?? 0) === (live ? 4 : 3) && (kinds.get("card") ?? 0) >= 4, "every bypass and every card decision is a row like any other", "ledger");
+    check((kinds.get("bypass") ?? 0) === (live ? 3 : 2) && (kinds.get("card") ?? 0) >= 4, "every bypass and every card decision is a row like any other", "ledger");
     const byAgent = new Map<string, number>();
     for (const f of svc.flights) byAgent.set(f.agent.code, (byAgent.get(f.agent.code) ?? 0) + 1);
     note(`flights by agent: ${[...byAgent.entries()].map(([k, n]) => `${k} ${n}`).join(" · ")}`);

@@ -476,74 +476,15 @@ describe("MPP: a charge, and a session with a deposit and vouchers", () => {
   });
 });
 
-describe("ACP: the card, through a token bound to one checkout", () => {
-  it("a checkout session, a delegated token with an allowance, a completed order — and the card's own limits still decide", async () => {
-    const x = await boot();
-    const available = async () => (await x.svc.read("mastercard"))[0]!.amount;
-    const before = await available();
-    const card = carded(await x.pay(ITEM, "30", ""));
-    expect(card.offer).toEqual({ payee: "shop.sim", payTo: "merchant_shop_sim via psp.sim", amount: "29 USD", protocol: "ACP · delegated card token", network: "card" });
-    expect(card.account).toBe("mastercard");
-    const r = paid(await x.answer(card));
-    expect(r.data).toEqual({ order: { id: "order_000001", checkout_session_id: "cs_000001", permalink_url: "https://shop.sim/orders/000001" }, item: { id: "desk-feed-pro", title: "Desk Feed Pro · 30 days", price: { amount: 2900, currency: "usd" } } });
-    expect(r.payment).toMatchObject({ from: "mastercard", to: "shop.sim", amountUsd: 29, protocol: "acp", status: "settled" });
-    expect([before - (await available()), x.float(), x.spend().spentMicro]).toEqual([29, x.start, 29_000_000]);
-    // the merchant never holds the card: its processor gets the credential (here a reference to the agentic token) with an allowance, and hands the merchant a token
-    const native = x.svc.rows().filter((row) => row.tool === "agentPay" && row.outcome === "accepted").at(-1)!.native as { allowance: X.AcpAllowance; token: string; card: { responseCode: string } };
-    expect(native.allowance).toMatchObject({ reason: "one_time", max_amount: 2900, currency: "usd", checkout_session_id: "cs_000001", merchant_id: "merchant_shop_sim" });
-    expect(native.card.responseCode).toBe("00");
-    // the card's approval replayed the SAME checkout session (one Idempotency-Key per instruction), it did not open a second
-    expect(x.world.sent.filter((s) => s.path === "/checkout_sessions").map((s) => s.status)).toEqual([201, 201]);
-    expect(x.world.sent.map((s) => s.host)).toEqual(["shop.sim", "shop.sim", "shop.sim", "shop.sim", "psp.sim", "shop.sim"]);
-
-    // the merchant later names another processor on its page: the card credential is not sent there
-    x.world.shop.processorUrl = "https://evil-psp.sim/agentic_commerce/delegate_payment";
-    const moved = refusal(await x.pay(ITEM, "30", ""));
-    expect([moved.code, moved.detail]).toEqual(["E_PAYEE_CHANGED", { pinned: "merchant_shop_sim via psp.sim", offered: "merchant_shop_sim via evil-psp.sim" }]);
-    expect(x.world.sent.some((s) => s.host === "evil-psp.sim")).toBe(false);
-    x.world.shop.processorUrl = "https://psp.sim/agentic_commerce/delegate_payment";
-
-    // the token is spent, and it was never good for anything but that checkout
-    const charge = { amount: 2900, currency: "usd", merchant_id: "merchant_shop_sim", checkout_session_id: "cs_000001", merchant: "Shop Sim", mcc: "5968" };
-    expect(await x.world.psp.charge(native.token, charge, x.now())).toMatchObject({ ok: false, code: "token_already_used" });
-  });
-
-  it("the allowance refuses another merchant, another session, a higher amount, a late charge", async () => {
-    const x = await boot();
-    const headers = { Authorization: "Bearer sim-agent-platform", "API-Version": X.ACP_VERSION, "Idempotency-Key": "k-1" };
-    const body = { payment_method: { type: "card", card_number_type: "network_token", token_ref: "ref" }, allowance: { reason: "one_time", max_amount: 2900, currency: "usd", checkout_session_id: "cs_9", merchant_id: "merchant_shop_sim", expires_at: new Date(x.now() + 10 * MIN).toISOString() }, risk_signals: [], metadata: {} };
-    const made = await x.world.fetch({ method: "POST", url: "https://psp.sim/agentic_commerce/delegate_payment", headers, body }, x.now());
-    const token = (made.body as { id: string }).id;
-    expect([made.status, token]).toEqual([201, "vt_000001"]);
-    const charge = { amount: 2900, currency: "usd", merchant_id: "merchant_shop_sim", checkout_session_id: "cs_9", merchant: "Shop Sim", mcc: "5968" };
-    const why = async (over: Partial<typeof charge>, at = x.now()) => (await x.world.psp.charge(token, { ...charge, ...over }, at) as { code?: string }).code;
-    expect(await why({ merchant_id: "merchant_other" })).toBe("merchant_mismatch");
-    expect(await why({ checkout_session_id: "cs_10" })).toBe("checkout_session_mismatch");
-    expect(await why({ amount: 2901 })).toBe("amount_exceeds_allowance");
-    expect(await why({}, x.now() + 11 * MIN)).toBe("token_expired");
-    // the same key and body replays; the same key with another body is a conflict; no key at all is refused
-    const replay = await x.world.fetch({ method: "POST", url: "https://psp.sim/agentic_commerce/delegate_payment", headers, body }, x.now());
-    expect([replay.status, (replay.body as { id: string }).id, replay.headers["idempotent-replayed"]]).toEqual([201, "vt_000001", "true"]);
-    const conflict = await x.world.fetch({ method: "POST", url: "https://psp.sim/agentic_commerce/delegate_payment", headers, body: { ...body, metadata: { x: 1 } } }, x.now());
-    expect([conflict.status, (conflict.body as { code: string }).code]).toEqual([422, "idempotency_conflict"]);
-    const bare = await x.world.fetch({ method: "POST", url: "https://psp.sim/agentic_commerce/delegate_payment", headers: { Authorization: headers.Authorization, "API-Version": X.ACP_VERSION }, body }, x.now());
-    expect([bare.status, (bare.body as { code: string }).code]).toEqual([400, "idempotency_key_required"]);
-  });
-
-  it("a checkout that totals more than the agent agreed to is not paid; a card the issuer declines is the issuer's refusal", async () => {
-    const x = await boot({ perPayment: "700", budget: "1000" });
-    x.world.shop.checkoutCents = 9900;
-    expect(code(await x.pay(ITEM, "30", ""))).toBe("E_PAYEE_OVERCHARGE");
-    // $600 is inside the approval and above the agentic token's own per-transaction limit: the network says no
-    x.world.shop.checkoutCents = 60_000;
-    const r = refusal(await x.payOk(ITEM, "700", ""));
-    expect([r.code, r.venue, (r.native as { responseCode: string }).responseCode]).toEqual(["E_VENUE_CARD_DECLINED", "mastercard", "61"]);
-    expect(x.spend().spentMicro).toBe(0);
-    expect(x.engine.payments.filter((p) => p.kind === "pay")).toEqual([]);
-  });
-});
-
 describe("AP2: the agent's own signature on what it commits the user to", () => {
+  it("a shop is paid from a float: a payment that names none sends nothing, for there is no card on the account", async () => {
+    const x = await boot();
+    const r = refusal(await x.pay(ITEM, "30", ""));
+    expect([r.code, r.message]).toEqual(["E_PAYEE_UNSUPPORTED", "shop.sim is paid in USDC: name the float that pays"]);
+    expect(x.world.sent.map((q) => `${q.method} ${q.host}${q.path}`)).toEqual(["GET shop.sim/items/desk-feed-pro"]);
+    expect(x.svc.adapter("mastercard")).toBeUndefined();
+  });
+
   it("open mandates from the owner's approval, closed mandates from the agent's key, receipts from the merchant and its processor", async () => {
     const x = await boot();
     // without its key in the request there is nothing a closed mandate could be checked against
@@ -649,17 +590,6 @@ describe("what the independent review found, kept closed", () => {
     expect(x.start - x.float()).toBe(18_000_000);
   });
 
-  it("a card that was charged while the merchant's answer was unreadable is on the books too", async () => {
-    const x = await boot();
-    const available = async () => (await x.svc.read("mastercard"))[0]!.amount;
-    const before = await available();
-    const honest = x.world.shop.handle as unknown as Handler;
-    hostsOf(x.world).set("shop.sim", async (c) => (c.url.pathname.endsWith("/complete") ? { ...(await honest(c)), body: 5 } : honest(c)));
-    const r = refusal(await x.payOk(ITEM, "30", ""));
-    expect([r.code, (r.detail as { paid?: boolean }).paid]).toEqual(["E_PAYEE_UNVERIFIED", true]);
-    expect([before - (await available()), x.spend().spentMicro, x.engine.payments.filter((p) => p.kind === "pay").map((p) => [p.from, p.amountUsd, p.note])]).toEqual([29, 29_000_000, [["mastercard", 29, "shop.sim charged the card and did not complete the order"]]]);
-  });
-
   it("an opening transaction a payee kept is cancelled: broadcast later, it reverts", async () => {
     const x = await boot();
     const honest = x.world.infer.handle as unknown as Handler;
@@ -704,14 +634,6 @@ describe("what the independent review found, kept closed", () => {
     expect([view.pay.sessions[0]!.status, view.heldUsd, y.spend().reservedMicro, y.start - y.float()]).toEqual(["closed", 0, 0, 10_000]);
     paid(await y.pay(STREAM, "0.05"));
     expect((await y.engine.view()).pay.sessions.map((s) => s.status)).toEqual(["closed", "open"]);
-  });
-
-  it("a payee's own links are https or they are nothing: no card credential over plain http", async () => {
-    const x = await boot();
-    paid(await x.payOk(ITEM, "30", ""));
-    x.world.shop.processorUrl = "http://psp.sim/agentic_commerce/delegate_payment";
-    expect(code(await x.pay(ITEM, "30", ""))).toBe("E_PAYEE_UNVERIFIED");
-    expect(x.world.sent.filter((s) => s.host === "psp.sim")).toHaveLength(1);
   });
 
   it("a payee that never answers is waited for, not for ever: the instructions behind it are taken", async () => {

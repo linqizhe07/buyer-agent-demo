@@ -234,29 +234,3 @@ describe("AP2 v0.2 · mandates", () => {
     expect(X.jwsVerify(receipt, issuer.jwk)).toBe(false);
   });
 });
-
-describe("ACP · a delegated payment token", () => {
-  const allowance: X.AcpAllowance = { reason: "one_time", max_amount: 2900, currency: "usd", checkout_session_id: "cs_1", merchant_id: "merchant_1", expires_at: "2026-10-05T14:10:00.000Z" };
-  const charge = { amount: 2900, currency: "usd", merchant_id: "merchant_1", checkout_session_id: "cs_1" };
-
-  it("the allowance: one use, one merchant, one checkout, up to an amount, until a time", () => {
-    const at = "2026-10-05T14:00:00.000Z";
-    expect(X.acpAllows(allowance, charge, at, false)).toBeNull();
-    expect(X.acpAllows(allowance, charge, at, true)).toBe("token_already_used");
-    expect(X.acpAllows(allowance, charge, "2026-10-05T14:10:00.000Z", false)).toBe("token_expired");
-    expect(X.acpAllows(allowance, { ...charge, merchant_id: "merchant_2" }, at, false)).toBe("merchant_mismatch");
-    expect(X.acpAllows(allowance, { ...charge, checkout_session_id: "cs_2" }, at, false)).toBe("checkout_session_mismatch");
-    expect(X.acpAllows(allowance, { ...charge, currency: "eur" }, at, false)).toBe("currency_mismatch");
-    expect(X.acpAllows(allowance, { ...charge, amount: 2901 }, at, false)).toBe("amount_exceeds_allowance");
-  });
-
-  it("an Idempotency-Key replays the same body and refuses a different one", () => {
-    const idem = new X.Idempotency();
-    expect(idem.check("k1", { a: 1 })).toBeNull();
-    idem.store("k1", { a: 1 }, { id: "cs_1" });
-    expect(idem.check("k1", { a: 1 })).toEqual({ replay: { id: "cs_1" } });
-    expect(idem.check("k1", { a: 2 })).toEqual({ conflict: true });
-    expect(idem.check("k2", { a: 1 })).toBeNull();
-    expect(idem.check(undefined, { a: 1 })).toBeNull();
-  });
-});

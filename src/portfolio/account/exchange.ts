@@ -32,14 +32,18 @@ import { evaluate, type AskReason, type Openness } from "../openness.ts";
 import { parseIntent, parseOrder } from "../intents.ts";
 import { achArrival, etDate, whenLabel } from "./calendar.ts";
 import { doorOf, plan, type Door, type Leg, type Rail, type Route, type RouteRequest, type VenueView, whyWatchOnly } from "./doors.ts";
-import { heldUsd, inFlightUsd, launch, newPayment, returnPayment, settleDue, type Advance, type Authority, type Money, type Payment, type PaymentKind } from "./payments.ts";
+import { heldUsd, inFlightUsd, launch, newPayment, settleDue, type Advance, type Authority, type Money, type Payment, type PaymentKind } from "./payments.ts";
 import { actionHash, isAgentAction, isDeviceSig, isJwk, isOwnerAction, kidOf, malformed, micro, MONEY_TTL_MS, MONEY_TYPES, NonceBook, ownerTypedData, shownFields, signerOf, type Action, type AgentAction, type AnySig, type Envelope, type Hex, type Jwk, type OwnerAction, type SendAsset } from "./sign.ts";
 import { LiveMoves, type LiveMoney } from "./live-moves.ts";
+import { LiveOrders, type LiveOrder, type OrderQuote } from "./live-orders.ts";
 import { activeAgents, agentStatus, applyOwner, covers, deviceKeys, emptyState, isOwner, spendFor, type AccountState, type AgentKey, type OwnerKey, type SpendApproval, type SubAccount } from "./state.ts";
 
 const HUB = "metamask";
 const STABLE = new Set(["USD", "USDC", "USDT", "pUSD"]);
 export const CARD_TTL_MS = 30 * 60_000;
+/** what moves or holds only simulated money: routes between simulated venues, swaps and orders at them, floats, the address book, payees, app fees */
+const SIMULATED_ONLY = new Set(["sendAsset", "swap", "agentSendAsset", "agentSwap", "agentPay", "createSubAccount", "userSetAbstraction", "setDestination", "approveBuilderFee", "agentExecute", "agentOrder"]);
+const realOnly = (type: string) => no("E_ACCOUNT_BAD_ACTION", { tool: type, message: `this account holds real accounts only: "${type}" acts on simulated venues. Real orders are liveOrder (the owner) and agentLiveOrder (an agent); real money moves with liveMove and agentLiveMove`, detail: { use: ["liveOrder", "agentLiveOrder", "liveMove", "agentLiveMove"] } });
 
 /** a card as the engine needs it from the flight board */
 export interface CardLike {
@@ -69,6 +73,8 @@ export interface CardOffer {
   amount: string;
   protocol: string;
   network: string;
+  /** a real-money movement: the most its fee may be, as the owner is shown it */
+  fee?: string | undefined;
   /** a metered session: the most that is locked in escrow when it opens, and the escrow contract that holds it */
   deposit?: string | undefined;
   escrow?: string | undefined;
@@ -80,6 +86,8 @@ export interface FlightLike {
 
 /** what the engine needs from the service it lives in */
 export interface Host {
+  /** the account holds real accounts only: the host shows it the venues connected live, and what moves only simulated money is refused */
+  readonly real?: boolean | undefined;
   now(): string;
   adapter(id: string): AccountAdapter | undefined;
   accounts(): Account[];
@@ -156,6 +164,8 @@ export type Outcome =
   | { ok: true; kind: "payment"; payment: Payment; flight?: string | undefined; data?: unknown }
   | { ok: true; kind: "card"; pending: true; card: CardLike; flight?: string | undefined }
   | { ok: true; kind: "result"; result: unknown; flight?: string | undefined }
+  /** an order at a venue connected live, as it stands */
+  | { ok: true; kind: "order"; order: LiveOrder; flight?: string | undefined }
   | Refusal;
 
 export interface AccountSeed {
@@ -207,7 +217,7 @@ export function cardHash(c: CardLike): Hex {
 }
 
 export function routeWords(r: Route, names: (id: string) => string, nowMs: number): string {
-  const hops = r.legs.map((l) => (l.step === "swap" ? `swap to ${l.token} at ${names(l.venue)}` : l.step === "shift" ? `${l.fromLedger} → ${l.toLedger} at ${names(l.venue)}` : l.step === "bridge" ? l.protocol : l.step === "in" ? `into ${names(l.venue)} (${l.protocol.split(" (")[0]})` : l.step === "venue" ? `${l.protocol}, started at ${names(l.venue)}` : l.venue === HUB ? `the wallet sends it${l.chain ? ` on ${l.chain}` : ""}` : `out of ${names(l.venue)}${l.chain ? ` on ${l.chain}` : ""}`));
+  const hops = r.legs.map((l) => (l.step === "swap" ? `swap to ${l.token} at ${names(l.venue)}` : l.step === "shift" ? `${l.fromLedger} → ${l.toLedger} at ${names(l.venue)}` : l.step === "bridge" ? l.protocol : l.step === "in" ? `into ${names(l.venue)} (${l.protocol.split(" (")[0]})` : l.venue === HUB ? `the wallet sends it${l.chain ? ` on ${l.chain}` : ""}` : `out of ${names(l.venue)}${l.chain ? ` on ${l.chain}` : ""}`));
   return `${hops.join(" · ")} · fee ${money(r.feeUsd)} · lands ${whenLabel(nowMs, r.arrivalMs)}`;
 }
 
@@ -215,6 +225,9 @@ export class AccountEngine {
   state: AccountState;
   readonly nonces = new NonceBook();
   payments: Payment[] = [];
+  /** orders placed at venues connected live, newest first */
+  orders: LiveOrder[] = [];
+  private orderSeq = 0;
   private results = new Map<string, Outcome>();
   /** instructions an earlier run of this account took, read back from its ledgers: none of them is taken again */
   private readonly taken = new Set<string>();
@@ -222,6 +235,8 @@ export class AccountEngine {
   private payer: Payer | undefined;
   /** the door for REAL money at venues connected live (account/live-moves.ts) */
   readonly live: LiveMoves;
+  /** the door for ORDERS at venues connected live (account/live-orders.ts) */
+  readonly trade: LiveOrders;
   /** wrong pairing codes since the server started: after a few, none is accepted until it restarts */
   private codeMisses = 0;
 
@@ -231,6 +246,7 @@ export class AccountEngine {
   ) {
     this.state = { ...emptyState(), owners: [...(seed.owners ?? [])] };
     this.live = new LiveMoves(this as never);
+    this.trade = new LiveOrders(this as never);
   }
 
   /** everything but the nonce books goes back to the start: an old signed envelope must not come back to life with the account */
@@ -238,6 +254,8 @@ export class AccountEngine {
     // the paired owner stays the owner: a reset that emptied the owners would hand the account to whoever paired next
     this.state = { ...emptyState(), owners: this.seed.owners?.length ? [...this.seed.owners] : this.state.owners, threshold: this.seed.owners?.length ? 1 : this.state.threshold };
     this.payments = [];
+    this.orders = [];
+    this.orderSeq = 0;
     this.results = new Map();
     this.seq = 0;
     this.payer?.reset();
@@ -266,6 +284,10 @@ export class AccountEngine {
 
   nextPaymentId(): string {
     return `pay-${String(++this.seq).padStart(4, "0")}`;
+  }
+
+  nextOrderId(): string {
+    return `ord-${String(++this.orderSeq).padStart(4, "0")}`;
   }
 
   private money(): Money {
@@ -313,7 +335,12 @@ export class AccountEngine {
    * payee, a signature): two requests let in together would each see the budget as it was before the other spent it. A limit that two requests can
    * each pass alone is not a limit. */
   exchange(envelope: Envelope): Promise<Outcome> {
-    const turn = this.queue.then(() => this.take(envelope));
+    return this.serially(() => this.take(envelope));
+  }
+
+  /** run `fn` in the same line as the instructions: what changes an order or a payment never runs in the middle of one */
+  serially<T>(fn: () => Promise<T>): Promise<T> {
+    const turn = this.queue.then(fn);
     this.queue = turn.catch(() => undefined);
     return turn;
   }
@@ -348,7 +375,7 @@ export class AccountEngine {
         if (isOwner(this.state, signer)) return this.refused(no("E_ACCOUNT_BAD_ACTION", { message: "an owner signs owner actions; this one is an agent's" }), envelope, signer);
         // remember the stranger so the owner can be offered the choice; its nonce is NOT spent
         if (!this.state.requests.some((r) => r.address === signer)) this.state = { ...this.state, requests: [...this.state.requests, { address: signer as Hex, name: "", at: this.host.now() }].slice(-8) };
-        return this.refused(no("E_ACCOUNT_UNKNOWN_SIGNER", { message: "this key is not authorised on the account: the owner authorises it under Agent keys", detail: { signer } }), envelope, signer);
+        return this.refused(no("E_ACCOUNT_UNKNOWN_SIGNER", { message: "this key is not authorised on the account: the owner lets it in under Agents", detail: { signer } }), envelope, signer);
       }
       if (status === "expired") return this.refused(no("E_ACCOUNT_AGENT_EXPIRED", { detail: { signer } }), envelope, signer);
       if (status === "revoked") return this.refused(no("E_ACCOUNT_AGENT_REVOKED", { detail: { signer } }), envelope, signer);
@@ -371,7 +398,8 @@ export class AccountEngine {
     if (MONEY_TYPES.has(action.type) && Math.abs(now - action.nonce) > MONEY_TTL_MS) return this.refused(no("E_ACCOUNT_EXPIRED", { message: now > action.nonce ? `signed ${Math.round((now - action.nonce) / 60_000)} min ago: a money instruction is good for ${MONEY_TTL_MS / 60_000} minutes` : `dated ${Math.round((action.nonce - now) / 60_000)} min ahead: a money instruction is good for ${MONEY_TTL_MS / 60_000} minutes around its date`, detail: { signedAt: new Date(action.nonce).toISOString() } }), envelope, signer);
     for (const who of signers) this.nonces.use(who, action.nonce);
 
-    await this.settle();
+    // an order or a cancel is not kept waiting while the account asks other venues how their orders stand
+    await this.settle(["liveCancel", "agentLiveCancel", "liveOrder", "agentLiveOrder"].includes(action.type));
     const out = await this.run(action, envelope, signer, agent, hash);
     this.results.set(key, out);
     if (isRefusal(out)) this.host.log({ kind: "account-refusal", venue: out.venue ?? "*", tool: action.type, code: out.code, reason: out.message, detail: out.detail, native: out.native, signer, envelope, ...(agent ? { agent: slug(agent.name) } : {}) });
@@ -386,6 +414,7 @@ export class AccountEngine {
 
   private async run(action: Action, envelope: Envelope, signer: string, agent: AgentKey | undefined, hash: Hex): Promise<Outcome> {
     const now = this.nowMs();
+    if (this.host.real && (SIMULATED_ONLY.has(action.type) || (action.type === "approveSpend" && action.scope === "payees" && micro(action.budget) > 0))) return realOnly(action.type === "approveSpend" ? "approveSpend · payees" : action.type);
     switch (action.type) {
       case "approveAgent":
       case "approveBuilderFee":
@@ -413,8 +442,11 @@ export class AccountEngine {
       case "connectVenue":
       case "disconnectVenue": {
         // a venue with money on its way to it or from it stays plugged in until that has landed
-        const busy = this.host.adapter(action.venue) ? this.payments.find((p) => p.status === "pending" && (p.from === action.venue || p.to === action.venue)) : undefined;
+        const busy = this.host.adapter(action.venue) ? this.payments.find((p) => (p.status === "pending" || (p.status === "authorized" && p.live)) && (p.from === action.venue || p.to === action.venue)) : undefined;
         if (busy) return no("E_ACCOUNT_BAD_ACTION", { venue: action.venue, message: `${this.name(action.venue)} has a payment in flight (${busy.id}): it can be ${action.type === "connectVenue" ? "connected live" : "unplugged"} when that has landed`, detail: { payment: busy.id } });
+        // an order still open there: disconnected, the account could neither follow it nor cancel it
+        const open = this.trade.openAt(action.venue);
+        if (open) return no("E_ACCOUNT_BAD_ACTION", { venue: action.venue, message: `${this.name(action.venue)} has an open order (${open.id}): cancel it, or let it fill, before ${action.type === "connectVenue" ? "connecting it again" : "disconnecting it"}`, detail: { order: open.id } });
         const r = action.type === "connectVenue" ? await this.host.connect(action.venue, action.connector, action.label, action.credentialRef) : this.host.disconnect(action.venue);
         if (isRefusal(r)) return r;
         this.host.log({ kind: "action", venue: action.venue, tool: action.type, signer, envelope, outcome: "ok", reason: r.summary, ...("native" in r && r.native !== undefined ? { native: r.native } : {}) });
@@ -426,6 +458,14 @@ export class AccountEngine {
         return this.live.owner(action, { signer, envelope, hash });
       case "agentLiveMove":
         return this.live.agent(action, { signer, envelope, hash, agent: agent! });
+      case "liveOrder":
+        return this.trade.owner(action, { signer, envelope, hash });
+      case "liveCancel":
+        return this.trade.cancel(action, { signer, authority: "owner", envelope });
+      case "agentLiveOrder":
+        return this.trade.agent(action, { signer, envelope, hash, agent: agent! });
+      case "agentLiveCancel":
+        return this.trade.cancel(action, { signer, authority: "agent", agent: agent!, envelope });
       case "sendAsset":
         return this.move(action, { signer, authority: "owner", envelope, hash });
       case "swap":
@@ -462,7 +502,8 @@ export class AccountEngine {
       case "approveBuilderFee":
         return a.maxFeeRate.trim() === "0" ? `fee approval for ${a.builder.slice(0, 10)}… removed` : `${a.builder.slice(0, 10)}… may charge up to ${a.maxFeeRate}`;
       case "approveSpend":
-        return micro(a.budget) === 0 ? `spending approval (${a.scope}) revoked` : `spending approval: ${a.scope} ${a.allow} · up to $${a.perPayment} a payment · $${a.budget} in all · until ${etDate(a.validUntil)}`;
+        if (a.scope === "trade") return micro(a.budget) === 0 ? "trading limit revoked" : `trading limit: ${a.allow.trim() === "*" ? "every venue on the account now" : a.allow} · up to $${a.perPayment} an order · $${a.budget} of orders in all · until ${etDate(a.validUntil)}`;
+        return micro(a.budget) === 0 ? `spending approval (${a.scope}) revoked` : `spending approval: ${a.scope} ${a.allow.trim() === "*" ? (a.scope === "venues" ? "every venue on the account now" : "every payee") : a.allow} · up to $${a.perPayment} a payment · $${a.budget} in all · until ${etDate(a.validUntil)}`;
       case "createSubAccount":
         return `sub-account "${a.name}" created with a float of up to $${a.float}`;
       case "userSetAbstraction":
@@ -568,7 +609,7 @@ export class AccountEngine {
     // whose leg is the strictest one on the way
     const b = route.blocker;
     if (route.access === "closed") return no("E_VENUE_RAIL_CLOSED", { venue: b?.venue ?? route.from, message: `${this.name(b?.venue ?? route.from)}: ${b?.why ?? "this runway is closed"}`, detail: { step: b?.step, ...(b?.opens ? { opens: b.opens } : {}) } });
-    if (route.access === "venue" && (who.authority === "agent" || route.legs.length > 1 || route.legs[0]!.step !== "venue")) return no("E_VENUE_RAIL_CLOSED", { venue: b!.venue, message: `${this.name(b!.venue)}: ${b!.why}${who.authority === "agent" ? "" : "; do that leg there, then move it on from the wallet"}`, detail: { step: b!.step, ...(b!.opens ? { opens: b!.opens } : {}) } });
+    if (route.access === "venue") return no("E_VENUE_RAIL_CLOSED", { venue: b!.venue, message: `${this.name(b!.venue)}: ${b!.why}${who.authority === "agent" ? "" : "; do that leg there, then move it on from the wallet"}`, detail: { step: b!.step, ...(b!.opens ? { opens: b!.opens } : {}) } });
     if (route.access === "owner" && who.authority === "agent") return no("E_ACCOUNT_OWNER_ONLY", { venue: b!.venue, message: `${this.name(b!.venue)}: ${b!.why}`, detail: { step: b!.step } });
 
     const maxFee = micro(action.maxFee);
@@ -604,8 +645,8 @@ export class AccountEngine {
       cardId = released?.id;
     }
 
-    const kind: PaymentKind = float ? "refill" : !home ? "send" : route.from === route.to ? "transfer" : route.legs[0]!.step === "venue" || this.host.adapter(route.from)?.account.kind === "bank" ? "deposit" : this.host.adapter(route.to)?.account.kind === "bank" || route.to === HUB ? "withdraw" : route.from === HUB ? "deposit" : "transfer";
-    const p = newPayment(`pay-${String(++this.seq).padStart(4, "0")}`, kind, float ? { ...route, to: `sub:${float.name}` } : route, this.host.now(), { signer: who.signer, authority: route.access === "venue" ? "venue" : who.authority, ...(who.agent ? { agent: who.agent.address } : {}), ...(flight ? { flight: flight.no } : {}), action: who.hash, ...(spend ? { approval: spend.id } : {}), ...(cardId ? { card: cardId } : {}), ...(external ? { external } : {}) });
+    const kind: PaymentKind = float ? "refill" : !home ? "send" : route.from === route.to ? "transfer" : route.to === HUB ? "withdraw" : route.from === HUB ? "deposit" : "transfer";
+    const p = newPayment(`pay-${String(++this.seq).padStart(4, "0")}`, kind, float ? { ...route, to: `sub:${float.name}` } : route, this.host.now(), { signer: who.signer, authority: who.authority, ...(who.agent ? { agent: who.agent.address } : {}), ...(flight ? { flight: flight.no } : {}), action: who.hash, ...(spend ? { approval: spend.id } : {}), ...(cardId ? { card: cardId } : {}), ...(external ? { external } : {}) });
     this.payments.unshift(p);
     // a float on its way home leaves the float as the payment starts
     const leaving = route.from.startsWith("sub:") ? this.sub(route.from.slice(4)) : undefined;
@@ -756,6 +797,9 @@ export class AccountEngine {
     else if (card.action.type === "agentLiveMove") {
       release();
       again = await this.live.release(card, { signer: key.address, agent: key });
+    } else if (card.action.type === "agentLiveOrder") {
+      release();
+      again = await this.trade.release(card, { signer: key.address, agent: key });
     } else if (card.action.type === "agentSendAsset" || (card.action.type === "agentPay" && this.payer)) {
       // what the card held of the budget goes back first: the instruction is then judged against the approval like any other — every limit of it
       release();
@@ -773,10 +817,22 @@ export class AccountEngine {
   // ---- time -----------------------------------------------------------------------------
 
   /** land whatever is due; called before anything reads or moves */
-  async settle(): Promise<void> {
+  async settle(quick = false): Promise<void> {
     this.record(await settleDue(this.payments, this.nowMs(), this.money()));
     this.payer?.tick(this.nowMs());
-    await this.live.poll();
+    if (quick) return;
+    // asking venues how things stand never takes the account down: a venue that throws is asked again next time
+    try {
+      await this.live.poll();
+    } catch (err) {
+      this.host.log({ kind: "note", venue: "*", tool: "live poll", reason: `asking how payments stand failed: ${String((err as Error)?.message ?? err).slice(0, 160)}` });
+    }
+    try {
+      // a page read waits for the venues a few seconds at most: what arrives later is shown on the next read
+      await Promise.race([this.trade.poll(), new Promise((resolve) => setTimeout(resolve, 3_000))]);
+    } catch (err) {
+      this.host.log({ kind: "note", venue: "*", tool: "order poll", reason: `asking how orders stand failed: ${String((err as Error)?.message ?? err).slice(0, 160)}` });
+    }
   }
 
   private record(events: Advance[]): void {
@@ -795,16 +851,6 @@ export class AccountEngine {
         if (flight) this.host.say(flight, e.event === "failed" ? `${this.name(e.leg?.venue ?? p.from)} refused: ${e.refusal?.message ?? "refused"}. Nothing moved` : (p.note ?? "stranded"), "no");
       }
     }
-  }
-
-  /** the bank sends an ACH back (a simulation hook: in life this arrives on the venue's statement) */
-  returnAch(paymentId: string, code = "R01", description = "Insufficient funds"): Refusal | { ok: true; payment: Payment } {
-    const p = this.payments.find((x) => x.id === paymentId);
-    if (!p) return no("E_ACCOUNT_BAD_ACTION", { message: `no payment ${paymentId}` });
-    const r = returnPayment(p, code, description, this.money());
-    if (r) return r;
-    this.host.log({ kind: "payment", venue: p.to, tool: "returned", outcome: "returned", payment: p.id, code: "E_VENUE_RETURNED", notionalUsd: p.amountUsd, reason: `${p.id} · returned by the bank (${code} ${description}): ${money(p.amountUsd)} is back at ${this.name(p.from)}`, native: { return_code: code, description } });
-    return { ok: true, payment: p };
   }
 
   /** every settled leg at a venue that keeps a statement should be on that statement, and every line on it should be a payment the account knows */
@@ -839,13 +885,12 @@ export class AccountEngine {
     await this.settle();
     const now = this.nowMs();
     const views = await this.host.views();
-    const label = (r: Rail | undefined, name: string, bank = false, inbound = false): RunwayLabel => {
+    const label = (r: Rail | undefined, name: string): RunwayLabel => {
       if (!r) return { text: "—", access: "closed" };
       const when = r.clock === "ach" ? etDate(achArrival(now)) : eta(r.etaSec);
       const what = r.id === "cctp" ? "CCTP" : r.clock === "ach" ? "ACH" : r.id === "deposit" || r.id === "withdraw" || r.id === "transfer" || r.id === "receive" ? r.tokens.filter((t) => t !== "pUSD").join(" · ") : r.protocol;
       if (r.access === "closed") return { text: "Closed", access: r.access, why: r.why };
-      // a bank's ACH is started on the other side: the venue that pays out, or the venue that pulls
-      if (r.access === "venue") return { text: `${bank ? (inbound ? "A venue pays out" : "A venue pulls it") : `At ${name}`} · ${when}`, access: r.access, why: r.why, opens: r.opens };
+      if (r.access === "venue") return { text: `At ${name} · ${when}`, access: r.access, why: r.why, opens: r.opens };
       if (r.access === "owner") return { text: `Yours to sign · ${when}`, access: r.access, why: r.why };
       return { text: `${what} · ${when}`, access: r.access };
     };
@@ -854,7 +899,7 @@ export class AccountEngine {
       const stable = (h: Holding) => h.class === "stable" || h.class === "cash";
       const rail = (dir: string, x: Rail): RunwayRow => ({ dir, protocol: x.protocol, carries: x.tokens.join(" · "), chains: x.chains, feeOn1000: x.fee(1000, x.chains[0]), lands: x.clock === "ach" ? etDate(achArrival(now)) : eta(x.etaSec), access: x.access, ...(x.why ? { why: x.why } : {}), ...(x.opens ? { opens: x.opens } : {}), ...(x.minUsd !== undefined ? { minUsd: x.minUsd } : {}), final: x.final, ...(x.returnDays ? { returnDays: x.returnDays } : {}) });
       const runways: RunwayRow[] = [...d.in.map((x) => rail("In", x)), ...d.out.map((x) => rail("Out", x)), ...d.inside.map((x) => ({ dir: "Inside", protocol: x.protocol, carries: `${x.from} → ${x.to}`, chains: [], feeOn1000: 0, lands: "now", access: x.access, final: true })), ...d.swap.map((x) => ({ dir: "Swap", protocol: x.protocol, carries: x.pair.join(" ⇄ "), chains: [], feeOn1000: r2((1000 * x.feeBps) / 10_000), lands: "now", access: x.access, minUsd: x.minUsd, final: true }))];
-      return { id: v.id, name: v.name, frontLine: d.frontLine, usd: r2(v.holdings.filter((h) => h.class !== "credit").reduce((s, h) => s + h.usd, 0)), cashUsd: r2(v.holdings.filter((h) => stable(h) && !h.inTransit).reduce((s, h) => s + h.usd, 0)), holdings: v.holdings.map((h) => ({ asset: h.asset, amount: h.amount, usd: h.usd, note: h.note, inTransit: h.inTransit === true })), ...(d.restricted ? { restricted: d.restricted } : {}), ...(v.plugged ? { plugged: true, via: v.watchOnly ? `${v.provider} · ${v.scope.limits[0] ?? ""}` : v.connector === "wallet" ? "plugged in by address" : `plugged in · ${v.scope.limits[0] ?? ""}` } : {}), ...(v.watchOnly ? { live: true as const, watchOnly: v.watchOnly, ...(v.asOf ? { asOf: v.asOf } : {}), ...(v.stale ? { stale: v.stale } : {}), ...(v.proven ? { proven: v.proven } : {}), ...(v.liveCan ? { liveCan: v.liveCan } : {}), ...(v.readOnlyBecause ? { readOnlyBecause: v.readOnlyBecause } : {}), ...(v.address ? { address: v.address } : {}) } : v.live ? { live: true as const } : {}), in: label(d.in[0], v.name, v.kind === "bank", true), out: label(d.out[0], v.name, v.kind === "bank"), fiat: (d.in[0] ?? d.out[0])?.chains.length === 0, ledgers: [...new Set(d.inside.flatMap((x) => (x.from === "chain" ? [] : [x.from, x.to])))], swaps: d.swap.map((x) => ({ pair: x.pair, feeBps: x.feeBps, minUsd: x.minUsd, access: x.access })), agentKey: d.agentKey, runways };
+      return { id: v.id, name: v.name, frontLine: d.frontLine, usd: r2(v.holdings.reduce((s, h) => s + h.usd, 0)), cashUsd: r2(v.holdings.filter((h) => stable(h) && !h.inTransit).reduce((s, h) => s + h.usd, 0)), holdings: v.holdings.map((h) => ({ asset: h.asset, amount: h.amount, usd: h.usd, class: h.class, note: h.note, inTransit: h.inTransit === true })), ...(d.restricted ? { restricted: d.restricted } : {}), ...(v.plugged ? { plugged: true, via: v.watchOnly ? `${v.provider} · ${v.scope.limits[0] ?? ""}` : v.connector === "wallet" ? "plugged in by address" : `plugged in · ${v.scope.limits[0] ?? ""}` } : {}), ...(v.watchOnly ? { live: true as const, watchOnly: v.watchOnly, ...(v.asOf ? { asOf: v.asOf } : {}), ...(v.stale ? { stale: v.stale } : {}), ...(v.proven ? { proven: v.proven } : {}), ...(v.liveCan ? { liveCan: v.liveCan } : {}), ...(v.liveTrade ? { trade: v.liveTrade } : {}), ...(v.noTradeBecause ? { noTradeBecause: v.noTradeBecause } : {}), ...(v.readOnlyBecause ? { readOnlyBecause: v.readOnlyBecause } : {}), ...(v.address ? { address: v.address } : {}) } : v.live ? { live: true as const } : {}), in: label(d.in[0], v.name), out: label(d.out[0], v.name), fiat: (d.in[0] ?? d.out[0])?.chains.length === 0, ledgers: [...new Set(d.inside.flatMap((x) => (x.from === "chain" ? [] : [x.from, x.to])))], swaps: d.swap.map((x) => ({ pair: x.pair, feeBps: x.feeBps, minUsd: x.minUsd, access: x.access })), agentKey: d.agentKey, runways };
     });
     const owners = this.state.owners.map((o) => ({ id: o.id, kind: o.kind, label: o.label }));
     return {
@@ -865,6 +910,7 @@ export class AccountEngine {
       heldUsd: heldUsd(this.payments),
       venues,
       payments: this.payments.slice(0, 40),
+      orders: this.orders.slice(0, 60),
       keys: this.state.agents.map((k) => ({ address: k.address, name: k.name, code: k.code, validUntil: new Date(k.validUntil).toISOString(), approvedAt: k.approvedAt, status: agentStatus(this.state, k.address, now) })),
       requests: this.state.requests,
       spend: this.state.spends.filter((s) => s.revokedAt === undefined).map((s) => ({ id: s.id, agent: s.agent, agentName: this.state.agents.find((k) => k.address === s.agent)?.name ?? s.agent, scope: s.scope, allow: s.allow, perPaymentUsd: s.perPaymentMicro / 1e6, budgetUsd: s.budgetMicro / 1e6, spentUsd: s.spentMicro / 1e6, reservedUsd: s.reservedMicro / 1e6, windowHours: s.windowHours, validUntil: new Date(s.validUntil).toISOString(), expired: now >= s.validUntil, payTo: s.payTo })),
@@ -878,6 +924,7 @@ export class AccountEngine {
       signers: { owners, threshold: this.state.threshold, pendingDevices: this.state.pendingDevices.map((d) => ({ kid: d.kid, at: d.at })) },
       destinations: this.state.destinations.map((d) => ({ ...d, usable: now >= Date.parse(d.usableAt), usableOn: etDate(Date.parse(d.usableAt)) })),
       activeKeys: activeAgents(this.state, now).length,
+      ...(this.host.real ? { real: true as const } : {}),
     };
   }
 
@@ -895,6 +942,7 @@ export class AccountEngine {
    * fee and its latest arrival go INTO the action. The page shows these fields and the device signs these fields; nothing is signed that is not shown. */
   async prepare(draft: Record<string, unknown>): Promise<Prepared | Refusal> {
     const type = String(draft.type ?? "");
+    if (this.host.real && SIMULATED_ONLY.has(type)) return realOnly(type);
     const nonce = this.nextNonce();
     let action: OwnerAction;
     let quote: Prepared["quote"];
@@ -904,11 +952,11 @@ export class AccountEngine {
       if (isRefusal(r)) return r;
       const { route } = r;
       const b = route.blocker;
-      if (route.access === "closed" || (route.access === "venue" && (route.legs.length > 1 || route.legs[0]!.step !== "venue"))) return no("E_VENUE_RAIL_CLOSED", { venue: b?.venue ?? route.from, message: `${this.name(b?.venue ?? route.from)}: ${b?.why ?? "this runway is closed"}`, detail: { ...(b?.opens ? { opens: b.opens } : {}) } });
+      if (route.access === "closed" || route.access === "venue") return no("E_VENUE_RAIL_CLOSED", { venue: b?.venue ?? route.from, message: `${this.name(b?.venue ?? route.from)}: ${b?.why ?? "this runway is closed"}`, detail: { ...(b?.opens ? { opens: b.opens } : {}) } });
       action = { type: "sendAsset", ...fields, fromSubAccount: "", route: route.hash, maxFee: String(route.feeUsd), deadline: route.arrivalMs + MONEY_TTL_MS, nonce };
       // a leg out of a wallet the account holds no key for is signed in that wallet: the page says so before the owner signs here
       const inWallet = route.legs.find((l) => l.step === "out" && this.host.adapter(l.venue)?.account.connector === "wallet");
-      quote = { words: routeWords(route, (id) => this.name(id), this.nowMs()), feeUsd: route.feeUsd, receiveUsd: route.receiveUsd, lands: whenLabel(this.nowMs(), route.arrivalMs), access: route.access, ...(route.access === "venue" ? { startAt: this.name(route.legs[0]!.venue) } : {}), ...(inWallet ? { signAt: this.name(inWallet.venue) } : {}), final: route.legs[route.legs.length - 1]!.final, legs: route.legs.map((l) => ({ step: l.step, venue: this.name(l.venue), protocol: l.protocol, feeUsd: l.feeUsd })) };
+      quote = { words: routeWords(route, (id) => this.name(id), this.nowMs()), feeUsd: route.feeUsd, receiveUsd: route.receiveUsd, lands: whenLabel(this.nowMs(), route.arrivalMs), access: route.access, ...(inWallet ? { signAt: this.name(inWallet.venue) } : {}), final: route.legs[route.legs.length - 1]!.final, legs: route.legs.map((l) => ({ step: l.step, venue: this.name(l.venue), protocol: l.protocol, feeUsd: l.feeUsd })) };
     } else if (type === "liveMove") {
       // real money: the destination address is asked of the destination venue here, never taken from the page
       const r = await this.live.prepare(draft);
@@ -917,6 +965,12 @@ export class AccountEngine {
       const fee = Number(r.maxFee);
       const writes = this.host.liveMoney?.().writes();
       quote = { words: `${r.kind} ${r.amount} ${r.asset}${r.kind === "swap" ? ` for ${r.toAsset}` : ""}`, feeUsd: fee, receiveUsd: r2(Math.max(0, Number(r.amount) - fee)), lands: r.kind === "transfer" || r.kind === "swap" ? "at once" : "when the venue has sent it", access: "owner", final: true, legs: [], live: { toAddress: r.toAddress, network: r.network, capUsd: writes?.capUsd ?? 0 } };
+    } else if (type === "liveOrder") {
+      // an order: the market, its price and its steps are asked of the venue here; the exact size and the most it may be worth go into the action
+      const r = await this.trade.prepare(draft);
+      if (isRefusal(r)) return r;
+      action = { ...r.action, nonce };
+      quote = { words: r.quote.words, feeUsd: 0, receiveUsd: r.quote.notionalUsd, lands: "at once", access: "owner", final: true, legs: [], order: r.quote };
     } else if (isOwnerAction({ type })) {
       action = { ...draft, type, nonce } as unknown as OwnerAction;
     } else return no("E_ACCOUNT_BAD_ACTION", { message: `"${type}" is not something the owner signs` });
@@ -935,7 +989,7 @@ export interface Prepared {
   domain: { name: string; version: string; chainId: number };
   accountChain: string;
   shown: Array<{ name: string; value: string }>;
-  quote?: { words: string; feeUsd: number; receiveUsd: number; lands: string; access: string; startAt?: string; signAt?: string; live?: { toAddress: string; network: string; capUsd: number }; final: boolean; legs: Array<{ step: string; venue: string; protocol: string; feeUsd: number }> } | undefined;
+  quote?: { words: string; feeUsd: number; receiveUsd: number; lands: string; access: string; signAt?: string; live?: { toAddress: string; network: string; capUsd: number }; order?: OrderQuote; final: boolean; legs: Array<{ step: string; venue: string; protocol: string; feeUsd: number }> } | undefined;
 }
 
 /** one rail of a venue as the Runways tab shows it */
@@ -968,8 +1022,10 @@ export interface AccountPage {
   inFlightUsd: number;
   /** what open payment sessions hold in escrow that is still the user's */
   heldUsd: number;
-  venues: Array<{ id: string; name: string; frontLine: string; usd: number; cashUsd: number; holdings: Array<{ asset: string; amount: number; usd: number; note?: string | undefined; inTransit: boolean }>; restricted?: string; /** the owner plugged it in: it can be unplugged */ plugged?: boolean; via?: string; /** its balances are the real venue's */ live?: true; /** connected read-only: every door through it is shut */ watchOnly?: string; asOf?: string; stale?: string; proven?: string; liveCan?: Account["liveCan"]; readOnlyBecause?: string; address?: string; in: RunwayLabel; out: RunwayLabel; /** it moves dollars by ACH, not stablecoins on a chain */ fiat: boolean; ledgers: string[]; swaps: Array<{ pair: [string, string]; feeBps: number; minUsd: number; access: string }>; agentKey: Door["agentKey"]; runways: RunwayRow[] }>;
+  venues: Array<{ id: string; name: string; frontLine: string; usd: number; cashUsd: number; holdings: Array<{ asset: string; amount: number; usd: number; class: Holding["class"]; note?: string | undefined; inTransit: boolean }>; restricted?: string; /** the owner plugged it in: it can be unplugged */ plugged?: boolean; via?: string; /** its balances are the real venue's */ live?: true; /** connected read-only: every door through it is shut */ watchOnly?: string; asOf?: string; stale?: string; proven?: string; liveCan?: Account["liveCan"]; readOnlyBecause?: string; /** orders can be placed here: may the key trade, and what is traded */ trade?: Account["liveTrade"]; noTradeBecause?: string; address?: string; in: RunwayLabel; out: RunwayLabel; /** it moves dollars by ACH, not stablecoins on a chain */ fiat: boolean; ledgers: string[]; swaps: Array<{ pair: [string, string]; feeBps: number; minUsd: number; access: string }>; agentKey: Door["agentKey"]; runways: RunwayRow[] }>;
   payments: Payment[];
+  /** orders placed at venues connected live, newest first */
+  orders: LiveOrder[];
   keys: Array<{ address: string; name: string; code: string; validUntil: string; approvedAt: string; status: string }>;
   requests: AccountState["requests"];
   spend: Array<{ id: string; agent: string; agentName: string; scope: string; allow: string[]; perPaymentUsd: number; budgetUsd: number; spentUsd: number; reservedUsd: number; windowHours: number; validUntil: string; expired: boolean; payTo: Record<string, string> }>;
@@ -987,6 +1043,8 @@ export interface AccountPage {
   liveUsd: number;
   /** the real venues this service can connect, read-only */
   connectLive?: LiveOptions | undefined;
+  /** the account holds real accounts only: every venue on it is connected live */
+  real?: true;
 }
 
 export type { Jwk };

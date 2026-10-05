@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Account · agent</title>
+<title>Account</title>
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,600;8..60,700&display=swap" />
 <link rel="stylesheet" href="/portfolio.css" />
@@ -13,12 +13,13 @@
 <main>
   <header class="top">
     <div>
-      <nav class="pages"><a href="/">Statement</a><a href="/account" aria-current="page">Account</a></nav>
+      <h1 class="brand">Account</h1>
       <div class="mono dim" id="stamp">—</div>
     </div>
     <div class="modes">
-      <div class="seg" id="mode"><button type="button" data-mode="open" aria-pressed="false">Open</button><button type="button" data-mode="guard" aria-pressed="false">Guard</button></div>
-      <div class="mono dim small" id="mode-note"></div>
+      <div class="seg" id="mode"><button type="button" data-mode="guard" aria-pressed="false">Conservative</button><button type="button" data-mode="open" aria-pressed="false">Aggressive</button></div>
+      <div class="dim small" id="mode-note"></div>
+      <div id="writes"></div>
     </div>
   </header>
 
@@ -27,29 +28,23 @@
       <div class="num" id="total">—</div>
       <div class="sub dim" id="sub">—</div>
     </div>
-    <div class="acts" id="acts">
-      <button type="button" class="ink" data-act="deposit">Deposit</button>
-      <button type="button" data-act="withdraw">Withdraw</button>
-      <button type="button" data-act="transfer">Transfer</button>
-      <button type="button" data-act="swap">Swap</button>
-      <button type="button" data-act="send">Send</button>
-    </div>
+    <button type="button" class="ink" id="connect">Connect an account</button>
   </section>
 
-  <section class="kind">
-    <div class="seg" id="type"><button type="button" data-type="disabled" aria-pressed="false">Separate</button><button type="button" data-type="unifiedAccount" aria-pressed="false">Unified</button></div>
-    <span class="dim small" id="type-note"></span>
+  <section class="alloc" id="alloc" hidden>
+    <div class="bar" id="alloc-bar"></div>
+    <div class="legend mono" id="alloc-legend"></div>
   </section>
+  <details class="liq" id="liq" hidden><summary id="liq-sum"></summary><div id="liq-body"></div></details>
 
   <div class="banner" id="banner" hidden></div>
+  <div class="msg" id="flash"></div>
   <section id="waiting" hidden></section>
 
-  <section>
-    <nav class="tabs" id="tabs" role="tablist"></nav>
-    <div id="panel"></div>
-  </section>
-
-  <footer class="mono dim small" id="foot"></footer>
+  <section><h2 class="sec">Accounts <span class="tools" id="accounts-tools"></span></h2><div id="accounts"></div></section>
+  <section id="statement-sec"><h2 class="sec">Statement <span class="tools" id="statement-tools"></span></h2><div class="print-head" id="print-head"></div><div id="open-now"></div><div class="filters" id="statement-filters"></div><div id="statement"></div></section>
+  <section><h2 class="sec">Agents</h2><div id="agents"></div></section>
+  <section><h2 class="sec">Devices</h2><div id="devices"></div></section>
 </main>
 
 <dialog id="modal"><form method="dialog" id="modal-form"></form></dialog>

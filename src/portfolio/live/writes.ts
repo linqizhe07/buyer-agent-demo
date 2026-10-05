@@ -15,6 +15,7 @@ import type { Refusal } from "../../core/errors.ts";
 import { no } from "../refuse.ts";
 import { CHAINS, STABLECOINS, type ChainName, type ChainReader } from "./chain.ts";
 import type { ExchangeClient } from "./exchange.ts";
+import type { WalletBridge } from "./wallet-bridge.ts";
 import { redact } from "./types.ts";
 
 export interface LiveReceipt {
@@ -34,7 +35,11 @@ export interface WalletTx {
   from: Hex;
   to: Hex;
   data: Hex;
-  value: "0x0";
+  /** the chain's coin it carries: none for a stablecoin transfer; a bridge's fee paid on top (Stargate's LayerZero fee) */
+  value: Hex;
+  /** the gas the route needs, when the venue says */
+  gas?: Hex | undefined;
+  what?: string | undefined;
 }
 
 export type Landed = "pending" | "settled" | "failed";
@@ -69,6 +74,8 @@ export interface LiveWriter {
   landed?(ref: string, asset: string, sinceMs: number): Promise<Landed>;
   /** a browser wallet's transaction: on chain, and the payment that was asked for? */
   confirm?(hash: Hex, expected: { asset: string; amount: number; to: Hex; network: ChainName }): Promise<Landed | Refusal>;
+  /** a proven wallet's dollars moved to another chain, routed by LI.FI and sent by the wallet (wallet-bridge.ts) */
+  bridge?: WalletBridge | undefined;
 }
 
 // ---- tokens ------------------------------------------------------------------------------------

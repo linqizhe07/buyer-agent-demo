@@ -32,9 +32,7 @@ import { isRefusal, type Refusal } from "../core/errors.ts";
 import { no } from "./refuse.ts";
 import { describeIntent, ENFORCER_LABEL, KIND_LABEL, KIND_ORDER, PRICES, qtyText, r2, SCRIPT_AGENT, usdOf, WRITE_CAPS, type Account, type AccountAdapter, type AgentId, type Capability, type ExecOk, type ExecResult, type Holding, type Intent } from "./accounts.ts";
 import { alpacaAccount, type AlpacaSeed } from "./adapters/alpaca.ts";
-import { bankAccount, type BankSeed } from "./adapters/bank.ts";
 import { binanceAccount, type BinanceSeed } from "./adapters/binance.ts";
-import { mastercardAccount, type MastercardSeed } from "./adapters/mastercard.ts";
 import { hyperliquidAccount, type HyperliquidSeed } from "./adapters/hyperliquid.ts";
 import { kalshiAccount, type KalshiSeed } from "./adapters/kalshi.ts";
 import { metamaskLiveAccount, metamaskSimAccount, type MetamaskSimSeed, type MmLiveOptions } from "./adapters/metamask.ts";
@@ -54,8 +52,11 @@ import { mountPayees, type PayeeWorld } from "./account/payees.ts";
 import { doorOf, EXCHANGES } from "./account/doors.ts";
 import { isSelfCustody, plug, type PlugSeed } from "./adapters/exchange.ts";
 import { liveAccount } from "./adapters/live.ts";
-import { liveOptions, openLive, type LiveDeps } from "./live/index.ts";
+import { keyFileStatus, liveOptions, openLive, type LiveDeps } from "./live/index.ts";
 import type { LiveVenue } from "./account/live-moves.ts";
+import type { LiveTrader, Market } from "./live/trade.ts";
+import { compareAcross, type Comparison } from "./live/compare.ts";
+import { fold, type StatementLine } from "./account/statement.ts";
 import { WalletProofs } from "./live/proof.ts";
 import { publicChain } from "./live/chain.ts";
 import { realMm } from "./live/metamask.ts";
@@ -75,14 +76,12 @@ export interface Seeds {
   polymarket: PolymarketSeed;
   kalshi: KalshiSeed;
   ondo: OndoSeed;
-  mastercard: MastercardSeed;
-  chase: BankSeed;
-  /** the two front-line venues the account layer adds; absent in the original eight-account set */
+  /** the two front-line venues the account layer adds; absent in the original set */
   alpaca?: AlpacaSeed | undefined;
   hyperliquid?: HyperliquidSeed | undefined;
 }
 
-/** `classic`: the eight accounts the portfolio demo was built on · `frontline`: those plus a stock broker and Hyperliquid, with the two changes that make them reachable (an OKX key that can withdraw to verified addresses, USDC on Arbitrum in the wallet) */
+/** `classic`: the accounts the portfolio demo was built on · `frontline`: those plus a stock broker and Hyperliquid, with the two changes that make them reachable (an OKX key that can withdraw to verified addresses, USDC on Arbitrum in the wallet) */
 export type VenueSet = "classic" | "frontline";
 
 export interface ServiceOptions {
@@ -107,6 +106,9 @@ export interface ServiceOptions {
   /** REAL money at venues connected live (the server's `--live-writes`): the most one movement may be, and the code the first owner types.
    * Absent: live venues are read, and nothing moves at them */
   liveWrites?: { capUsd: number; pairingCode: string } | undefined;
+  /** REAL accounts only (the server's default): no simulated venue is mounted, and the account layer has no simulated payee, plug-in
+   * or clock. What is on the service is what the owner connected through each venue's own interface */
+  real?: boolean | undefined;
 }
 
 /** one slice of an order (or any step an agent flies): where, what, and the agent's words for it */
@@ -288,11 +290,14 @@ export class PortfolioService {
     this.live = liveAccounts !== undefined;
     this.proofs = opts.liveDeps?.proofs ?? new WalletProofs(opts.liveDeps?.clock);
     this.openness = parseOpenness(opts.openness ?? loadOpenness());
+    // real money starts Conservative: every move an agent asks for waits for the owner until the owner signs the dial open
+    if (opts.real) this.openness = { ...this.openness, mode: "guard" };
     this.ledger = this.openLedger();
     this.mount();
     this.account = opts.account !== undefined || opts.venues === "frontline" ? new AccountEngine(this.host(), opts.account ?? {}) : undefined;
     if (this.account) this.catalog = opts.connectable ?? loadConnectable();
-    this.payees = this.account ? mountPayees(this.account) : undefined;
+    // the payees are simulated hosts: a real account has none
+    this.payees = this.account && !opts.real ? mountPayees(this.account) : undefined;
     if (this.account && !opts.freshLedger) this.rememberNonces(this.account);
   }
 
@@ -308,13 +313,17 @@ export class PortfolioService {
     }
   }
 
-  /** what the account layer may use of the service: the venues, the dial, the flight board, the ledger */
+  /** what the account layer may use of the service: the venues, the dial, the flight board, the ledger. A real account sees only the venues
+   * connected live: the simulated ones stay on the statement page */
   private host(): ConstructorParameters<typeof AccountEngine>[0] {
+    const real = this.opts.real === true;
+    const shown = (a: AccountAdapter | undefined) => (!real || a?.account.watchOnly ? a : undefined);
     return {
+      real,
       now: () => this.now(),
-      adapter: (id) => this.adapters.get(id),
-      accounts: () => this.accounts(),
-      views: () => this.views(),
+      adapter: (id) => shown(this.adapters.get(id)),
+      accounts: () => this.accounts().filter((a) => !real || a.watchOnly),
+      views: async () => (await this.views()).filter((v) => !real || v.watchOnly),
       policy: () => this.openness,
       dailyOutUsd: (now) => this.dailyOutUsd(now),
       log: (row) => void this.ledger.append(row),
@@ -365,18 +374,16 @@ export class PortfolioService {
           if (!this.sayHandler) return no("E_ACCOUNT_BAD_ACTION", { message: "no page agent is listening on this service" });
           return { ok: true, summary: `the owner told the page's agent: ${value.slice(0, 80)}`, data: await this.sayHandler(value) };
         }
+        // a real account keeps the real clock, and its connections and payments are not the simulation's to wipe
+        if (real && (change === "advance" || change === "reset")) return no("E_ACCOUNT_BAD_ACTION", { message: change === "reset" ? "this server holds your real accounts: it is not reset from here (restart it for a fresh one, and connect the accounts again)" : "this account runs on the real clock: nothing here is simulated" });
         if (change === "advance") {
           const minutes = Number(value);
           if (!(minutes > 0) || minutes > 60 * 24 * 30) return no("E_ACCOUNT_BAD_ACTION", { message: "the simulated clock moves ahead by 1 minute to 30 days" });
           return { ok: true, summary: `simulated clock +${minutes} min`, data: { now: await this.advance(minutes * 60_000) } };
         }
-        if (change === "sim-return") {
-          const r = this.account?.returnAch(value, "R01", "Insufficient funds");
-          return !r ? no("E_ACCOUNT_BAD_ACTION", {}) : isRefusal(r) ? r : { ok: true, summary: `the bank returned ${value}`, data: { payment: r.payment.id, status: r.payment.status } };
-        }
         if (change === "mode" && value === "open") {
           this.setMode("open");
-          return { ok: true, summary: "mode → open" };
+          return { ok: true, summary: "Aggressive: agents trade and move inside their limits without asking" };
         }
         if (change === "restore") {
           const r = this.restore(value);
@@ -399,7 +406,7 @@ export class PortfolioService {
       liveMoney: () => ({ writes: () => this.liveWritesView(), venue: (id) => (this.adapters.get(id)?.account.watchOnly ? this.liveVenues.get(id) : undefined), realNow: () => this.liveDeps().clock() }),
       pairingCode: () => this.opts.liveWrites?.pairingCode,
       connectable: () =>
-        Object.entries(this.catalog)
+        Object.entries(real ? {} : this.catalog)
           .filter(([id]) => !this.adapters.has(id))
           .map(([id, v]) => ({ id, name: v.name, connector: v.connector, via: isSelfCustody(v) ? "A self-custody wallet · by its address" : (EXCHANGES[v.connector]?.label ?? v.connector), credential: isSelfCustody(v) ? "no key: its address" : (EXCHANGES[v.connector]?.credential ?? "API key"), credentialRef: isSelfCustody(v) ? v.address : `home/credentials/${id}/api-key.json`, asks: isSelfCustody(v) ? "the chain: the address can be read and sent to, and nothing leaves it without your signature in that wallet" : (EXCHANGES[v.connector]?.probe ?? "what the key may do") })),
     };
@@ -408,6 +415,7 @@ export class PortfolioService {
   /** Plug in a venue the owner already has. No code names it: the connector says how it is spoken to, the venue's own answer about the credential
    * says what may be done there, and the account's doors for it are compiled from that answer. */
   private plugIn(venue: string, connector: string, label: string, credentialRef: string): Refusal | { ok: true; summary: string; native?: unknown } {
+    if (this.opts.real) return no("E_ACCOUNT_BAD_ACTION", { venue, message: `this account connects real venues only, through their own interfaces: "${connector}" is a simulated connector` });
     if (this.adapters.has(venue)) return no("E_ACCOUNT_BAD_ACTION", { venue, message: `${this.nameOf(venue)} is already on the account` });
     const seed = this.catalog[venue];
     if (!seed) return no("E_WALLET_ACCOUNT_UNKNOWN", { venue, message: `nothing answers as "${venue}" with that credential; what can be plugged in: ${Object.keys(this.catalog).join(", ") || "nothing"}`, detail: { connectable: Object.keys(this.catalog) } });
@@ -426,8 +434,48 @@ export class PortfolioService {
   }
 
   private liveWritesView(): { on: boolean; capUsd: number; turnOn: string } {
-    return { on: this.opts.liveWrites !== undefined, capUsd: this.opts.liveWrites?.capUsd ?? 0, turnOn: "npm run portfolio -- --live-writes" };
+    return { on: this.opts.liveWrites !== undefined, capUsd: this.opts.liveWrites?.capUsd ?? 0, turnOn: "npm run account" };
   }
+
+  /** what a venue connected live trades: a few markets, or the ones matching a query (a minute old at most) */
+  async liveMarkets(venue: string, query: string): Promise<Market[] | Refusal> {
+    const v = this.adapters.get(venue)?.account.watchOnly ? this.liveVenues.get(venue) : undefined;
+    if (!v) return no("E_WALLET_ACCOUNT_UNKNOWN", { venue, message: `"${venue}" is not a venue connected live` });
+    if (!v.trader) return no("E_VENUE_RAIL_CLOSED", { venue, message: `${v.name}: ${v.noTradeBecause ?? "no orders are placed here from the account"}` });
+    const trader = v.trader;
+    return this.marketReads.get(`markets|${venue}|${query.trim().toUpperCase()}`, 60_000, () => trader.markets(query));
+  }
+
+  /** one market at a venue connected live, with a price a few seconds old at most. An order itself is always valued at a fresh one */
+  async liveMarket(venue: string, symbol: string): Promise<Market | Refusal> {
+    const v = this.adapters.get(venue)?.account.watchOnly ? this.liveVenues.get(venue) : undefined;
+    if (!v) return no("E_WALLET_ACCOUNT_UNKNOWN", { venue, message: `"${venue}" is not a venue connected live` });
+    if (!v.trader) return no("E_VENUE_RAIL_CLOSED", { venue, message: `${v.name}: ${v.noTradeBecause ?? "no orders are placed here from the account"}` });
+    const trader = v.trader;
+    return this.marketReads.get(`market|${venue}|${symbol}`, 3_000, () => trader.market(symbol));
+  }
+  /** The same thing at every venue connected live that trades it — a coin, a stock — ranked by the price an order would take there (the ask
+   * for a buy, the bid for a sell). Kept fifteen seconds. A price far from the others' (more than 10% from their middle) is marked: it may be
+   * another token under the same name */
+  async liveCompare(base: string, side: "buy" | "sell", usd?: number): Promise<Comparison | Refusal> {
+    const b = base.trim();
+    if (!b || b.length > 40) return no("E_ACCOUNT_BAD_ACTION", { message: "name what to compare: BTC, ETH, AAPL" });
+    if (side !== "buy" && side !== "sell") return no("E_ACCOUNT_BAD_ACTION", { message: "compare a buy or a sell" });
+    // each venue's reads go through the same short-lived cache as the order ticket's: a new amount or the other side asks no venue again
+    const venues = [...this.liveVenues.values()].filter((v) => v.trader && this.adapters.get(v.id)?.account.watchOnly).map((v) => {
+      const t = v.trader!;
+      const trader: LiveTrader = Object.assign(Object.create(t) as LiveTrader, {
+        markets: (q: string) => this.marketReads.get(`markets|${v.id}|${q.trim().toUpperCase()}`, 60_000, () => t.markets(q)),
+        market: (sym: string) => this.marketReads.get(`market|${v.id}|${sym}`, 3_000, () => t.market(sym)),
+      });
+      return { id: v.id, name: v.name, trader };
+    });
+    return this.marketReads.get(`compare|${b.toUpperCase()}|${side}|${usd ?? ""}`, 15_000, () => compareAcross(venues, b, side, { timeoutMs: 4_000, ...(usd !== undefined ? { usd } : {}) }));
+  }
+
+  /** the order ticket's reads, kept for a moment and shared while they are in flight: a page (or anything else on this machine) asking
+   * again and again costs the venue one request, not one each — the venue's rate limit is for the orders */
+  private readonly marketReads = new ReadCache();
 
   /** what a live connection reaches: the real network, unless a test handed in stand-ins */
   private liveDeps(): LiveDeps {
@@ -448,6 +496,10 @@ export class PortfolioService {
     }
     return s;
   }
+  /** whether a key file in this server's home is ready for a connection; names, never values */
+  keyFile(kind: string, venue: string, ref: string, needs: string[] = []): ReturnType<typeof keyFileStatus> {
+    return keyFileStatus(this.opts.home, kind, venue, ref, needs);
+  }
   /** which sign-in a state that came back belongs to */
   signInHolding(state: string): OAuthSignIn | undefined {
     return [...this.signIns.values()].find((s) => s.has(state));
@@ -467,8 +519,11 @@ export class PortfolioService {
     const src = opened.source;
     // who showed the address is the user's: the wallet that signed the account's sentence, or the mm session on this machine
     const proven = src.address === undefined ? undefined : connector === "live:metamask" ? "the mm session on this machine" : deps.proofs.proven(src.address)?.wallet;
-    Object.assign(adapter.account, { ...(proven ? { proven } : {}), ...(src.writer ? { liveCan: src.writer.can } : {}), ...(src.readOnlyBecause ? { readOnlyBecause: src.readOnlyBecause } : {}) });
-    this.liveVenues.set(venue, { id: venue, name: adapter.account.name, kind: adapter.account.kind, ...(src.address ? { address: src.address } : {}), ...(proven ? { proven } : {}), ...(src.writer ? { writer: src.writer } : {}), ...(src.readOnlyBecause ? { readOnlyBecause: src.readOnlyBecause } : {}), via: src.via });
+    Object.assign(adapter.account, { ...(proven ? { proven } : {}), ...(src.writer ? { liveCan: src.writer.can } : {}), ...(src.noTradeBecause ? { noTradeBecause: src.noTradeBecause } : {}), ...(src.readOnlyBecause ? { readOnlyBecause: src.readOnlyBecause } : {}) });
+    // what the key may do is read from the trader each time: a venue can say it only after connecting (Kalshi's key scopes)
+    const trader = src.trader;
+    if (trader) Object.defineProperty(adapter.account, "liveTrade", { get: () => ({ can: trader.can, what: trader.what }), enumerable: true, configurable: true });
+    this.liveVenues.set(venue, { id: venue, name: adapter.account.name, kind: adapter.account.kind, ...(src.address ? { address: src.address } : {}), ...(proven ? { proven } : {}), ...(src.writer ? { writer: src.writer } : {}), ...(src.readOnlyBecause ? { readOnlyBecause: src.readOnlyBecause } : {}), ...(src.trader ? { trader: src.trader } : {}), ...(src.noTradeBecause ? { noTradeBecause: src.noTradeBecause } : {}), via: src.via });
     if (sim) this.shadowed.set(venue, sim);
     this.adapters.set(venue, adapter);
     const usd = r2((await adapter.read()).reduce((s, h) => s + h.usd, 0));
@@ -477,7 +532,7 @@ export class PortfolioService {
     const can = src.writer?.can;
     const leaves = !!can && (can.withdraw !== false || (can.ledgers.length > 1 && can.transfer !== false) || can.swap !== false || !!can.send);
     const mode = !src.writer ? `read only: ${src.readOnlyBecause ?? "nothing is sent to it from here"}` : !writes ? "read only: this server was started without real-money writes" : src.address !== undefined && !proven && src.writer.can.send === "wallet" ? "watched: no wallet signed for this address, so nothing is sent to or from it" : !leaves ? "this key only reads: money can be sent to it, nothing leaves it from here" : `real money moves only when you sign it, at most ${cents(writes.capUsd)} a movement`;
-    return { ok: true, summary: `${adapter.account.name} connected live · ${cents(usd)} there now · ${opened.summary} · ${mode}${sim ? " · it stands in for the simulated one until it is unplugged" : ""}`, native: { connector, probe: opened.source.probe.native ?? null } };
+    return { ok: true, summary: `${adapter.account.name} connected live · ${cents(usd)} there now · ${opened.summary} · ${mode}${sim && !this.opts.real ? " · it stands in for the simulated one until it is unplugged" : ""}`, native: { connector, probe: opened.source.probe.native ?? null } };
   }
 
   private unplug(venue: string): Refusal | { ok: true; summary: string } {
@@ -490,7 +545,8 @@ export class PortfolioService {
     if (sim) {
       this.shadowed.delete(venue);
       this.adapters.set(venue, sim);
-      return { ok: true, summary: `${a.account.name} disconnected: the account no longer reads the real venue, and the simulated one is back. The key at the venue is untouched: delete it there` };
+      // on a real account the simulated one comes back to the statement page only
+      return { ok: true, summary: `${a.account.name} disconnected: the account no longer reads the real venue${this.opts.real ? "" : ", and the simulated one is back"}. The key at the venue is untouched: delete it there` };
     }
     if (a.account.watchOnly) {
       this.adapters.delete(venue);
@@ -510,7 +566,10 @@ export class PortfolioService {
 
   /** what the Account page reads */
   async accountView(): Promise<AccountPage | undefined> {
-    return this.account?.view();
+    const page = await this.account?.view();
+    // a real account's page waits only on cards about its real venues; the statement page answers the simulation's own
+    if (page && this.opts.real) page.cards = page.cards.filter((c) => this.adapters.get(this.approvals.find((a) => a.id === c.id)?.account ?? "")?.account.watchOnly);
+    return page;
   }
 
   /** push the simulated clock ahead and land whatever came due on the way */
@@ -524,7 +583,8 @@ export class PortfolioService {
 
   static async create(opts: ServiceOptions): Promise<PortfolioService> {
     const seeds = opts.seeds ?? loadSeeds(opts.venues);
-    const live = opts.live ? { metamask: await metamaskLiveAccount(opts.mm), polymarket: await polymarketLiveAccount(opts.mm) } : undefined;
+    // the `mm` reads stand in for two simulated accounts; a real service has none to stand in for (MetaMask is connected like any account)
+    const live = opts.live && !opts.real ? { metamask: await metamaskLiveAccount(opts.mm), polymarket: await polymarketLiveAccount(opts.mm) } : undefined;
     return new PortfolioService(opts, seeds, live);
   }
 
@@ -541,10 +601,12 @@ export class PortfolioService {
     // a fresh mount is the simulation from its seeds: whatever was connected live is gone with the rest
     this.shadowed.clear();
     this.liveVenues?.clear();
+    // a real service starts empty: the owner connects what is there
+    if (this.opts.real) return void (this.adapters = new Map());
     // the simulated wallet reads its allowlist from this array, so a venue plugged in later can be added to it
     this.walletAllow.length = 0;
     this.walletAllow.push(...s.metamask.allowlist);
-    const list: AccountAdapter[] = [binanceAccount(s.binance), okxAccount(s.okx), this.liveAccounts?.metamask ?? metamaskSimAccount({ ...s.metamask, allowlist: this.walletAllow }, this.now), this.liveAccounts?.polymarket ?? polymarketSimAccount(s.polymarket, this.now), kalshiAccount(s.kalshi, this.now), ondoAccount(s.ondo, this.now), mastercardAccount(s.mastercard, this.now), bankAccount(s.chase)];
+    const list: AccountAdapter[] = [binanceAccount(s.binance), okxAccount(s.okx), this.liveAccounts?.metamask ?? metamaskSimAccount({ ...s.metamask, allowlist: this.walletAllow }, this.now), this.liveAccounts?.polymarket ?? polymarketSimAccount(s.polymarket, this.now), kalshiAccount(s.kalshi, this.now), ondoAccount(s.ondo, this.now)];
     if (s.alpaca) list.push(alpacaAccount(s.alpaca, this.now));
     if (s.hyperliquid) list.push(hyperliquidAccount(s.hyperliquid, this.now));
     this.adapters = new Map(list.map((a) => [a.account.id, a]));
@@ -592,7 +654,7 @@ export class PortfolioService {
           enforcerLabel: ENFORCER_LABEL[acct.scope.enforcedBy],
           reach: effectiveReach(acct, this.openness),
           revoked: this.openness.revoked.includes(acct.id),
-          usd: r2(holdings.filter((h) => h.class !== "credit").reduce((s, h) => s + h.usd, 0)),
+          usd: r2(holdings.reduce((s, h) => s + h.usd, 0)),
           holdings,
         };
         if (readError !== undefined) view.readError = readError;
@@ -850,8 +912,7 @@ export class PortfolioService {
       return v;
     }
     // the account layer: a first payment to a payee the owner has never paid is the owner's to approve, in any mode
-    const newPayee = this.account && intent.kind === "pay" && !this.account.state.payees.includes(intent.merchant) ? { why: "payee" as const, reason: `a first payment to ${intent.merchant} ($${v.usd}): a new payee is approved once` } : null;
-    const card = v.card ?? newPayee;
+    const card = v.card;
     if (card) {
       const approval: Approval = { id: `card-${String(++this.seq).padStart(4, "0")}`, at: now, account: accountId, intent, usd: v.usd, reason: card.reason, status: "pending", why: card.why, flight: f.no, ...this.cardLife(now) };
       this.approvals.unshift(approval);
@@ -934,7 +995,6 @@ export class PortfolioService {
       if (f) this.note(f, `Approved, but ${plainRefusal(stale, (id) => this.nameOf(id))}`, "no");
       return stale;
     }
-    if (this.account && ap.why === "payee" && ap.intent.kind === "pay" && !this.account.state.payees.includes(ap.intent.merchant)) this.account.state = { ...this.account.state, payees: [...this.account.state.payees, ap.intent.merchant] };
     if (ap.batch) {
       // one yes covers every slice of the order
       const results: ExecResult[] = [];
@@ -1038,5 +1098,55 @@ export class PortfolioService {
 
   ledgerPath(): string {
     return this.ledger.path();
+  }
+
+  /** The statement: every transaction at the real venues, read back from every ledger in this home — this run's and the earlier ones' — the
+   * last line written for each, newest first */
+  statement(): StatementLine[] {
+    const dir = join(this.opts.home, "portfolio");
+    const lines: StatementLine[] = [];
+    const current = this.ledger.path();
+    for (const name of existsSync(dir) ? readdirSync(dir).sort() : []) {
+      if (!/^ledger-.*\.jsonl$/.test(name) || join(dir, name) === current) continue;
+      for (const row of new Ledger(join(dir, name), this.now).all()) if (row.kind === "statement" && row.detail) lines.push(row.detail as StatementLine);
+    }
+    const before = new Set(lines.map((l) => l.key));
+    const now = new Set<string>();
+    for (const row of this.ledger.all()) if (row.kind === "statement" && row.detail) {
+      lines.push(row.detail as StatementLine);
+      now.add((row.detail as StatementLine).key);
+    }
+    // a line an earlier run left unfinished is not followed by this one: it says so, and counts only what had happened
+    const final = new Set(["filled", "canceled", "rejected", "expired", "settled", "failed", "returned"]);
+    return fold(lines).map((l) => (before.has(l.key) && !now.has(l.key) && !final.has(l.status) ? { ...l, status: "not followed since a restart", ...(l.status === "waiting for wallet" ? { amountUsd: 0 } : {}) } : l));
+  }
+
+  /** this run's ledger rows, oldest first */
+  ledgerRows(): readonly LedgerRow[] {
+    return this.ledger.all();
+  }
+}
+
+/** answers kept for a short while, and one request in flight per key */
+class ReadCache {
+  private readonly kept = new Map<string, { at: number; value: Promise<unknown> }>();
+  get<T>(key: string, ttlMs: number, load: () => Promise<T>): Promise<T> {
+    const now = Date.now();
+    const hit = this.kept.get(key);
+    if (hit && now - hit.at < ttlMs) return hit.value as Promise<T>;
+    // a refusal is not kept: the next ask asks the venue again
+    const value = load().then(
+      (v) => {
+        if (isRefusal(v)) this.kept.delete(key);
+        return v;
+      },
+      (err: unknown) => {
+        this.kept.delete(key);
+        throw err;
+      },
+    );
+    this.kept.set(key, { at: now, value });
+    if (this.kept.size > 500) for (const [k, v] of this.kept) if (now - v.at >= 60_000) this.kept.delete(k);
+    return value;
   }
 }

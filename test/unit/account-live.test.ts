@@ -253,6 +253,26 @@ describe("the key file", () => {
     expect(refusal(await x.connect("binance", "live:exchange:binance", "credentials/linked/api-key.json")).message).toBe("credentials/linked/api-key.json is a link to a file outside the home directory: not read");
   });
 
+  it("can be checked before connecting: where it goes, whether it is private, which fields are missing — names, never values", async () => {
+    const x = await boot();
+    const check = (ref = "", needs: string[] = []) => x.svc.keyFile("exchange", "okx", ref, needs);
+    expect(check()).toMatchObject({ ready: false, path: join(x.home, "credentials/okx/api-key.json"), fields: ["apiKey", "secret"] });
+    expect(check().message).toContain("there is no key file at credentials/okx/api-key.json");
+    // the exchange library says OKX also needs its passphrase: the check asks for it too
+    x.keyFile("credentials/okx/api-key.json", KEY, 0o644);
+    expect(check("", ["apiKey", "secret", "password"])).toMatchObject({ ready: false, mode: "644", fields: ["apiKey", "secret", "password"] });
+    x.keyFile("credentials/okx/api-key.json", KEY);
+    const short = check("", ["apiKey", "secret", "password"]);
+    expect([short.ready, short.missing]).toEqual([false, ["password"]]);
+    x.keyFile("credentials/okx/api-key.json", { ...KEY, password: "made-up-pass" });
+    const ready = check("", ["apiKey", "secret", "password"]);
+    expect([ready.ready, ready.message]).toEqual([true, "the key file is ready"]);
+    expect(JSON.stringify([short, ready]).includes(KEY.secret)).toBe(false);
+    // a connection that reads no key file says so; a path outside the home is not looked at
+    expect(x.svc.keyFile("wallet", "w", "").ready).toBe(false);
+    expect(check("../outside.json").message).toContain("is outside it");
+  });
+
   it("stays in the file: not in the ledger, not in what the page reads, not in a refusal that quotes the exchange", async () => {
     const leaky: OpenExchange = async (id) =>
       fakeExchange(id, {
