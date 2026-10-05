@@ -60,7 +60,7 @@ export interface Account {
   /** a live venue reached by address: who showed the address is the user's (the wallet that signed); absent, it is only watched */
   proven?: string | undefined;
   /** what real money can be asked of a live venue, when the server moves real money at all */
-  liveCan?: { withdraw: boolean | "unknown"; ledgers: string[]; swap: boolean | "unknown"; receive: boolean; send: "wallet" | "mm" | false } | undefined;
+  liveCan?: { withdraw: boolean | "unknown"; ledgers: string[]; transfer: boolean | "unknown"; swap: boolean | "unknown"; receive: boolean; send: "wallet" | "mm" | false } | undefined;
   /** why a live venue is only ever read */
   readOnlyBecause?: string | undefined;
 }

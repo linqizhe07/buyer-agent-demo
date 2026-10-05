@@ -217,12 +217,24 @@ server.registerTool(
 
 // ---- the account: what this seat's key may do, and the two ways it moves money -------------------
 
+/** what this seat may ask of a venue connected live, in the words the page uses */
+function liveMoney(v: AccountLite["venues"][number], writes: boolean): string {
+  if (v.readOnlyBecause) return `read only: ${v.readOnlyBecause}`;
+  if (!writes) return "read only: this server moves no real money";
+  const c = v.liveCan;
+  if (!c) return "read only";
+  if (v.address && !v.proven) return "watched: no wallet signed for this address, so nothing is sent to or from it";
+  const out = [c.withdraw !== false && !c.send ? "withdraw" : "", c.send ? "send" : "", c.ledgers.length > 1 && c.transfer !== false ? `transfer between ${c.ledgers.join(" and ")}` : "", c.swap !== false && !c.send ? "swap" : ""].filter(Boolean);
+  if (!out.length) return `this key only reads: nothing leaves it${c.receive ? ", but it can receive a movement from another venue" : ""}`;
+  return `ask with portfolio_live_move (the owner signs every one): ${[...out, c.receive ? "receive" : ""].filter(Boolean).join(", ")}`;
+}
+
 interface AccountLite {
   now: string;
   type: string;
   totalUsd: number;
   inFlightUsd: number;
-  venues: Array<{ id: string; name: string; frontLine: string; usd: number; cashUsd: number; restricted?: string; in: { text: string; access: string; why?: string }; out: { text: string; access: string; why?: string }; ledgers: string[]; live?: true; liveCan?: { withdraw: boolean | string; ledgers: string[]; swap: boolean | string; receive: boolean; send: string | false }; readOnlyBecause?: string; proven?: string; address?: string }>;
+  venues: Array<{ id: string; name: string; frontLine: string; usd: number; cashUsd: number; restricted?: string; in: { text: string; access: string; why?: string }; out: { text: string; access: string; why?: string }; ledgers: string[]; live?: true; liveCan?: { withdraw: boolean | string; ledgers: string[]; transfer?: boolean | string; swap: boolean | string; receive: boolean; send: string | false }; readOnlyBecause?: string; proven?: string; address?: string }>;
   connectLive?: { writes?: { on: boolean; capUsd: number } };
   payments: Array<{ id: string; kind: string; at: string; from: string; to: string; amountUsd: number; status: string; settlesAt: string; agent?: string; protocol?: string; note?: string }>;
   keys: Array<{ address: string; name: string; validUntil: string; status: string }>;
@@ -255,7 +267,7 @@ server.registerTool(
       inFlightUsd: a.inFlightUsd,
       approvals: a.spend.filter((s) => s.agent === me).map((s) => ({ scope: s.scope, allow: s.allow, perPaymentUsd: s.perPaymentUsd, budgetUsd: s.budgetUsd, leftUsd: Number((s.budgetUsd - s.spentUsd - s.reservedUsd).toFixed(6)), ...(s.windowHours ? { onePerHours: s.windowHours } : {}), validUntil: s.validUntil, expired: s.expired, ...(s.scope === "payees" ? { pinnedAddresses: s.payTo } : {}) })),
       floats: a.subAccounts.filter((s) => s.agent === me).map((s) => ({ name: s.name, balanceUsd: s.balanceUsd, capUsd: s.capUsd })),
-      venues: a.venues.map((v) => (v.live ? { id: v.id, name: v.name, frontLine: v.frontLine, usd: v.usd, live: true, realMoney: v.readOnlyBecause ? `read only: ${v.readOnlyBecause}` : !a.connectLive?.writes?.on ? "read only: this server moves no real money" : v.liveCan ? `ask with portfolio_live_move (the owner signs every one): ${[v.liveCan.withdraw !== false && !v.liveCan.send ? "withdraw" : "", v.liveCan.send ? "send" : "", v.liveCan.ledgers.length > 1 ? `transfer between ${v.liveCan.ledgers.join(" and ")}` : "", v.liveCan.swap !== false && !v.liveCan.send ? "swap" : "", v.liveCan.receive ? "receive" : ""].filter(Boolean).join(", ")}` : "read only", ...(v.address ? { address: v.address, proven: v.proven ?? "watched, not proven" } : {}) } : { id: v.id, name: v.name, frontLine: v.frontLine, usd: v.usd, movableUsd: v.cashUsd, ...(v.restricted ? { restricted: v.restricted } : { moneyIn: `${v.in.text} (${v.in.access})`, moneyOut: `${v.out.text} (${v.out.access})${v.out.why ? ` — ${v.out.why}` : ""}` }), ...(v.ledgers.length ? { ledgers: v.ledgers } : {}) })),
+      venues: a.venues.map((v) => (v.live ? { id: v.id, name: v.name, frontLine: v.frontLine, usd: v.usd, live: true, realMoney: liveMoney(v, !!a.connectLive?.writes?.on), ...(v.address ? { address: v.address, proven: v.proven ?? "watched, not proven" } : {}) } : { id: v.id, name: v.name, frontLine: v.frontLine, usd: v.usd, movableUsd: v.cashUsd, ...(v.restricted ? { restricted: v.restricted } : { moneyIn: `${v.in.text} (${v.in.access})`, moneyOut: `${v.out.text} (${v.out.access})${v.out.why ? ` — ${v.out.why}` : ""}` }), ...(v.ledgers.length ? { ledgers: v.ledgers } : {}) })),
       ...(a.connectLive?.writes?.on ? { realMoney: { on: true, capUsd: a.connectLive.writes.capUsd } } : {}),
       waitingForOwner: a.cards,
       payments: a.payments.slice(0, 12).map((p) => ({ id: p.id, kind: p.kind, from: p.from, to: p.to, amountUsd: p.amountUsd, status: p.status, ...(p.status === "pending" ? { lands: p.settlesAt } : {}), ...(p.protocol ? { protocol: p.protocol } : {}), ...(p.note ? { note: p.note } : {}) })),

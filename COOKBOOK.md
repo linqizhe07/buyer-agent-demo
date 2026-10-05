@@ -389,7 +389,7 @@ npx vitest run test/attack
 1. 在交易所建一把**只读**的 API key。
 2. 存成 `~/.buyer-agent-demo/credentials/okx/api-key.json`：`{"apiKey": "…", "secret": "…", "password": "…"}`。`password` 是 OKX、KuCoin、Bitget 建 key 时设的口令，别家不用。
 3. `chmod 600` 这个文件。
-4. 页面 Balances 页签，OKX 那一行点 "Connect"，点 "Connect, read-only"。
+4. 页面 Balances 页签，OKX 那一行点 "Connect"，再点 "Connect, read-only"（服务开了真钱写入时，这个按钮叫 "Connect"）。
 
 ```
 OKX connected live · $1,000.00 there now · the venue says this credential can read · not bound to an IP · a read-only key · read only: this server was started without real-money writes · it stands in for the simulated one until it is unplugged
@@ -416,6 +416,8 @@ npm run portfolio -- --live-writes --live-cap 50
 3. 场所那一行点 "Move…"：提到你自己的地方、账本之间划转、稳定币互换，或者从钱包发。
 4. 填好金额，预览里是**账户替你向目的地要来的地址**、手续费上限、网络。确认没错，点 "Sign and send"。从钱包发的，钱包会再请你确认一次。
 5. Payments 页签里这一笔标着 LIVE，场所或链说到了才算到账。
+
+只能看的那一行写 "Read-only"，没有 "Move…"：钥匙只读的交易所，从它那里动不了钱，但它可以收你钱包发来的钱；粘贴地址接上的钱包只看，既不收也不发。
 
 几条规矩：每笔不超过 `--live-cap`；签名十分钟内有效；执行前再问一次场所，地址或手续费变了就不执行；钱只去交易所自己的充值地址或签过那句话的钱包；第一次提到新地址，多数交易所要你先在它那边加白名单。
 

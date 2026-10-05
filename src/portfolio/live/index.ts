@@ -77,7 +77,7 @@ const said = (source: LiveSource): string => `${source.probe.can.length ? `the v
 
 const exchange: Connector = {
   kind: "exchange",
-  label: "Exchange account · read-only API key",
+  label: "Exchange account · API key",
   needs: "key-file",
   example: EXCHANGE_KEY.example,
   venues: ["binance", "okx", "bybit", "kraken"],
