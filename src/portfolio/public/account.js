@@ -556,6 +556,8 @@ function openLive(venueId) {
     const o = kindOf();
     proven = null;
     say("");
+    // a sign-in keeps Connect shut until the venue says yes; any other way of connecting opens it again
+    $("modal-go").disabled = Owner.role !== "owner";
     if (o.needs === "key-file") {
       const pick = o.kind === "exchange" && !preset;
       if (pick && !EXCHANGES) EXCHANGES = ((await (await fetch("/api/account/exchanges")).json()).exchanges) || [];
@@ -593,6 +595,42 @@ function openLive(venueId) {
           }
         });
       }
+    } else if (o.needs === "sign-in") {
+      const who = o.label.split(" · ")[0];
+      $("live-body").innerHTML = `<div class="quote"><div class="path">${esc(o.example)}</div></div><div><button type="button" id="signin-go">Sign in at ${esc(who)}…</button></div><input type="hidden" name="ref" value="" /><input type="hidden" name="label" value="${esc(preset ? preset.name : who)}" />`;
+      $("modal-go").disabled = true;
+      $("signin-go").addEventListener("click", async () => {
+        // the tab opens inside the click, so no popup blocker stops it; it goes to the venue once its address is known
+        const tab = window.open("about:blank", "_blank");
+        say(`Asking ${who} where to sign in…`, "wait");
+        const r = await fetch("/api/account/signin/start", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ connector: o.kind }) }).then((x) => x.json()).catch(() => ({ ok: false }));
+        if (!r.ok) {
+          if (tab) tab.close();
+          return say((r.refusal && r.refusal.message) || r.error || "the sign-in could not start", "no");
+        }
+        if (tab) {
+          tab.opener = null;
+          tab.location.href = r.url;
+          say(`Sign in on ${who}’s own page, then come back here.`, "wait");
+        } else {
+          $("modal-msg").className = "msg wait";
+          $("modal-msg").innerHTML = `<a href="${esc(r.url)}" target="_blank" rel="noopener">Open ${esc(who)}’s sign-in page</a>, sign in there, then come back here.`;
+        }
+        const until = Date.now() + 15 * 60_000;
+        const poll = async () => {
+          if (!$("modal").open) return;
+          const st = await fetch(`/api/account/signin/status?state=${encodeURIComponent(r.state)}`).then((x) => x.json()).catch(() => ({}));
+          if (st.status === "ready") {
+            form.elements.ref.value = r.state;
+            $("modal-go").disabled = Owner.role !== "owner";
+            return say(`${who} signed you in. Connect it.`, "ok");
+          }
+          if (st.status === "failed") return say(st.error || "the sign-in did not finish", "no");
+          if (Date.now() > until) return say("The sign-in ran out: start it again.", "no");
+          setTimeout(poll, 1500);
+        };
+        poll();
+      });
     } else {
       $("live-body").innerHTML = `<div class="quote"><div class="path">${esc(o.example)}</div></div><input type="hidden" name="ref" value="" /><input type="hidden" name="label" value="${esc(preset ? preset.name : "")}" />`;
     }

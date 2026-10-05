@@ -3,13 +3,16 @@
  *
  *   live:exchange:<id>   any exchange the unified library covers (binance, okx, bybit, kraken …)      a key file
  *   live:alpaca          a brokerage account                                                          a key file
+ *   live:robinhood       Robinhood's investing accounts, through Robinhood's MCP server               Robinhood's own sign-in
+ *   live:robinhood-crypto  a Robinhood crypto account                                                 a key file
  *   live:kalshi          a prediction-market account                                                  a key file
  *   live:hyperliquid     a perp DEX account                                                           an address
  *   live:polymarket      a prediction-market wallet                                                   an address
- *   live:wallet          any EVM wallet: an exchange's own wallet, a browser wallet, a hardware one   an address
+ *   live:wallet          any EVM wallet: an exchange's own wallet, a browser wallet, a hardware one,  an address
+ *                        a Robinhood Wallet (its Stock Tokens on Robinhood Chain are read too)
  *   live:ondo            a tokenised-fund position                                                    an address
  *
- * Every one of them reads and none of them writes.
+ * Every one of them reads; what some of them can also be asked to move, on the owner's signature, is in writes.ts.
  */
 import { isRefusal, type Refusal } from "../../core/errors.ts";
 import { no } from "../refuse.ts";
@@ -21,6 +24,8 @@ import { defaultKeyRef, loadKeyFile } from "./credentials.ts";
 import { EXCHANGE_KEY, exchangeSource, type OpenExchange } from "./exchange.ts";
 import { KALSHI_KEY, kalshiSource } from "./kalshi.ts";
 import { metamaskSource, type RunMm } from "./metamask.ts";
+import { ROBINHOOD_CRYPTO_KEY, realMcp, robinhoodCryptoSource, robinhoodStocksSource, type OpenMcp } from "./robinhood.ts";
+import type { OAuthSignIn } from "./signin.ts";
 import type { Price } from "./prices.ts";
 import type { WalletProofs } from "./proof.ts";
 import type { Http, LiveBalance, LiveSource } from "./types.ts";
@@ -40,6 +45,10 @@ export interface LiveDeps {
   mm: RunMm;
   /** a stand-in for the exchange library (tests) */
   openExchange?: OpenExchange | undefined;
+  /** the sign-in at a venue that speaks OAuth to MCP clients, by connector kind (Robinhood) */
+  signIn?: ((kind: string) => OAuthSignIn | undefined) | undefined;
+  /** an MCP client to a venue's own server; a stand-in in tests */
+  openMcp?: OpenMcp | undefined;
 }
 
 export interface LiveRequest {
@@ -105,6 +114,34 @@ const alpaca: Connector = {
   },
 };
 
+const robinhood: Connector = {
+  kind: "robinhood",
+  label: "Robinhood · investing accounts, through Robinhood's own sign-in",
+  needs: "sign-in",
+  example: "Robinhood's own page opens: you sign in there and approve this account. It reads your Robinhood accounts' cash and stock positions through Robinhood's MCP server, and never calls the tools that place or cancel orders.",
+  venues: [],
+  async open(req, deps) {
+    const signIn = deps.signIn?.("robinhood");
+    if (!signIn) return no("E_VENUE_UNREACHABLE", { venue: req.venue, message: "this server has no Robinhood sign-in" });
+    const opened = await robinhoodStocksSource({ venue: req.venue, label: req.label, token: () => signIn.token(req.reference), open: deps.openMcp ?? realMcp });
+    return isRefusal(opened) ? opened : { ...opened, summary: said(opened.source) };
+  },
+};
+
+const robinhoodCrypto: Connector = {
+  kind: "robinhood-crypto",
+  label: "Robinhood Crypto · API key",
+  needs: "key-file",
+  example: ROBINHOOD_CRYPTO_KEY.example,
+  venues: [],
+  async open(req, deps) {
+    const key = loadKeyFile(deps.home, req.reference, ROBINHOOD_CRYPTO_KEY, req.venue);
+    if (isRefusal(key)) return key;
+    const opened = await robinhoodCryptoSource({ venue: req.venue, label: req.label, reference: req.reference || defaultKeyRef(req.venue), key, http: deps.http, clock: deps.clock });
+    return isRefusal(opened) ? opened : { ...opened, summary: said(opened.source) };
+  },
+};
+
 const kalshi: Connector = {
   kind: "kalshi",
   label: "Kalshi · prediction-market account, API key",
@@ -132,7 +169,7 @@ const byAddress = (kind: string, label: string, example: string, venues: string[
   },
 });
 
-const wallet = byAddress("wallet", "Wallet · any EVM wallet, by its address", "Connect a browser wallet (OKX Wallet, Binance Wallet, MetaMask …) and it signs one sentence to show the address is yours; or paste an address to watch it.", ["metamask", "okx-wallet"], walletSource, true);
+const wallet = byAddress("wallet", "Wallet · any EVM wallet, by its address", "Connect a browser wallet (OKX Wallet, Binance Wallet, MetaMask …) and it signs one sentence to show the address is yours; or paste an address to watch it — a Robinhood Wallet's too: its Stock Tokens on Robinhood Chain are read with the rest.", ["metamask", "okx-wallet"], walletSource, true);
 const hyperliquid = byAddress("hyperliquid", "Hyperliquid · by the account's address", "The address of the Hyperliquid account itself (the master account, not an API wallet).", ["hyperliquid"], hyperliquidSource, true);
 const polymarket = byAddress("polymarket", "Polymarket · by the account wallet's address", "The account wallet Polymarket shows in the profile menu (the deposit or proxy wallet), not the key that signs for it.", ["polymarket"], polymarketSource, false);
 const ondo = byAddress("ondo", "Ondo · OUSG at an address", "The Ethereum address that holds the OUSG.", ["ondo"], ondoSource, false);
@@ -149,7 +186,7 @@ const metamask: Connector = {
   },
 };
 
-export const CONNECTORS: Connector[] = [exchange, alpaca, kalshi, metamask, wallet, hyperliquid, polymarket, ondo];
+export const CONNECTORS: Connector[] = [exchange, alpaca, robinhood, robinhoodCrypto, kalshi, metamask, wallet, hyperliquid, polymarket, ondo];
 
 /** register a connector kind (the other sources add themselves here) */
 export function register(c: Connector): void {

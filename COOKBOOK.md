@@ -399,6 +399,11 @@ OKX connected live · $1,000.00 there now · the venue says this credential can 
 
 **钱包**（OKX Wallet、Binance Wallet、MetaMask 扩展等）：在装了钱包的浏览器里打开页面，"Connect a real venue…" → Wallet，点你的钱包。钱包先给地址，再签一句话（不是交易，什么都不批准），这个地址就是"proven yours"。只粘贴地址的是"watched"：能看，不能收真钱。
 
+**Robinhood**：
+- 投资账户：表格下面 "Connect a real venue…" → How 选 "Robinhood · investing accounts, through Robinhood's own sign-in" → "Sign in at Robinhood…"，在 Robinhood 自己的页面登录、批准，回到账户页点 "Connect"。读各账户的现金和股票持仓；令牌只在服务的内存里，重启要重新登录。
+- Crypto：在 Robinhood 网页版的 crypto 账户设置里建 API 凭据（你自己生成 Ed25519 密钥对，把公钥交给 Robinhood），存成 `~/.buyer-agent-demo/credentials/robinhood-crypto/api-key.json`：`{"apiKey": "rh-api-…", "privateKey": "<base64 私钥>"}`，`chmod 600`，然后 "Connect a real venue…" → "Robinhood Crypto · API key"。
+- Stock Tokens：接任何钱包（包括粘贴 Robinhood Wallet 的地址）都会一起读 Robinhood Chain 上的 Stock Tokens。
+
 **其他**：MetaMask Agent Wallet 走本机的 `mm` 命令行（先确认 `mm wallet show` 能用）；Alpaca 和 Kalshi 用钥匙文件（Kalshi 是 key id 加它给的私钥 `.pem`）；Hyperliquid、Polymarket、Ondo 填地址。
 
 会被拒：钥匙文件不在、权限不是 600、缺字段 `E_ACCOUNT_CREDENTIAL` · 交易所不认这把钥匙 `E_VENUE_UNAUTHORIZED` · 场所不服务这个地区 `E_VENUE_GEOBLOCKED`（Binance、Bybit 从这台机器就是这样，那是它们的规矩）· 没应答 `E_VENUE_UNREACHABLE`。

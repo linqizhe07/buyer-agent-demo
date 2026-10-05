@@ -96,6 +96,8 @@ export const NETWORK_CODES: Record<ChainName, string[]> = {
   Optimism: ["OPTIMISM", "OP"],
   Polygon: ["MATIC", "POLYGON", "POL"],
   "BNB Chain": ["BEP20", "BSC"],
+  // no exchange this account knows lists it as a network
+  "Robinhood Chain": [],
 };
 
 type Net = { fee?: number | undefined; withdraw?: boolean | undefined; deposit?: boolean | undefined };

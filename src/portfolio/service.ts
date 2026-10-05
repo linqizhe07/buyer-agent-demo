@@ -60,6 +60,8 @@ import { WalletProofs } from "./live/proof.ts";
 import { publicChain } from "./live/chain.ts";
 import { realMm } from "./live/metamask.ts";
 import { publicPrices } from "./live/prices.ts";
+import { ROBINHOOD_MCP } from "./live/robinhood.ts";
+import { OAuthSignIn } from "./live/signin.ts";
 import { realHttp } from "./live/types.ts";
 import type { AgentAction, Envelope, Hex } from "./account/sign.ts";
 
@@ -430,9 +432,26 @@ export class PortfolioService {
   /** what a live connection reaches: the real network, unless a test handed in stand-ins */
   private liveDeps(): LiveDeps {
     // made once: the chain clients and the price cache are kept between connections
-    return (this.liveMade ??= { home: this.opts.home, http: realHttp, clock: Date.now, mm: realMm(this.opts.mm?.bin, this.opts.mm?.timeoutMs), chain: this.opts.liveDeps?.chain ?? publicChain(), price: this.opts.liveDeps?.price ?? publicPrices({ open: this.opts.liveDeps?.openExchange, clock: this.opts.liveDeps?.clock }), ...this.opts.liveDeps, proofs: this.proofs });
+    return (this.liveMade ??= { home: this.opts.home, http: realHttp, clock: Date.now, mm: realMm(this.opts.mm?.bin, this.opts.mm?.timeoutMs), chain: this.opts.liveDeps?.chain ?? publicChain(), price: this.opts.liveDeps?.price ?? publicPrices({ open: this.opts.liveDeps?.openExchange, clock: this.opts.liveDeps?.clock }), signIn: (kind) => this.signIn(kind), ...this.opts.liveDeps, proofs: this.proofs });
   }
   private liveMade: LiveDeps | undefined;
+
+  /** the sign-in at a venue that speaks OAuth to MCP clients (Robinhood): one per venue, its tokens in memory only */
+  private readonly signIns = new Map<string, OAuthSignIn>();
+  signIn(kind: string): OAuthSignIn | undefined {
+    if (kind !== "robinhood") return undefined;
+    let s = this.signIns.get(kind);
+    if (!s) {
+      const deps = this.liveDeps();
+      s = new OAuthSignIn({ resource: ROBINHOOD_MCP, name: "Robinhood", venue: "robinhood", http: deps.http, clock: deps.clock });
+      this.signIns.set(kind, s);
+    }
+    return s;
+  }
+  /** which sign-in a state that came back belongs to */
+  signInHolding(state: string): OAuthSignIn | undefined {
+    return [...this.signIns.values()].find((s) => s.has(state));
+  }
 
   /** Connect a venue the user REALLY has, read-only. The venue is asked through its own interface (live/): what it holds, and what it says the
    * credential may do. A live connection on the id of a simulated venue takes that venue's place until it is unplugged; either way every

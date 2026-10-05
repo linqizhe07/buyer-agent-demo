@@ -19,7 +19,7 @@ import { isRefusal, type Refusal } from "../../core/errors.ts";
 import { canonical } from "../../core/hash.ts";
 import { no } from "../refuse.ts";
 import type { AccountKind } from "../accounts.ts";
-import { CHAINS, type ChainName } from "../live/chain.ts";
+import { STABLECOINS, type ChainName } from "../live/chain.ts";
 import { isStable } from "../live/types.ts";
 import type { Landed, LiveReceipt, LiveWriter, WalletTx } from "../live/writes.ts";
 import type { CardLike, Outcome } from "./exchange.ts";
@@ -69,7 +69,8 @@ export interface LiveEngine {
 }
 
 const KINDS = ["withdraw", "send", "transfer", "swap"] as const;
-const NETWORKS = Object.keys(CHAINS) as ChainName[];
+/** real money moves in dollar stablecoins, so on the chains that carry one (Robinhood Chain is read, not paid on) */
+const NETWORKS = [...new Set(STABLECOINS.map((s) => s.chain))] as ChainName[];
 const TTL_MS = 10 * 60_000;
 const POLL_MS = 20_000;
 const same = (a: string | undefined, b: string | undefined) => (a ?? "").toLowerCase() === (b ?? "").toLowerCase();

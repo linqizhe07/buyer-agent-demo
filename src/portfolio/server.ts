@@ -90,6 +90,12 @@ export function parseAgent(raw: unknown): AgentId {
   return { id, name, code };
 }
 
+/** the page a venue's sign-in sends the browser back to: whether it finished, in the account page's paper and ink, and nothing else */
+function signedInPage(error?: string): string {
+  const esc = (t: string) => t.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Robinhood sign-in</title><style>:root{--paper:#f6f1e7;--ink:#1d1a16;--dim:#6b6358}@media (prefers-color-scheme:dark){:root{--paper:#17150f;--ink:#ece4d4;--dim:#a39a8a}}body{margin:0;padding:56px 16px;background:var(--paper);color:var(--ink);font:17px/1.55 Georgia,"Times New Roman",serif}main{max-width:520px;margin:0 auto}h1{font-weight:400;font-size:28px;margin:0 0 12px}p{color:var(--dim);margin:0}</style></head><body><main><h1>${error ? "The sign-in did not finish" : "Signed in at Robinhood"}</h1><p>${error ? esc(error) : "Go back to the account page: it carries on from here. This tab can be closed."}</p></main>${error ? "" : "<script>setTimeout(() => window.close(), 1500)</script>"}</body></html>`;
+}
+
 export async function startPortfolioServer(opts: PortfolioServerOptions): Promise<PortfolioServerHandle> {
   const svc = opts.service;
   const agent = new AgentSession(svc);
@@ -160,6 +166,32 @@ export async function startPortfolioServer(opts: PortfolioServerOptions): Promis
     const { address, signature } = req.body as { address?: unknown; signature?: unknown };
     const r = await svc.proofs.prove(String(address ?? ""), String(signature ?? ""));
     res.status(isRefusal(r) ? 400 : 200).json(isRefusal(r) ? { ok: false, refusal: r } : { ok: true, address: r.address, wallet: r.wallet });
+  }));
+
+  // Signing in at a venue that speaks OAuth to MCP clients (Robinhood). The owner's browser goes to the venue's own page; the code it brings
+  // back here is traded once for a token this process keeps in memory. Nothing is connected by this: connecting is still the owner's signed
+  // instruction, which names the sign-in by its state.
+  app.post("/api/account/signin/start", wrap(async (req, res) => {
+    if (!svc.account) return void res.status(404).json({ ok: false, error: "the account layer is not mounted" });
+    const kind = String((req.body as { connector?: unknown }).connector ?? "");
+    const signIn = svc.signIn(kind);
+    if (!signIn) return void bad(res, `there is no sign-in for "${kind.slice(0, 40)}"`);
+    const host = req.get("host") ?? "127.0.0.1";
+    const r = await signIn.start(`${req.protocol}://${host}/api/account/signin/callback`);
+    res.status(isRefusal(r) ? 502 : 200).json(isRefusal(r) ? { ok: false, refusal: r } : { ok: true, url: r.url, state: r.state });
+  }));
+  app.get("/api/account/signin/status", (req, res) => {
+    const state = typeof req.query.state === "string" ? req.query.state : "";
+    const signIn = svc.signInHolding(state);
+    res.json({ ok: true, ...(signIn ? signIn.status(state) : { status: "unknown" }) });
+  });
+  app.get("/api/account/signin/callback", wrap(async (req, res) => {
+    const text = (v: unknown) => (typeof v === "string" ? v : undefined);
+    const q = req.query as Record<string, unknown>;
+    const state = text(q.state) ?? "";
+    const signIn = svc.signInHolding(state);
+    const r = signIn ? await signIn.finish({ state, code: text(q.code), error: text(q.error), error_description: text(q.error_description), iss: text(q.iss) }) : no("E_ACCOUNT_BAD_ACTION", { message: "this sign-in is not one this server started, or it ran out: start it again from the account page" });
+    res.status(isRefusal(r) ? 400 : 200).type("html").send(signedInPage(isRefusal(r) ? r.message : undefined));
   }));
 
   // the page says which transaction the wallet sent for a real-money payment that was waiting for it; the chain decides whether it is that one

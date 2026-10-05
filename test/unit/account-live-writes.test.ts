@@ -364,6 +364,8 @@ describe("real money at venues connected live", () => {
     const x = await boot();
     await x.connectOkx();
     await x.own({ type: "connectVenue", venue: "metamask", connector: "live:metamask", label: "", credentialRef: "" });
+    // Robinhood Chain is read, not paid on: it carries no dollar stablecoin this account knows
+    expect(refusal(await x.move({ kind: "send", from: "metamask", to: "okx", asset: "USDC", network: "Robinhood Chain", amount: "10" })).message).toBe("a network is one of Ethereum, Optimism, BNB Chain, Polygon, Base, Arbitrum");
     // OKX takes USDC on Arbitrum and Ethereum here: Base is not one of its networks, and the account says so before anything else
     expect(refusal(await x.move({ kind: "send", from: "metamask", to: "okx", asset: "USDC", network: "Base", amount: "10" })).message).toBe("OKX does not carry USDC on Base: it lists ARBITRUM, ERC20");
     const off = refusal(await x.move({ kind: "send", from: "metamask", to: "okx", asset: "USDC", network: "Arbitrum", amount: "10" }));
