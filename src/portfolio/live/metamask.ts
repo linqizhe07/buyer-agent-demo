@@ -11,8 +11,14 @@
  *   a swap               `<TOKEN>/USDC@<chain>`. `mm swap quote` moves nothing; `mm swap execute --quote-id` sends the quote just made,
  *                        never a blind re-quote; `mm swap status --quote-id` until MetaMask's Bridge API says COMPLETE or FAILED. A swap is
  *                        exact-input: a sell spends exactly the tokens, a buy spends qty × ask in USDC and gets about qty, never exactly
- *   a prediction order   `<market slug>:<outcome>` at Polymarket. `mm predict geoblock` first, then `mm predict place` (GTC at a limit, FAK
- *                        at a worst price for a market order); `mm predict orders` while it rests; `mm predict cancel --order-id`
+ *   a prediction order   `<market slug>:<outcome>` at Polymarket. `mm predict geoblock` first, then `mm predict place --order-type`: a limit
+ *                        order GTC (it rests, and `--post-only` keeps it a maker), or FAK (IOC) or FOK at its limit; a market order FAK, or
+ *                        FOK, at its worst price. `mm predict orders` while it rests; `mm predict cancel --order-id`
+ *   what is held         `mm predict positions`: the shares the Predict deposit wallet holds. A swap leaves tokens in the wallet itself,
+ *                        which `mm wallet balance` reads already: mm has no positions of its own for them
+ *
+ * No amend, close or leverage: mm 7.0.0 has no command that changes a Polymarket order in place or closes a position at its own call
+ * (selling the shares is an order), and nothing of the kind for a swap. Its perpetuals have them, and this trader does not trade those.
  *
  * What moves money (`swap execute`, `predict place`) runs only when MetaMask's own switch is on as well as this server's:
  * PORTFOLIO_MM_WRITES=1, as for `mm transfer` (writes.ts). Otherwise the command that would run is printed and nothing runs. MetaMask's
@@ -25,7 +31,7 @@ import { isRefusal, type Code, type Refusal } from "../../core/errors.ts";
 import { holdingsOf, type MmBalance, type MmShow } from "../adapters/metamask.ts";
 import { no } from "../refuse.ts";
 import { CHAINS, STABLECOINS, type ChainName } from "./chain.ts";
-import { badOrder, ceilTo, DONE, floorTo, inDollars, onStep, pick, plain, type LiveTrader, type Market, type OrderRequest, type OrderState, type OrderStatus } from "./trade.ts";
+import { badOrder, ceilTo, DONE, floorTo, inDollars, onStep, pick, plain, type LiveTrader, type Market, type OrderRequest, type OrderState, type OrderStatus, type Position, type TimeInForce } from "./trade.ts";
 import { num, redact, REGION, type LiveBalance, type LiveSource } from "./types.ts";
 import { mmWriter } from "./writes.ts";
 
@@ -76,6 +82,12 @@ const jsonOf = (s: string): unknown => {
 const obj = (v: unknown): Record<string, unknown> | undefined => (v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined);
 const arr = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
 const str = (v: unknown): string => (typeof v === "string" ? v : typeof v === "number" ? String(v) : "");
+/** a figure the venue gave, or nothing when it gave none: unlike num(), a figure that is not there is not read as 0 (a resolved outcome
+ * that lost really is worth 0) */
+const known = (v: unknown): number | undefined => {
+  const n = typeof v === "number" ? v : typeof v === "string" && v.trim() !== "" ? Number(v) : NaN;
+  return Number.isFinite(n) ? n : undefined;
+};
 
 function failureIn(v: unknown): MmFailure | undefined {
   const o = obj(v);
@@ -203,7 +215,12 @@ const WELL_KNOWN: Array<[ChainName, string]> = [
   ["Polygon", "WETH"], ["BNB Chain", "BTCB"],
 ];
 const SWAP_NOTE = "a swap your MetaMask Agent Wallet sends through MetaMask's swap API, at up to 0.5% slippage; prices are for about $100 and include MetaMask's fee, not the network fee. A swap is exact-input: a buy spends qty × ask in USDC and gets about qty. MetaMask's Guard may ask you to approve it first";
-const PM_NOTE = "a Polymarket order through mm, paid in pUSD from your Predict deposit wallet (mm predict setup and a deposit come first); a market order fills what it can at once, up to its worst price, and the rest is canceled; Polymarket's taker fee comes on top";
+const PM_NOTE = "a Polymarket order through mm, paid in pUSD from your Predict deposit wallet (mm predict setup and a deposit come first). A limit order rests until canceled (GTC), post-only if you ask; IOC fills what it can at once and cancels the rest, FOK fills all at once or not at all; a market order is IOC at its worst price, or FOK. An IOC or FOK buy spends size × price and may get more shares. Polymarket's taker fee comes on top";
+/** the times in force Polymarket takes through `mm predict place --order-type`, by the name each has there: GTC rests until canceled, FAK
+ * fills what it can at once and cancels the rest (the account's IOC), FOK fills all at once or not at all. GTD is not offered: it needs an
+ * expiry, which the account's order does not carry */
+const PM_ORDER_TYPES: Partial<Record<TimeInForce, "GTC" | "FAK" | "FOK">> = { gtc: "GTC", ioc: "FAK", fok: "FOK" };
+const PM_TIFS = Object.keys(PM_ORDER_TYPES) as TimeInForce[];
 
 const INSUFFICIENT = new Set(["INSUFFICIENT_FUNDS", "INSUFFICIENT_GAS", "PREDICT_INSUFFICIENT_BALANCE", "PREDICT_INSUFFICIENT_FUNDING_BALANCE", "PREDICT_INSUFFICIENT_GAS"]);
 const INVALID = new Set(["INVALID_AMOUNT", "INVALID_INPUT", "INVALID_SWAP_PARAMS", "AMOUNT_TOO_LOW", "AMOUNT_TOO_HIGH", "SLIPPAGE_TOO_HIGH", "SLIPPAGE_TOO_LOW", "TOKEN_NOT_FOUND", "TOKEN_NOT_SUPPORTED", "NATIVE_ASSET_UNSUPPORTED", "UNSUPPORTED_CHAIN", "REFUEL_UNSUPPORTED_ROUTE", "RWA_NATIVE_TOKEN_UNSUPPORTED", "INVALID_TICK_SIZE", "INVALID_ORDER_TYPE", "INVALID_SIDE", "PREDICT_ORDER_SIZE_TOO_SMALL", "MISSING_FLAG", "MISSING_SWAP_PARAMS", "MISSING_CHAIN", "INVALID_CHAIN"]);
@@ -374,7 +391,8 @@ export function mmTrader(d: MmTraderDeps): LiveTrader {
     if (PERMISSION.has(f.code) || /address banned/i.test(m)) return say("E_VENUE_PERMISSION", `${who} refused to ${doing}: ${words}`);
     if (UNAUTHORIZED.has(f.code) || /unauthori[sz]ed|invalid api key/i.test(m)) return say("E_VENUE_UNAUTHORIZED", who === PM ? `${PM} no longer accepts mm's trading credentials: run mm predict auth --refresh in a terminal` : "mm is not signed in, or MetaMask no longer accepts its session: sign in with mm in a terminal (mm wallet show must work)");
     if (f.code === "RWA_MARKET_UNAVAILABLE" || /not yet ready|no orderbook exists|cancel-only|post-only mode|trading is currently disabled/i.test(m)) return say("E_VENUE_MARKET_CLOSED", `${who} takes no orders here now: ${words}`);
-    if (INVALID.has(f.code) || /invalid price|invalid tick size|tick size rule|align to tick|lower than the minimum|invalid expiration/i.test(m)) return { ...badOrder(venue, who, words), native };
+    // a post-only order that would have taken at once is refused as written ("invalid post-only order: order crosses book")
+    if (INVALID.has(f.code) || /invalid price|invalid tick size|tick size rule|align to tick|lower than the minimum|invalid expiration|invalid post-only order|crosses (the )?book/i.test(m)) return { ...badOrder(venue, who, words), native };
     if (DOWN.has(f.code) || /too many requests|HTTP (429|5\d\d)|order timed out|\b425\b|ECONNRESET|ETIMEDOUT/i.test(m)) return say("E_VENUE_UNREACHABLE", f.code === "ENOENT" || f.code === "UNSUPPORTED_NODE" ? `mm could not run on this machine: ${words}` : `${who} did not answer in time, or is limiting requests: try again in a minute`);
     if (when === "track" && (UNKNOWN_ORDER.has(f.code) || /invalid orderid|not found/i.test(m))) return say("E_ACCOUNT_ORDER_UNKNOWN", `${who} does not know this order: ${words}`);
     return say("E_VENUE_REJECTED", `${who} refused to ${doing}: ${words}`);
@@ -494,7 +512,9 @@ export function mmTrader(d: MmTraderDeps): LiveTrader {
 
   async function placeSwap(o: OrderRequest, s: Seen & { spot: SwapSpot }): Promise<OrderState | Refusal> {
     const { m, spot } = s;
-    if (o.type !== "market") return badOrder(venue, SWAPS, "a swap is a market order: mm takes no limit price");
+    if (o.type !== "market" || o.stopPrice !== undefined) return badOrder(venue, SWAPS, "a swap is a market order: mm takes no limit or stop price");
+    // nothing more to choose: a swap lands whole on chain or reverts, and mm takes no time in force, post-only or reduce-only for it
+    if (o.tif !== undefined || o.postOnly || o.reduceOnly) return badOrder(venue, SWAPS, "a swap takes no time in force, post-only or reduce-only: it lands whole on chain, or reverts");
     if (!(o.qty > 0) || !onStep(o.qty, m.qtyStep)) return badOrder(venue, SWAPS, `a size of ${m.base} moves in steps of ${plain(m.qtyStep ?? 0)}`, { qtyStep: m.qtyStep });
     const sell = o.side === "sell";
     const tokenArg = spot.token.native ? spot.token.symbol : spot.token.address;
@@ -702,7 +722,9 @@ export function mmTrader(d: MmTraderDeps): LiveTrader {
     const why = whyClosed(info);
     const price = book.bid !== undefined && book.ask !== undefined ? (book.bid + book.ask) / 2 : (book.last ?? (outcome.price || undefined));
     const symbol = info.slug ? `${info.slug}:${outcome.name}` : tokenId;
-    const m: Market = { symbol, name: `${info.question} · ${outcome.name}`, kind: "event", base: outcome.name, quote: "pUSD", price: price !== undefined ? sig(price) : undefined, bid: book.bid, ask: book.ask, minQty: min || undefined, qtyStep: 0.01, priceStep: tick, open: why === undefined, note: why ?? PM_NOTE, types: ["limit", "market"] };
+    // what mm predict place takes here: GTC, IOC (FAK) and FOK, and --post-only; no reduce-only flag and no leverage, so neither is said
+    // a sell can only be of shares the deposit wallet holds: it closes a position, never opens one the other way (sellsReduce)
+    const m: Market = { symbol, name: `${info.question} · ${outcome.name}`, kind: "event", base: outcome.name, quote: "pUSD", price: price !== undefined ? sig(price) : undefined, bid: book.bid, ask: book.ask, minQty: min || undefined, qtyStep: 0.01, priceStep: tick, open: why === undefined, note: why ?? PM_NOTE, types: ["limit", "market"], tifs: [...PM_TIFS], postOnly: true, sellsReduce: true };
     seen.set(symbol.toUpperCase(), { m, at: now(), spot: { kind: "predict", tokenId, conditionId: info.conditionId, tick, min } });
     return m;
   }
@@ -723,24 +745,46 @@ export function mmTrader(d: MmTraderDeps): LiveTrader {
     return undefined;
   }
 
+  /** the order type mm sends Polymarket, or why there is none. A limit order rests (GTC) unless IOC or FOK is asked, at its limit; a market
+   * order fills at once, FAK unless FOK is asked, at its worst price. Post-only is for an order that rests: mm refuses --post-only with FOK
+   * or FAK, so it is refused here first, before Polymarket's region check or anything else is asked */
+  function pmOrderType(o: OrderRequest): "GTC" | "FAK" | "FOK" | Refusal {
+    const tif = o.tif ?? (o.type === "market" ? "ioc" : "gtc");
+    // its own keys only: "constructor" is not a time in force, and nothing but GTC, FAK or FOK reaches mm's argv
+    const ot = Object.hasOwn(PM_ORDER_TYPES, tif) ? PM_ORDER_TYPES[tif] : undefined;
+    const names = PM_TIFS.map((t) => t.toUpperCase());
+    if (!ot) return badOrder(venue, PM, `mm places ${names.slice(0, -1).join(", ")} or ${names.at(-1)} orders here, not ${String(tif).toUpperCase()}`);
+    if (o.type === "market" && ot === "GTC") return badOrder(venue, PM, "a market order fills at once (IOC or FOK): only a limit order rests until canceled");
+    if (o.postOnly && o.type !== "limit") return badOrder(venue, PM, "post-only is for a limit order");
+    if (o.postOnly && ot !== "GTC") return badOrder(venue, PM, `a post-only order rests on the book or is refused, and ${tif.toUpperCase()} never rests: mm takes --post-only only for an order that rests (GTC)`);
+    return ot;
+  }
+
   async function placePm(o: OrderRequest, s: Seen & { spot: PmSpot }): Promise<OrderState | Refusal> {
     const { m, spot } = s;
     const { tick, min, tokenId } = spot;
+    // Polymarket through mm takes a limit or a market order, never a stop, and mm has no reduce-only flag for it
+    if (o.type !== "limit" && o.type !== "market") return badOrder(venue, PM, `mm places limit and market orders here, not ${String(o.type).replace("_", "-")} orders`);
+    if (o.stopPrice !== undefined) return badOrder(venue, PM, "mm places no stop orders here, so an order carries no stop price");
+    if (o.reduceOnly) return badOrder(venue, PM, "mm takes no reduce-only flag for an order here");
+    const ot = pmOrderType(o);
+    if (isRefusal(ot)) return ot;
     if (!(o.qty > 0) || !onStep(o.qty, 0.01)) return badOrder(venue, PM, "a size is in shares, in steps of 0.01", { qtyStep: 0.01 });
     if (min > 0 && o.qty < min - 1e-9) return badOrder(venue, PM, `the smallest order in ${m.name} is ${plain(min)} shares`, { minQty: min });
+    // the price mm is sent: a limit order's limit (where it rests, or the worst an IOC or FOK fill may take), or a market order's worst price,
+    // snapped to the tick on the safe side. An IOC or FOK buy spends size × price, and may get more shares
     let price: number;
     if (o.type === "limit") {
       price = o.limitPrice ?? NaN;
       if (!(price > 0) || !onStep(price, tick)) return badOrder(venue, PM, `a price in ${m.name} moves in steps of ${plain(tick)}`, { priceStep: tick });
     } else {
-      // a market order is FAK at its worst price, snapped to the tick on the safe side; a FAK buy spends size × price and may get more shares
       const book = o.side === "buy" ? m.ask : m.bid;
       const worst = o.worstPrice ?? (book === undefined ? undefined : o.side === "buy" ? book * (1 + ROOM) : book * (1 - ROOM));
       if (worst === undefined) return badOrder(venue, PM, `nothing is on the ${o.side === "buy" ? "ask" : "bid"} side of ${m.name}: a limit order can rest there instead`);
       price = o.side === "buy" ? Math.min(floorTo(worst, tick), floorTo(1 - tick, tick)) : Math.max(ceilTo(worst, tick), tick);
     }
     if (price < tick - 1e-9 || price > 1 - tick + 1e-9) return badOrder(venue, PM, `a price is between ${plain(tick)} and ${plain(1 - tick)}`, { priceStep: tick });
-    const args = ["predict", "place", "--token-id", tokenId, "--side", o.side, "--size", plain(o.qty, 2), "--price", plain(price, 6), "--order-type", o.type === "limit" ? "GTC" : "FAK", "--json"];
+    const args = ["predict", "place", "--token-id", tokenId, "--side", o.side, "--size", plain(o.qty, 2), "--price", plain(price, 6), "--order-type", ot, ...(o.postOnly ? ["--post-only"] : []), "--json"];
     const geo = ["predict", "geoblock", "--json"];
     if (!writesOn()) return off([geo, args]);
     const blocked = await geoblock(geo);
@@ -761,8 +805,10 @@ export function mmTrader(d: MmTraderDeps): LiveTrader {
     let filled = shares;
     if (st === "matched") {
       if (shares <= 0) filled = o.qty;
-      // a FAK order never rests: what did not fill at once was canceled. A GTC order's remainder rests on the book: partly filled, still open
-      status = shares > 0 && shares < o.qty - 1e-9 ? (o.type === "market" ? "canceled" : "partial") : "filled";
+      // FOK filled whole, or it would have been refused. A FAK order never rests: what did not fill at once was canceled. A GTC order's
+      // remainder rests on the book: partly filled, still open
+      const part = shares > 0 && shares < o.qty - 1e-9;
+      status = !part || ot === "FOK" ? "filled" : ot === "FAK" ? "canceled" : "partial";
     } else if (st === "live") status = shares > 0 ? "partial" : "open";
     // delayed: marketable, matched after the market's delay; unmatched: taken, not matched; anything else Polymarket adds: taken, not known
     else status = "pending";
@@ -830,6 +876,60 @@ export function mmTrader(d: MmTraderDeps): LiveTrader {
     return no("E_VENUE_REJECTED", { venue, message: `${PM} did not cancel ${short(ref)}${why ? `: ${said(why)}` : ""}`, native });
   }
 
+  // ---- what is held ------------------------------------------------------------------------------
+
+  /** one of Polymarket's Data API rows as the account's position: shares of one outcome, always held long (no one sells short there), under
+   * the symbol the account gives that outcome, so it is the market market() opens and the one a sell of those shares is placed in */
+  const positionOf = (p: Record<string, unknown>): Position | undefined => {
+    const qty = num(p.size);
+    const tokenId = str(p.asset);
+    const slug = str(p.slug);
+    const outcome = str(p.outcome);
+    const symbol = /^[a-z0-9][a-z0-9-]*$/i.test(slug) && outcome ? `${slug}:${outcome}` : tokenId;
+    if (!(qty > 0) || !symbol) return undefined;
+    const entry = known(p.avgPrice);
+    const mark = known(p.curPrice);
+    const usd = known(p.currentValue);
+    const pnl = known(p.cashPnl);
+    // resolved: no longer traded, waiting for mm predict redeem (a winning share pays 1 pUSD, a losing one nothing)
+    const resolved = p.redeemable === true;
+    return {
+      symbol,
+      name: `${str(p.title) || slug || short(tokenId)}${outcome ? ` · ${outcome}` : ""}${resolved ? " (resolved)" : ""}`,
+      kind: "event",
+      side: "long",
+      qty,
+      ...(entry !== undefined && entry > 0 ? { entryPrice: entry } : {}),
+      ...(mark !== undefined ? { markPrice: mark } : {}),
+      ...(usd !== undefined ? { usd } : {}),
+      ...(pnl !== undefined ? { unrealizedUsd: pnl } : {}),
+      native: { tokenId, conditionId: str(p.conditionId), outcome, size: qty, avgPrice: entry, curPrice: mark, currentValue: usd, cashPnl: pnl, redeemable: resolved, ...(p.mergeable === true ? { mergeable: true } : {}), ...(str(p.endDate) ? { endDate: str(p.endDate) } : {}) },
+    };
+  };
+
+  /** `mm predict positions`: what the Predict deposit wallet holds at Polymarket. mm passes on Polymarket's Data API rows (GET /positions for
+   * the deposit wallet) as they come, asked with the API's own defaults: the 100 largest, each of at least one share. A read: it moves
+   * nothing, so MetaMask's switch is not asked */
+  async function pmPositions(): Promise<Position[] | Refusal> {
+    const args = ["predict", "positions", "--json"];
+    let data: unknown;
+    try {
+      data = await run<unknown>(args);
+    } catch (err) {
+      const f = failureOf(err);
+      // mm asks whether the deposit wallet is deployed before it reads anything: a wallet that never set up Predict holds nothing there
+      if (f.code === "PREDICT_SETUP_REQUIRED") return [];
+      return saidNo(f, PM, "list what the Predict deposit wallet holds", args, "order");
+    }
+    const rows = obj(obj(data)?.result)?.positions;
+    if (!Array.isArray(rows)) return unread(PM, args);
+    return rows.flatMap((r) => {
+      const p = obj(r);
+      const x = p ? positionOf(p) : undefined;
+      return x ? [x] : [];
+    });
+  }
+
   // ---- the trader --------------------------------------------------------------------------------------
 
   async function market(symbol: string): Promise<Market | Refusal> {
@@ -876,7 +976,7 @@ export function mmTrader(d: MmTraderDeps): LiveTrader {
   const listed = (chain: ChainName, token: string): Market => ({ symbol: `${token}/USDC@${chain}`, name: `${token} on ${chain}`, kind: "token", base: token, quote: "USDC", open: true, note: SWAP_NOTE, types: ["market"] });
   const pmListed = (info: PmInfo): Market[] => {
     const why = whyClosed(info);
-    return info.outcomes.map((o) => ({ symbol: info.slug ? `${info.slug}:${o.name}` : o.tokenId, name: `${info.question} · ${o.name}`, kind: "event", base: o.name, quote: "pUSD", price: o.price || undefined, minQty: info.min || undefined, qtyStep: 0.01, priceStep: info.tick || undefined, open: why === undefined, note: why ?? PM_NOTE, types: ["limit", "market"] }));
+    return info.outcomes.map((o) => ({ symbol: info.slug ? `${info.slug}:${o.name}` : o.tokenId, name: `${info.question} · ${o.name}`, kind: "event", base: o.name, quote: "pUSD", price: o.price || undefined, minQty: info.min || undefined, qtyStep: 0.01, priceStep: info.tick || undefined, open: why === undefined, note: why ?? PM_NOTE, types: ["limit", "market"], tifs: [...PM_TIFS], postOnly: true, sellsReduce: true }));
   };
   /** a Polymarket market is found by what `mm predict markets get` takes: its slug or its condition id (a bare number is not taken for
    * Gamma's market id: a search for "2026" would list an unrelated market). Free text is not searched: the output of
@@ -935,5 +1035,7 @@ export function mmTrader(d: MmTraderDeps): LiveTrader {
       const r = await pmOpen(ref, symbol);
       return isRefusal(r) ? r : r.state;
     },
+    // what is held at Polymarket. No amend, close or setLeverage: mm has no command for any of them here (selling the shares is an order)
+    positions: pmPositions,
   };
 }

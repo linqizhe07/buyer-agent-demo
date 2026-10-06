@@ -54,10 +54,17 @@ import { isSelfCustody, plug, type PlugSeed } from "./adapters/exchange.ts";
 import { liveAccount } from "./adapters/live.ts";
 import { keyFileStatus, liveOptions, openLive, type LiveDeps } from "./live/index.ts";
 import type { LiveVenue } from "./account/live-moves.ts";
-import type { LiveTrader, Market } from "./live/trade.ts";
+import type { LiveTrader, Market, Position } from "./live/trade.ts";
 import { compareAcross, type Comparison } from "./live/compare.ts";
 import { fold, type StatementLine } from "./account/statement.ts";
 import { WalletProofs } from "./live/proof.ts";
+import { proofHolds, readHistory, rebuild, type DialSnapshot, type Rebuilt, type RunMark } from "./account/restore.ts";
+import { RealPayer } from "./account/pay-real.ts";
+import { agentWalletKey, agentWalletKeyPath, hasKey } from "./account/keystore.ts";
+import { agentWalletSource, agentWalletVenue } from "./live/agent-wallet.ts";
+import { guardedHttp, type PayHttp } from "./live/guarded-http.ts";
+import { publicSender } from "./live/chain.ts";
+import type { SubAccount } from "./account/state.ts";
 import { publicChain } from "./live/chain.ts";
 import { realMm } from "./live/metamask.ts";
 import { publicPrices } from "./live/prices.ts";
@@ -99,6 +106,10 @@ export interface ServiceOptions {
   openness?: unknown;
   /** start from an empty ledger even when a file with this name exists: a scripted run on a fixed clock gets the same file name every time and would otherwise append to its previous run */
   freshLedger?: boolean;
+  /** a real account starts from nothing instead of continuing its ledgers (account/restore.ts): `--fresh` */
+  fresh?: boolean | undefined;
+  /** how a payee is asked when an agent pays with real money (live/guarded-http.ts); a stand-in in tests */
+  payHttp?: PayHttp | undefined;
   /** the venues the owner could plug in (default: fixtures `connectable.json`) */
   connectable?: Record<string, PlugSeed> | undefined;
   /** stand-ins for what a live connection reaches — the exchange library, HTTP, the chain, the real clock — so tests never leave the process */
@@ -106,6 +117,9 @@ export interface ServiceOptions {
   /** REAL money at venues connected live (the server's `--live-writes`): the most one movement may be, and the code the first owner types.
    * Absent: live venues are read, and nothing moves at them */
   liveWrites?: { capUsd: number; pairingCode: string } | undefined;
+  /** the code the first owner types when nothing moves money either (a read-only real account): an owner paired without one would own the
+   * account's later runs, money and all. With liveWrites, its own code is the one */
+  pairingCode?: string | undefined;
   /** REAL accounts only (the server's default): no simulated venue is mounted, and the account layer has no simulated payee, plug-in
    * or clock. What is on the service is what the owner connected through each venue's own interface */
   real?: boolean | undefined;
@@ -277,6 +291,9 @@ export class PortfolioService {
   private readonly liveVenues = new Map<string, LiveVenue>();
   /** wallets that proved an address is the user's, by signing the sentence the account wrote */
   readonly proofs: WalletProofs;
+  /** a real account restarted: what it brought back from its ledgers, and the restore still under way (venues connecting again) */
+  restored: RestoreReport | undefined;
+  restoring: Promise<void> | undefined;
 
   private constructor(
     private readonly opts: ServiceOptions,
@@ -296,8 +313,9 @@ export class PortfolioService {
     this.mount();
     this.account = opts.account !== undefined || opts.venues === "frontline" ? new AccountEngine(this.host(), opts.account ?? {}) : undefined;
     if (this.account) this.catalog = opts.connectable ?? loadConnectable();
-    // the payees are simulated hosts: a real account has none
+    // the payees are simulated hosts: a real account has none. A real account pays real ones, from agent wallets (account/pay-real.ts)
     this.payees = this.account && !opts.real ? mountPayees(this.account) : undefined;
+    if (this.account && opts.real && opts.liveWrites) this.account.usePayer(new RealPayer(this.account, { http: opts.payHttp ?? guardedHttp, chain: this.liveDeps().chain, wallet: (name) => agentWalletKey(opts.home, name), clock: () => this.liveDeps().clock(), capUsd: () => opts.liveWrites?.capUsd ?? 0 }));
     if (this.account && !opts.freshLedger) this.rememberNonces(this.account);
   }
 
@@ -385,6 +403,20 @@ export class PortfolioService {
           this.setMode("open");
           return { ok: true, summary: "Aggressive: agents trade and move inside their limits without asking" };
         }
+        if (change === "maxLeverage") {
+          // the most leverage an agent may set on a perpetual: widening, so it is the owner's to sign
+          const lev = Number(value);
+          if (!/^\d{1,3}$/.test(value) || !(lev >= 1)) return no("E_ACCOUNT_BAD_ACTION", { message: "the agents' leverage cap is a whole number, 1 or more" });
+          this.openness = { ...this.openness, maxLeverage: lev };
+          this.ledger.append({ kind: "note", venue: "*", reason: `agents may set leverage up to ${lev}x`, detail: this.dialNow() });
+          return { ok: true, summary: `agents may set leverage up to ${lev}x` };
+        }
+        if (change === "session") {
+          // a new session for the agents: thirty days from now. Widening, so it is the owner's to sign
+          this.openness = { ...this.openness, sessionExpiresAt: new Date(Date.parse(this.now()) + 30 * 86_400_000).toISOString() };
+          this.ledger.append({ kind: "note", venue: "*", reason: `a new session for the agents, until ${this.openness.sessionExpiresAt}`, detail: this.dialNow() });
+          return { ok: true, summary: `agents may act again, until ${this.openness.sessionExpiresAt.slice(0, 10)}` };
+        }
         if (change === "restore") {
           const r = this.restore(value);
           return isRefusal(r) ? r : { ok: true, summary: `${this.nameOf(value)} is open to the agent again` };
@@ -404,7 +436,16 @@ export class PortfolioService {
       disconnect: (venue) => this.unplug(venue),
       live: () => ({ ...liveOptions(this.opts.home), writes: this.liveWritesView() }),
       liveMoney: () => ({ writes: () => this.liveWritesView(), venue: (id) => (this.adapters.get(id)?.account.watchOnly ? this.liveVenues.get(id) : undefined), realNow: () => this.liveDeps().clock() }),
-      pairingCode: () => this.opts.liveWrites?.pairingCode,
+      pairingCode: () => this.opts.liveWrites?.pairingCode ?? this.opts.pairingCode,
+      ...(real && this.opts.liveWrites
+        ? {
+            agentWalletAddress: (name: string) => {
+              const k = agentWalletKey(this.opts.home, name);
+              return isRefusal(k) ? k : (k.address as Hex);
+            },
+            agentWalletUp: (sub: SubAccount) => this.plugAgentWallet(sub),
+          }
+        : {}),
       connectable: () =>
         Object.entries(real ? {} : this.catalog)
           .filter(([id]) => !this.adapters.has(id))
@@ -444,6 +485,13 @@ export class PortfolioService {
     if (!v.trader) return no("E_VENUE_RAIL_CLOSED", { venue, message: `${v.name}: ${v.noTradeBecause ?? "no orders are placed here from the account"}` });
     const trader = v.trader;
     return this.marketReads.get(`markets|${venue}|${query.trim().toUpperCase()}`, 60_000, () => trader.markets(query));
+  }
+
+  /** what is held at a venue connected live, fifteen seconds old at most (the page asks often; the venue is asked once) */
+  async livePositions(venue: string): Promise<Position[] | Refusal> {
+    if (!this.account) return no("E_ACCOUNT_BAD_ACTION", { message: "the account layer is not mounted" });
+    const engine = this.account;
+    return this.marketReads.get(`positions|${venue}`, 15_000, () => engine.trade.positions(venue));
   }
 
   /** one market at a venue connected live, with a price a few seconds old at most. An order itself is always valued at a fresh one */
@@ -522,7 +570,7 @@ export class PortfolioService {
     Object.assign(adapter.account, { ...(proven ? { proven } : {}), ...(src.writer ? { liveCan: src.writer.can } : {}), ...(src.noTradeBecause ? { noTradeBecause: src.noTradeBecause } : {}), ...(src.readOnlyBecause ? { readOnlyBecause: src.readOnlyBecause } : {}) });
     // what the key may do is read from the trader each time: a venue can say it only after connecting (Kalshi's key scopes)
     const trader = src.trader;
-    if (trader) Object.defineProperty(adapter.account, "liveTrade", { get: () => ({ can: trader.can, what: trader.what }), enumerable: true, configurable: true });
+    if (trader) Object.defineProperty(adapter.account, "liveTrade", { get: () => ({ can: trader.can, what: trader.what, positions: !!trader.positions, amend: !!trader.amend, leverage: !!trader.setLeverage, close: !!trader.close }), enumerable: true, configurable: true });
     this.liveVenues.set(venue, { id: venue, name: adapter.account.name, kind: adapter.account.kind, ...(src.address ? { address: src.address } : {}), ...(proven ? { proven } : {}), ...(src.writer ? { writer: src.writer } : {}), ...(src.readOnlyBecause ? { readOnlyBecause: src.readOnlyBecause } : {}), ...(src.trader ? { trader: src.trader } : {}), ...(src.noTradeBecause ? { noTradeBecause: src.noTradeBecause } : {}), via: src.via });
     if (sim) this.shadowed.set(venue, sim);
     this.adapters.set(venue, adapter);
@@ -532,7 +580,10 @@ export class PortfolioService {
     const can = src.writer?.can;
     const leaves = !!can && (can.withdraw !== false || (can.ledgers.length > 1 && can.transfer !== false) || can.swap !== false || !!can.send);
     const mode = !src.writer ? `read only: ${src.readOnlyBecause ?? "nothing is sent to it from here"}` : !writes ? "read only: this server was started without real-money writes" : src.address !== undefined && !proven && src.writer.can.send === "wallet" ? "watched: no wallet signed for this address, so nothing is sent to or from it" : !leaves ? "this key only reads: money can be sent to it, nothing leaves it from here" : `real money moves only when you sign it, at most ${cents(writes.capUsd)} a movement`;
-    return { ok: true, summary: `${adapter.account.name} connected live · ${cents(usd)} there now · ${opened.summary} · ${mode}${sim && !this.opts.real ? " · it stands in for the simulated one until it is unplugged" : ""}`, native: { connector, probe: opened.source.probe.native ?? null } };
+    // the wallet's proof rides on the connection's row: a restarted account checks the signature again rather than forgetting it was given
+    const proof = src.address !== undefined && connector !== "live:metamask" ? deps.proofs.proven(src.address) : undefined;
+    const kept = proof?.message && proof.signature ? { address: proof.address, wallet: proof.wallet, at: proof.at, message: proof.message, signature: proof.signature } : undefined;
+    return { ok: true, summary: `${adapter.account.name} connected live · ${cents(usd)} there now · ${opened.summary} · ${mode}${sim && !this.opts.real ? " · it stands in for the simulated one until it is unplugged" : ""}`, native: { connector, probe: opened.source.probe.native ?? null, ...(kept ? { proof: kept } : {}) } };
   }
 
   private unplug(venue: string): Refusal | { ok: true; summary: string } {
@@ -569,6 +620,7 @@ export class PortfolioService {
     const page = await this.account?.view();
     // a real account's page waits only on cards about its real venues; the statement page answers the simulation's own
     if (page && this.opts.real) page.cards = page.cards.filter((c) => this.adapters.get(this.approvals.find((a) => a.id === c.id)?.account ?? "")?.account.watchOnly);
+    if (page && this.restored) page.restore = this.restored;
     return page;
   }
 
@@ -585,7 +637,86 @@ export class PortfolioService {
     const seeds = opts.seeds ?? loadSeeds(opts.venues);
     // the `mm` reads stand in for two simulated accounts; a real service has none to stand in for (MetaMask is connected like any account)
     const live = opts.live && !opts.real ? { metamask: await metamaskLiveAccount(opts.mm), polymarket: await polymarketLiveAccount(opts.mm) } : undefined;
-    return new PortfolioService(opts, seeds, live);
+    const svc = new PortfolioService(opts, seeds, live);
+    if (opts.real && svc.account && !opts.freshLedger) await svc.continueRuns();
+    return svc;
+  }
+
+  /** A real account continues its earlier runs (account/restore.ts): this run's first row says which file it continues; the owner, the agents,
+   * their limits, the dial and the ids come back at once — every signature checked again — and the venues are connected again in the
+   * background, the door holding every instruction until they have been. `--fresh` starts from nothing instead */
+  private async continueRuns(): Promise<void> {
+    const engine = this.account!;
+    const history = readHistory(join(this.opts.home, "portfolio"), this.ledger.path(), this.now);
+    const fresh = this.opts.fresh === true || history.last === null;
+    const mark: RunMark = { v: 1, continues: fresh ? null : history.last, fresh, n: history.lastRun + 1 };
+    // a fresh account's first row also holds its dial, so that a restart keeps the session it started with rather than starting a new one
+    this.ledger.append({ kind: "note", venue: "*", reason: fresh ? `account run started fresh${this.opts.fresh ? " (--fresh): nothing earlier is brought back" : ""}` : `account run started: it continues ${history.last}`, detail: { run: mark, ...(fresh ? this.dialNow() : {}) } });
+    if (fresh) return;
+    // a replayed agent wallet is the key file it was made with: one that is gone is not made again under the same name
+    const home = this.opts.home;
+    const r = await rebuild(history.rows, engine.state, { ...engine.applyOptions(), codeRequired: (this.opts.liveWrites?.pairingCode ?? this.opts.pairingCode) !== undefined, walletAddress: (name) => (hasKey(agentWalletKeyPath(home, name)) ? (() => { const k = agentWalletKey(home, name); return isRefusal(k) ? k : (k.address as Hex); })() : no("E_ACCOUNT_CREDENTIAL", { message: `the key file of the agent wallet "${name}" is gone from ${agentWalletKeyPath(home, name)}` })) });
+    engine.adopt(r.state, r.ids);
+    this.seq = Math.max(this.seq, r.ids.card);
+    if (r.dial) this.adoptDial(r.dial);
+    const report: RestoreReport = { runs: history.files.length, from: history.files[0] ?? "", owner: r.owner, agents: r.state.agents.filter((a) => a.revokedAt === undefined && a.validUntil > Date.parse(this.now())).length, limits: r.state.spends.filter((x) => x.revokedAt === undefined && x.validUntil > Date.parse(this.now())).length, mode: this.openness.mode === "open" ? "Aggressive" : "Conservative", venues: r.connections.map((c) => ({ venue: c.venue, ok: false, why: "connecting again" })), orders: r.orders.length, payments: r.payments.length + r.authorisations.length, skipped: [...r.skipped, ...(history.broken ? [`${history.broken.file}: its hash chain breaks${history.broken.at ? ` at row ${history.broken.at}` : ""}, so nothing after the break (and nothing older) was brought back`] : [])], state: "restoring" };
+    this.restored = report;
+    this.restoring = engine.serially(() => this.reconnect(r, report)).catch(() => undefined);
+  }
+
+  /** an agent wallet on the account: read from the chains, proven the user's (the account holds its key), a place money can be sent to */
+  private async plugAgentWallet(sub: SubAccount): Promise<void> {
+    const venue = agentWalletVenue(sub.name);
+    if (this.adapters.get(venue)?.account.watchOnly) return;
+    const key = agentWalletKey(this.opts.home, sub.name);
+    if (isRefusal(key)) return void this.ledger.append({ kind: "note", venue, reason: `the agent wallet "${sub.name}" is not shown: ${key.message}` });
+    const deps = this.liveDeps();
+    const opened = await agentWalletSource({ venue, label: `Agent wallet · ${sub.name}`, key, chain: deps.chain, sender: deps.sender ?? publicSender() });
+    if (isRefusal(opened)) return void this.ledger.append({ kind: "note", venue, reason: `the agent wallet "${sub.name}" could not be read: ${opened.message}` });
+    const adapter = await liveAccount(venue, opened.source, { connector: "live:agent-wallet", first: opened.first, clock: deps.clock, price: deps.price });
+    const proven = "this account holds its key";
+    Object.assign(adapter.account, { proven, liveCan: opened.source.writer!.can, noTradeBecause: opened.source.noTradeBecause, plugged: true });
+    this.liveVenues.set(venue, { id: venue, name: adapter.account.name, kind: adapter.account.kind, address: key.address, proven, writer: opened.source.writer!, noTradeBecause: opened.source.noTradeBecause!, via: opened.source.via });
+    this.adapters.set(venue, adapter);
+  }
+
+  /** the restore's second half: the venues, from the same credential references the owner signed; then what was in flight, followed again */
+  private async reconnect(r: Rebuilt, report: RestoreReport): Promise<void> {
+    const engine = this.account!;
+    // the agent wallets the owner made: their keys are where they were made, in this home
+    for (const sub of r.state.subAccounts) await this.plugAgentWallet(sub);
+    for (const [i, c] of r.connections.entries()) {
+      // a wallet's proof is the signature it gave, checked again; one that no longer checks out connects the address as watched
+      if (c.proof && (await proofHolds(c.proof))) this.proofs.keep(c.proof);
+      let out: Awaited<ReturnType<PortfolioService["plugLive"]>>;
+      try {
+        out = c.connector.startsWith("live:") ? await this.plugLive(c.venue, c.connector, c.label, c.credentialRef) : no("E_ACCOUNT_BAD_ACTION", { venue: c.venue, message: "not a live connection" });
+      } catch (err) {
+        out = no("E_VENUE_UNREACHABLE", { venue: c.venue, message: String((err as Error)?.message ?? err).slice(0, 160) });
+      }
+      report.venues[i] = isRefusal(out) ? { venue: c.venue, ok: false, why: out.message } : { venue: c.venue, ok: true };
+      this.ledger.append({ kind: "note", venue: c.venue, reason: isRefusal(out) ? `not connected again after the restart: ${out.message}` : `connected again after the restart · ${out.summary}` });
+    }
+    for (const o of r.orders) engine.trade.adopt(o);
+    for (const p of r.payments) engine.live.adopt(p);
+    for (const k of r.authorisations) engine.adoptAuthorisation(k);
+    report.state = "done";
+    const back = report.venues.filter((v) => v.ok).length;
+    this.ledger.append({ kind: "note", venue: "*", reason: `restored after a restart: ${report.owner ? "your device is still the owner" : "no owner yet"} · ${report.agents} agent${report.agents === 1 ? "" : "s"} · ${report.limits} limit${report.limits === 1 ? "" : "s"} · ${back} of ${report.venues.length} venue${report.venues.length === 1 ? "" : "s"} connected again · ${report.orders} order${report.orders === 1 ? "" : "s"} and ${report.payments} movement${report.payments === 1 ? "" : "s"} followed again · ${report.mode}${report.skipped.length ? ` · ${report.skipped.length} not brought back` : ""}`, detail: { restore: report } });
+  }
+
+  /** the dial as the ledger last recorded it, the agents' session included: a restart neither opens a session the owner ended nor lengthens one
+   * (a new session is the owner's to sign) */
+  private adoptDial(d: DialSnapshot): void {
+    // never later than this start would give a new account: a row cannot lengthen the session past what a restart grants anyway
+    const session = d.sessionExpiresAt && (!this.openness.sessionExpiresAt || Date.parse(d.sessionExpiresAt) < Date.parse(this.openness.sessionExpiresAt)) ? d.sessionExpiresAt : this.openness.sessionExpiresAt;
+    this.openness = { ...this.openness, mode: d.mode, revoked: d.revoked, reach: d.reach as Openness["reach"], ...(session ? { sessionExpiresAt: session } : {}), ...(d.maxLeverage !== undefined ? { maxLeverage: d.maxLeverage } : {}) };
+  }
+
+  /** the dial now, as the note rows record it after each change: a restart reads the last one */
+  private dialNow(): { dial: DialSnapshot } {
+    const ended = !!this.openness.sessionExpiresAt && Date.parse(this.openness.sessionExpiresAt) <= Date.parse(this.now());
+    return { dial: { mode: this.openness.mode === "open" ? "open" : "guard", revoked: [...this.openness.revoked], reach: { ...this.openness.reach }, ...(this.openness.sessionExpiresAt ? { sessionExpiresAt: this.openness.sessionExpiresAt } : {}), ...(ended ? { ended: true } : {}), ...(this.openness.maxLeverage !== undefined ? { maxLeverage: this.openness.maxLeverage } : {}) } };
   }
 
   private openLedger(): Ledger {
@@ -1038,7 +1169,7 @@ export class PortfolioService {
 
   setMode(mode: Mode): void {
     this.openness = { ...this.openness, mode };
-    this.ledger.append({ kind: "note", venue: "*", reason: `mode → ${mode}` });
+    this.ledger.append({ kind: "note", venue: "*", reason: `mode → ${mode}`, detail: this.dialNow() });
   }
 
   /** narrow (or restore) what the agent may do at one account; `read` is always on, and a full set means "maximal" (the entry is dropped) */
@@ -1050,28 +1181,28 @@ export class PortfolioService {
     if (a.account.scope.can.filter((c) => c !== "read").every((c) => writes.includes(c))) delete reach[accountId];
     else reach[accountId] = writes;
     this.openness = { ...this.openness, reach };
-    this.ledger.append({ kind: "note", venue: accountId, reason: `reach → ${writes.join(", ") || "read"}` });
+    this.ledger.append({ kind: "note", venue: accountId, reason: `reach → ${writes.join(", ") || "read"}`, detail: this.dialNow() });
     return { ok: true, reach: effectiveReach(a.account, this.openness) };
   }
 
   revoke(accountId: string): Refusal | { ok: true; revoked: string[] } {
     if (!this.adapters.has(accountId)) return no("E_WALLET_ACCOUNT_UNKNOWN", { venue: accountId });
     this.openness = { ...this.openness, revoked: [...new Set([...this.openness.revoked, accountId])] };
-    this.ledger.append({ kind: "note", venue: accountId, reason: "revoked: the agent keeps reads only; deleting the key at the exchange or freezing the token at the issuer is an operator action" });
+    this.ledger.append({ kind: "note", venue: accountId, reason: "revoked: the agent keeps reads only; deleting the key at the exchange or freezing the token at the issuer is an operator action", detail: this.dialNow() });
     return { ok: true, revoked: this.openness.revoked };
   }
 
   restore(accountId: string): Refusal | { ok: true; revoked: string[] } {
     if (!this.adapters.has(accountId)) return no("E_WALLET_ACCOUNT_UNKNOWN", { venue: accountId });
     this.openness = { ...this.openness, revoked: this.openness.revoked.filter((x) => x !== accountId) };
-    this.ledger.append({ kind: "note", venue: accountId, reason: "restored" });
+    this.ledger.append({ kind: "note", venue: accountId, reason: "restored", detail: this.dialNow() });
     return { ok: true, revoked: this.openness.revoked };
   }
 
   /** end the agent's session: every write stops now, every read continues */
   revokeAll(): { ok: true; sessionExpiresAt: string } {
     this.openness = { ...this.openness, sessionExpiresAt: this.now() };
-    this.ledger.append({ kind: "note", venue: "*", reason: "session ended: every write stops, reads continue" });
+    this.ledger.append({ kind: "note", venue: "*", reason: "session ended: every write stops, reads continue", detail: this.dialNow() });
     return { ok: true, sessionExpiresAt: this.openness.sessionExpiresAt };
   }
 
@@ -1125,6 +1256,22 @@ export class PortfolioService {
   ledgerRows(): readonly LedgerRow[] {
     return this.ledger.all();
   }
+}
+
+/** what a restarted account brought back from its ledgers (account/restore.ts), as the page and the log say it */
+export interface RestoreReport {
+  /** how many earlier runs the account continues, and the first of them */
+  runs: number;
+  from: string;
+  owner: boolean;
+  agents: number;
+  limits: number;
+  mode: "Conservative" | "Aggressive";
+  venues: Array<{ venue: string; ok: boolean; why?: string }>;
+  orders: number;
+  payments: number;
+  skipped: string[];
+  state: "restoring" | "done";
 }
 
 /** answers kept for a short while, and one request in flight per key */

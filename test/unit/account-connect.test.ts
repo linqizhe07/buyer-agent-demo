@@ -87,7 +87,7 @@ describe("plugging in a venue the user already has", () => {
     expect(o.accounts.map((a) => a.id)).toContain("bybit");
     expect(o.portfolio.totalUsd).toBeGreaterThan(0);
     // the ledger has the owner's signed instruction and the venue's answer about the key
-    const row = x.svc.rows().find((r) => r.tool === "connectVenue")!;
+    const row = x.svc.rows().find((r) => r.tool === "connectVenue" && r.outcome === "ok")!;
     expect(row.native).toEqual({ connector: "unified", probe: { permissions: ["read", "trade"], ipRestrict: true } });
     expect(row.signer).toBe(owner.address);
   });

@@ -24,6 +24,11 @@ export interface Proof {
   address: Hex;
   wallet: string;
   at: number;
+  /** the sentence and the wallet's signature over it: kept with the connection, so a restarted account can check the proof again */
+  message?: string | undefined;
+  signature?: Hex | undefined;
+  /** brought back from the connection's row after a restart (and checked again there): it does not lapse */
+  kept?: boolean | undefined;
 }
 
 export function siweMessage(f: { domain: string; address: Hex; statement: string; uri: string; chainId: number; nonce: string; issuedAt: string; expirationTime: string }): string {
@@ -67,14 +72,19 @@ export class WalletProofs {
     // an ordinary key's signature is checked here; a contract wallet's would need the chain, and is left as "watched"
     if (!ok) return no("E_ACCOUNT_BAD_SIGNATURE", { message: "the signature is not that address's over the sentence it was given. A contract wallet cannot be proven this way: connect it by its address, and it is shown as watched" });
     this.open.delete(key);
-    const proof = { address: c.address, wallet: c.wallet, at: this.clock() };
+    const proof: Proof = { address: c.address, wallet: c.wallet, at: this.clock(), message: c.message, signature: signature as Hex };
     this.done.set(key, proof);
     return proof;
   }
 
-  /** a proof given in the last ten minutes */
+  /** a proof given in the last ten minutes, or one a restart brought back with its connection */
   proven(address: string): Proof | undefined {
     const p = this.done.get(String(address).toLowerCase());
-    return p && this.clock() - p.at <= TTL_MS ? p : undefined;
+    return p && (p.kept || this.clock() - p.at <= TTL_MS) ? p : undefined;
+  }
+
+  /** a proof kept on a connection's row, ALREADY checked again by the caller (account/restore.ts `proofHolds`) */
+  keep(p: { address: Hex; wallet: string; at: number; message: string; signature: Hex }): void {
+    this.done.set(p.address.toLowerCase(), { ...p, kept: true });
   }
 }

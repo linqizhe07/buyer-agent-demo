@@ -2,8 +2,8 @@ import { constants, createPrivateKey, generateKeyPairSync, verify } from "node:c
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
 import { isRefusal, type Refusal } from "../../src/core/errors.ts";
-import { kalshiSign, kalshiSource } from "../../src/portfolio/live/kalshi.ts";
-import type { LiveTrader, Market, OrderState } from "../../src/portfolio/live/trade.ts";
+import { kalshiDayEnd, kalshiSign, kalshiSource } from "../../src/portfolio/live/kalshi.ts";
+import type { LiveTrader, Market, OrderRequest, OrderState, Position } from "../../src/portfolio/live/trade.ts";
 import type { Http, HttpReply, LiveSource } from "../../src/portfolio/live/types.ts";
 
 /** TRADING at Kalshi, against a stand-in for Kalshi's trade API v2 that checks every request's signature with a key pair made here and
@@ -178,11 +178,11 @@ describe("the Kalshi connection carries a trader", () => {
 });
 
 describe("market(): one Kalshi market, for one of its outcomes", () => {
-  it("YES and NO: the dollar prices of each side of the one book, steps of 0.01 contracts and of the grid, open while `active`, market and limit orders", async () => {
+  it("YES and NO: the dollar prices of each side of the one book, steps of 0.01 contracts and of the grid, open while `active`; market and limit orders, the four times in force, post-only and reduce-only — no stops, no leverage", async () => {
     const k = fakeKalshi();
     const { t } = await connect(k);
     const yes = market(await t.market("kxfed-27apr-t4.00:yes"));
-    expect(yes).toEqual({ symbol: "KXFED-27APR-T4.00:YES", name: "Will the upper bound of the federal funds rate be above 4.00% following the Fed's Apr 28, 2027 meeting? (Above 4.00%) · Yes", kind: "event", base: "KXFED-27APR-T4.00:YES", quote: "USD", price: 0.43, bid: 0.42, ask: 0.45, minQty: 0.01, qtyStep: 0.01, priceStep: 0.01, open: true, note: "closes 2027-04-28 17:55 UTC", types: ["market", "limit"] });
+    expect(yes).toEqual({ symbol: "KXFED-27APR-T4.00:YES", name: "Will the upper bound of the federal funds rate be above 4.00% following the Fed's Apr 28, 2027 meeting? (Above 4.00%) · Yes", kind: "event", base: "KXFED-27APR-T4.00:YES", quote: "USD", price: 0.43, bid: 0.42, ask: 0.45, minQty: 0.01, qtyStep: 0.01, priceStep: 0.01, open: true, note: "closes 2027-04-28 17:55 UTC", types: ["market", "limit"], tifs: ["gtc", "ioc", "fok", "day"], tifsByType: { market: ["ioc", "fok"], limit: ["gtc", "ioc", "fok", "day"] }, postOnly: true, reduceOnly: true });
     const no = market(await t.market("KXFED-27APR-T4.00:NO"));
     expect([no.symbol, no.name.endsWith("· No"), no.price, no.bid, no.ask, no.open]).toEqual(["KXFED-27APR-T4.00:NO", true, 0.57, 0.55, 0.58, true]);
     // the tapered grid: its finest step, a tenth of a cent — so the account's worst price for a 0.048 ask is 0.048, not 0.04; the trader checks the full grid
@@ -452,6 +452,8 @@ describe("Kalshi's refusals, in its own words", () => {
     expect((await said(json({ error: { code: "unauthorized", message: "invalid signature" } }, 401)))[0]).toBe("E_VENUE_UNAUTHORIZED");
     expect(await said(json({ error: "too many requests" }, 429))).toEqual(["E_VENUE_UNREACHABLE", "Kalshi is rate-limiting this machine: try again in a minute", { status: 429, said: "too many requests" }]);
     expect((await said(json({ error: { code: "something_new", message: "something new" } }, 400)))[0]).toBe("E_VENUE_REJECTED");
+    // a post-only order that would cross, as a batch reported it (changelog 2025-10-24)
+    expect(await said(json({ error: { code: "invalid order", message: "invalid order", details: "post only cross" } }, 400))).toEqual(["E_VENUE_ORDER_INVALID", "Kalshi: post-only: at this price the order would have taken from the book at once, so Kalshi did not rest it", { status: 400, said: "invalid order · post only cross · invalid order" }]);
   });
 
   it("nothing secret leaves in a refusal, even if Kalshi's answer were to carry the private key, line breaks and all", async () => {
@@ -630,6 +632,323 @@ describe("markets(): what can be traded at Kalshi", () => {
     // the list itself not answering is Kalshi's no
     const down = fakeKalshi({ routes: (s) => (s.path === "/markets" ? json({ error: { code: "service_unavailable", message: "unavailable" } }, 503) : undefined) });
     expect(refusal(await (await connect(down)).t.markets("")).code).toBe("E_VENUE_UNREACHABLE");
+  });
+});
+
+/** 2026-10-05 10:00 EDT (START): the day ends at 23:59:59 EDT, which is 03:59:59 UTC the next morning */
+const DAY_END = Date.parse("2026-10-06T03:59:59Z") / 1000;
+const FED_YES = "KXFED-27APR-T4.00:YES";
+const FED_NO = "KXFED-27APR-T4.00:NO";
+const body = (p: Sent): Rec => p.body as Rec;
+
+describe("how long an order stays, post-only and reduce-only: what V2's create takes", () => {
+  it("each time in force as V2's time_in_force: gtc good_till_canceled, ioc immediate_or_cancel, fok fill_or_kill, and day good_till_canceled with the end of the day in New York as its expiration_time", async () => {
+    const k = fakeKalshi({ routes: (s) => (s.method === "POST" ? created("0.00", String((s.body as Rec).count)) : undefined) });
+    const { t } = await connect(k);
+    const limit = { symbol: FED_YES, side: "buy", type: "limit", qty: 1, limitPrice: 0.4 } as const;
+    for (const [i, tif] of (["gtc", "ioc", "fok", "day"] as const).entries()) state(await t.place({ ...limit, tif, clientId: `ord-000${i + 1}` }));
+    expect(posts(k).map((p) => [body(p).time_in_force, body(p).expiration_time])).toEqual([["good_till_canceled", undefined], ["immediate_or_cancel", undefined], ["fill_or_kill", undefined], ["good_till_canceled", DAY_END]]);
+    // the day order, whole: what Kalshi takes and nothing else
+    expect(posts(k)[3]!.raw).toBe(JSON.stringify({ ticker: "KXFED-27APR-T4.00", side: "bid", count: "1.00", price: "0.4000", time_in_force: "good_till_canceled", self_trade_prevention_type: "taker_at_cross", client_order_id: "ord-0004", expiration_time: DAY_END }));
+    // none asked: as it always was here — a limit order rests, a market order fills at once
+    state(await t.place({ ...limit, clientId: "ord-0005" }));
+    state(await t.place({ ...limit, type: "market", limitPrice: undefined, clientId: "ord-0006" }));
+    expect(posts(k).slice(4).map((p) => body(p).time_in_force)).toEqual(["good_till_canceled", "immediate_or_cancel"]);
+  });
+
+  it("a market order fills at once (immediate-or-cancel) or, asked, all at once or not at all (fill-or-kill); a sell sent ioc goes reduce_only, asked or not — a fill-or-kill or resting one cannot, since Kalshi takes reduce_only only with immediate_or_cancel", async () => {
+    const k = fakeKalshi({ routes: (s) => (s.path === "/portfolio/positions" ? json({ market_positions: [{ ticker: FED.ticker, position_fp: "25.00" }] }) : s.method === "POST" ? created("0.00", "0.00") : undefined) });
+    const { t } = await connect(k);
+    const go = async (o: Partial<OrderRequest>) => {
+      state(await t.place({ symbol: FED_YES, side: "buy", type: "market", qty: 1, clientId: "c1", ...o }));
+      const b = body(posts(k).at(-1)!);
+      return [b.side, b.price, b.time_in_force, b.reduce_only];
+    };
+    // FED's book: YES 0.42 / 0.45
+    expect(await go({ tif: "fok" })).toEqual(["bid", "0.4500", "fill_or_kill", undefined]);
+    expect(await go({ tif: "ioc" })).toEqual(["bid", "0.4500", "immediate_or_cancel", undefined]);
+    expect(await go({ side: "sell" })).toEqual(["ask", "0.4200", "immediate_or_cancel", true]);
+    expect(await go({ side: "sell", tif: "fok" })).toEqual(["ask", "0.4200", "fill_or_kill", undefined]);
+    expect(await go({ side: "sell", type: "limit", limitPrice: 0.47, tif: "ioc" })).toEqual(["ask", "0.4700", "immediate_or_cancel", true]);
+    expect(await go({ side: "sell", type: "limit", limitPrice: 0.47, tif: "fok" })).toEqual(["ask", "0.4700", "fill_or_kill", undefined]);
+    expect(await go({ side: "sell", type: "limit", limitPrice: 0.47 })).toEqual(["ask", "0.4700", "good_till_canceled", undefined]);
+  });
+
+  it("post_only on a limit order that rests (good-till-canceled or day), and Kalshi's cancel of one that would have crossed is said as canceled; reduce_only on a sell that fills at once — NO held closed as a bid on the YES leg", async () => {
+    let crossed = true;
+    const k = fakeKalshi({
+      routes: (s) => {
+        if (s.path === "/portfolio/positions") return json({ market_positions: [{ ticker: FED.ticker, position_fp: "-30.00" }] });
+        // the first post-only order would have crossed: Kalshi cancels it rather than let it take (PostOnlyCrossCancel)
+        if (s.method === "POST" && crossed) {
+          crossed = false;
+          return created("0.00", "0.00");
+        }
+        return s.method === "POST" ? created("0.00", String((s.body as Rec).count)) : undefined;
+      },
+    });
+    const { t } = await connect(k);
+    const first = state(await t.place({ symbol: FED_YES, side: "buy", type: "limit", qty: 1, limitPrice: 0.46, postOnly: true, clientId: "c1" }));
+    expect([first.status, first.filledQty]).toEqual(["canceled", 0]);
+    state(await t.place({ symbol: FED_NO, side: "buy", type: "limit", qty: 1, limitPrice: 0.57, tif: "day", postOnly: true, clientId: "c2" }));
+    state(await t.place({ symbol: FED_NO, side: "sell", type: "market", qty: 5, reduceOnly: true, clientId: "c3" }));
+    state(await t.place({ symbol: FED_NO, side: "sell", type: "limit", qty: 5, limitPrice: 0.54, tif: "ioc", reduceOnly: true, clientId: "c4" }));
+    const same = { ticker: "KXFED-27APR-T4.00", self_trade_prevention_type: "taker_at_cross" };
+    expect(posts(k).map(body)).toEqual([
+      { ...same, side: "bid", count: "1.00", price: "0.4600", time_in_force: "good_till_canceled", client_order_id: "c1", post_only: true },
+      // NO at 0.57 is an ask on YES at 0.43, resting until the day's end
+      { ...same, side: "ask", count: "1.00", price: "0.4300", time_in_force: "good_till_canceled", client_order_id: "c2", expiration_time: DAY_END, post_only: true },
+      // NO's best bid 0.55 is a YES bid at 0.45; NO at least 0.54 is a YES bid at 0.46
+      { ...same, side: "bid", count: "5.00", price: "0.4500", time_in_force: "immediate_or_cancel", client_order_id: "c3", reduce_only: true },
+      { ...same, side: "bid", count: "5.00", price: "0.4600", time_in_force: "immediate_or_cancel", client_order_id: "c4", reduce_only: true },
+    ]);
+  });
+
+  it("refused here, before anything is sent: stop orders, a market order that would rest, post-only that could never rest, reduce-only on a buy or on an order that does not fill at once, a day order in the day's last seconds", async () => {
+    const k = fakeKalshi({ routes: (s) => (s.path === "/portfolio/positions" ? json({ market_positions: [{ ticker: FED.ticker, position_fp: "25.00" }] }) : undefined) });
+    const { t } = await connect(k);
+    const sell = { symbol: FED_YES, side: "sell", type: "limit", qty: 1, limitPrice: 0.4, clientId: "c1" } as const;
+    const said = async (o: Rec) => {
+      const r = refusal(await t.place({ ...sell, ...o } as never));
+      return [r.code, r.message];
+    };
+    expect(await said({ type: "stop", limitPrice: undefined, stopPrice: 0.3 })).toEqual(["E_VENUE_ORDER_INVALID", "Kalshi: Kalshi has no stop orders on event contracts: it takes limit orders, and the account's market order goes as a limit that fills at once"]);
+    expect((await said({ type: "stop_limit", stopPrice: 0.3 }))[1]).toContain("Kalshi has no stop-limit orders on event contracts");
+    expect(await said({ type: "market", limitPrice: undefined, tif: "gtc" })).toEqual(["E_VENUE_ORDER_INVALID", "Kalshi: a market order at Kalshi is a limit at its worst price that fills at once (immediate-or-cancel), or all at once or not at all (fill-or-kill): one that rests on the book is a limit order"]);
+    expect((await said({ type: "market", limitPrice: undefined, tif: "day" }))[0]).toBe("E_VENUE_ORDER_INVALID");
+    expect(await said({ side: "buy", type: "market", limitPrice: undefined, postOnly: true })).toEqual(["E_VENUE_ORDER_INVALID", "Kalshi: post-only is for a limit order: a market order takes from the book"]);
+    for (const tif of ["ioc", "fok"]) expect(await said({ side: "buy", postOnly: true, tif })).toEqual(["E_VENUE_ORDER_INVALID", "Kalshi: a post-only order rests on the book as a maker: one that must fill at once never rests, so Kalshi would cancel it at once"]);
+    expect(await said({ side: "buy", type: "market", limitPrice: undefined, reduceOnly: true })).toEqual(["E_VENUE_ORDER_INVALID", "Kalshi: reduce-only at Kalshi is a sell of contracts held: a buy of KXFED-27APR-T4.00:YES only opens or grows a position in it (KXFED-27APR-T4.00:NO held is reduced by selling it)"]);
+    for (const o of [{ reduceOnly: true }, { reduceOnly: true, tif: "gtc" }, { reduceOnly: true, tif: "fok" }, { reduceOnly: true, tif: "day" }, { type: "market", limitPrice: undefined, reduceOnly: true, tif: "fok" }]) {
+      expect(await said(o)).toEqual(["E_VENUE_ORDER_INVALID", "Kalshi: Kalshi takes reduce-only only on an order that fills at once (immediate-or-cancel): a market sell, or a limit sell with ioc"]);
+    }
+    expect((await said({ tif: "gtd" }))[1]).toBe('Kalshi: Kalshi takes good-till-canceled, immediate-or-cancel, fill-or-kill and day orders, not "gtd"');
+    // four seconds before 11:59:59pm ET: a day order would end before it rested
+    k.now = DAY_END * 1000 - 4000;
+    const late = refusal(await t.place({ ...sell, side: "buy", tif: "day" }));
+    expect([late.code, late.message, late.detail]).toEqual(["E_VENUE_ORDER_INVALID", "Kalshi: a day order at Kalshi ends at 11:59:59pm ET, seconds from now: it would end before it rested. Send it good-till-canceled, or after midnight ET", { expiresAt: DAY_END }]);
+    expect(posts(k)).toEqual([]);
+  });
+
+  it("a day order ends at 23:59:59 in New York, the last whole second of Kalshi's own day (11:59:59.999pm ET) — on the nights the clocks change too", () => {
+    const end = (iso: string) => new Date(kalshiDayEnd(Date.parse(iso)) * 1000).toISOString();
+    expect(end("2026-10-05T14:00:00Z")).toBe("2026-10-06T03:59:59.000Z"); // 10:00 EDT
+    expect(end("2026-10-06T03:59:58.500Z")).toBe("2026-10-06T03:59:59.000Z"); // 23:59:58.5 EDT, still that day
+    expect(end("2026-10-06T04:00:00Z")).toBe("2026-10-07T03:59:59.000Z"); // midnight EDT: the next day's
+    expect(end("2026-12-15T20:00:00Z")).toBe("2026-12-16T04:59:59.000Z"); // 15:00 EST
+    // 1 November 2026, 01:30 EDT: the clocks go back at 02:00, and the day ends at 23:59:59 EST
+    expect(end("2026-11-01T05:30:00Z")).toBe("2026-11-02T04:59:59.000Z");
+    // 14 March 2027, 01:30 EST: the clocks go forward at 02:00, and the day ends at 23:59:59 EDT
+    expect(end("2027-03-14T06:30:00Z")).toBe("2027-03-15T03:59:59.000Z");
+  });
+});
+
+/** a stand-in order that rests at Kalshi and takes amends as Kalshi does: the price and the whole size (filled + resting) are set, not added */
+function amendable(start: Rec, more: (s: Sent) => HttpReply | undefined = () => undefined) {
+  const box = { live: order(start) };
+  const routes = (s: Sent): HttpReply | undefined => {
+    const custom = more(s);
+    if (custom) return custom;
+    if (s.path === `/portfolio/orders/${ORDER}`) return json({ order: box.live });
+    if (s.method === "POST" && s.path === `/portfolio/events/orders/${ORDER}/amend`) {
+      const b = s.body as Rec;
+      const rest = (Number(b.count) - Number(box.live.fill_count_fp)).toFixed(2);
+      const resized = rest !== box.live.remaining_count_fp;
+      box.live = { ...box.live, yes_price_dollars: Number(b.price).toFixed(6), no_price_dollars: (1 - Number(b.price)).toFixed(6), remaining_count_fp: rest };
+      return json({ order_id: ORDER, client_order_id: "ord-0001", ...(resized ? { remaining_count: rest } : {}), ts_ms: START });
+    }
+    if (s.path === "/portfolio/fills") return json({ fills: [{ count_fp: box.live.fill_count_fp, yes_price_dollars: "0.4000", no_price_dollars: "0.6000", fee_cost: "0.040000" }] });
+    return undefined;
+  };
+  return { box, routes };
+}
+/** a YES bid of 10 at 0.40, 4 filled and 6 resting, its price as a portfolio answer carries it: six decimals */
+const RESTING: Rec = { yes_price_dollars: "0.400000", no_price_dollars: "0.600000", initial_count_fp: "10.00", fill_count_fp: "4.00", remaining_count_fp: "6.00" };
+const PLACED: OrderRequest = { symbol: FED_YES, side: "buy", type: "limit", qty: 10, limitPrice: 0.4, clientId: "ord-0001" };
+
+describe("amend(): a resting order changed in place", () => {
+  it("a new limit: POST …/amend with the order's whole terms — ticker, side, price, and its count as Kalshi has it (filled + resting) — signed over its path; then the order as it stands", async () => {
+    const a = amendable(RESTING);
+    const k = fakeKalshi({ routes: a.routes });
+    const { t } = await connect(k);
+    market(await t.market(FED_YES));
+    const n = k.sent.length;
+    const s = state(await t.amend!(ORDER, FED_YES, { limitPrice: 0.41 }, PLACED));
+    // the look the account just took is the one the change is checked against: then the order, the amend, the order again and its fills
+    expect(k.since(n)).toEqual([`GET /portfolio/orders/${ORDER}`, `POST /portfolio/events/orders/${ORDER}/amend`, `GET /portfolio/orders/${ORDER}`, "GET /portfolio/fills"]);
+    const p = posts(k)[0]!;
+    expect([p.url, p.raw]).toEqual([`${BASE}/portfolio/events/orders/${ORDER}/amend`, JSON.stringify({ ticker: "KXFED-27APR-T4.00", side: "bid", price: "0.4100", count: "10.00" })]);
+    expect(p.headers).toEqual({ "KALSHI-ACCESS-KEY": KEY_ID, "KALSHI-ACCESS-TIMESTAMP": String(START), "KALSHI-ACCESS-SIGNATURE": kalshiSign(k.privateKey, START, "POST", `/trade-api/v2/portfolio/events/orders/${ORDER}/amend`), accept: "application/json", "Content-Type": "application/json" });
+    expect([s.ref, s.status, s.filledQty, s.avgPrice, s.feeUsd]).toEqual([ORDER, "partial", 4, 0.4, 0]);
+    expect(s.native).toEqual({ amend: { order_id: ORDER, client_order_id: "ord-0001", ts_ms: START }, order: a.box.live });
+    expect((s.native as { order: Rec }).order.yes_price_dollars).toBe("0.410000");
+  });
+
+  it("a new size is the order's whole size, filled and resting, as Kalshi's count is; an unchanged price goes back as it rests, in four decimals; a NO order's limit goes as YES's", async () => {
+    const a = amendable(RESTING);
+    const k = fakeKalshi({ routes: a.routes });
+    const { t } = await connect(k);
+    // 4 filled and 6 resting; 8 in all leaves 4 resting — and a smaller size keeps the order's place in the queue
+    state(await t.amend!(ORDER, FED_YES, { qty: 8 }, PLACED));
+    expect(body(posts(k).at(-1)!)).toEqual({ ticker: "KXFED-27APR-T4.00", side: "bid", price: "0.4000", count: "8.00" });
+    expect(a.box.live.remaining_count_fp).toBe("4.00");
+    state(await t.amend!(ORDER, FED_YES, { qty: 12, limitPrice: 0.39 }, PLACED));
+    expect(body(posts(k).at(-1)!)).toEqual({ ticker: "KXFED-27APR-T4.00", side: "bid", price: "0.3900", count: "12.00" });
+    // buying NO at 0.58 rests as an ask on YES at 0.42: its new limit, 0.57, goes as 0.43
+    a.box.live = order({ ...RESTING, book_side: "ask", outcome_side: "no", yes_price_dollars: "0.420000", no_price_dollars: "0.580000" });
+    state(await t.amend!(ORDER, FED_NO, { limitPrice: 0.57 }, { ...PLACED, symbol: FED_NO, limitPrice: 0.58 }));
+    expect(body(posts(k).at(-1)!)).toEqual({ ticker: "KXFED-27APR-T4.00", side: "ask", price: "0.4300", count: "10.00" });
+  });
+
+  it("refused here, before anything is sent: a stop to change, nothing to change, a size off 0.01 or down to what has filled, a price off the grid, an order no longer resting, one that is not the order it is said to be, an id Kalshi does not have, a key that may not trade, a closed market — and a change to what already is sends nothing", async () => {
+    let closed = false;
+    const a = amendable(RESTING, (s) => (closed && s.path === `/markets/${String(FED.ticker)}` ? json({ market: { ...FED, status: "closed" } }) : s.path === "/portfolio/orders/nope" ? notFound() : undefined));
+    const k = fakeKalshi({ routes: a.routes });
+    const { t } = await connect(k);
+    const said = async (change: Rec, placed: OrderRequest = PLACED, ref = ORDER, symbol = placed.symbol) => {
+      const r = refusal(await t.amend!(ref, symbol, change, placed));
+      return [r.code, r.message];
+    };
+    expect(await said({ stopPrice: 0.3 })).toEqual(["E_VENUE_ORDER_INVALID", "Kalshi: Kalshi has no stop orders on event contracts: there is no stop price to change"]);
+    expect(await said({})).toEqual(["E_ACCOUNT_BAD_ACTION", "a change to an order at Kalshi is a new size, a new limit, or both: neither was given"]);
+    expect(await said({ qty: 7.125 })).toEqual(["E_VENUE_ORDER_INVALID", "Kalshi: a count at Kalshi is in steps of 0.01 contracts, at least 0.01"]);
+    expect(await said({ limitPrice: 0.405 })).toEqual(["E_VENUE_ORDER_INVALID", `Kalshi: a price in ${String(FED.title)} (Above 4.00%) · Yes moves in steps of 0.01 between 0 and 1`]);
+    expect(await said({ qty: 4 })).toEqual(["E_VENUE_ORDER_INVALID", "Kalshi: 4 of this order has filled already: its size can come down to more than that, not to 4. To stop the rest, cancel it"]);
+    // the order is a bid on YES: it is not a sell of YES, and not an order on another market
+    expect(await said({ limitPrice: 0.41 }, { ...PLACED, side: "sell" })).toEqual(["E_VENUE_REJECTED", `Kalshi's order ${ORDER} is a bid on KXFED-27APR-T4.00, not the sell of KXFED-27APR-T4.00:YES it was taken for: nothing was changed`]);
+    expect((await said({ limitPrice: 0.41 }, { ...PLACED, symbol: "KXGREENLAND-29:YES" }))[0]).toBe("E_VENUE_REJECTED");
+    expect((await said({ limitPrice: 0.41 }, PLACED, "nope"))[0]).toBe("E_ACCOUNT_ORDER_UNKNOWN");
+    a.box.live = order({ ...RESTING, status: "executed", fill_count_fp: "10.00", remaining_count_fp: "0.00" });
+    expect(await said({ limitPrice: 0.41 })).toEqual(["E_VENUE_REJECTED", "Kalshi: the order is no longer on the book (filled, 10 filled): there is nothing to change"]);
+    a.box.live = order(RESTING);
+    // already so: the order as it stands, and nothing sent
+    const n = k.sent.length;
+    const same = state(await t.amend!(ORDER, FED_YES, { qty: 10, limitPrice: 0.4 }, PLACED));
+    expect([same.status, same.filledQty, k.since(n)]).toEqual(["partial", 4, [`GET /portfolio/orders/${ORDER}`, "GET /portfolio/fills"]]);
+    closed = true;
+    k.now += 60_000;
+    expect((await said({ limitPrice: 0.41 }))[0]).toBe("E_VENUE_MARKET_CLOSED");
+    expect(posts(k)).toEqual([]);
+    const readOnly = fakeKalshi({ scopes: ["read"], routes: amendable(RESTING).routes });
+    const r = refusal(await (await connect(readOnly)).t.amend!(ORDER, FED_YES, { limitPrice: 0.41 }, PLACED));
+    expect([r.code, posts(readOnly)]).toEqual(["E_VENUE_PERMISSION", []]);
+  });
+
+  it("a sell made bigger must have the more free to sell, as a new sell does: what is held, less what already rests on that side — this order's own rest among it", async () => {
+    // 10 YES held; this ask rests 6 and another rests 2, so 2 more are free; a resting bid sells no YES
+    const a = amendable({ book_side: "ask", outcome_side: "no", yes_price_dollars: "0.500000", no_price_dollars: "0.500000", initial_count_fp: "6.00", fill_count_fp: "0.00", remaining_count_fp: "6.00" }, (s) => {
+      if (s.path === "/portfolio/positions") return json({ market_positions: [{ ticker: FED.ticker, position_fp: "10.00" }] });
+      if (s.path === "/portfolio/orders") return json({ orders: [a.box.live, order({ order_id: "other", book_side: "ask", remaining_count_fp: "2.00" }), order({ order_id: "a-bid", book_side: "bid", remaining_count_fp: "50.00" })], cursor: "" });
+      return undefined;
+    });
+    const k = fakeKalshi({ routes: a.routes });
+    const { t } = await connect(k);
+    const sell: OrderRequest = { symbol: FED_YES, side: "sell", type: "limit", qty: 6, limitPrice: 0.5, clientId: "c1" };
+    const over = refusal(await t.amend!(ORDER, FED_YES, { qty: 9 }, sell));
+    expect([over.code, over.message, over.detail]).toEqual(["E_VENUE_INSUFFICIENT", "Kalshi: you hold 10 KXFED-27APR-T4.00:YES, and orders resting on Kalshi's book, this one among them, already sell 8 of it: 2 more is free to sell, fewer than the 3 more asked. A sell here is of what is held: selling more at Kalshi would buy the other side", { held: 10, resting: 8, more: 3 }]);
+    expect(posts(k)).toEqual([]);
+    state(await t.amend!(ORDER, FED_YES, { qty: 8 }, sell));
+    expect(body(posts(k)[0]!)).toEqual({ ticker: "KXFED-27APR-T4.00", side: "ask", price: "0.5000", count: "8.00" });
+    // smaller, or at a new price, it sells no more: nothing held is read
+    const n = k.sent.length;
+    state(await t.amend!(ORDER, FED_YES, { qty: 5, limitPrice: 0.52 }, sell));
+    expect(k.since(n)).toEqual([`GET /portfolio/orders/${ORDER}`, `POST /portfolio/events/orders/${ORDER}/amend`, `GET /portfolio/orders/${ORDER}`]);
+  });
+
+  it("Kalshi's answer: a 404 (filled or canceled since it was read) is said with the order as it is; a 400 is Kalshi's own no; no answer, or a 5xx, is read back — the change made if the order shows it, unknown if not", async () => {
+    const said = async (more: (s: Sent, a: ReturnType<typeof amendable>) => HttpReply | undefined, throwOn?: (s: Sent, a: ReturnType<typeof amendable>) => boolean) => {
+      const box: { a?: ReturnType<typeof amendable> } = {};
+      box.a = amendable(RESTING, (s) => more(s, box.a!));
+      const k = fakeKalshi({ routes: box.a.routes, ...(throwOn ? { throwOn: (s: Sent) => throwOn(s, box.a!) } : {}) });
+      const r = await (await connect(k)).t.amend!(ORDER, FED_YES, { limitPrice: 0.41 }, PLACED);
+      return { r, a: box.a, k };
+    };
+    const amending = (s: Sent) => s.method === "POST" && s.path.endsWith("/amend");
+    const gone = refusal(
+      (
+        await said((s, a) => {
+          if (!amending(s)) return undefined;
+          a.box.live = order({ ...RESTING, status: "executed", fill_count_fp: "10.00", remaining_count_fp: "0.00" });
+          return notFound();
+        })
+      ).r,
+    );
+    expect([gone.code, gone.message]).toEqual(["E_VENUE_REJECTED", "Kalshi did not take the change (HTTP 404): the order is filled now, 10 filled"]);
+    const poor = refusal((await said((s) => (amending(s) ? json({ error: { code: "available_balance_too_low", message: "Insufficient available balance for the order" } }, 400) : undefined))).r);
+    expect([poor.code, poor.message]).toEqual(["E_VENUE_INSUFFICIENT", "Kalshi: not enough cash for this order on the exchange shard its market trades on (shard 0). An order sent through Kalshi's API counts only the cash already on that shard"]);
+    // no answer, but Kalshi made the change: the order shows it, and that is the answer
+    const made = await said(
+      () => undefined,
+      (s, a) => {
+        if (!amending(s)) return false;
+        a.box.live = { ...a.box.live, yes_price_dollars: "0.410000", no_price_dollars: "0.590000" };
+        return true;
+      },
+    );
+    expect([state(made.r).ref, (state(made.r).native as Rec).yes_price_dollars]).toEqual([ORDER, "0.410000"]);
+    // no answer and no change on the order: unknown, never "not changed"
+    const lost = refusal((await said(() => undefined, (s) => amending(s))).r);
+    expect([lost.code, lost.message, lost.detail]).toEqual(["E_VENUE_UNREACHABLE", "Kalshi did not answer the change, and the order does not show the change yet: it may have been made all the same. Read the order before changing it again (sent again, the same change is the same change)", { ref: ORDER, changed: "unknown" }]);
+    const five = refusal((await said((s) => (amending(s) ? json({ error: { code: "service_unavailable", message: "unavailable" } }, 503) : undefined))).r);
+    expect([five.code, five.message.startsWith("Kalshi answered the change with HTTP 503, and the order does not show the change yet")]).toEqual(["E_VENUE_UNREACHABLE", true]);
+  });
+});
+
+describe("positions(): what is held at Kalshi", () => {
+  /** decided NO, waiting to settle: its last trade is no longer what a contract is worth */
+  const DECIDED: Rec = { ...FED, ticker: "KXFED-26SEP-T4.00", status: "determined", result: "no", yes_bid_dollars: "0.0000", yes_ask_dollars: "1.0000", no_bid_dollars: "0.0000", no_ask_dollars: "1.0000", last_price_dollars: "0.0300" };
+  const ROW = { exchange_index: 0, realized_pnl_dollars: "0.000000", total_traded_dollars: "10.500000", fees_paid_dollars: "0.180000", last_updated_ts: "2026-10-05T13:00:00Z" };
+
+  it("each market's netted position as the outcome held — YES above zero, NO below — at what it cost, named and priced by its market; flat rows left out; a page at a time", async () => {
+    const k = fakeKalshi({
+      routes: (s) => {
+        if (s.path === "/portfolio/positions" && s.query.count_filter === "position") {
+          return s.query.cursor === "p2"
+            ? json({ market_positions: [{ ...ROW, ticker: "KXFED-26SEP-T4.00", position_fp: "-40.00", market_exposure_dollars: "24.000000" }], event_positions: [], cursor: "" })
+            : json({ market_positions: [{ ...ROW, ticker: FED.ticker, position_fp: "25.00", market_exposure_dollars: "10.500000" }, { ...ROW, ticker: "KXFLAT-26OCT", position_fp: "0.00", market_exposure_dollars: "0.000000" }, { ...ROW, ticker: "KXGONE-26OCT", position_fp: "3.00", market_exposure_dollars: "1.200000" }], event_positions: [], cursor: "p2" });
+        }
+        if (s.path === "/markets" && s.query.tickers) return json({ markets: [FED, DECIDED].filter((m) => s.query.tickers!.split(",").includes(String(m.ticker))), cursor: "" });
+        return undefined;
+      },
+    });
+    const { t } = await connect(k);
+    const n = k.sent.length;
+    const held = await t.positions!();
+    if (isRefusal(held)) throw new Error(held.message);
+    expect(k.sent.slice(n).map((s) => [s.path, s.query])).toEqual([
+      ["/portfolio/positions", { count_filter: "position", limit: "200" }],
+      ["/portfolio/positions", { count_filter: "position", limit: "200", cursor: "p2" }],
+      ["/markets", { tickers: "KXFED-27APR-T4.00,KXGONE-26OCT,KXFED-26SEP-T4.00", limit: "3" }],
+    ]);
+    const words = `${String(FED.title)} (Above 4.00%)`;
+    expect(held.map(({ native: _, ...p }) => p)).toEqual([
+      { symbol: FED_YES, name: `${words} · Yes`, kind: "event", side: "long", qty: 25, entryPrice: 0.42, markPrice: 0.43, usd: 10.75, unrealizedUsd: 0.25 },
+      // a market the lookup did not return: named by its ticker, at what it cost, and no price
+      { symbol: "KXGONE-26OCT:YES", name: "KXGONE-26OCT · Yes", kind: "event", side: "long", qty: 3, entryPrice: 0.4 },
+      // NO held where the result is no: a dollar a contract, whatever the last trade
+      { symbol: "KXFED-26SEP-T4.00:NO", name: `${words} · No`, kind: "event", side: "long", qty: 40, entryPrice: 0.6, markPrice: 1, usd: 40, unrealizedUsd: 16 },
+    ] satisfies Array<Omit<Position, "native">>);
+    expect(held[0]!.native).toEqual({ ...ROW, ticker: FED.ticker, position_fp: "25.00", market_exposure_dollars: "10.500000" });
+  });
+
+  it("Kalshi not answering for the positions is its no; markets that cannot be read leave the positions named by ticker, at cost, unpriced", async () => {
+    let down = false;
+    const k = fakeKalshi({
+      routes: (s) => {
+        if (s.path === "/portfolio/positions" && s.query.count_filter === "position") return down ? json({ error: { code: "service_unavailable", message: "unavailable" } }, 503) : json({ market_positions: [{ ...ROW, ticker: FED.ticker, position_fp: "-2.00", market_exposure_dollars: "1.160000" }], cursor: "" });
+        if (s.path === "/markets") return json({ error: { code: "service_unavailable", message: "unavailable" } }, 503);
+        return undefined;
+      },
+    });
+    const { t } = await connect(k);
+    expect(await t.positions!()).toEqual([{ symbol: FED_NO, name: "KXFED-27APR-T4.00 · No", kind: "event", side: "long", qty: 2, entryPrice: 0.58, native: { ...ROW, ticker: FED.ticker, position_fp: "-2.00", market_exposure_dollars: "1.160000" } }]);
+    down = true;
+    expect(refusal(await t.positions!()).code).toBe("E_VENUE_UNREACHABLE");
+  });
+
+  it("the trader changes a resting order and lists what is held; it has no close of its own (a position closes with a reduce-only sell) and no leverage to set", async () => {
+    const { t } = await connect(fakeKalshi());
+    expect([typeof t.amend, typeof t.positions, t.close, t.setLeverage]).toEqual(["function", "function", undefined, undefined]);
   });
 });
 

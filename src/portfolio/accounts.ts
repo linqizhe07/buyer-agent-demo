@@ -62,7 +62,7 @@ export interface Account {
   /** what real money can be asked of a live venue, when the server moves real money at all */
   liveCan?: { withdraw: boolean | "unknown"; ledgers: string[]; transfer: boolean | "unknown"; swap: boolean | "unknown"; receive: boolean; send: "wallet" | "mm" | false } | undefined;
   /** a venue connected live where orders can be placed: whether the key may trade (as the venue said), and what is traded there */
-  liveTrade?: { can: boolean | "unknown"; what: string } | undefined;
+  liveTrade?: { can: boolean | "unknown"; what: string; /** what else its trader does there: positions, an order changed in place, leverage, its own close */ positions?: boolean; amend?: boolean; leverage?: boolean; close?: boolean } | undefined;
   /** why no order is placed at this venue from the account, when none is */
   noTradeBecause?: string | undefined;
   /** why a live venue is only ever read */

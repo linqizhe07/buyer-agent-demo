@@ -114,11 +114,23 @@ export class LiveMoves {
   private readonly runId = randomBytes(6).toString("hex");
   constructor(private readonly e: LiveEngine) {}
 
-  /** the payment's line on the statement, as it stands now */
+  /** the payment's line on the statement, as it stands now — and the payment itself, so that a restarted account follows it again. A payment
+   * keeps the run that made it: its line is the same line whichever run writes it */
   private line(p: Payment): void {
     const names = (id: string) => this.money()?.venue(id)?.name ?? id;
-    const l = paymentLine(p, this.runId, names, (address) => this.e.state.agents.find((k) => k.address === address)?.name ?? address);
-    this.e.host.log({ kind: "statement", venue: p.from, reason: `${l.id} · ${l.description} · ${l.status}`, detail: l });
+    const run = p.run ?? this.runId;
+    const l = paymentLine(p, run, names, (address) => this.e.state.agents.find((k) => k.address === address)?.name ?? address);
+    this.e.host.log({ kind: "statement", venue: p.from, reason: `${l.id} · ${l.description} · ${l.status}`, detail: l, native: { payment: p, run } });
+  }
+
+  /** A movement an earlier run started and did not see land (account/restore.ts): followed again. Nothing is sent: the venue or the chain is
+   * only asked whether it has landed. One handed to a wallet keeps the ten minutes it was given, and no more */
+  adopt(p: Payment & { run: string }): void {
+    if (this.e.payments.some((x) => x.id === p.id && (x.run ?? this.runId) === p.run)) return;
+    const back: Payment = { ...p };
+    this.e.payments.push(back);
+    this.polled.delete(p.id);
+    this.line(back);
   }
 
   private money(): LiveMoney | undefined {
@@ -320,7 +332,7 @@ export class LiveMoves {
   }
 
   private protocol(p: Plan): string {
-    return p.kind === "bridge" ? `${p.route?.tool ?? "a bridge"}, routed by LI.FI, sent by your wallet` : p.kind === "withdraw" ? `${p.src.via} withdrawal` : p.kind === "transfer" ? `${p.src.via} transfer` : p.kind === "swap" ? `${p.src.via} market order` : p.src.writer.can.send === "mm" ? "mm transfer" : "a transaction your wallet sends";
+    return p.kind === "bridge" ? `${p.route?.tool ?? "a bridge"}, routed by LI.FI, sent by your wallet` : p.kind === "withdraw" ? `${p.src.via} withdrawal` : p.kind === "transfer" ? `${p.src.via} transfer` : p.kind === "swap" ? `${p.src.via} market order` : p.src.writer.can.send === "mm" ? "mm transfer" : p.src.writer.can.send === "account" ? "a transfer the account signs with the agent wallet's key" : "a transaction your wallet sends";
   }
 
   private words(p: Plan): string {
@@ -337,10 +349,11 @@ export class LiveMoves {
     // a bridge: the approval (when one is needed) and the transfer, for the wallet to send in that order
     const bridgeTxs = p.kind === "bridge" && p.route ? [...(p.route.approval?.txs ?? []), { ...p.route.tx, what: "bridge" } satisfies WalletTx] : undefined;
     if (bridgeTxs) r = bridgeTxs[bridgeTxs.length - 1]!;
-    else if (p.kind === "withdraw") r = await p.src.writer.withdraw!({ asset: f.asset, amount: p.amount, address: p.toAddress!, tag: p.tag, network: p.network!, clientId: id });
+    // the exchange's idempotency key: the payment's id AND this run's, since a later run can hand the same payment id out again
+    else if (p.kind === "withdraw") r = await p.src.writer.withdraw!({ asset: f.asset, amount: p.amount, address: p.toAddress!, tag: p.tag, network: p.network!, clientId: `${id}-${this.runId}` });
     else if (p.kind === "transfer") r = await p.src.writer.transfer!({ asset: f.asset, amount: p.amount, from: f.fromLedger, to: f.toLedger });
     else if (p.kind === "swap") r = await p.src.writer.swap!({ sell: f.asset, buy: f.toAsset, amount: p.amount });
-    else if (p.src.writer.can.send === "mm") r = await p.src.writer.send!({ asset: f.asset, amount: p.amount, to: p.toAddress!, network: p.network! });
+    else if (p.src.writer.can.send === "mm" || p.src.writer.can.send === "account") r = await p.src.writer.send!({ asset: f.asset, amount: p.amount, to: p.toAddress!, network: p.network! });
     else r = await p.src.writer.walletTx!({ asset: f.asset, amount: p.amount, to: p.toAddress!, network: p.network! });
     if (isRefusal(r)) {
       this.e.host.log({ kind: "account-refusal", venue: p.src.id, tool: `live ${p.kind}`, code: r.code, reason: r.message, native: r.native, signer: who.signer });
@@ -370,7 +383,7 @@ export class LiveMoves {
       ...(who.agent ? { agent: who.agent } : {}),
       ...(who.action ? { action: who.action } : {}),
       ...(who.card ? { card: who.card } : {}),
-      live: { kind: p.kind, ...(p.toAddress ? { toAddress: p.toAddress } : {}), ...(p.network ? { network: p.network } : {}), ...(p.toNetwork ? { toNetwork: p.toNetwork } : {}), ...(p.route ? { tool: p.route.tool } : {}), ...(wallet ? { sendBy: new Date(Math.min(who.deadline ?? Infinity, this.money()!.realNow() + TTL_MS)).toISOString() } : {}) },
+      live: { kind: p.kind, ...(p.toAddress ? { toAddress: p.toAddress } : {}), ...(p.network ? { network: p.network } : {}), ...(p.src.writer.can.send === "account" && receipt ? { txHash: receipt.ref as Hex } : {}), ...(p.toNetwork ? { toNetwork: p.toNetwork } : {}), ...(p.route ? { tool: p.route.tool } : {}), ...(wallet ? { sendBy: new Date(Math.min(who.deadline ?? Infinity, this.money()!.realNow() + TTL_MS)).toISOString() } : {}) },
       note: wallet ? `waiting for your wallet to send it: ${p.src.name} asks you to confirm` : status === "settled" ? `done at ${p.src.name}` : `${p.src.name} took it; waiting for it to land`,
     };
     this.e.payments.unshift(payment);

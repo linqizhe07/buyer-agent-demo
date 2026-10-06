@@ -5,10 +5,11 @@
  * A token's decimals are read from the token itself rather than assumed: the same dollar is 6 decimals on one chain and 18 on another.
  * A chain that does not answer is left out and named, so one slow endpoint does not blank the wallet.
  *
- * Only reads are ever sent (`eth_call`, `eth_getBalance`, a transaction and its receipt by hash): nothing here can sign, and nothing here
- * sends a transaction.
+ * The reader only reads (`eth_call`, `eth_getBalance`, a transaction and its receipt by hash). The one thing that SENDS is `publicSender`:
+ * a dollar transfer from an agent wallet the account holds the key of (account/keystore.ts), and nothing else.
  */
-import { createPublicClient, erc20Abi, formatUnits, http, parseAbi, type Chain, type Hex, type PublicClient } from "viem";
+import { createPublicClient, createWalletClient, erc20Abi, formatUnits, http, parseAbi, type Chain, type Hex, type PublicClient } from "viem";
+import type { PrivateKeyAccount } from "viem/accounts";
 
 /** a mined transaction, as much of it as a payment needs */
 export interface Mined {
@@ -47,6 +48,13 @@ export interface ChainReader {
   /** a transaction by its hash, mined or still waiting to be: who sent it, where, the call and the coin it carries; `undefined` when the
    * chain does not know it (or does not answer). Optional: a reader without it leaves a sent transaction to be judged by its receipt */
   transaction?(chain: ChainName, hash: Hex): Promise<SentTx | undefined>;
+  /** EIP-3009: has this authorisation's nonce been used on the token (USDC's `authorizationState`)? `undefined` when the chain does not answer */
+  authorizationUsed?(chain: ChainName, token: Hex, authorizer: Hex, nonce: Hex): Promise<boolean | undefined>;
+}
+
+/** Sending, from a key the account holds: one token transfer, gas paid in the chain's own coin by the sender. Nothing else is ever sent */
+export interface ChainSender {
+  transfer(r: { chain: ChainName; account: PrivateKeyAccount; token: Hex; to: Hex; units: bigint }): Promise<{ hash: Hex } | { error: string }>;
 }
 
 /** a transaction as it was sent: what a wallet's transaction is checked against before the account follows it */
@@ -148,6 +156,13 @@ export function publicChain(env: Record<string, string | undefined> = process.en
         return undefined;
       }
     },
+    async authorizationUsed(chain, token, authorizer, nonce) {
+      try {
+        return Boolean(await client(chain).readContract({ address: token, abi: parseAbi(["function authorizationState(address authorizer, bytes32 nonce) view returns (bool)"]), functionName: "authorizationState", args: [authorizer, nonce] }));
+      } catch {
+        return undefined;
+      }
+    },
     async uint(chain, address, signature, args = []) {
       try {
         const abi = parseAbi([signature]);
@@ -156,6 +171,23 @@ export function publicChain(env: Record<string, string | undefined> = process.en
         return typeof out === "bigint" ? out : undefined;
       } catch {
         return undefined;
+      }
+    },
+  };
+}
+
+/** the one thing this file sends: a token transfer signed by a key the account holds, through the same endpoints the reader uses */
+export function publicSender(env: Record<string, string | undefined> = process.env): ChainSender {
+  return {
+    async transfer({ chain, account, token, to, units }) {
+      try {
+        const { chain: c, env: key } = CHAINS[chain];
+        const wallet = createWalletClient({ account, chain: c, transport: http(env[key] || undefined, { timeout: 15_000, retryCount: 0 }) });
+        const hash = await wallet.writeContract({ address: token, abi: erc20Abi, functionName: "transfer", args: [to, units], chain: c, account });
+        return { hash };
+      } catch (err) {
+        // the node's own words, without anything that could carry a key (viem never puts one in an error)
+        return { error: String((err as { shortMessage?: string; message?: string })?.shortMessage ?? (err as Error)?.message ?? err).slice(0, 200) };
       }
     },
   };

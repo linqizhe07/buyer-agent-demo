@@ -27,7 +27,7 @@ import { canonical } from "../../core/hash.ts";
 import { no } from "../refuse.ts";
 import type { Intent } from "../accounts.ts";
 import { isExpired } from "../openness.ts";
-import { ceilTo, DONE, floorTo, inDollars, notionalOf, onStep, plain, type LiveTrader, type Market, type MarketKind, type OrderState, type OrderStatus, type OrderType, type Side } from "../live/trade.ts";
+import { ceilTo, DONE, floorTo, inDollars, notionalOf, onStep, ORDER_TYPES, plain, TIFS, type LiveTrader, type Market, type MarketKind, type OrderChange, type OrderRequest, type OrderState, type OrderStatus, type OrderType, type Position, type Side, type TimeInForce } from "../live/trade.ts";
 import type { CardLike, Outcome } from "./exchange.ts";
 import type { LiveEngine, LiveVenue } from "./live-moves.ts";
 import { orderLine } from "./statement.ts";
@@ -38,6 +38,11 @@ export type LiveOrderAction = Extract<OwnerAction, { type: "liveOrder" }>;
 export type LiveCancelAction = Extract<OwnerAction, { type: "liveCancel" }>;
 export type AgentLiveOrderAction = Extract<AgentAction, { type: "agentLiveOrder" }>;
 export type AgentLiveCancelAction = Extract<AgentAction, { type: "agentLiveCancel" }>;
+export type LiveAmendAction = Extract<OwnerAction, { type: "liveAmend" }>;
+export type AgentLiveAmendAction = Extract<AgentAction, { type: "agentLiveAmend" }>;
+export type AgentLiveCloseAction = Extract<AgentAction, { type: "agentLiveClose" }>;
+type CloseFields = { venue: string; symbol: string; qty: string };
+type LeverageFields = { venue: string; symbol: string; leverage: string; marginMode: string };
 
 /** one order the account placed, as the page, the ledger and an agent see it */
 export interface LiveOrder {
@@ -57,8 +62,13 @@ export interface LiveOrder {
   /** in base units */
   qty: number;
   limitPrice?: number | undefined;
-  /** a market order: the worst price the venue was told it may fill at */
+  /** a market or stop order: the worst price the venue was told it may fill at */
   worstPrice?: number | undefined;
+  /** a stop or stop-limit order: the price that triggers it */
+  stopPrice?: number | undefined;
+  tif?: TimeInForce | undefined;
+  postOnly?: boolean | undefined;
+  reduceOnly?: boolean | undefined;
   /** a contract is this much base */
   contractSize?: number | undefined;
   /** the price it was valued at when it was placed, and what it was worth then in dollars (the most it may cost, for a market buy) */
@@ -105,6 +115,10 @@ interface Fields {
   qty: string;
   usd: string;
   limitPrice: string;
+  stopPrice: string;
+  tif: string;
+  postOnly: string;
+  reduceOnly: string;
 }
 
 interface Plan {
@@ -118,8 +132,12 @@ interface Plan {
   /** the price it is valued at */
   price: number;
   notional: number;
-  /** a market order: the worst price it may fill at */
+  /** a market or stop order: the worst price it may fill at */
   worstPrice?: number | undefined;
+  stopPrice?: number | undefined;
+  tif?: TimeInForce | undefined;
+  postOnly?: boolean | undefined;
+  reduceOnly?: boolean | undefined;
   /** what it is counted at: what it may cost at worst (a buy), what it is worth now (a sell) */
   maxUsd: number;
 }
@@ -149,6 +167,10 @@ export class LiveOrders {
   private readonly polled = new Map<string, number>();
   /** what each waiting card showed, by card id */
   private readonly shown = new Map<string, Shown>();
+  /** what each waiting card for an AMEND showed: the order as it would be */
+  private readonly shownAmend = new Map<string, { order: string; qty: number; limitPrice?: number | undefined; stopPrice?: number | undefined; maxUsd: number }>();
+  /** what each close card showed the owner: the market and the size, which an approval releases exactly */
+  private readonly shownClose = new Map<string, { symbol: string; qty: number }>();
   /** this run of the account: part of every client id it sends, so a restart never sends a venue an id it has seen */
   private readonly run = randomBytes(8).toString("hex");
   constructor(private readonly e: OrderEngine) {}
@@ -159,7 +181,7 @@ export class LiveOrders {
 
   /** Everything that does not depend on who signed: the switch, the venue, the market, the size, the price, the cap */
   private async plan(raw: Fields): Promise<Plan | Refusal> {
-    const f: Fields = { venue: text(raw.venue), symbol: text(raw.symbol), side: text(raw.side), orderType: text(raw.orderType), qty: text(raw.qty), usd: text(raw.usd), limitPrice: text(raw.limitPrice) };
+    const f: Fields = { venue: text(raw.venue), symbol: text(raw.symbol), side: text(raw.side), orderType: text(raw.orderType), qty: text(raw.qty), usd: text(raw.usd), limitPrice: text(raw.limitPrice), stopPrice: text(raw.stopPrice), tif: text(raw.tif), postOnly: text(raw.postOnly), reduceOnly: text(raw.reduceOnly) };
     const m = this.money();
     if (!m) return no("E_ACCOUNT_BAD_ACTION", { message: "this account has no venues connected live" });
     const w = m.writes();
@@ -171,7 +193,7 @@ export class LiveOrders {
     const trader = v.trader;
     if (trader.can === false) return no("E_VENUE_PERMISSION", { venue: v.id, message: `${v.name}: ${trader.whyNot ?? "this key may not trade. That is set on the key at the venue"}` });
     if (f.side !== "buy" && f.side !== "sell") return no("E_ACCOUNT_BAD_ACTION", { message: "an order's side is buy or sell" });
-    if (f.orderType !== "market" && f.orderType !== "limit") return no("E_ACCOUNT_BAD_ACTION", { message: "an order is a market order or a limit order" });
+    if (!(ORDER_TYPES as readonly string[]).includes(f.orderType)) return no("E_ACCOUNT_BAD_ACTION", { message: "an order is a market, limit, stop or stop_limit order" });
     const side = f.side as Side;
     const type = f.orderType as OrderType;
     const byQty = f.qty.trim() !== "";
@@ -179,21 +201,39 @@ export class LiveOrders {
     if (byQty === byUsd) return no("E_ACCOUNT_BAD_ACTION", { message: "an order's size is given once: in the market's own units (qty) or in dollars (usd)" });
     const size = byQty ? f.qty.trim() : f.usd.trim();
     if (!DEC.test(size) || !(Number(size) > 0)) return no("E_ACCOUNT_BAD_ACTION", { message: "a size is a plain decimal, more than zero" });
-    if (type === "limit" ? !DEC.test(f.limitPrice.trim()) || !(Number(f.limitPrice) > 0) : f.limitPrice.trim() !== "") return no("E_ACCOUNT_BAD_ACTION", { message: type === "limit" ? "a limit order has a limit price: a plain decimal, more than zero" : "a market order has no limit price" });
+    const limited = type === "limit" || type === "stop_limit";
+    const stopped = type === "stop" || type === "stop_limit";
+    if (limited ? !DEC.test(f.limitPrice.trim()) || !(Number(f.limitPrice) > 0) : f.limitPrice.trim() !== "") return no("E_ACCOUNT_BAD_ACTION", { message: limited ? `a ${type === "limit" ? "limit" : "stop-limit"} order has a limit price: a plain decimal, more than zero` : `a ${type} order has no limit price` });
+    if (stopped ? !DEC.test(f.stopPrice.trim()) || !(Number(f.stopPrice) > 0) : f.stopPrice.trim() !== "") return no("E_ACCOUNT_BAD_ACTION", { message: stopped ? `a ${type === "stop" ? "stop" : "stop-limit"} order has a stop price that triggers it: a plain decimal, more than zero` : `a ${type} order has no stop price` });
+    if (f.tif.trim() !== "" && !(TIFS as readonly string[]).includes(f.tif.trim())) return no("E_ACCOUNT_BAD_ACTION", { message: `a time in force is ${TIFS.join(", ")}, or left to the venue` });
+    if (![f.postOnly, f.reduceOnly].every((x) => x === "" || x === "true")) return no("E_ACCOUNT_BAD_ACTION", { message: 'post-only and reduce-only are "true", or left out' });
+    if (f.postOnly === "true" && type !== "limit") return no("E_ACCOUNT_BAD_ACTION", { message: "post-only is for a limit order: it rests on the book as a maker, or is refused" });
     if (!f.symbol.trim()) return no("E_ACCOUNT_BAD_ACTION", { message: "an order names its market" });
 
     const mk = await trader.market(f.symbol.trim());
     if (isRefusal(mk)) return mk;
     if (!inDollars(mk.quote)) return no("E_ACCOUNT_UNPRICED", { venue: v.id, message: `${mk.symbol} is priced in ${mk.quote}: the account trades markets priced in dollars, so that every limit means dollars` });
     if (!mk.open) return no("E_VENUE_MARKET_CLOSED", { venue: v.id, message: `${v.name}: ${mk.name} takes no orders now${mk.note ? ` (${mk.note})` : ""}` });
-    if (!mk.types.includes(type)) return no("E_VENUE_ORDER_INVALID", { venue: v.id, message: `${v.name} takes ${mk.types.join(" and ")} orders in ${mk.name}, not ${type} orders` });
-    const limitPrice = type === "limit" ? Number(f.limitPrice) : undefined;
-    if (limitPrice !== undefined && !onStep(limitPrice, mk.priceStep)) return no("E_VENUE_ORDER_INVALID", { venue: v.id, message: `${v.name}: a price in ${mk.name} moves in steps of ${plain(mk.priceStep!)}`, detail: { priceStep: mk.priceStep } });
-    // the side of the book the order takes; a limit that crosses it fills at the book, so a sell is never valued under the bid
+    if (!mk.types.includes(type)) return no("E_VENUE_ORDER_INVALID", { venue: v.id, message: `${v.name} takes ${mk.types.join(", ")} orders in ${mk.name}, not ${type} orders` });
+    // what the market takes besides the type: a time in force it lists, post-only and reduce-only where it says so
+    const tif = f.tif.trim() === "" ? undefined : (f.tif.trim() as TimeInForce);
+    if (tif !== undefined && !(mk.tifs ?? []).includes(tif)) return no("E_VENUE_ORDER_INVALID", { venue: v.id, message: mk.tifs?.length ? `${v.name} takes ${mk.tifs.join(", ")} in ${mk.name}, not ${tif}` : `${v.name} takes no time-in-force choice in ${mk.name}: its own default applies` });
+    const forType = mk.tifsByType?.[type];
+    if (tif !== undefined && forType && !forType.includes(tif)) return no("E_VENUE_ORDER_INVALID", { venue: v.id, message: forType.length ? `${v.name} takes ${forType.join(", ")} for a ${type.replace("_", "-")} order in ${mk.name}, not ${tif}` : `${v.name} takes no time-in-force choice for a ${type.replace("_", "-")} order in ${mk.name}` });
+    if (f.postOnly === "true" && !mk.postOnly) return no("E_VENUE_ORDER_INVALID", { venue: v.id, message: `${v.name} takes no post-only orders in ${mk.name}` });
+    if (f.reduceOnly === "true" && !mk.reduceOnly) return no("E_VENUE_ORDER_INVALID", { venue: v.id, message: `${v.name} takes no reduce-only orders in ${mk.name}` });
+    const limitPrice = limited ? Number(f.limitPrice) : undefined;
+    const stopPrice = stopped ? Number(f.stopPrice) : undefined;
+    for (const x of [limitPrice, stopPrice]) if (x !== undefined && !onStep(x, mk.priceStep)) return no("E_VENUE_ORDER_INVALID", { venue: v.id, message: `${v.name}: a price in ${mk.name} moves in steps of ${plain(mk.priceStep!)}`, detail: { priceStep: mk.priceStep } });
+    // the side of the book the order takes; a limit that crosses it fills at the book, so a sell is never valued under the bid. A stop is
+    // valued where it triggers: what the book does before then is not the order's price. A buy stop-limit at its limit (the most it pays); a
+    // sell stop-limit at its stop, or its limit if that is higher — a limit under the stop takes the book where the stop fires, so a sell
+    // limited at $1 is worth what it sells, not $1
     const book = side === "buy" ? (mk.ask ?? mk.price) : (mk.bid ?? mk.price);
-    const price = limitPrice === undefined ? book : side === "buy" ? limitPrice : Math.max(limitPrice, book ?? 0);
+    const price = type === "stop" ? stopPrice : limitPrice === undefined ? book : side === "buy" ? limitPrice : type === "stop_limit" ? Math.max(limitPrice, stopPrice ?? 0) : Math.max(limitPrice, book ?? 0);
     if (!(price !== undefined && price > 0)) return no("E_ACCOUNT_UNPRICED", { venue: v.id, message: `${v.name} shows no price for ${mk.name} right now, so no limit can be judged: try a limit order` });
-    const worstPrice = type === "market" ? (side === "buy" ? floorTo(price * (1 + SLIPPAGE), mk.priceStep) : ceilTo(price * (1 - SLIPPAGE), mk.priceStep)) : undefined;
+    // a market order — and a stop, once it triggers — carries a worst price: 2% past where it is valued
+    const worstPrice = type === "market" || type === "stop" ? (side === "buy" ? floorTo(price * (1 + SLIPPAGE), mk.priceStep) : ceilTo(price * (1 - SLIPPAGE), mk.priceStep)) : undefined;
     const each = notionalOf(mk, 1, side === "buy" && worstPrice !== undefined ? worstPrice : price);
     let qty: number;
     if (byQty) {
@@ -205,7 +245,7 @@ export class LiveOrders {
     if (mk.minNotional !== undefined && notional < mk.minNotional - 1e-9) return no("E_VENUE_ORDER_INVALID", { venue: v.id, message: `${v.name}: the smallest order in ${mk.name} is worth ${usd(mk.minNotional)}`, detail: { minNotional: mk.minNotional } });
     const maxUsd = side === "buy" && worstPrice !== undefined ? notionalOf(mk, qty, worstPrice) : notional;
     if (maxUsd > w.capUsd + 1e-9) return no("E_ACCOUNT_LIMIT", { venue: v.id, message: `${usd(maxUsd)} is more than the most one order may be on this server (${usd(w.capUsd)}). It is set when the server starts: --live-cap`, detail: { capUsd: w.capUsd, orderUsd: maxUsd } });
-    return { f, v: v as Plan["v"], m: mk, side, type, qty, limitPrice, price, notional, ...(worstPrice !== undefined ? { worstPrice } : {}), maxUsd };
+    return { f, v: v as Plan["v"], m: mk, side, type, qty, limitPrice, price, notional, ...(worstPrice !== undefined ? { worstPrice } : {}), ...(stopPrice !== undefined ? { stopPrice } : {}), ...(tif ? { tif } : {}), ...(f.postOnly === "true" ? { postOnly: true } : {}), ...(f.reduceOnly === "true" ? { reduceOnly: true } : {}), maxUsd };
   }
 
   /** Held to what was agreed — the owner's signature or the card: the same market, and a price that has not moved past what was agreed. A
@@ -248,20 +288,20 @@ export class LiveOrders {
 
   /** what the owner is shown and signs: the exact size, the price, what it is worth, ten minutes */
   async prepare(draft: Record<string, unknown>): Promise<{ action: Omit<LiveOrderAction, "nonce">; quote: OrderQuote } | Refusal> {
-    const f: Fields = { venue: String(draft.venue ?? ""), symbol: String(draft.symbol ?? ""), side: String(draft.side ?? ""), orderType: String(draft.orderType ?? "market"), qty: String(draft.qty ?? ""), usd: String(draft.usd ?? ""), limitPrice: String(draft.limitPrice ?? "") };
+    const f: Fields = { venue: String(draft.venue ?? ""), symbol: String(draft.symbol ?? ""), side: String(draft.side ?? ""), orderType: String(draft.orderType ?? "market"), qty: String(draft.qty ?? ""), usd: String(draft.usd ?? ""), limitPrice: String(draft.limitPrice ?? ""), stopPrice: String(draft.stopPrice ?? ""), tif: String(draft.tif ?? ""), postOnly: draft.postOnly === true || draft.postOnly === "true" ? "true" : "", reduceOnly: draft.reduceOnly === true || draft.reduceOnly === "true" ? "true" : "" };
     const p = await this.plan(f);
     if (isRefusal(p)) return p;
     // a buy signs the most it may cost; a sell signs what it is worth now, and a market sell may then fetch at most 2% less
     const worth = (p.side === "buy" ? cents(p.maxUsd) : Math.floor(p.notional * 100 + 1e-6) / 100).toFixed(2);
     return {
-      action: { type: "liveOrder", venue: p.v.id, symbol: p.m.symbol, side: p.side, orderType: p.type, qty: plain(p.qty), limitPrice: p.limitPrice !== undefined ? plain(p.limitPrice) : "", maxNotional: worth, deadline: this.money()!.realNow() + TTL_MS },
+      action: { type: "liveOrder", venue: p.v.id, symbol: p.m.symbol, side: p.side, orderType: p.type, qty: plain(p.qty), limitPrice: p.limitPrice !== undefined ? plain(p.limitPrice) : "", stopPrice: p.stopPrice !== undefined ? plain(p.stopPrice) : "", tif: p.tif ?? "", postOnly: p.postOnly ? "true" : "", reduceOnly: p.reduceOnly ? "true" : "", maxNotional: worth, deadline: this.money()!.realNow() + TTL_MS },
       quote: { words: this.words(p), name: p.m.name, kind: p.m.kind, base: p.m.base, quote: p.m.quote, price: p.price, notionalUsd: Number(p.notional.toFixed(2)), maxUsd: Number(worth), ...(p.worstPrice !== undefined ? { worstPrice: p.worstPrice } : {}), ...(p.m.note ? { note: p.m.note } : {}), capUsd: this.money()!.writes().capUsd },
     };
   }
 
   /** The owner's signed order: planned again, held to what was signed, placed */
   async owner(a: LiveOrderAction, who: { signer: string; envelope: Envelope; hash: Hex }): Promise<Outcome> {
-    const planned = await this.plan({ ...a, usd: "" });
+    const planned = await this.plan({ ...fieldsOf(a), usd: "" });
     if (isRefusal(planned)) return planned;
     if (this.money()!.realNow() > a.deadline) return no("E_ACCOUNT_EXPIRED", { message: "this order was good for ten minutes after it was prepared: prepare it again" });
     const p = this.hold(planned, a.symbol, Number(a.maxNotional), "signed for");
@@ -274,7 +314,7 @@ export class LiveOrders {
     const now = Date.parse(this.e.host.now());
     const spend = await this.limit(who.signer, text(a.venue));
     if (isRefusal(spend)) return spend;
-    const p = await this.plan(a);
+    const p = await this.plan(fieldsOf(a));
     if (isRefusal(p)) return p;
     const flight = this.e.host.openFlight({ id: slug(who.agent.name), name: who.agent.name, code: who.agent.code }, `${this.words(p)} · real money`);
     if (this.e.host.policy().mode === "open") {
@@ -310,7 +350,7 @@ export class LiveOrders {
     if (!shown) return no("E_ACCOUNT_REQUOTE", { message: "this card's order is not known to this run of the account: the agent asks again" });
     const spend = await this.limit(who.signer, text(a.venue));
     if (isRefusal(spend)) return spend;
-    const planned = await this.plan({ ...a, qty: plain(shown.qty), usd: "" });
+    const planned = await this.plan({ ...fieldsOf(a), qty: plain(shown.qty), usd: "" });
     if (isRefusal(planned)) return planned;
     // a buy may cost at most what the card showed; a sell is held to what it was worth when the card was shown
     const p = this.hold(planned, shown.symbol, planned.side === "buy" ? card.usd : shown.notional, "on the card");
@@ -366,22 +406,35 @@ export class LiveOrders {
     return { ok: true, kind: "order", order: o };
   }
 
-  /** the order's line on the statement, as it stands now */
+  /** the order's line on the statement, as it stands now — and the order itself, so that a restarted account follows it again */
   private line(o: LiveOrder): void {
     const l = orderLine(o, (address) => this.e.state.agents.find((k) => k.address === address)?.name ?? address);
-    this.e.host.log({ kind: "statement", venue: o.venue, reason: `${l.id} · ${l.description} · ${l.status}`, detail: l });
+    this.e.host.log({ kind: "statement", venue: o.venue, reason: `${l.id} · ${l.description} · ${l.status}`, detail: l, native: { order: o } });
+  }
+
+  /** An order an earlier run of the account placed and did not see finished (account/restore.ts): followed again, as it was — its id, its
+   * client id, the limit it counts against. Nothing is sent: it is only asked about */
+  adopt(o: LiveOrder): void {
+    if (this.e.orders.some((x) => x.clientId === o.clientId)) return;
+    const back: LiveOrder = { ...o, note: o.walletTxs && !o.ref ? o.note : `${o.note ? `${o.note} · ` : ""}followed again after a restart` };
+    this.e.orders.push(back);
+    this.polled.set(o.id, 0);
+    // its line is written in this run too: the statement shows it as followed, not as left behind
+    this.line(back);
   }
 
   private words(p: Plan): string {
-    return `${p.side} ${qtyText(p.qty)} ${p.m.base} at ${p.v.name} · ${p.type === "limit" ? `limit ${plain(p.limitPrice!)}` : "market"} · about ${usd(p.notional)}`;
+    const how = p.type === "limit" ? `limit ${plain(p.limitPrice!)}` : p.type === "stop" ? `stop at ${plain(p.stopPrice!)}` : p.type === "stop_limit" ? `stop at ${plain(p.stopPrice!)}, limit ${plain(p.limitPrice!)}` : "market";
+    const flags = [p.tif ? p.tif.toUpperCase() : "", p.postOnly ? "post-only" : "", p.reduceOnly ? "reduce-only" : ""].filter(Boolean).join(", ");
+    return `${p.side} ${qtyText(p.qty)} ${p.m.base} at ${p.v.name} · ${how}${flags ? ` (${flags})` : ""} · about ${usd(p.notional)}`;
   }
 
-  /** the one venue call, and the order it becomes */
-  private async place(p: Plan, who: Who): Promise<Outcome> {
+  /** the one venue call, and the order it becomes. `send`: another call than place — a venue's own close of a position */
+  private async place(p: Plan, who: Who, send?: (clientId: string) => Promise<OrderState | Refusal>): Promise<Outcome> {
     const id = this.e.nextOrderId();
     const clientId = createHash("sha256").update(`${this.run}:${id}`).digest("hex").slice(0, 32);
     const at = new Date(this.money()!.realNow()).toISOString();
-    const r = await safely(() => p.v.trader.place({ symbol: p.m.symbol, side: p.side, type: p.type, qty: p.qty, ...(p.limitPrice !== undefined ? { limitPrice: p.limitPrice } : {}), ...(p.worstPrice !== undefined ? { worstPrice: p.worstPrice } : {}), clientId }), p.v.id, p.v.name);
+    const r = await safely(() => (send ? send(clientId) : p.v.trader.place(requestOf(p, clientId))), p.v.id, p.v.name);
     if (isRefusal(r)) {
       this.e.host.log({ kind: "account-refusal", venue: p.v.id, tool: "live order", code: r.code, reason: r.message, native: r.native, signer: who.signer, ...(who.envelope ? { envelope: who.envelope } : {}) });
       return r;
@@ -401,6 +454,10 @@ export class LiveOrders {
       qty: p.qty,
       ...(p.limitPrice !== undefined ? { limitPrice: p.limitPrice } : {}),
       ...(p.worstPrice !== undefined ? { worstPrice: p.worstPrice } : {}),
+      ...(p.stopPrice !== undefined ? { stopPrice: p.stopPrice } : {}),
+      ...(p.tif ? { tif: p.tif } : {}),
+      ...(p.postOnly ? { postOnly: true } : {}),
+      ...(p.reduceOnly ? { reduceOnly: true } : {}),
       ...(p.m.contractSize !== undefined ? { contractSize: p.m.contractSize } : {}),
       price: p.price,
       usd: Number(p.maxUsd.toFixed(6)),
@@ -438,7 +495,7 @@ export class LiveOrders {
       case "partial":
         return `${qtyText(o.filledQty)} of ${qtyText(o.qty)} filled${o.avgPrice ? ` at ${plain(o.avgPrice)}` : ""}`;
       case "open":
-        return o.type === "limit" ? `on ${o.venueName}'s book at ${plain(o.limitPrice!)}` : o.worstPrice !== undefined ? `on ${o.venueName}'s book at its worst price, ${plain(o.worstPrice)}: it fills there or better, or waits` : `taken by ${o.venueName}`;
+        return o.type === "limit" ? `on ${o.venueName}'s book at ${plain(o.limitPrice!)}` : o.type === "stop" || o.type === "stop_limit" ? `waiting at ${o.venueName} for the price to reach ${plain(o.stopPrice ?? 0)}${o.type === "stop_limit" ? `, then a limit at ${plain(o.limitPrice ?? 0)}` : ""}` : o.worstPrice !== undefined ? `on ${o.venueName}'s book at its worst price, ${plain(o.worstPrice)}: it fills there or better, or waits` : `taken by ${o.venueName}`;
       case "pending":
         return `${o.venueName} took it`;
       case "canceled":
@@ -514,7 +571,7 @@ export class LiveOrders {
     if (!o?.walletTxs || o.ref || o.status !== "pending") return no("E_ACCOUNT_ORDER_UNKNOWN", { message: `no order ${orderId} is waiting for a wallet` });
     const v = this.money()?.venue(o.venue);
     if (!v?.trader?.requote) return no("E_VENUE_RAIL_CLOSED", { venue: o.venue, message: `${o.venueName} cannot build the swap again: send it as it is, or take it back` });
-    const r = await safely(() => v.trader!.requote!({ symbol: o.symbol, side: o.side, type: o.type, qty: o.qty, ...(o.limitPrice !== undefined ? { limitPrice: o.limitPrice } : {}), ...(o.worstPrice !== undefined ? { worstPrice: o.worstPrice } : {}), clientId: o.clientId }), o.venue, o.venueName);
+    const r = await safely(() => v.trader!.requote!(requestOfOrder(o)), o.venue, o.venueName);
     if (isRefusal(r)) return r;
     if (!r.walletTxs?.length) return no("E_VENUE_REJECTED", { venue: o.venue, message: `${o.venueName} built no swap` });
     o.walletTxs = r.walletTxs;
@@ -522,6 +579,245 @@ export class LiveOrders {
     o.note = this.noteOf(o);
     this.e.host.log({ kind: "order", venue: o.venue, tool: "live order", outcome: "requoted", reason: `${o.id} · the approval is on chain: the swap was built again from a fresh quote` });
     return { ok: true, kind: "order", order: o };
+  }
+
+  // ---- what is held, an order changed in place, a position closed, leverage --------------------------------
+
+  /** what is held at a venue, as the venue lists it */
+  async positions(venue: string): Promise<Position[] | Refusal> {
+    const v = this.money()?.venue(venue);
+    if (!v) return no("E_WALLET_ACCOUNT_UNKNOWN", { venue, message: `"${venue}" is not a venue connected live` });
+    if (!v.trader?.positions) return no("E_VENUE_RAIL_CLOSED", { venue, message: `${v.name} lists no positions to the account` });
+    return safely(() => v.trader!.positions!(), venue, v.name, STATUS_MS);
+  }
+
+  /** the order as an amend would leave it: its new size, limit or stop, valued afresh against the market as it is now */
+  private async amendPlan(o: LiveOrder, a: { qty: string; limitPrice: string; stopPrice: string }): Promise<{ p: Plan; change: OrderChange } | Refusal> {
+    const given = (x: string) => text(x).trim() !== "";
+    if (![a.qty, a.limitPrice, a.stopPrice].some(given)) return no("E_ACCOUNT_BAD_ACTION", { message: "an amend changes the size, the limit or the stop" });
+    if (given(a.limitPrice) && o.type !== "limit" && o.type !== "stop_limit") return no("E_ACCOUNT_BAD_ACTION", { message: `${o.id} is a ${o.type} order: it has no limit price to change` });
+    if (given(a.stopPrice) && o.type !== "stop" && o.type !== "stop_limit") return no("E_ACCOUNT_BAD_ACTION", { message: `${o.id} is a ${o.type} order: it has no stop price to change` });
+    const qty = given(a.qty) ? a.qty.trim() : plain(o.qty);
+    if (DEC.test(qty) && Number(qty) < o.filledQty - 1e-12) return no("E_ACCOUNT_BAD_ACTION", { message: `${o.id} has ${qtyText(o.filledQty)} filled already: it cannot be made smaller than that` });
+    const f: Fields = { venue: o.venue, symbol: o.symbol, side: o.side, orderType: o.type, qty, usd: "", limitPrice: given(a.limitPrice) ? a.limitPrice.trim() : o.limitPrice !== undefined ? plain(o.limitPrice) : "", stopPrice: given(a.stopPrice) ? a.stopPrice.trim() : o.stopPrice !== undefined ? plain(o.stopPrice) : "", tif: o.tif ?? "", postOnly: o.postOnly ? "true" : "", reduceOnly: o.reduceOnly ? "true" : "" };
+    const planned = await this.plan(f);
+    if (isRefusal(planned)) return planned;
+    // a stop's worst price is never pulled in by a change: a venue that holds a stop as a stop-limit at its worst price (Alpaca) keeps the
+    // one the stop was placed with, so what the order is worth at most stays a bound whichever of the two the venue holds
+    const old = o.type === "stop" ? o.worstPrice : undefined;
+    const p = old === undefined || planned.worstPrice === undefined ? planned : (() => {
+      const worstPrice = planned.side === "buy" ? Math.max(planned.worstPrice, old) : Math.min(planned.worstPrice, old);
+      return { ...planned, worstPrice, maxUsd: planned.side === "buy" ? notionalOf(planned.m, planned.qty, worstPrice) : planned.maxUsd };
+    })();
+    const capUsd = this.money()!.writes().capUsd;
+    if (p.maxUsd > capUsd + 1e-9) return no("E_ACCOUNT_LIMIT", { venue: o.venue, message: `${usd(p.maxUsd)} is more than the most one order may be on this server (${usd(capUsd)}): the stop keeps the worst price it was placed with, ${plain(old!)}`, detail: { capUsd, orderUsd: p.maxUsd } });
+    return { p, change: { ...(given(a.qty) ? { qty: p.qty } : {}), ...(given(a.limitPrice) ? { limitPrice: p.limitPrice } : {}), ...(given(a.stopPrice) ? { stopPrice: p.stopPrice } : {}) } };
+  }
+
+  private changeable(a: { venue: string; order: string }, who: { authority: "owner" | "agent"; agent?: AgentKey | undefined }): LiveOrder | Refusal {
+    const o = this.e.orders.find((x) => x.id === a.order && x.venue === a.venue);
+    const mine = o && (who.authority === "owner" || (o.authority === "agent" && o.agent === who.agent?.address));
+    if (!o || !mine) return no("E_ACCOUNT_ORDER_UNKNOWN", { venue: a.venue, message: who.authority === "agent" && o ? `${a.order} was not placed by this agent: an agent changes only its own orders` : `there is no order ${a.order} at ${a.venue} on the account`, detail: { order: a.order } });
+    if (DONE.has(o.status) || (o.walletTxs && !o.ref)) return no("E_ACCOUNT_BAD_ACTION", { venue: o.venue, message: `${o.id} is ${o.walletTxs && !o.ref ? "waiting for a wallet" : o.status}: there is nothing to change at the venue`, detail: { order: o.id } });
+    const v = this.money()?.venue(o.venue);
+    if (!v?.trader) return no("E_VENUE_RAIL_CLOSED", { venue: o.venue, message: `${o.venueName} is no longer connected live` });
+    if (!v.trader.amend) return no("E_VENUE_RAIL_CLOSED", { venue: o.venue, message: `${o.venueName} changes no order in place: cancel it and place another` });
+    return o;
+  }
+
+  /** what an agent's change adds to the limit that stands: what the order grows by, or — counted on a limit the owner has since replaced — all of
+   * it, since it moves onto the one that stands */
+  private growth(o: LiveOrder, maxUsd: number, limit: string): number {
+    return o.approval === limit ? maxUsd - o.usd : maxUsd;
+  }
+
+  /** what the owner is shown and signs for an amend: the order as it would be, what it would then be worth at most, ten minutes */
+  async prepareAmend(draft: Record<string, unknown>): Promise<{ action: Omit<LiveAmendAction, "nonce">; quote: OrderQuote } | Refusal> {
+    const a = { venue: String(draft.venue ?? ""), order: String(draft.order ?? ""), qty: String(draft.qty ?? ""), limitPrice: String(draft.limitPrice ?? ""), stopPrice: String(draft.stopPrice ?? "") };
+    const o = this.changeable(a, { authority: "owner" });
+    if (isRefusal(o)) return o;
+    const r = await this.amendPlan(o, a);
+    if (isRefusal(r)) return r;
+    const p = r.p;
+    const worth = (p.side === "buy" ? cents(p.maxUsd) : Math.floor(p.notional * 100 + 1e-6) / 100).toFixed(2);
+    return { action: { type: "liveAmend", ...a, maxNotional: worth, deadline: this.money()!.realNow() + TTL_MS }, quote: { words: `${o.id}: ${this.words(p)}`, name: p.m.name, kind: p.m.kind, base: p.m.base, quote: p.m.quote, price: p.price, notionalUsd: Number(p.notional.toFixed(2)), maxUsd: Number(worth), ...(p.worstPrice !== undefined ? { worstPrice: p.worstPrice } : {}), capUsd: this.money()!.writes().capUsd } };
+  }
+
+  /** Change an open order in place. The owner: held to what was signed. An agent: only its own order; what the order becomes worth MORE is
+   * judged like a new order of the difference — Aggressive inside its limit at once, Conservative on a card; worth less, it simply goes */
+  async amend(a: LiveAmendAction | AgentLiveAmendAction, who: { signer: string; authority: "owner" | "agent"; agent?: AgentKey | undefined; envelope: Envelope; hash: Hex }): Promise<Outcome> {
+    const o = this.changeable(a, who);
+    if (isRefusal(o)) return o;
+    const r = await this.amendPlan(o, a);
+    if (isRefusal(r)) return r;
+    if (who.authority === "owner") {
+      const signed = a as LiveAmendAction;
+      if (this.money()!.realNow() > signed.deadline) return no("E_ACCOUNT_EXPIRED", { message: "this change was good for ten minutes after it was prepared: prepare it again" });
+      const held = this.hold(r.p, o.symbol, Number(signed.maxNotional), "signed for");
+      if (isRefusal(held)) return held;
+      return this.applyAmend(o, held, r.change, who);
+    }
+    const spend = await this.limit(who.signer, o.venue);
+    if (isRefusal(spend)) return spend;
+    const p = r.p;
+    const line = perOrder(spend, p.maxUsd);
+    if (line) return line;
+    const more = this.growth(o, p.maxUsd, spend.id);
+    if (more <= 1e-9) return this.applyAmend(o, p, r.change, who, spend.id);
+    const now = Date.parse(this.e.host.now());
+    if (this.e.host.policy().mode === "open") {
+      const c = covers(spend, o.venue, micro(more.toFixed(6)), now);
+      if (c) return c;
+      return this.applyAmend(o, p, r.change, who, spend.id);
+    }
+    const worth = cents(p.maxUsd);
+    const extra = cents(more);
+    const c = covers(spend, o.venue, micro(extra.toFixed(2)), now);
+    if (c) return c;
+    const flight = this.e.host.openFlight({ id: slug(who.agent!.name), name: who.agent!.name, code: who.agent!.code }, `change ${o.id}: ${this.words(p)} · real money`);
+    const offer = { payee: o.venueName, payTo: o.symbol, amount: `${o.id} → ${p.side} ${qtyText(p.qty)} ${p.m.base}`, protocol: `change an order · ${this.words(p)}`, network: `${p.side === "buy" ? "costs at most" : "worth about"} ${usd(worth)} · ${usd(extra)} more than now` };
+    const actionHash = keccak256(stringToHex(canonical({ action: who.hash, offer, qty: plain(p.qty), limit: p.limitPrice !== undefined ? plain(p.limitPrice) : "", stop: p.stopPrice !== undefined ? plain(p.stopPrice) : "", worth: worth.toFixed(2) })));
+    const card = this.e.host.raiseCard(flight.no, { account: o.venue, intent: { kind: "trade", symbol: p.m.symbol, side: p.side, qty: p.qty }, usd: extra, reason: `${who.agent!.name} asks to change ${o.id}: ${this.words(p)}`, why: "live", action: a as AgentLiveAmendAction, actionHash, signer: who.signer, expiresAt: new Date(now + 30 * 60_000).toISOString(), offer, approval: spend.id });
+    this.shownAmend.set(card.id, { order: o.id, qty: p.qty, ...(p.limitPrice !== undefined ? { limitPrice: p.limitPrice } : {}), ...(p.stopPrice !== undefined ? { stopPrice: p.stopPrice } : {}), maxUsd: worth });
+    this.e.patchSpend(spend.id, (x) => ({ ...x, reservedMicro: x.reservedMicro + micro(String(extra)) }));
+    this.e.host.log({ kind: "action", venue: o.venue, tool: a.type, signer: who.signer, envelope: who.envelope, outcome: "card", notionalUsd: extra, reason: `${card.id} · change ${o.id}: ${this.words(p)}`, flight: flight.no, intentId: card.id });
+    return { ok: true, kind: "card", pending: true, card, flight: flight.no };
+  }
+
+  /** the owner approved an agent's change: exactly what the card showed, judged again against the agent's limit as it stands */
+  async releaseAmend(card: CardLike, who: { signer: string; agent: AgentKey }): Promise<Outcome> {
+    const a = card.action as AgentLiveAmendAction;
+    const shown = this.shownAmend.get(card.id);
+    this.shownAmend.delete(card.id);
+    if (!shown) return no("E_ACCOUNT_REQUOTE", { message: "this card's change is not known to this run of the account: the agent asks again" });
+    const o = this.changeable(a, { authority: "agent", agent: who.agent });
+    if (isRefusal(o)) return o;
+    const spend = await this.limit(who.signer, o.venue);
+    if (isRefusal(spend)) return spend;
+    const r = await this.amendPlan(o, { qty: plain(shown.qty), limitPrice: shown.limitPrice !== undefined && o.limitPrice !== shown.limitPrice ? plain(shown.limitPrice) : "", stopPrice: shown.stopPrice !== undefined && o.stopPrice !== shown.stopPrice ? plain(shown.stopPrice) : "" });
+    if (isRefusal(r)) return r;
+    const held = this.hold(r.p, o.symbol, r.p.side === "buy" ? shown.maxUsd : r.p.notional, "on the card");
+    if (isRefusal(held)) return held;
+    const line = perOrder(spend, held.maxUsd);
+    if (line) return line;
+    const more = this.growth(o, held.maxUsd, spend.id);
+    const c = more > 0 ? covers(spend, o.venue, micro(more.toFixed(6)), Date.parse(this.e.host.now())) : null;
+    if (c) return c;
+    return this.applyAmend(o, held, r.change, { signer: who.signer, authority: "agent", agent: who.agent }, spend.id);
+  }
+
+  /** the venue's amend, and the order as it stands after it. What it is worth more is counted first (and uncounted if the venue says no);
+   * what it is worth less goes back to its limit */
+  private async applyAmend(o: LiveOrder, p: Plan, change: OrderChange, who: { signer: string; authority: "owner" | "agent"; agent?: AgentKey | undefined; envelope?: Envelope | undefined }, onto = o.approval): Promise<Outcome> {
+    const v = this.money()!.venue(o.venue)!;
+    // moving onto the limit that stands: all of the order is counted there, and what the old limit counted for it goes back to that one
+    const moving = onto !== undefined && onto !== o.approval;
+    const charge = moving ? micro(p.maxUsd.toFixed(6)) : p.maxUsd > o.usd ? micro((p.maxUsd - o.usd).toFixed(6)) : 0;
+    const back = moving ? micro(o.usd.toFixed(6)) : p.maxUsd < o.usd ? micro((o.usd - p.maxUsd).toFixed(6)) : 0;
+    if (onto && charge > 0) this.e.patchSpend(onto, (x) => ({ ...x, spentMicro: x.spentMicro + charge }));
+    const r = await safely(() => v.trader!.amend!(o.ref, o.symbol, change, requestOfOrder(o)), o.venue, o.venueName);
+    if (isRefusal(r)) {
+      if (onto && charge > 0) this.e.patchSpend(onto, (x) => ({ ...x, spentMicro: Math.max(0, x.spentMicro - charge) }));
+      this.e.host.log({ kind: "account-refusal", venue: o.venue, tool: "live amend", code: r.code, reason: r.message, native: r.native, signer: who.signer });
+      return r;
+    }
+    if (o.approval && back > 0) this.e.patchSpend(o.approval, (x) => ({ ...x, spentMicro: Math.max(0, x.spentMicro - back) }));
+    if (moving) o.approval = onto;
+    Object.assign(o, { qty: p.qty, price: p.price, usd: Number(p.maxUsd.toFixed(6)), ...(p.limitPrice !== undefined ? { limitPrice: p.limitPrice } : {}), ...(p.stopPrice !== undefined ? { stopPrice: p.stopPrice } : {}), ...(p.worstPrice !== undefined ? { worstPrice: p.worstPrice } : {}) });
+    this.apply(o, r, "");
+    this.polled.set(o.id, 0);
+    this.e.host.log({ kind: "order", venue: o.venue, tool: "live amend", outcome: o.status, venueOrderId: o.ref, notionalUsd: p.notional, reason: `${o.id} · changed by ${who.authority === "owner" ? "the owner" : "its agent"} · ${this.words(p)}`, signer: who.signer, ...(who.envelope ? { envelope: who.envelope } : {}) });
+    this.giveBack(o);
+    this.line(o);
+    return { ok: true, kind: "order", order: o };
+  }
+
+  /** Close a position — all of it, or some — at a venue. It only shrinks what is held, so it does not count against a limit. The owner's goes at
+   * once; an agent's is an order the owner sees like any other — in Conservative a card, in Aggressive at once inside its per-order line —
+   * and only where its trading limit lets it trade (a position the agent closes may be the owner's own). The venue's own close where it has
+   * one; otherwise a reduce-only market order, and only where the market takes reduce-only: a close that could open a position the other way
+   * is not sent */
+  async close(a: CloseFields | AgentLiveCloseAction, who: { signer: string; authority: "owner" | "agent"; agent?: AgentKey | undefined; envelope?: Envelope | undefined; hash: Hex; card?: string | undefined }): Promise<Outcome> {
+    const v = this.money()?.venue(text(a.venue));
+    if (!v) return no("E_WALLET_ACCOUNT_UNKNOWN", { venue: a.venue, message: `"${a.venue}" is not a venue connected live` });
+    if (!v.trader?.positions) return no("E_VENUE_RAIL_CLOSED", { venue: v.id, message: `${v.name} lists no positions to the account: sell what is held as an order` });
+    let spend: SpendApproval | undefined;
+    if (who.authority === "agent") {
+      const s = await this.limit(who.signer, v.id);
+      if (isRefusal(s)) return s;
+      spend = s;
+    }
+    const list = await safely(() => v.trader!.positions!(), v.id, v.name, STATUS_MS);
+    if (isRefusal(list)) return list;
+    const pos = list.find((x) => x.symbol === text(a.symbol));
+    if (!pos || !(pos.qty > 0)) return no("E_ACCOUNT_BAD_ACTION", { venue: v.id, message: `${v.name} shows no position in ${a.symbol}` });
+    const qty = text(a.qty).trim() === "" ? pos.qty : Number(a.qty);
+    if ((text(a.qty).trim() !== "" && !DEC.test(text(a.qty).trim())) || !(qty > 0) || qty > pos.qty + 1e-12) return no("E_ACCOUNT_BAD_ACTION", { venue: v.id, message: `a close is more than zero and at most the ${qtyText(pos.qty)} held` });
+    const native = v.trader.close;
+    // without the venue's own close: reduce-only where the market takes it; a plain sell where a sell can only sell what is held; else nothing
+    const mk = native ? undefined : await safely(() => v.trader!.market(pos.symbol), v.id, v.name, STATUS_MS);
+    if (mk && isRefusal(mk)) return mk;
+    const plainSell = !!mk && !mk.reduceOnly && !!mk.sellsReduce && pos.side === "long";
+    if (mk && !mk.reduceOnly && !plainSell) return no("E_VENUE_ORDER_INVALID", { venue: v.id, message: `${v.name} takes no reduce-only order in ${mk.name}, and has no close of its own: close it at the venue, so that nothing opens the other way` });
+    const p = await this.plan({ venue: v.id, symbol: pos.symbol, side: pos.side === "long" ? "sell" : "buy", orderType: "market", qty: plain(qty), usd: "", limitPrice: "", stopPrice: "", tif: "", postOnly: "", reduceOnly: native || plainSell ? "" : "true" });
+    if (isRefusal(p)) return p;
+    if (spend && who.card === undefined && !(this.e.host.policy().mode === "open" && micro(p.maxUsd.toFixed(6)) <= spend.perPaymentMicro)) return this.closeCard(a, p, qty, who);
+    return this.place(p, { signer: who.signer, authority: who.authority, ...(who.agent ? { agent: who.agent.address } : {}), action: who.hash, ...(who.envelope ? { envelope: who.envelope } : {}), ...(who.card ? { card: who.card } : {}) }, native ? (clientId) => native.call(v.trader, pos.symbol, qty, clientId) : undefined);
+  }
+
+  /** an agent's close the owner answers: what it closes and what that is worth, shown on a card. It counts against no limit, so the card holds
+   * none of one */
+  private closeCard(a: CloseFields | AgentLiveCloseAction, p: Plan, qty: number, who: { signer: string; agent?: AgentKey | undefined; envelope?: Envelope | undefined; hash: Hex }): Outcome {
+    const agent = who.agent!;
+    const now = Date.parse(this.e.host.now());
+    const flight = this.e.host.openFlight({ id: slug(agent.name), name: agent.name, code: agent.code }, `close ${qtyText(qty)} ${p.m.base} of ${p.m.name} · real money`);
+    const worth = cents(p.maxUsd);
+    const offer = { payee: p.v.name, payTo: p.m.symbol, amount: `close · ${p.side} ${qtyText(qty)} ${p.m.base}`, protocol: "real order · a close at market", network: `${p.side === "buy" ? "costs at most" : "worth about"} ${usd(worth)} · it only shrinks what is held` };
+    // the owner's answer signs the card's hash: the agent's request AND the market and size the owner is shown
+    const actionHash = keccak256(stringToHex(canonical({ action: who.hash, offer, symbol: p.m.symbol, qty: plain(qty), worth: worth.toFixed(2) })));
+    const card = this.e.host.raiseCard(flight.no, { account: p.v.id, intent: { kind: "trade", symbol: p.m.symbol, side: p.side, qty }, usd: worth, reason: `${agent.name} asks to close ${qtyText(qty)} ${p.m.base} of ${p.m.name}`, why: "live", action: a as AgentLiveCloseAction, actionHash, signer: who.signer, expiresAt: new Date(now + 30 * 60_000).toISOString(), offer });
+    this.shownClose.set(card.id, { symbol: p.m.symbol, qty });
+    this.e.host.log({ kind: "action", venue: p.v.id, tool: "agentLiveClose", signer: who.signer, ...(who.envelope ? { envelope: who.envelope } : {}), outcome: "card", notionalUsd: worth, reason: `${card.id} · close ${qtyText(qty)} of ${p.m.name}`, flight: flight.no, intentId: card.id });
+    return { ok: true, kind: "card", pending: true, card, flight: flight.no };
+  }
+
+  /** the owner approved an agent's close: exactly the size the card showed, against what is held then (never more than that) */
+  async releaseClose(card: CardLike, who: { signer: string; agent: AgentKey }): Promise<Outcome> {
+    const a = card.action as AgentLiveCloseAction;
+    const shown = this.shownClose.get(card.id);
+    this.shownClose.delete(card.id);
+    if (!shown) return no("E_ACCOUNT_REQUOTE", { message: "this card's close is not known to this run of the account: the agent asks again" });
+    return this.close({ venue: a.venue, symbol: shown.symbol, qty: plain(shown.qty) }, { signer: who.signer, authority: "agent", agent: who.agent, hash: card.actionHash!, card: card.id });
+  }
+
+  /** A perpetual's leverage (and margin mode). The owner: up to what the venue takes. An agent: where its trading limit lets it trade, up to
+   * the most the owner signed for agents (1x unless the owner signed more) */
+  async leverage(a: LeverageFields, who: { signer: string; authority: "owner" | "agent"; envelope: Envelope }): Promise<Outcome> {
+    const v = this.money()?.venue(text(a.venue));
+    if (!v) return no("E_WALLET_ACCOUNT_UNKNOWN", { venue: a.venue, message: `"${a.venue}" is not a venue connected live` });
+    if (!v.trader?.setLeverage) return no("E_VENUE_RAIL_CLOSED", { venue: v.id, message: `${v.name} sets no leverage from the account` });
+    const lev = Number(a.leverage);
+    if (!/^\d{1,3}$/.test(text(a.leverage)) || !(lev >= 1)) return no("E_ACCOUNT_BAD_ACTION", { message: "leverage is a whole number, 1 or more" });
+    if (text(a.marginMode) !== "" && a.marginMode !== "cross" && a.marginMode !== "isolated") return no("E_ACCOUNT_BAD_ACTION", { message: 'a margin mode is "cross" or "isolated"' });
+    const m = this.money()!;
+    if (!m.writes().on) return no("E_WALLET_LIVE_WRITES_OFF", { message: `this server changes nothing at a venue: it was started read-only. ${m.writes().turnOn}` });
+    const mk = await safely(() => v.trader!.market(text(a.symbol)), v.id, v.name, STATUS_MS);
+    if (isRefusal(mk)) return mk;
+    if (mk.kind !== "perp" && mk.kind !== "future") return no("E_ACCOUNT_BAD_ACTION", { venue: v.id, message: `leverage is set on a perpetual or a future; ${mk.name} is ${mk.kind}` });
+    if (mk.maxLeverage !== undefined && lev > mk.maxLeverage) return no("E_VENUE_ORDER_INVALID", { venue: v.id, message: `${v.name} takes at most ${mk.maxLeverage}x in ${mk.name}` });
+    if (who.authority === "agent") {
+      const spend = await this.limit(who.signer, v.id);
+      if (isRefusal(spend)) return spend;
+      const cap = this.e.host.policy().maxLeverage ?? 1;
+      if (lev > cap) return no("E_ACCOUNT_LIMIT", { venue: v.id, message: `the owner lets agents use at most ${cap}x leverage: ${lev}x is the owner's to set, or to allow`, detail: { maxLeverage: cap } });
+    }
+    const r = await safely(() => v.trader!.setLeverage!(mk.symbol, lev, (text(a.marginMode) || undefined) as "cross" | "isolated" | undefined), v.id, v.name);
+    if (isRefusal(r)) {
+      this.e.host.log({ kind: "account-refusal", venue: v.id, tool: "live leverage", code: r.code, reason: r.message, native: r.native, signer: who.signer });
+      return r;
+    }
+    this.e.host.log({ kind: "action", venue: v.id, tool: "live leverage", signer: who.signer, envelope: who.envelope, outcome: "ok", reason: `${mk.name} at ${v.name}: ${r.leverage}x${r.marginMode ? `, ${r.marginMode} margin` : ""}`, native: r.native });
+    return { ok: true, kind: "result", result: { venue: v.id, symbol: mk.symbol, leverage: r.leverage, ...(r.marginMode ? { marginMode: r.marginMode } : {}) } };
   }
 
   /** an order still open at a venue: a venue with one is not disconnected until it is done */
@@ -617,3 +913,23 @@ export interface OrderQuote {
 }
 
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+
+/** an agent's order is held to its limit's per-order line as it stands after any change: a change cannot grow one order past what one order may be */
+function perOrder(spend: SpendApproval, maxUsd: number): Refusal | null {
+  return micro(maxUsd.toFixed(6)) > spend.perPaymentMicro ? no("E_MANDATE_PER_ORDER_CAP", { message: `the order would be worth ${usd(maxUsd)}, more than the ${usd(spend.perPaymentMicro / 1e6)} an order the trading limit allows: a change cannot grow one order past it`, detail: { approval: spend.id, perPayment: spend.perPaymentMicro / 1e6, amount: Number(maxUsd.toFixed(6)) } }) : null;
+}
+
+/** an order's fields as the door reads them, from an owner's or an agent's instruction (the agent's optional ones absent = "") */
+function fieldsOf(a: { venue: string; symbol: string; side: string; orderType: string; qty: string; usd?: string | undefined; limitPrice: string; stopPrice?: string | undefined; tif?: string | undefined; postOnly?: string | undefined; reduceOnly?: string | undefined }): Fields {
+  return { venue: text(a.venue), symbol: text(a.symbol), side: text(a.side), orderType: text(a.orderType), qty: text(a.qty), usd: text(a.usd), limitPrice: text(a.limitPrice), stopPrice: text(a.stopPrice), tif: text(a.tif), postOnly: text(a.postOnly), reduceOnly: text(a.reduceOnly) };
+}
+
+/** what the venue is sent for a plan */
+function requestOf(p: Plan, clientId: string): OrderRequest {
+  return { symbol: p.m.symbol, side: p.side, type: p.type, qty: p.qty, ...(p.limitPrice !== undefined ? { limitPrice: p.limitPrice } : {}), ...(p.worstPrice !== undefined ? { worstPrice: p.worstPrice } : {}), ...(p.stopPrice !== undefined ? { stopPrice: p.stopPrice } : {}), ...(p.tif ? { tif: p.tif } : {}), ...(p.postOnly ? { postOnly: true } : {}), ...(p.reduceOnly ? { reduceOnly: true } : {}), clientId };
+}
+
+/** an order as it was placed, for a venue asked to change or rebuild it */
+function requestOfOrder(o: LiveOrder): OrderRequest {
+  return { symbol: o.symbol, side: o.side, type: o.type, qty: o.qty, ...(o.limitPrice !== undefined ? { limitPrice: o.limitPrice } : {}), ...(o.worstPrice !== undefined ? { worstPrice: o.worstPrice } : {}), ...(o.stopPrice !== undefined ? { stopPrice: o.stopPrice } : {}), ...(o.tif ? { tif: o.tif } : {}), ...(o.postOnly ? { postOnly: true } : {}), ...(o.reduceOnly ? { reduceOnly: true } : {}), clientId: o.clientId };
+}

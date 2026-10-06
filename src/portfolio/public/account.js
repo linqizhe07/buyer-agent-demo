@@ -99,11 +99,38 @@ function render() {
   } else $("banner").textContent = Owner.role === "pending" ? "This browser can look but not sign. Add it under Devices from your other browser." : owner ? "" : "This browser can't make a signing key, so it can only look.";
   $("flash").className = `msg ${flash ? "no" : said ? "ok" : ""}`;
   $("flash").innerHTML = flash ? esc(flash) : sayHtml(said);
+  renderDial(L, owner);
+  renderRestored();
   renderWaiting(owner);
   renderAccounts(L, owner);
+  renderPositions(L, owner);
   renderStatement(owner);
   renderAgents(L, owner);
+  renderWallets(owner);
   renderDevices(owner);
+}
+
+/* the agents' session and the most leverage they may set: what the owner opens to agents beyond their limits */
+function renderDial(L, owner) {
+  const d = A.dial;
+  if (!d || !writesOn()) return void ($("dial").innerHTML = "");
+  const lev = L.some((v) => v.trade && v.trade.leverage);
+  $("dial").innerHTML = `${d.sessionEnded ? `Agents' session ended${owner ? ' · <button type="button" class="link" id="session-new">Start a new one</button>' : ""}` : `Agents may act until ${esc(nyDay(d.sessionExpiresAt))}`}${lev ? ` · their leverage up to ${esc(String(d.maxLeverage))}x${owner ? ' <button type="button" class="link dim" id="lev-cap">Change</button>' : ""}` : ""}`;
+  if ($("session-new")) $("session-new").addEventListener("click", () => own({ type: "setPolicy", change: "session", value: "30d" }));
+  if ($("lev-cap")) $("lev-cap").addEventListener("click", () => {
+    const v = prompt("The most leverage an agent may set on a perpetual (1 = none):", String(d.maxLeverage));
+    if (v && /^\d{1,3}$/.test(v.trim())) own({ type: "setPolicy", change: "maxLeverage", value: v.trim() });
+  });
+}
+
+/* a restart: what the account brought back from its ledgers, and what it could not */
+function renderRestored() {
+  const r = A.restore;
+  if (!r) return void ($("restored").hidden = true);
+  const back = r.venues.filter((v) => v.ok);
+  const missed = r.venues.filter((v) => !v.ok);
+  $("restored").hidden = false;
+  $("restored").innerHTML = `${r.state === "restoring" ? "Restoring after a restart…" : `Continued after a restart: ${back.length} of ${plural(r.venues.length, "account")} connected again`}${r.orders + r.payments ? ` · ${plural(r.orders + r.payments, "transaction")} followed again` : ""}${missed.length || r.skipped.length ? `<details class="inl"><summary>details</summary>${[...missed.filter((v) => v.why !== "connecting again").map((v) => `${nameOf(v.venue) || v.venue}: ${v.why}`), ...r.skipped].map((x) => `<div>${esc(x)}</div>`).join("")}</details>` : ""}`;
 }
 
 /* what the money is in: the statement's bar, from what the venues say they hold */
@@ -200,11 +227,13 @@ function renderOpen(owner) {
   if (!orders.length && !wallet.length) return void ($("open-now").innerHTML = "");
   const orderRow = (o) => {
     const waiting = o.walletTxs && !o.ref;
-    return `<tr><td>${o.side === "buy" ? "Buy" : "Sell"} ${esc(qtyOf(o.qty))} ${esc(o.contractSize ? "contracts" : o.base)} · ${esc(o.venueName)}<span class="why">${esc([`${nyDay(o.at)} ${nyTime(o.at)}`, byOf(o), o.type === "limit" ? `limit ${o.limitPrice}` : "market", o.note].join(" · "))}</span></td><td class="r num2">${fine(o.qty * o.price * (o.contractSize || 1))}</td><td>${owner ? `${waiting ? `<button type="button" class="link" data-order-send="${esc(o.id)}"${INFLIGHT.has(o.clientId) ? " disabled" : ""}>${o.reported ? "Report again" : "Send from wallet…"}</button> · ` : ""}<button type="button" class="link dim" data-cancel="${esc(o.id)}" data-venue="${esc(o.venue)}">Cancel</button>` : `<span class="st pending">${o.canceling ? "Canceling" : "Open"}</span>`}</td></tr>`;
+    const amendable = !waiting && !o.canceling && ((A.venues.find((x) => x.id === o.venue) || {}).trade || {}).amend;
+    return `<tr><td>${o.side === "buy" ? "Buy" : "Sell"} ${esc(qtyOf(o.qty))} ${esc(o.contractSize ? "contracts" : o.base)} · ${esc(o.venueName)}<span class="why">${esc([`${nyDay(o.at)} ${nyTime(o.at)}`, byOf(o), typeText(o), o.note].join(" · "))}</span></td><td class="r num2">${fine(o.qty * o.price * (o.contractSize || 1))}</td><td>${owner ? `${waiting ? `<button type="button" class="link" data-order-send="${esc(o.id)}"${INFLIGHT.has(o.clientId) ? " disabled" : ""}>${o.reported ? "Report again" : "Send from wallet…"}</button> · ` : ""}${amendable ? `<button type="button" class="link" data-amend="${esc(o.id)}">Change…</button> · ` : ""}<button type="button" class="link dim" data-cancel="${esc(o.id)}" data-venue="${esc(o.venue)}">Cancel</button>` : `<span class="st pending">${o.canceling ? "Canceling" : "Open"}</span>`}</td></tr>`;
   };
   const payRow = (p) => `<tr><td>${esc(whatOf(p))}<span class="why">${esc(`${nyDay(p.at)} ${nyTime(p.at)} · ${byOf(p)}${p.live.sendBy && !p.live.reported ? ` · send by ${nyTime(p.live.sendBy)}` : ""}`)}</span></td><td class="r num2">${fine(p.amountUsd)}</td><td>${owner ? `<button type="button" class="link" data-wallet-send="${esc(p.id)}"${INFLIGHT.has(`${p.id}@${p.at}`) ? " disabled" : ""}>${p.live.reported ? "Report again" : "Send from wallet…"}</button>` : '<span class="st pending">Waiting for your wallet</span>'}</td></tr>`;
   $("open-now").innerHTML = `<div class="sub-h">Under way</div><table class="open-t"><tbody>${orders.map(orderRow).join("")}${wallet.map(payRow).join("")}</tbody></table>`;
   for (const b of $("open-now").querySelectorAll("button[data-cancel]")) b.addEventListener("click", () => own({ type: "liveCancel", venue: b.dataset.venue, order: b.dataset.cancel }));
+  for (const b of $("open-now").querySelectorAll("button[data-amend]")) b.addEventListener("click", () => openAmend(A.orders.find((x) => x.id === b.dataset.amend)));
   const later = (fn) => async (b) => {
     b.disabled = true;
     try {
@@ -266,6 +295,124 @@ function renderStatement(owner) {
   });
 }
 
+/* an order's type in words: market, a limit, a stop and where it triggers */
+const typeText = (o) => (o.type === "limit" ? `limit ${px(o.limitPrice)}` : o.type === "stop" ? `stop at ${px(o.stopPrice)}` : o.type === "stop_limit" ? `stop ${px(o.stopPrice)}, limit ${px(o.limitPrice)}` : "market") + (o.tif ? ` · ${o.tif.toUpperCase()}` : "") + (o.postOnly ? " · post-only" : "") + (o.reduceOnly ? " · reduce-only" : "");
+
+/** change an open order in place: a new size, limit or stop. The account values it afresh and shows what it would be worth; your signature changes it */
+function openAmend(o) {
+  if (!o) return;
+  const limited = o.type === "limit" || o.type === "stop_limit";
+  const stopped = o.type === "stop" || o.type === "stop_limit";
+  $("modal-form").innerHTML = `<h2>Change ${esc(o.id)} · ${esc(o.venueName)}</h2><div class="dim small">${esc(`${o.side === "buy" ? "Buy" : "Sell"} ${qtyOf(o.qty)} ${o.base} · ${typeText(o)}`)}. Leave a field empty to keep it.</div>
+    <div class="row">${field("Size", `<input name="qty" inputmode="decimal" placeholder="${esc(String(o.qty))}" autocomplete="off" />`)}${stopped ? field("Stop price", `<input name="stopPrice" inputmode="decimal" placeholder="${esc(String(o.stopPrice))}" autocomplete="off" />`) : ""}${limited ? field("Limit price", `<input name="limitPrice" inputmode="decimal" placeholder="${esc(String(o.limitPrice))}" autocomplete="off" />`) : ""}</div>
+    <div class="quote real" id="quote"><span class="dim">Type what changes.</span></div>
+    <details id="signs" hidden><summary>What you sign</summary><pre id="signs-pre"></pre></details>
+    <div class="msg" id="modal-msg"></div>
+    <div class="end"><button type="button" id="modal-cancel">Cancel</button><button type="submit" class="ink" id="modal-go" disabled>Sign and change</button></div>`;
+  const form = $("modal-form");
+  let prepared = null;
+  let timer = 0;
+  let seq = 0;
+  const quote = async () => {
+    const my = ++seq;
+    prepared = null;
+    $("modal-go").disabled = true;
+    const f = formOf("modal-form");
+    const d = { type: "liveAmend", venue: o.venue, order: o.id, qty: String(f.qty || "").trim(), limitPrice: String(f.limitPrice || "").trim(), stopPrice: String(f.stopPrice || "").trim() };
+    if (!d.qty && !d.limitPrice && !d.stopPrice) return void ($("quote").innerHTML = '<span class="dim">Type what changes.</span>');
+    const r = await Owner.prepare(d);
+    if (my !== seq) return;
+    if (r.status !== 200) return void ($("quote").innerHTML = `<div class="msg no">${esc(Owner.why(r))}</div>`);
+    prepared = r.body;
+    const q = prepared.quote.order;
+    $("quote").innerHTML = `<div class="big"><span>${esc(q.words)}</span><span>≈ ${money(q.notionalUsd)}</span></div><div class="path">${o.side === "buy" ? `costs at most ${money(q.maxUsd)}` : `worth about ${money(q.maxUsd)}`} · your signature is good for 10 minutes</div>`;
+    $("signs-pre").textContent = prepared.shown.map((x) => `${x.name}: ${x.value}`).join("\n");
+    $("signs").hidden = false;
+    $("modal-go").disabled = Owner.role !== "owner";
+  };
+  for (const el of form.querySelectorAll("input")) el.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(quote, 350); });
+  $("modal-cancel").addEventListener("click", () => $("modal").close());
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    if (!prepared) return;
+    $("modal-go").disabled = true;
+    const r = await Owner.submit(prepared);
+    if (r.status >= 400 || (r.body && r.body.ok === false)) {
+      $("modal-msg").className = "msg no";
+      $("modal-msg").textContent = Owner.why(r) || "Refused";
+      return void quote();
+    }
+    said = `Changed: ${r.body.order.id} · ${r.body.order.note}`;
+    $("modal").close();
+    await load();
+  };
+  if (!$("modal").open) $("modal").showModal();
+  form.elements.qty.focus();
+}
+
+// ---- positions --------------------------------------------------------------------------
+
+/* what each venue that lists positions holds: asked when the page loads (the server keeps an answer fifteen seconds) */
+const POS = new Map();
+function renderPositions(L, owner) {
+  const venues = L.filter((v) => v.trade && v.trade.positions);
+  $("positions-sec").hidden = !venues.length;
+  if (!venues.length) return;
+  for (const v of venues) {
+    fetch(`/api/account/positions?${new URLSearchParams({ venue: v.id })}`).then((r) => r.json()).then((r) => {
+      const before = JSON.stringify(POS.get(v.id) || null);
+      POS.set(v.id, r.ok ? r.positions : { error: (r.refusal && r.refusal.message) || "no answer" });
+      if (JSON.stringify(POS.get(v.id)) !== before) drawPositions(venues, owner);
+    }).catch(() => {});
+  }
+  drawPositions(venues, owner);
+}
+function drawPositions(venues, owner) {
+  const rows = venues.flatMap((v) => {
+    const p = POS.get(v.id);
+    if (!p) return [`<tr><td>${esc(v.name)}</td><td colspan="3" class="dim">Asking…</td></tr>`];
+    if (p.error) return [`<tr><td>${esc(v.name)}</td><td colspan="3" class="dim">${esc(p.error)}</td></tr>`];
+    return p.filter((x) => x.qty > 0).map((x) => `<tr><td>${esc(x.name)}<span class="why">${esc(v.name)} · ${x.side === "long" ? "long" : "short"} ${esc(qtyOf(x.qty))}${x.leverage ? ` · ${x.leverage}x` : ""}${x.entryPrice ? ` · entry ${px(x.entryPrice)}` : ""}${x.markPrice ? ` · mark ${px(x.markPrice)}` : ""}${x.liquidationPrice ? ` · liquidation ${px(x.liquidationPrice)}` : ""}</span></td><td class="r num2">${x.usd !== undefined ? money(x.usd) : "—"}</td><td class="r num2 ${x.unrealizedUsd > 0 ? "up" : x.unrealizedUsd < 0 ? "down" : ""}">${x.unrealizedUsd !== undefined ? `${x.unrealizedUsd >= 0 ? "+" : "−"}${money(Math.abs(x.unrealizedUsd))}` : ""}</td><td class="r">${owner && canTrade(v) ? `<button type="button" class="link" data-close="${esc(x.symbol)}" data-venue="${esc(v.id)}">Close</button>` : ""}</td></tr>`);
+  });
+  $("positions").innerHTML = rows.length ? `<table class="pos-t"><tbody>${rows.join("")}</tbody></table>` : '<p class="empty">Nothing held in positions.</p>';
+  for (const b of $("positions").querySelectorAll("button[data-close]")) b.addEventListener("click", () => {
+    if (confirm(`Close the whole position in ${b.dataset.close}? It is sold (or bought back) at market.`)) own({ type: "liveClose", venue: b.dataset.venue, symbol: b.dataset.close, qty: "" }, async () => POS.delete(b.dataset.venue));
+  });
+}
+
+// ---- agent wallets ------------------------------------------------------------------------
+
+/** Wallets the account holds the key of, so that an agent can pay for things without you there: made by your signature, filled from your own
+ * accounts, paid from inside the payees limit you give the agent, and emptied back to you */
+function renderWallets(owner) {
+  const subs = A.subAccounts || [];
+  const live = (s) => A.venues.find((v) => v.id === `agent-${slug(s.name)}`);
+  const sources = connected().filter((v) => canMove(v) && !v.id.startsWith("agent-"));
+  const rows = subs.map((s) => {
+    const v = live(s);
+    const coins = v ? (v.holdings || []).filter((h) => h.amount > 0) : [];
+    const gas = coins.filter((h) => h.class !== "stable" && h.class !== "cash");
+    return `<tr><td>${esc(s.name)}<span class="why">pays for ${esc(s.agentName)} · <span class="mono">${esc(short(s.address))}</span> <button type="button" class="link dim" data-copy="${esc(s.address)}">Copy</button></span></td><td class="r num2">${v ? money(v.usd) : "—"}<span class="why">${esc(coins.filter((h) => !gas.includes(h)).map((h) => `${h.asset} ${qtyOf(h.amount)}${h.note ? ` on ${h.note}` : ""}`).join(" · ") || "empty")}${gas.length ? ` · gas ${esc(gas.map((h) => `${qtyOf(h.amount)} ${h.asset}${h.note ? ` (${h.note})` : ""}`).join(", "))}` : " · no gas yet"}</span></td><td class="r">${owner && v ? `${sources.length ? `<button type="button" class="link" data-topup="${esc(v.id)}">Top up…</button> · ` : ""}<button type="button" class="link dim" data-takeback="${esc(v.id)}">Take back…</button>` : ""}</td></tr>`;
+  }).join("");
+  const keys = A.keys.filter((k) => k.status === "ok");
+  const form = owner && writesOn() && keys.length ? `<form class="add" id="wallet-form">${field("Name", '<input class="m" name="name" placeholder="research" maxlength="16" />')}${field("For agent", select("agent", keys.map((k) => [k.address, k.name])))}${field("Keep up to", '<input class="s" name="float" inputmode="decimal" placeholder="50" />')}<button type="submit" class="ink">Make it</button></form>` : "";
+  $("wallets").innerHTML = `${subs.length ? `<table><tbody>${rows}</tbody></table>` : `<p class="empty">${keys.length ? "No agent wallet yet." : "Let an agent in first: a wallet pays for one agent."}</p>`}${form}<p class="dim small hint">The account holds its key; the agent never sees it. It pays x402 and MPP charges in USDC (Base, Arbitrum, Optimism, Polygon, Ethereum) inside the payees limit you give the agent under Agents. Sending money back out pays a little gas in that chain's own coin.</p>`;
+  for (const b of $("wallets").querySelectorAll("button[data-copy]")) b.addEventListener("click", () => copyText(b.dataset.copy, b));
+  for (const b of $("wallets").querySelectorAll("button[data-takeback]")) b.addEventListener("click", () => openLiveMove(b.dataset.takeback));
+  for (const b of $("wallets").querySelectorAll("button[data-topup]")) b.addEventListener("click", () => {
+    const from = sources.length === 1 ? sources[0].id : prompt(`Top up from which account? ${sources.map((x) => `${x.id} (${x.name})`).join(", ")}`, sources[0].id);
+    if (from && sources.some((x) => x.id === from)) openLiveMove(from, { to: b.dataset.topup });
+  });
+  const f = $("wallet-form");
+  if (f) f.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const v = Object.fromEntries(new FormData(f).entries());
+    const name = String(v.name || "").trim();
+    if (!/^[A-Za-z0-9][A-Za-z0-9 _-]{0,15}$/.test(name) || !(Number(v.float) > 0)) return void ((flash = "An agent wallet needs a name (letters and digits, up to 16) and how much it keeps at most."), render());
+    own({ type: "createSubAccount", name, agent: v.agent, float: String(v.float).trim() });
+  });
+}
+
 const whatOf = (p) => (p.kind === "swap" ? `Swap at ${nameOf(p.from)} · ${p.sourceToken} → ${p.token}` : p.kind === "transfer" && p.from === p.to ? `Transfer at ${nameOf(p.from)} · ${p.legs[0].fromLedger} → ${p.legs[0].toLedger}` : `${p.kind[0].toUpperCase() + p.kind.slice(1)} · ${nameOf(p.from)} → ${nameOf(p.to)}${p.live && p.live.network ? ` · ${p.live.network}` : ""}`);
 /* who did it: you, or an agent — on your yes (Conservative), or inside its limit (Aggressive) */
 const byOf = (p) => (p.authority !== "agent" ? "You" : `${keyName(p.agent)}, ${p.card ? "approved by you" : "inside its limit"}`);
@@ -292,14 +439,16 @@ function renderAgents(L, owner) {
   const rows = keys.map((k) => {
     const t = limitOf(k, "trade");
     const m = limitOf(k, "venues");
-    const s = t || m;
-    const where = t ? `trades at ${t.allow.map(nameOf).join(", ")}${m ? " · moves money too" : ""}` : m ? `moves money between ${m.allow.map(nameOf).join(", ")}` : "";
-    const limit = s ? `${fine(s.spentUsd)} of ${fine(s.budgetUsd)} used · up to ${fine(s.perPaymentUsd)} ${t ? "an order" : "a move"}<span class="why">${esc(where)}${s.reservedUsd ? ` · ${fine(s.reservedUsd)} waiting` : ""}${s.expired ? " · limit expired" : ` · until ${nyDay(s.validUntil)}`}</span>` : '<span class="dim">No limit yet: it can do nothing</span>';
+    const y = limitOf(k, "payees");
+    const s = t || m || y;
+    const pays = y ? `pays ${y.allow.includes("*") ? "any payee" : y.allow.join(", ")} up to ${fine(y.perPaymentUsd)} each (${fine(y.spentUsd)} of ${fine(y.budgetUsd)})` : "";
+    const where = [t ? `trades at ${t.allow.map(nameOf).join(", ")}` : "", m ? `moves money between ${m.allow.map(nameOf).join(", ")}` : "", t || m ? pays : y ? `pays ${y.allow.includes("*") ? "any payee" : y.allow.join(", ")}` : ""].filter(Boolean).join(" · ");
+    const limit = s ? `${fine(s.spentUsd)} of ${fine(s.budgetUsd)} used · up to ${fine(s.perPaymentUsd)} ${t ? "an order" : m ? "a move" : "a payment"}<span class="why">${esc(where)}${s.reservedUsd ? ` · ${fine(s.reservedUsd)} waiting` : ""}${s.expired ? " · limit expired" : ` · until ${nyDay(s.validUntil)}`}</span>` : '<span class="dim">No limit yet: it can do nothing</span>';
     return `<tr><td>${esc(k.name)}<span class="why mono">${esc(short(k.address))}${k.status === "expired" ? " · expired" : ` · until ${nyDay(k.validUntil)}`}</span></td><td>${limit}</td><td class="r">${owner && k.status === "ok" ? `<button type="button" class="link dim" data-limit="${esc(k.address)}">Change limit</button> · <button type="button" class="link dim" data-revoke="${esc(k.name)}">Revoke</button>` : ""}</td></tr>`;
   }).join("");
   const T = L.filter(canTrade);
   const M = L.filter(canMove);
-  const form = owner && A.connectLive ? `<form class="add" id="agent-form">${field("Agent", select("agent", [["", "New agent…"], ...keys.filter((k) => k.status === "ok").map((k) => [k.address, k.name])]))}<span class="newonly">${field("Name", '<input class="m" name="name" placeholder="Claude Code" maxlength="32" />')}${field("Key address", '<input class="l" name="address" placeholder="0x…" pattern="0x[0-9a-fA-F]{40}" />')}</span>${T.length ? `<fieldset class="chk"><legend>May trade at</legend>${T.map((v) => `<label><input type="checkbox" name="allow" value="${esc(v.id)}" checked /> ${esc(v.name)}</label>`).join("")}${M.length > 1 ? '<label class="also"><input type="checkbox" name="move" /> and move money between my accounts</label>' : ""}</fieldset>${field("Per order", '<input class="s" name="perPayment" inputmode="decimal" placeholder="25" />')}${field("Budget", '<input class="s" name="budget" inputmode="decimal" placeholder="100" />')}` : ""}${field("For", select("days", [["1", "1 day"], ["7", "7 days"], ["30", "30 days"], ["90", "90 days"]], "30"))}<button type="submit" class="ink">Save</button></form><p class="dim small hint">${T.length ? "An agent trades only inside its limit. Conservative: each order waits for you. Aggressive: it goes at once." : "Connect an account that trades to give an agent a limit."}</p>` : "";
+  const form = owner && A.connectLive ? `<form class="add" id="agent-form">${field("Agent", select("agent", [["", "New agent…"], ...keys.filter((k) => k.status === "ok").map((k) => [k.address, k.name])]))}<span class="newonly">${field("Name", '<input class="m" name="name" placeholder="Claude Code" maxlength="32" />')}${field("Key address", '<input class="l" name="address" placeholder="0x…" pattern="0x[0-9a-fA-F]{40}" />')}</span>${T.length ? `<fieldset class="chk"><legend>May trade at</legend>${T.map((v) => `<label><input type="checkbox" name="allow" value="${esc(v.id)}" checked /> ${esc(v.name)}</label>`).join("")}${M.length > 1 ? '<label class="also"><input type="checkbox" name="move" /> and move money between my accounts</label>' : ""}</fieldset>${field("Per order", '<input class="s" name="perPayment" inputmode="decimal" placeholder="25" />')}${field("Budget", '<input class="s" name="budget" inputmode="decimal" placeholder="100" />')}` : ""}<details class="pay"${A.spend.some((x) => x.scope === "payees") ? " open" : ""}><summary>Payments from an agent wallet</summary><div class="row">${field("May pay", '<input class="l" name="payees" placeholder="api.example.com, data.example.com" />')}<label class="chk1"><input type="checkbox" name="anyPayee" /> any payee</label></div><div class="row">${field("Per payment", '<input class="s" name="payPer" inputmode="decimal" placeholder="1" />')}${field("Budget", '<input class="s" name="payBudget" inputmode="decimal" placeholder="20" />')}</div></details>${field("For", select("days", [["1", "1 day"], ["7", "7 days"], ["30", "30 days"], ["90", "90 days"]], "30"))}<button type="button" class="link" id="everything">Everything</button><button type="submit" class="ink">Save</button></form><p class="dim small hint">${T.length ? "An agent trades only inside its limit. Conservative: each order waits for you. Aggressive: it goes at once." : "Connect an account that trades to give an agent a limit."}</p>` : "";
   $("agents").innerHTML = `${keys.length || asking ? `<table><tbody>${asking}${rows}</tbody></table>` : '<p class="empty">No agents yet.</p>'}${form}`;
   const f = $("agent-form");
   if (!f) return;
@@ -311,6 +460,13 @@ function renderAgents(L, owner) {
   };
   f.elements.agent.addEventListener("change", sync);
   sync();
+  // the widest an agent can be let in: every account it can trade at, money between all of them, any payee — you still type the amounts
+  if ($("everything")) $("everything").addEventListener("click", () => {
+    for (const el of f.querySelectorAll('input[name="allow"]')) el.checked = true;
+    if (f.elements.move) f.elements.move.checked = true;
+    if (f.elements.anyPayee) { f.elements.anyPayee.checked = true; f.querySelector("details.pay").open = true; }
+    (f.elements.perPayment || f.elements.payPer).focus();
+  });
   for (const b of $("agents").querySelectorAll("button[data-fill]")) b.addEventListener("click", () => { f.elements.agent.value = ""; sync(); f.elements.address.value = b.dataset.fill; f.elements.name.focus(); });
   for (const b of $("agents").querySelectorAll("button[data-limit]")) b.addEventListener("click", () => { f.elements.agent.value = b.dataset.limit; sync(); if (f.elements.perPayment) f.elements.perPayment.focus(); });
   for (const b of $("agents").querySelectorAll("button[data-revoke]")) b.addEventListener("click", () => own({ type: "approveAgent", agentAddress: ZERO, agentName: b.dataset.revoke, validUntil: 0 }));
@@ -330,12 +486,25 @@ function renderAgents(L, owner) {
       const move = moving && moveTo.length > 1 ? () => own({ type: "approveSpend", agent, scope: "venues", allow: moveTo.join(","), perPayment: per, budget, windowHours: 0, validUntil: until }) : had && !moving ? () => own({ type: "approveSpend", agent, scope: "venues", allow: had.allow.join(","), perPayment: "0", budget: "0", windowHours: 0, validUntil: until }) : undefined;
       return own({ type: "approveSpend", agent, scope: "trade", allow: allow.length === T.length ? "*" : allow.join(","), perPayment: per, budget, windowHours: 0, validUntil: until }, move);
     };
+    /* payments from an agent wallet: the hosts it may pay (or any, when ticked), each payment's most, and a budget of its own */
+    const payBudget = String(v.payBudget || "").trim();
+    const payees = v.anyPayee ? "*" : String(v.payees || "").split(",").map((x) => x.trim().toLowerCase()).filter(Boolean).join(",");
+    const pay = (agent) => (payBudget && payees ? own({ type: "approveSpend", agent, scope: "payees", allow: payees, perPayment: String(v.payPer || "").trim() || payBudget, budget: payBudget, windowHours: 0, validUntil: until }) : undefined);
     if (budget && !allow.length) return void ((flash = "Pick at least one account it may trade at."), render());
-    if (!isNew()) return void (budget ? limits(v.agent) : ((flash = "Type a budget to change its limit."), render()));
+    if (payBudget && !payees) return void ((flash = "Name the hosts it may pay, or tick any payee."), render());
+    if (!isNew()) {
+      if (!budget && !payBudget) return void ((flash = "Type a budget to change its limit."), render());
+      if (budget) await limits(v.agent);
+      if (payBudget) await pay(v.agent);
+      return;
+    }
     if (!String(v.name || "").trim() || !/^0x[0-9a-fA-F]{40}$/.test(String(v.address || ""))) return void ((flash = "A new agent needs a name and its key's 0x address."), render());
     const address = String(v.address).toLowerCase();
-    // letting an agent in is its key, then (when a budget is given) its limit: one signature each
-    await own({ type: "approveAgent", agentAddress: address, agentName: String(v.name).trim(), validUntil: until }, budget ? () => limits(address) : undefined);
+    // letting an agent in is its key, then (when budgets are given) its limits: one signature each
+    await own({ type: "approveAgent", agentAddress: address, agentName: String(v.name).trim(), validUntil: until }, async () => {
+      if (budget) await limits(address);
+      if (payBudget) await pay(address);
+    });
   });
 }
 
@@ -456,7 +625,7 @@ async function sendPaymentOnce(p, key, tx, txs) {
 }
 
 /** move real money at an account: what is possible there, the address and fee the account finds, then your signature */
-function openLiveMove(venueId) {
+function openLiveMove(venueId, preset = {}) {
   const v = A.venues.find((x) => x.id === venueId);
   if (!v || !v.liveCan) return;
   const c = v.liveCan;
@@ -564,6 +733,11 @@ function openLiveMove(venueId) {
     await load();
   };
   body();
+  // opened to fill an agent wallet: that wallet is where it goes
+  if (preset.to && form.elements.to && [...form.elements.to.options].some((o) => o.value === preset.to)) {
+    form.elements.to.value = preset.to;
+    form.elements.to.dispatchEvent(new Event("input"));
+  }
   $("modal").showModal();
 }
 
@@ -645,7 +819,9 @@ function openTrade(venueId, preset = {}) {
     ${field("Market", '<input name="symbol" list="mk-list" autocomplete="off" spellcheck="false" placeholder="Search" required /><datalist id="mk-list"></datalist>')}
     <div class="row">${field("Side", '<div class="seg" id="tk-side"><button type="button" data-side="buy" aria-pressed="true">Buy</button><button type="button" data-side="sell" aria-pressed="false">Sell</button></div>')}${field("Type", select("orderType", [["market", "Market"], ["limit", "Limit"]]))}</div>
     <div class="row">${field("Amount", '<input name="amount" inputmode="decimal" placeholder="25" autocomplete="off" required />')}${field("In", select("unit", [["usd", "Dollars"], ["qty", "Units"]]))}</div>
-    <div id="tk-limit" hidden>${field("Limit price", '<input name="limitPrice" inputmode="decimal" autocomplete="off" />')}</div>
+    <div class="row"><div id="tk-stop" hidden>${field("Stop price", '<input name="stopPrice" inputmode="decimal" autocomplete="off" />')}</div><div id="tk-limit" hidden>${field("Limit price", '<input name="limitPrice" inputmode="decimal" autocomplete="off" />')}</div></div>
+    <div class="row" id="tk-more" hidden><span id="tk-tif"></span><label class="chk1" id="tk-post" hidden><input type="checkbox" name="postOnly" /> Post-only</label><label class="chk1" id="tk-reduce" hidden><input type="checkbox" name="reduceOnly" /> Reduce-only</label></div>
+    <div class="path" id="tk-lev" hidden></div>
     <div class="quote real" id="quote"><span class="dim">Pick a market to see its price.</span></div>
     <div class="path elsewhere" id="elsewhere"></div>
     <details id="signs" hidden><summary>What you sign</summary><pre id="signs-pre"></pre></details>
@@ -668,10 +844,58 @@ function openTrade(venueId, preset = {}) {
     found = r.markets || [];
     $("mk-list").innerHTML = found.map((m) => `<option value="${esc(m.symbol)}">${esc(m.name !== m.symbol ? m.name : m.kind)}${m.price ? ` · ${esc(px(m.price))}` : ""}</option>`).join("");
   };
+  const LIMITED = ["limit", "stop_limit"];
+  const STOPPED = ["stop", "stop_limit"];
   const draft = () => {
     const f = formOf("modal-form");
     const amount = String(f.amount || "").trim();
-    return { type: "liveOrder", venue: v.id, symbol: String(f.symbol || "").trim(), side, orderType: f.orderType, ...(f.unit === "qty" ? { qty: amount } : { usd: amount }), limitPrice: f.orderType === "limit" ? String(f.limitPrice || "").trim() : "" };
+    return { type: "liveOrder", venue: v.id, symbol: String(f.symbol || "").trim(), side, orderType: f.orderType, ...(f.unit === "qty" ? { qty: amount } : { usd: amount }), limitPrice: LIMITED.includes(f.orderType) ? String(f.limitPrice || "").trim() : "", stopPrice: STOPPED.includes(f.orderType) ? String(f.stopPrice || "").trim() : "", tif: f.tif || "", postOnly: f.orderType === "limit" && f.postOnly ? "true" : "", reduceOnly: f.reduceOnly ? "true" : "" };
+  };
+  /* the market as the venue lists it: which order types, times in force and flags it takes — the ticket offers those and nothing else */
+  let mk = null;
+  const TYPE_NAMES = { market: "Market", limit: "Limit", stop: "Stop", stop_limit: "Stop limit" };
+  const TIF_NAMES = { gtc: "Until canceled", ioc: "Fill now, rest canceled", fok: "All now or nothing", day: "Today only" };
+  const shape = () => {
+    const t = form.elements.orderType.value;
+    $("tk-limit").hidden = !LIMITED.includes(t);
+    $("tk-stop").hidden = !STOPPED.includes(t);
+    $("tk-post").hidden = !(mk && mk.postOnly && t === "limit");
+    // the times in force this order type takes here (a venue may take "Today only" for a stop and not for a limit)
+    const sel = $("tk-tif").querySelector("select");
+    if (mk && sel) {
+      const allowed = (mk.tifsByType && mk.tifsByType[t]) || mk.tifs || [];
+      const keep = sel.value;
+      sel.innerHTML = [["", "The venue's default"], ...allowed.map((x) => [x, TIF_NAMES[x] || x])].map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join("");
+      sel.value = allowed.includes(keep) ? keep : "";
+    }
+  };
+  const fit = (m) => {
+    mk = m;
+    const keep = form.elements.orderType.value;
+    form.elements.orderType.innerHTML = (m.types || ["market", "limit"]).map((t) => `<option value="${esc(t)}">${esc(TYPE_NAMES[t] || t)}</option>`).join("");
+    if ((m.types || []).includes(keep)) form.elements.orderType.value = keep;
+    $("tk-tif").innerHTML = m.tifs && m.tifs.length ? field("Time in force", select("tif", [["", "The venue's default"], ...m.tifs.map((t) => [t, TIF_NAMES[t] || t])])) : "";
+    if ($("tk-tif").querySelector("select")) $("tk-tif").querySelector("select").addEventListener("change", () => later(0));
+    $("tk-reduce").hidden = !m.reduceOnly;
+    $("tk-more").hidden = !(m.tifs && m.tifs.length) && !m.postOnly && !m.reduceOnly;
+    // a perpetual's leverage, where the venue lets it be set from here: the owner's signature
+    $("tk-lev").hidden = !(v.trade.leverage && (m.kind === "perp" || m.kind === "future"));
+    $("tk-lev").innerHTML = $("tk-lev").hidden ? "" : `Leverage <input name="leverage" class="xs" inputmode="numeric" placeholder="${m.maxLeverage ? `up to ${m.maxLeverage}` : "3"}" /> ${select("marginMode", [["", "Margin as it is"], ["cross", "Cross"], ["isolated", "Isolated"]])} <button type="button" class="link" id="lev-set">Set</button>`;
+    if ($("lev-set")) $("lev-set").addEventListener("click", async () => {
+      const f = formOf("modal-form");
+      if (!/^\d{1,3}$/.test(String(f.leverage || "").trim())) return say("Leverage is a whole number, 1 or more.", "no");
+      const r = await Owner.act({ type: "liveLeverage", venue: v.id, symbol: m.symbol, leverage: String(f.leverage).trim(), marginMode: f.marginMode || "" });
+      say(r.status >= 400 ? Owner.why(r) : `${m.name}: ${r.body.result.leverage}x${r.body.result.marginMode ? `, ${r.body.result.marginMode}` : ""}`, r.status >= 400 ? "no" : "ok");
+    });
+    shape();
+  };
+  let mkFor = "";
+  const loadMarket = async (symbol) => {
+    if (!symbol || symbol === mkFor) return;
+    mkFor = symbol;
+    const r = await fetch(`/api/account/market?${new URLSearchParams({ venue: v.id, symbol })}`).then((x) => x.json()).catch(() => ({}));
+    if (stale() || mkFor !== symbol) return;
+    if (r.ok) fit(r.market);
   };
   let seq = 0;
   const quote = async () => {
@@ -682,7 +906,8 @@ function openTrade(venueId, preset = {}) {
     $("signs").hidden = true;
     const d = draft();
     if (!d.symbol) return void ($("quote").innerHTML = '<span class="dim">Pick a market to see its price.</span>');
-    if (!(Number(d.qty || d.usd) > 0) || (d.orderType === "limit" && !(Number(d.limitPrice) > 0))) {
+    loadMarket(d.symbol);
+    if (!(Number(d.qty || d.usd) > 0) || (LIMITED.includes(d.orderType) && !(Number(d.limitPrice) > 0)) || (STOPPED.includes(d.orderType) && !(Number(d.stopPrice) > 0))) {
       // the market alone: its price, so the owner knows what to type
       const r = await fetch(`/api/account/market?${new URLSearchParams({ venue: v.id, symbol: d.symbol })}`).then((x) => x.json()).catch(() => ({}));
       if (stale() || my !== seq) return;
@@ -703,7 +928,9 @@ function openTrade(venueId, preset = {}) {
     const q = prepared.quote.order;
     if (q.kind !== "event") elsewhere(q.base);
     const unit = UNITS[q.kind] || q.base;
-    $("quote").innerHTML = `<div class="big"><span>${a.side === "buy" ? "Buy" : "Sell"} ${esc(a.qty)} ${esc(unit === q.base ? q.base : `${unit} · ${q.base}`)}</span><span>≈ ${money(q.notionalUsd)}</span></div><div class="path">${esc(q.name)} at ${esc(px(a.limitPrice || q.price))} ${esc(q.quote)}${a.orderType === "market" && a.side === "buy" ? ` · up to ${money(q.maxUsd)} if the price moves` : ""}</div>${q.note ? `<div class="path">${esc(q.note)}</div>` : ""}<div class="path">Your signature is good for 10 minutes.</div>`;
+    const how = a.orderType === "stop" ? `when the price reaches ${esc(px(a.stopPrice))} ${esc(q.quote)}, at market` : a.orderType === "stop_limit" ? `when the price reaches ${esc(px(a.stopPrice))}, a limit at ${esc(px(a.limitPrice))} ${esc(q.quote)}` : `at ${esc(px(a.limitPrice || q.price))} ${esc(q.quote)}`;
+    const flags = [a.tif ? TIF_NAMES[a.tif] : "", a.postOnly ? "post-only" : "", a.reduceOnly ? "reduce-only" : ""].filter(Boolean).join(" · ");
+    $("quote").innerHTML = `<div class="big"><span>${a.side === "buy" ? "Buy" : "Sell"} ${esc(a.qty)} ${esc(unit === q.base ? q.base : `${unit} · ${q.base}`)}</span><span>≈ ${money(q.notionalUsd)}</span></div><div class="path">${esc(q.name)} ${how}${(a.orderType === "market" || a.orderType === "stop") && a.side === "buy" ? ` · up to ${money(q.maxUsd)} if the price moves` : ""}</div>${flags ? `<div class="path">${esc(flags)}</div>` : ""}${q.note ? `<div class="path">${esc(q.note)}</div>` : ""}<div class="path">Your signature is good for 10 minutes.</div>`;
     $("signs-pre").textContent = prepared.shown.map((x) => `${x.name}: ${x.value}`).join("\n");
     $("signs").hidden = false;
     $("modal-go").disabled = Owner.role !== "owner";
@@ -729,8 +956,8 @@ function openTrade(venueId, preset = {}) {
   const later = (ms = 350) => { clearTimeout(timer); timer = setTimeout(quote, ms); };
   let sugTimer = 0;
   form.elements.symbol.addEventListener("input", () => { clearTimeout(sugTimer); sugTimer = setTimeout(suggest, 250); later(600); });
-  for (const el of [form.elements.amount, form.elements.limitPrice]) el.addEventListener("input", () => later());
-  for (const el of [form.elements.unit, form.elements.orderType]) el.addEventListener("change", () => { $("tk-limit").hidden = form.elements.orderType.value !== "limit"; later(0); });
+  for (const el of [form.elements.amount, form.elements.limitPrice, form.elements.stopPrice]) el.addEventListener("input", () => later());
+  for (const el of [form.elements.unit, form.elements.orderType, form.elements.postOnly, form.elements.reduceOnly]) el.addEventListener("change", () => { shape(); later(0); });
   for (const b of $("tk-side").querySelectorAll("button")) b.addEventListener("click", () => { side = b.dataset.side; for (const x of $("tk-side").querySelectorAll("button")) x.setAttribute("aria-pressed", String(x === b)); later(0); });
   $("modal-cancel").addEventListener("click", () => $("modal").close());
   form.onsubmit = async (e) => {
@@ -763,7 +990,7 @@ function openTrade(venueId, preset = {}) {
     if (preset.orderType) form.elements.orderType.value = preset.orderType;
     if (preset.unit) form.elements.unit.value = preset.unit;
     if (preset.amount) form.elements.amount.value = preset.amount;
-    $("tk-limit").hidden = form.elements.orderType.value !== "limit";
+    shape();
     later(0);
   }
   if (!$("modal").open) $("modal").showModal();

@@ -13,9 +13,15 @@
  *   GET  gamma /markets/slug/{slug}    a market by its name: its outcomes and their ids, neg-risk, whether it takes orders
  *   GET  gamma /markets/keyset         the markets to choose from (by 24-hour volume, kept five minutes), and a token's market by condition id
  *   GET  /book?token_id=               the book: best bid and ask, the tick, the smallest order, neg-risk
- *   POST /order                        one signed order, with the L2 headers: an HMAC over the exact body sent
+ *   POST /order                        one signed order, with the L2 headers: an HMAC over the exact body sent. Its `orderType` is the time
+ *                                     in force (GTC, FAK or FOK), and an order that rests (GTC) may say `postOnly`
  *   GET  /data/order/{id}              what became of it; GET /data/trades?market= for the prices it filled at
  *   DELETE /order                      cancel it
+ *   GET  data-api /v2/positions?user=  what the wallet holds, outcome by outcome
+ *
+ * What the CLOB does not have is not offered: no stop or trigger order, no reduce-only flag, no leverage, and no change to an open order in
+ * place (/order takes POST and DELETE only: an order is signed, so another price or size is another order). Its GTD order, good until a
+ * date the owner names, has no counterpart among the account's times in force.
  *
  * Who signs: the key file holds the signer's private key. When the money sits in a Polymarket wallet (the address in the profile menu),
  * the file also names that wallet (`funderAddress`) and its kind (`signatureType`): 1 a Proxy wallet, 2 a Safe, 3 a Deposit Wallet (every
@@ -33,7 +39,7 @@ import { no } from "../refuse.ts";
 import { polymarketSource } from "./address.ts";
 import type { ChainReader } from "./chain.ts";
 import type { KeyFile, KeyShape } from "./credentials.ts";
-import { badOrder, ceilTo, floorTo, inDollars, pick, plain, type LiveTrader, type Market, type OrderRequest, type OrderState, type OrderStatus } from "./trade.ts";
+import { badOrder, ceilTo, floorTo, inDollars, pick, plain, type LiveTrader, type Market, type OrderRequest, type OrderState, type OrderStatus, type Position, type TimeInForce } from "./trade.ts";
 import { asRefusal, num, REGION, redact, unreachable, type Http, type HttpReply, type LiveBalance, type LiveSource } from "./types.ts";
 
 export const POLYMARKET_TRADE_KEY: KeyShape = {
@@ -44,6 +50,7 @@ export const POLYMARKET_TRADE_KEY: KeyShape = {
 
 const CLOB = "https://clob.polymarket.com";
 const GAMMA = "https://gamma-api.polymarket.com";
+const DATA = "https://data-api.polymarket.com/v2";
 const GEOBLOCK = "https://polymarket.com/api/geoblock";
 const CHAIN_ID = 137;
 /** Polygon, from docs.polymarket.com/resources/contracts and the clients' configs (all four agree). The V1 exchanges (domain "1") are dead */
@@ -96,6 +103,15 @@ const ROUNDING: Array<{ tick: number; price: number; size: number; amount: numbe
   { tick: 0.0001, price: 4, size: 2, amount: 6 },
 ];
 const roundingOf = (tick: number) => ROUNDING.find((r) => Math.abs(r.tick - tick) < 1e-12);
+
+/** The CLOB's order types, which its OpenAPI calls the time in force, in the account's words (docs.polymarket.com/concepts/order-lifecycle):
+ * GTC rests until it fills or is canceled; FAK, fill and kill, fills what it can at once and cancels the rest, which is the account's
+ * immediate-or-cancel (except that a FAK matching nothing is refused, not canceled: error-codes, "FAK orders are partially filled or killed
+ * if no match is found"); FOK fills all of it at once or none of it. GTD is left out (see above), and no Polymarket market has a session
+ * for a `day` order to end with */
+type ClobOrderType = "GTC" | "FAK" | "FOK";
+const TIF: Partial<Record<TimeInForce, ClobOrderType>> = { gtc: "GTC", ioc: "FAK", fok: "FOK" };
+const TIFS_HERE: TimeInForce[] = ["gtc", "ioc", "fok"];
 
 const LIST_MS = 5 * 60_000;
 /** what market() learned about a symbol is used by place() for this long; the price a market order may fill at comes with the order */
@@ -288,6 +304,43 @@ interface Known {
   open: boolean;
   why?: string | undefined;
   at: number;
+}
+
+// ---- positions -------------------------------------------------------------------------------------
+
+/** a number the Data API gave: a missing or null one is "unavailable, never zero" in its conventions, so it stays unknown rather than 0 */
+const given = (v: unknown): number | undefined => {
+  const n = typeof v === "number" ? v : typeof v === "string" && v.trim() !== "" ? Number(v) : NaN;
+  return Number.isFinite(n) ? n : undefined;
+};
+const POSITION_FIELDS = ["token_id", "condition_id", "slug", "outcome", "outcome_index", "status", "redeemable", "mergeable", "negative_risk", "end_date", "current_size", "avg_price", "current_price", "current_value", "entry_cost_usdc", "entry_fees_usdc", "realized_pnl", "unrealized_pnl"] as const;
+
+/** One row of the Data API's positions (docs.polymarket.com/api-reference/wallet/list-positions-for-a-user-or-market), in the account's words.
+ * The symbol is the one market() takes: `<slug>:<outcome>`, or the token id when the row names no market. The shares held are
+ * `current_size` (`total_size` is every share ever bought). Every holding is long: a bet against an outcome is the other outcome bought, and
+ * a sell can only be of shares the wallet holds. A resolved market's shares stay a position until they are redeemed (status REDEEMABLE,
+ * marked at 0 when the outcome lost). The profile fields of the row (name, image) are left out */
+function positionOf(p: Json): Position | undefined {
+  const qty = num(p.current_size);
+  if (!(qty > 0)) return undefined;
+  const slug = typeof p.slug === "string" ? p.slug : "";
+  const outcome = typeof p.outcome === "string" ? p.outcome : "";
+  const token = typeof p.token_id === "string" ? p.token_id : "";
+  const symbol = SLUG.test(slug) && outcome ? `${slug}:${outcome}` : TOKEN.test(token) ? token : undefined;
+  if (symbol === undefined) return undefined;
+  const title = typeof p.title === "string" && p.title ? p.title : slug || token;
+  return {
+    symbol,
+    name: `${title} · ${outcome || "?"}`,
+    kind: "event",
+    side: "long",
+    qty,
+    entryPrice: positive(p.avg_price),
+    markPrice: given(p.current_price),
+    usd: given(p.current_value),
+    unrealizedUsd: given(p.unrealized_pnl),
+    native: Object.fromEntries(POSITION_FIELDS.filter((k) => p[k] !== undefined).map((k) => [k, p[k]])),
+  };
 }
 
 // ---- refusals --------------------------------------------------------------------------------------
@@ -511,7 +564,14 @@ function polymarketTrader(c: { venue: string; name: string; wallet: Wallet; http
       priceStep: tick,
       open,
       note: open ? (o.notes.length ? o.notes.join(" · ") : undefined) : reason,
+      // every Polymarket order is a limit order, a market order being one priced to match at once (concepts/order-lifecycle): there is no
+      // stop or trigger order, no reduce-only flag and no leverage, so none is declared
       types: ["market", "limit"],
+      tifs: [...TIFS_HERE],
+      // an order that rests may be post-only: the CLOB takes it on GTC and GTD only (its OpenAPI, SendOrder.postOnly)
+      postOnly: true,
+      // a sell can only sell shares held — open sells reserve them, and a sell beyond them is refused: it never opens a position the other way
+      sellsReduce: true,
     };
   };
 
@@ -641,10 +701,31 @@ function polymarketTrader(c: { venue: string; name: string; wallet: Wallet; http
     return stateOf(r.body);
   };
 
-  /** The signed order, as the official clients build it. `market` is a fill-and-kill order at the worst price the account allows: a sell of
-   * the shares asked, a buy of what those shares cost on the book now (Polymarket sizes a fill-and-kill buy in pUSD, so the cost is walked
-   * off the asks up to the worst price, and anything the book lacks is counted at the worst price). `limit` rests until filled or canceled */
-  const build = async (o: OrderRequest, k: Known): Promise<{ body: string; hash: Hex; orderType: "GTC" | "FAK"; creds: NonNullable<typeof creds> } | Refusal> => {
+  /** The CLOB order type an order is sent as, or why Polymarket would not take it as asked. A limit order rests (GTC) unless it is
+   * fill-and-kill (ioc, sent as FAK) or fill-or-kill (fok, FOK); a market order fills at once, FAK unless FOK is asked, and never rests
+   * (the clients send a market order as FAK or FOK only). Post-only is for an order that rests: the CLOB's OpenAPI says it is "Only
+   * supported for GTC and GTD orders", and the unified client refuses it on any other before sending, as this does */
+  const orderTypeOf = (o: OrderRequest): ClobOrderType | Refusal => {
+    if (o.type !== "limit" && o.type !== "market") return badOrder(c.venue, c.name, `the CLOB takes limit and market orders, not ${String(o.type).replace("_", "-")} orders: it has no stop or trigger order`);
+    if (o.stopPrice !== undefined) return badOrder(c.venue, c.name, "the CLOB has no stop orders, so an order there carries no stop price");
+    if (o.reduceOnly === true) return badOrder(c.venue, c.name, "the CLOB has no reduce-only flag (a sell there can only be of shares the wallet holds, so it never opens a position)");
+    // own keys only, as with the key file's words: "constructor" is not a time in force
+    const sent = o.tif !== undefined && Object.hasOwn(TIF, o.tif) ? TIF[o.tif] : undefined;
+    if (o.tif !== undefined && sent === undefined) return badOrder(c.venue, c.name, `an order here is good till canceled (gtc), fill-and-kill (ioc) or fill-or-kill (fok), not ${String(o.tif)}`);
+    const t = sent ?? (o.type === "limit" ? "GTC" : "FAK");
+    if (o.type === "market" && t === "GTC") return badOrder(c.venue, c.name, "a market order here fills at once, fill-and-kill (ioc) or fill-or-kill (fok): an order that rests is a limit order");
+    if (o.postOnly === true && o.type === "market") return badOrder(c.venue, c.name, "a market order takes from the book: only a limit order may be post-only");
+    if (o.postOnly === true && t !== "GTC") return badOrder(c.venue, c.name, "post-only is for an order that rests (gtc): a fill-and-kill or fill-or-kill order takes from the book at once");
+    return t;
+  };
+
+  /** The signed order, as the official clients build it. An order that rests (GTC: a limit order, post-only or not) is its shares at its
+   * limit. One that fills at once (FAK or FOK: every market order, and a limit order that is fill-and-kill or fill-or-kill) is built as the
+   * clients build a price-protected market order, bounded at the limit or at the worst price the account allows: a sell of the shares
+   * asked, and a buy of what those shares cost on the book now. The CLOB sizes a FAK or FOK buy in pUSD, not in shares ("CLOB GTC/GTD BUY
+   * targets are shares; FOK/FAK BUY targets are collateral", migrate/polymarket-v2/api-integrations), so the cost is walked off the asks up
+   * to the bound, anything the book lacks is counted at the bound, and the pUSD goes to the cent as the clients send it */
+  const build = async (o: OrderRequest, k: Known, orderType: ClobOrderType): Promise<{ body: string; hash: Hex; orderType: ClobOrderType; creds: NonNullable<typeof creds> } | Refusal> => {
     const cfg = roundingOf(k.tick);
     if (!cfg) return badOrder(c.venue, c.name, `the tick here is ${plain(k.tick)}, which is not one Polymarket's clients round for`, { tick: k.tick });
     const hundredths = Math.round(o.qty * 100);
@@ -662,7 +743,8 @@ function polymarketTrader(c: { venue: string; name: string; wallet: Wallet; http
     const amountQ = quantum(cfg.amount);
     let makerAmount: bigint;
     let takerAmount: bigint;
-    if (o.type === "limit") {
+    // place() sends GTC for a limit order only: a market order never rests
+    if (orderType === "GTC") {
       const usd = mulDiv(shares, priceM, SCALE * amountQ, false) * amountQ;
       [makerAmount, takerAmount] = o.side === "buy" ? [usd, shares] : [shares, usd];
     } else if (o.side === "sell") {
@@ -680,13 +762,14 @@ function polymarketTrader(c: { venue: string; name: string; wallet: Wallet; http
         left -= take;
       }
       cost += mulDiv(left, priceM, SCALE, true);
-      // each level was rounded up: the whole is held to the shares at the worst price, the most the account valued it at
+      // each level was rounded up: the whole is held to the shares at the bound, the most the account valued it at
       const most = mulDiv(shares, priceM, SCALE, false);
       if (cost > most) cost = most;
-      // pUSD to two decimals, down: never more than the worst price allows
+      // pUSD to two decimals, down: never more than the bound allows
       const sizeQ = quantum(cfg.size);
       makerAmount = (cost / sizeQ) * sizeQ;
-      // the fewest shares it may bring, rounded up, so that no fill is dearer than the worst price
+      // the fewest shares it may bring, rounded up, so that no fill is dearer than the bound. Whether the CLOB holds this figure to the
+      // market's smallest order in shares is not in its docs (they disagree on that minimum's units); its refusal would be its own words
       takerAmount = mulDiv(makerAmount, SCALE, priceM * amountQ, true) * amountQ;
       if (makerAmount === 0n) return badOrder(c.venue, c.name, "the order is worth less than a cent");
     }
@@ -708,13 +791,15 @@ function polymarketTrader(c: { venue: string; name: string; wallet: Wallet; http
     }
     const k2 = await credsOf();
     if (isRefusal(k2)) return k2;
-    const orderType = o.type === "limit" ? "GTC" : "FAK";
-    // the body as the unified client sends it; it is serialised once, and those exact bytes are signed and sent
+    // the body as the unified client sends it; it is serialised once, and those exact bytes are signed and sent. The order type and post-only
+    // are not in the signed order: they travel only here, `postOnly` last and only when asked (place() allows it on GTC alone). The
+    // expiration is "0" for all three types: only a GTD order has one
     const body = JSON.stringify({
       deferExec: false,
       order: { builder: ZERO32, expiration: "0", maker: w.maker, makerAmount: makerAmount.toString(), metadata: ZERO32, salt: s, side: o.side === "buy" ? "BUY" : "SELL", signature, signatureType: w.type, signer: w.signer, takerAmount: takerAmount.toString(), timestamp: timestamp.toString(), tokenId: k.tokenId },
       orderType,
       owner: k2.apiKey,
+      ...(o.postOnly === true ? { postOnly: true } : {}),
     });
     return { body, hash, orderType, creds: k2 };
   };
@@ -742,6 +827,10 @@ function polymarketTrader(c: { venue: string; name: string; wallet: Wallet; http
 
     async place(o) {
       try {
+        // an order the CLOB would not take as asked is refused here, before anything is sent: Polymarket's location check stays the first
+        // thing sent for every order
+        const orderType = orderTypeOf(o);
+        if (isRefusal(orderType)) return orderType;
         if (!(Number.isFinite(o.qty) && o.qty > 0)) return badOrder(c.venue, c.name, "a size is more than zero");
         if (o.type === "limit" && !(o.limitPrice !== undefined && Number.isFinite(o.limitPrice) && o.limitPrice > 0)) return badOrder(c.venue, c.name, "a limit order has a limit price");
         if (o.type === "market" && o.limitPrice !== undefined) return badOrder(c.venue, c.name, "a market order has no limit price");
@@ -751,10 +840,10 @@ function polymarketTrader(c: { venue: string; name: string; wallet: Wallet; http
         if (geo) return geo;
         const k = await resolve(o.symbol);
         if (!k.open) return no("E_VENUE_MARKET_CLOSED", { venue: c.venue, message: `${c.name}: ${k.name} takes no orders now${k.why ? ` (${k.why})` : ""}` });
-        const built = await build(o, k);
+        const built = await build(o, k, orderType);
         if (isRefusal(built)) return built;
         // Polymarket takes no client order id: an order is its own hash (salt and timestamp make it unique). The account's id stays here
-        const mine = { clientId: o.clientId, orderHash: built.hash, orderType: built.orderType };
+        const mine = { clientId: o.clientId, orderHash: built.hash, orderType: built.orderType, ...(o.postOnly === true ? { postOnly: true } : {}) };
         let r: HttpReply;
         try {
           // the credentials whose key is the body's `owner`, and nothing re-derived on the way: the order is sent once, as signed
@@ -826,6 +915,32 @@ function polymarketTrader(c: { venue: string; name: string; wallet: Wallet; http
         return asRefusal(c.venue, c.name, err, secrets());
       }
     },
+
+    /** What the wallet that holds the money has at Polymarket: the Data API's positions for it, asked as the address connection asks them
+     * (address.ts), page by page up to a thousand. A public read, like the balances: nothing is signed and nothing goes to the CLOB */
+    async positions() {
+      try {
+        const out: Position[] = [];
+        let cursor = "";
+        for (let page = 0; page < 5; page++) {
+          // a next page is the cursor with the same `user` (a bare cursor is a 400); the cursor carries the page size
+          const body = await getJson(`${DATA}/positions?user=${w.maker}&limit=200${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
+          for (const p of isObj(body) && Array.isArray(body.data) ? body.data.filter(isObj) : []) {
+            const held = positionOf(p);
+            if (held) out.push(held);
+          }
+          const pagination = isObj(body) && isObj(body.pagination) ? body.pagination : {};
+          cursor = typeof pagination.next_cursor === "string" ? pagination.next_cursor : "";
+          if (!cursor) break;
+        }
+        return out;
+      } catch (err) {
+        return asRefusal(c.venue, c.name, err, secrets());
+      }
+    },
+
+    // Not here, because the CLOB has no call for them: amend (POST and DELETE are all /order takes; another price or size is another
+    // signed order), close (a position is closed by selling its shares, which place() does), setLeverage (there is no leverage)
   };
 
   /** Polymarket did not answer an order. The order's id is its EIP-712 hash, known before it is sent, so Polymarket is asked for that

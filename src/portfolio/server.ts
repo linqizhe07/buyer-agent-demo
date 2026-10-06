@@ -29,6 +29,7 @@
  *                                      an order its exact size, price and the most it may be worth)
  *   GET  /api/account/markets?venue=okx&q=BTC        what a venue connected live trades (a read)
  *   GET  /api/account/market?venue=okx&symbol=BTC/USDT   one market: a fresh price, the smallest order, the steps, open or not (a read)
+ *   GET  /api/account/positions?venue=okx                what is held there: perpetuals, shares, event contracts (a read)
  *   POST /api/exchange {action, nonce, signature}   THE door: every instruction, signed — an owner action by an owner key, an agent's by an
  *                                      authorised agent key (200 done · 202 a card is waiting · 401 not a signer · 409 refused)
  *
@@ -40,7 +41,6 @@ import { randomBytes } from "node:crypto";
 import express from "express";
 import { readFileSync } from "node:fs";
 import type { Server } from "node:http";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isRefusal } from "../core/errors.ts";
@@ -54,6 +54,7 @@ import { exchangeList } from "./live/exchange.ts";
 import { parseEventSymbol } from "./events.ts";
 import type { OrderPlan } from "./router.ts";
 import { isPending, loadOpenness, PortfolioService } from "./service.ts";
+import { defaultHome } from "./home.ts";
 import type { Side } from "./venues.ts";
 
 const PUBLIC = fileURLToPath(new URL("./public/", import.meta.url));
@@ -163,7 +164,9 @@ export async function startPortfolioServer(opts: PortfolioServerOptions): Promis
   app.get("/api/account", wrap(async (_req, res) => {
     const view = await svc.accountView();
     if (!view) return void res.status(404).json({ ok: false, error: "the account layer is not mounted (--classic)" });
-    res.json({ ok: true, ...view, mode: svc.policy().mode, live: svc.live });
+    const o = svc.policy();
+    // the dial as the page needs it: the agents' session, the venues switched off for agents, the most leverage they may set
+    res.json({ ok: true, ...view, mode: o.mode, live: svc.live, dial: { sessionExpiresAt: o.sessionExpiresAt, sessionEnded: Date.parse(o.sessionExpiresAt) <= Date.parse(view.now), revoked: o.revoked, maxLeverage: o.maxLeverage ?? 1 } });
   }));
 
   app.post("/api/account/pair", (req, res) => {
@@ -255,6 +258,14 @@ export async function startPortfolioServer(opts: PortfolioServerOptions): Promis
     const usd = Number(q("usd"));
     const r = await svc.liveCompare(q("base"), q("side") === "sell" ? "sell" : "buy", usd > 0 ? usd : undefined);
     res.status(isRefusal(r) ? 409 : 200).json(isRefusal(r) ? { ok: false, refusal: r } : { ok: true, ...r });
+  }));
+
+  // what is held at a venue connected live: perpetuals, shares, event contracts (a read)
+  app.get("/api/account/positions", wrap(async (req, res) => {
+    if (!svc.account) return void res.status(404).json({ ok: false, error: "the account layer is not mounted" });
+    const venue = typeof req.query.venue === "string" ? req.query.venue.slice(0, 40) : "";
+    const r = await svc.livePositions(venue);
+    res.status(isRefusal(r) ? 409 : 200).json(isRefusal(r) ? { ok: false, refusal: r } : { ok: true, positions: r });
   }));
 
   // the routes a bridge could take across chains from a wallet of the owner's, the one the account would sign for first (a read)
@@ -410,9 +421,7 @@ export function pairingCode(): string {
   return `${chars.slice(0, 4)}-${chars.slice(4)}`;
 }
 
-export function defaultHome(): string {
-  return process.env.BUYER_HOME ?? join(homedir(), ".buyer-agent-demo");
-}
+export { defaultHome };
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const args = process.argv.slice(2);
@@ -432,19 +441,28 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   if (!(capUsd > 0)) throw new Error("--live-cap is a number of dollars, more than zero");
   const readOnly = args.includes("--read-only");
   if (readOnly && args.includes("--live-writes")) throw new Error("--read-only and --live-writes say opposite things: pick one");
-  const liveWrites = !readOnly && !classic ? { capUsd, pairingCode: pairingCode() } : undefined;
+  // the first owner pairs with a code printed here whether or not trading is on: an owner let in without one would own the account's later
+  // runs too, trading and all
+  const code = classic ? undefined : pairingCode();
+  const liveWrites = !readOnly && !classic ? { capUsd, pairingCode: code! } : undefined;
   // the fixture's session ends on a fixed date; a server on the real clock gets thirty days from when it starts
   const openness = loadOpenness() as { sessionExpiresAt?: string };
   const month = new Date(Date.now() + 30 * 86_400_000).toISOString();
-  const service = await PortfolioService.create({ home: at("--home") ?? defaultHome(), live, ...(liveWrites ? { liveWrites } : {}), ...(classic ? {} : { venues: "frontline" as const, real: true, openness: { ...openness, sessionExpiresAt: (openness.sessionExpiresAt ?? "") > month ? openness.sessionExpiresAt : month } }) });
+  // a real account continues its earlier runs — the owner's device, the venues, the agents and their limits come back (account/restore.ts);
+  // --fresh starts it from nothing
+  const fresh = args.includes("--fresh");
+  const service = await PortfolioService.create({ home: at("--home") ?? defaultHome(), live, fresh, ...(liveWrites ? { liveWrites } : {}), ...(code ? { pairingCode: code } : {}), ...(classic ? {} : { venues: "frontline" as const, real: true, openness: { ...openness, sessionExpiresAt: (openness.sessionExpiresAt ?? "") > month ? openness.sessionExpiresAt : month } }) });
   const srv = await startPortfolioServer({ port, service }).catch((e: NodeJS.ErrnoException) => {
     if (e.code !== "EADDRINUSE") throw e;
     // the usual reason: this server is already running in another terminal
     console.error(`port ${port} is already in use: a portfolio server is probably running already. Open http://127.0.0.1:${port}/account, or start a second one: npm run portfolio -- --port ${port + 1} --home <another directory>`);
     process.exit(1);
   });
-  if (liveWrites) console.log(`TRADING IS ON · real orders and movements at the accounts you connect · at most $${liveWrites.capUsd} an order or a movement (--live-cap; --read-only turns it off) · every one is signed by you, or inside a limit you signed for an agent · money leaves a venue only for a place shown to be yours\n  pairing code: ${liveWrites.pairingCode} — the first browser becomes the owner only with this code, typed on the page`);
-  else if (!classic) console.log("read-only: nothing is traded or moved from this server (started with --read-only)");
+  const r = service.restored;
+  if (r) console.log(`restored from ${r.runs} earlier run${r.runs === 1 ? "" : "s"} (since ${r.from}): ${r.owner ? "your browser is still the owner" : "no owner yet"} · ${r.agents} agent${r.agents === 1 ? "" : "s"} · ${r.limits} limit${r.limits === 1 ? "" : "s"} · ${r.venues.length} venue${r.venues.length === 1 ? "" : "s"} connecting again · ${r.orders + r.payments} in flight followed again · ${r.mode}${r.skipped.length ? `\n  not brought back: ${r.skipped.join("; ")}` : ""}\n  (--fresh starts the account from nothing)`);
+  const owned = (service.account?.state.owners.length ?? 0) > 0;
+  if (liveWrites) console.log(`TRADING IS ON · real orders and movements at the accounts you connect · at most $${liveWrites.capUsd} an order or a movement (--live-cap; --read-only turns it off) · every one is signed by you, or inside a limit you signed for an agent · money leaves a venue only for a place shown to be yours${owned ? "" : `\n  pairing code: ${liveWrites.pairingCode} — the first browser becomes the owner only with this code, typed on the page`}`);
+  else if (!classic) console.log(`read-only: nothing is traded or moved from this server (started with --read-only)${owned ? "" : `\n  pairing code: ${code} — the first browser becomes the owner only with this code, typed on the page`}`);
   console.log(classic ? `simulated statement at ${srv.url} · ${service.accounts().length} accounts · MetaMask ${live ? "LIVE via mm" : "simulated (--mm for live)"} · no account layer · ledger ${service.ledgerPath()} · Ctrl-C to stop` : `your account at ${srv.url} · real accounts only: connect them on the page · ledger ${service.ledgerPath()} · Ctrl-C to stop`);
   const stop = () => srv.close().then(() => process.exit(0));
   process.on("SIGINT", stop);

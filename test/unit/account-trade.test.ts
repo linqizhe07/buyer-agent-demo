@@ -150,7 +150,7 @@ describe("orders at venues connected live", () => {
     const p = await x.prepared({ symbol: "BTC/USDT", side: "buy", orderType: "market", usd: "30" });
     if (isRefusal(p)) throw new Error(p.message);
     // $30 at the ask of 60,010 is 0.000499… BTC, down to the step: 0.0004; worth $24.00, and up to 2% more for a market buy
-    expect([p.action, p.accountChain, p.quote?.order?.notionalUsd]).toEqual([{ type: "liveOrder", venue: "ex", symbol: "BTC/USDT", side: "buy", orderType: "market", qty: "0.0004", limitPrice: "", maxNotional: "24.49", deadline: 5_600_000, nonce: p.action.nonce }, "Live · real money", 24]);
+    expect([p.action, p.accountChain, p.quote?.order?.notionalUsd]).toEqual([{ type: "liveOrder", venue: "ex", symbol: "BTC/USDT", side: "buy", orderType: "market", qty: "0.0004", limitPrice: "", stopPrice: "", tif: "", postOnly: "", reduceOnly: "", maxNotional: "24.49", deadline: 5_600_000, nonce: p.action.nonce }, "Live · real money", 24]);
     const o = placed(await x.order({ symbol: "BTC/USDT", side: "buy", orderType: "market", usd: "30" }));
     // the venue gets the worst price it may fill at (2% over the ask, down to the price step) and a client id no other run sends
     expect(x.venue.placed).toEqual([{ symbol: "BTC/USDT", side: "buy", type: "market", qty: 0.0004, worstPrice: 61_210.2, clientId: o.clientId }]);
@@ -296,7 +296,8 @@ describe("orders at venues connected live", () => {
   it("the page knows where orders can be placed and what is traded there", async () => {
     const x = await boot();
     const v = (await x.page()).venues.find((y) => y.id === "ex")!;
-    expect(v.trade).toEqual({ can: true, what: "spot" });
+    // and what else it does there: this stand-in lists no positions, changes no order in place, sets no leverage, closes nothing itself
+    expect(v.trade).toEqual({ can: true, what: "spot", positions: false, amend: false, leverage: false, close: false });
     expect(await x.svc.liveMarkets("ex", "btc")).toEqual([BTC]);
     expect(code((await x.svc.liveMarket("nowhere", "BTC/USDT")) as Refusal)).toBe("E_WALLET_ACCOUNT_UNKNOWN");
   });

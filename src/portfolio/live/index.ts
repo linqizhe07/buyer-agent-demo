@@ -20,7 +20,7 @@ import { no } from "../refuse.ts";
 import type { LiveOption, LiveOptions } from "../account/exchange.ts";
 import { hyperliquidSource, ondoSource, polymarketSource, walletSource, type AddressRequest } from "./address.ts";
 import { ALPACA_KEY, alpacaSource } from "./alpaca.ts";
-import type { ChainReader } from "./chain.ts";
+import type { ChainReader, ChainSender } from "./chain.ts";
 import { defaultKeyRef, loadKeyFile, type KeyShape } from "./credentials.ts";
 import { EXCHANGE_KEY, exchangeSource, type OpenExchange } from "./exchange.ts";
 import { KALSHI_KEY, kalshiSource } from "./kalshi.ts";
@@ -51,6 +51,8 @@ export interface LiveDeps {
   signIn?: ((kind: string) => OAuthSignIn | undefined) | undefined;
   /** an MCP client to a venue's own server; a stand-in in tests */
   openMcp?: OpenMcp | undefined;
+  /** what sends a transfer from an agent wallet the account holds the key of (chain.ts publicSender); a stand-in in tests */
+  sender?: ChainSender | undefined;
 }
 
 export interface LiveRequest {

@@ -74,6 +74,8 @@ export interface Payment {
   heldUsd?: number | undefined;
   /** where the money is while it is not at its destination, and what to do about it */
   note?: string | undefined;
+  /** the run of the account that started it, when it was not this one (a payment followed again after a restart) */
+  run?: string | undefined;
   /** REAL money at venues connected live: it lands when the venue or the chain says so, never by the simulation's clock */
   live?: { kind: string; toAddress?: Hex | undefined; network?: string | undefined; txHash?: Hex | undefined; /** a bridge: the chain it lands on, and the bridge that carries it */ toNetwork?: string | undefined; tool?: string | undefined; /** a wallet's transaction: the latest it is to be sent, and the hash the wallet reported for it */ sendBy?: string | undefined; reported?: Hex | undefined; /** given up on for not being sent in time */ expired?: boolean | undefined } | undefined;
 }

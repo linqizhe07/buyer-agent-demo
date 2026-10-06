@@ -124,6 +124,8 @@ npm run portfolio:mcp                           # stdio MCP：agent 面（portfo
 npm run account                           # http://127.0.0.1:4820：一个页面，只认你真实的账户；能下单、能动钱（配对码在终端）
 npm run account -- --live-cap 50          # 每一单、每一笔最多 $50（默认 $100）
 npm run account -- --read-only            # 只读：不下单、不动钱
+npm run account -- --fresh                # 从零开始：不接着以前的运行（默认会接着，见下）
+npm run account:service -- install --live-cap 20   # macOS：装成登录自启、挂了自动拉起的后台服务（status · restart · logs · code · uninstall）
 npm run account:demo                      # 无头：十四个 beat，每个 beat 放行一件事、拒绝一件事；同一个 home 连跑两次，输出逐字节相同
 npm run portfolio:mcp                     # agent 的席位持一把 agent 钥匙，每次写都签名
 npx tsx examples/account/headless.ts      # 一个脚本从头走到尾：owner 签、agent 签、时间流逝，不起服务不开浏览器
@@ -133,6 +135,10 @@ npx tsx examples/account/agent-seat.ts whoami   # 扮演一个 agent，对跑着
 做法手册在 [COOKBOOK.md](COOKBOOK.md)：每件事怎么做、会看到什么、什么会被拒，配两个能直接跑的示例（`examples/account/`）。
 
 对账单和 Account 原来是两个页面，功能重叠，现在合成一个，就叫 Account。它回答两件事：你有多少钱、在哪里；**钱怎么进出每个场所，以及谁有权让它动**。它是 trading agent 和资金之间的机场：功能照 Hyperliquid 自己的账户页一项一项移过来，但门开在八个场所上（比原来多一个股票券商 Alpaca 和 Hyperliquid 自己），再加上买方账户需要、单个场所不需要的三样：支出授权，替 agent 回答对外付款协议，以及把用户已有的交易所钱包**即插即用**地接进来。界面是英文。
+
+**随时能被 agent 调用，动作空间开到最大。** 这一版补的是两件事：
+- **随时**：账户重启不丢。每次运行的账本第一行写明接着哪个文件，启动时顺着这条链重建：owner 的浏览器（不用再配对）、每一条你签过的长期指令（逐条重新验签后按原时间重放）、每份额度的用量、接过的账户（用当初签的同一个凭据引用重新接上）、没完成的单和在途的钱（只问不重发）、编号接着排。可以装成 launchd 后台服务。agent 的席位用自己生成、存在本机的钥匙，不再从名字推出来。`portfolio_wait` 等一张卡、一单、一笔钱变化，不用反复问。
+- **最大**：各场所接口支持的动作都开给 agent：市价、限价、止损、止损限价，有效期（GTC / IOC / FOK / DAY），只做 maker、只减仓，原地改单，持仓与平仓，永续杠杆（agent 不超过你签的倍数）；**付钱给别人**：agent 钱包（账户替它生成、钥匙在本机、agent 拿不到），按 x402 V1/V2 和 MPP charge 用 USDC 付，付没付成以链上为准；一个 agent 可以同时拿交易、挪钱、付款三份额度，页面上 "Everything" 一键勾满。守住的线不变：额度是你签的、`--live-cap`、随时撤销、钱只去你自己的地方（付款只付额度里的收款方）、各场所自己的地区规则不绕。
 
 **页面上只有真的。** `npm run account` 起的服务里只有你经各家自己的接口接进来的账户：没有一个模拟场所，也没有模拟的插件、收款方和时钟。一开始账户是空的，页面就是一排可以接的场所（交易所、券商、钱包、预测市场与代币），点哪个就是哪个的接法。只动模拟钱的指令（场所间的模拟路由、swap、float、地址簿、对外付款、Unified、应用抽成）在门口就拒，回答里写明真钱走 `liveMove`（owner）或 `agentLiveMove`（agent）。银行和卡删掉了：银行要聚合商的生产资格，卡没有给个人的接口，没有接口的就不放进来。下面讲的路由、在途、float、收款方和十四个 beat，是终端 demo 与测试里那套模拟账户上的规则。
 
@@ -256,10 +262,12 @@ Robinhood 的三条线都是它自己发布的接口（2026-10-05 读）：股�
 - 净值、按资产类别的配置条；下面一行是**流动性**：多少美元现成可用（现金和美元稳定币），其中多少能在原地交易、多少能在你的账户之间挪、多少只能在场所自己那里取出（Alpaca、Kalshi、Robinhood 的现金就是这样），展开是每个账户、每个账本或每条链上各有多少。等你批的卡（浏览器标签页的标题带着张数）。
 - Accounts：接上的账户（余额、它交易什么、`Trade…`、`Move…`、Details 里的持仓）；一个都没接时就是一排可以接的场所，点哪个就是哪个的接法：钥匙文件（第一步写着这家要勾哪些权限：能交易、不能提币；路径、一条建文件的命令、每两秒检查一次，只看字段名不看值）、场所自己的登录页（Robinhood）、钱包签一句话或只看地址。可以下载 CSV。
 - Statement：像银行流水，一行一笔交易：成交、提现、划转、跨链、换币，日期、说明、账户、金额（买入是钱出、卖出是钱进）、手续费、状态、谁做的（你，或者哪个 agent，是你批的还是在额度内）。按月份、账户、类型筛选，下载 CSV，打印。最上面是还在进行的：挂着的单（`Cancel`，两单以上有 "Cancel all"）和等你钱包发出的交易。流水从账本文件读回来：每一笔交易每变一次，账本里记一行 `statement`，重启之后以前的流水还在。
-- Agents：一张表一份表单。敲门的 agent 一点 "Let in…" 就进了表单，填名字和交易额度（在哪些账户下单、每单多少、一共多少、期限，可另勾"也能在我的账户之间挪钱"）一次存好；也在这里改额度、撤销。
+- Positions：能列持仓的场所（永续、股票、事件合约）每个持仓一行，"Close" 平掉（不占额度，只发 reduce-only 或场所自己的平仓；你点是直接执行，agent 平仓和下单一样：保守模式出卡，激进模式每单上限以内直接平）。挂着的单能 "Change…"（场所支持改单的）。
+- Agents：一张表一份表单。敲门的 agent 一点 "Let in…" 就进了表单，填名字和交易额度（在哪些账户下单、每单多少、一共多少、期限，可另勾"也能在我的账户之间挪钱"，"Payments from an agent wallet" 给付款额度：哪些域名或任何收款方、每笔多少、一共多少），"Everything" 一键勾满；也在这里改额度、撤销。
+- Agent wallets：账户替 agent 生成的钱包，余额从链上读，"Top up…" 从你的账户充值，"Take back…" 取回（这一笔它自己付 gas）。
 - Devices：哪些浏览器能签。
 
-下单的 MCP 工具：`portfolio_live_markets`（一个场所交易哪些市场，或者一个市场此刻的价格和规矩）、`portfolio_live_order`、`portfolio_live_cancel`；`portfolio_account` 里有这个席位的交易额度、每个场所它能交易什么、账户上的单（自己的标着 `mine`）。此前加的三个工具：`portfolio_account`（这个席位的钥匙有没有被授权、还能花多少）、`portfolio_transfer`（自家场所之间）、`portfolio_pay`（为一个 URL 付钱；AP2 的两份封闭式 mandate 由席位读过商户签的总价之后自己签）。原来的 `portfolio_execute` / `portfolio_order` 也改成签名后从同一个入口进；挂了这一层之后，HTTP 上未签名的写一律被拒绝。只认真实账户的服务器上，`portfolio_transfer` 和 `portfolio_pay` 被拒，真钱走 `portfolio_live_move`：Conservative 下它回一张卡，Aggressive 下额度内直接回付款单。
+下单的 MCP 工具：`portfolio_live_markets`（一个场所交易哪些市场，或者一个市场此刻的价格、规矩、它接受的单型和有效期）、`portfolio_live_order`（市价、限价、止损、止损限价，tif、postOnly、reduceOnly）、`portfolio_live_cancel`、`portfolio_live_amend`、`portfolio_live_positions`、`portfolio_live_close`、`portfolio_live_leverage`；等结果的 `portfolio_wait`、流水 `portfolio_statement`；真钱付款的 `portfolio_pay`（从 agent 钱包，x402 / MPP charge，可带 `method`、`body`）；`portfolio_account` 里有这个席位的交易额度、每个场所它能交易什么、账户上的单（自己的标着 `mine`）。此前加的三个工具：`portfolio_account`（这个席位的钥匙有没有被授权、还能花多少）、`portfolio_transfer`（自家场所之间）、`portfolio_pay`（为一个 URL 付钱；AP2 的两份封闭式 mandate 由席位读过商户签的总价之后自己签）。原来的 `portfolio_execute` / `portfolio_order` 也改成签名后从同一个入口进；挂了这一层之后，HTTP 上未签名的写一律被拒绝。只认真实账户的服务器上，`portfolio_transfer` 和 `portfolio_pay` 被拒，真钱走 `portfolio_live_move`：Conservative 下它回一张卡，Aggressive 下额度内直接回付款单。
 
 ### 十四个 beat
 
@@ -282,7 +290,8 @@ Robinhood 的三条线都是它自己发布的接口（2026-10-05 读）：股�
 ### 这一层的诚实边界
 
 - 终端 demo 和测试里的八个场所、可插的四个和三个收款方全部是本地模拟（只认真实账户的页面上没有它们）。请求按各家自己的格式构造，账户手里有钥匙的都真的签了名（哪些只构造不签，见上面 B 层），但**没有一个发给过真的对方**，所以这里没有任何互通性证明。费用、最低额、到账时间是 2026-10-04 从各家文档读来的报价，不是实测。
-- 钥匙是从源码里的标签派生的，是公开的：demo 展示的是检查，不是保密。页面上 owner 的钥匙是浏览器不肯导出的真设备钥匙，但**第一个打开页面的浏览器就成了 owner**（首次使用即信任），抢在人前面的本机进程可以冒领；服务重启之后账户又没有 owner，下一个来问的页面（包括任何一个还开着的旧标签页）就成了 owner。真产品要带外配对。
+- 模拟里的钥匙是从源码里的标签派生的，是公开的：demo 展示的是检查，不是保密。真实账户上 agent 席位和 agent 钱包的钥匙是本机随机生成的文件（600），不是标签派生的；页面上 owner 的钥匙是浏览器不肯导出的真设备钥匙，第一次要输终端里打印的配对码，之后重启也还是它（配对行里记着它的公钥）。能写这台机器上 `~/.buyer-agent-demo` 的人，也能改账本和钥匙文件：本机文件系统是信任边界，和钥匙文件一样。
+- agent 钱包是账户手里的一把热钥匙：最坏损失是你放进去的那笔钱。付款只付 USDC、只用 EIP-3009 授权（收款方的 facilitator 代付 gas）；MPP session 和 AP2 在真钱上不做。收款方先拿走授权、过一会儿才结算的，账户在授权过期前把那笔钱压在额度里，链上看到用掉了才记账；重启的那一刻还没过期的授权不会被接着盯（最多一分钟、一笔的钱）。
 - 对账单页上的脚本 agent 仍走旧的进程内路径（划转即时到账，陌生地址出卡）；带钥匙签名的入口走这里的新规则。两套规则并存。
 - float 仍然是账户手里的一把热钥匙，约束它的只有它的大小。除了 session 的托管合约对押金的上限，这里没有一条规则是由链或场所替账户强制的。
 - 券商的现金只能在券商那边用你自己的银行动，账户路由不进去。开这条跑道要的是券商合作方资格，不是代码。

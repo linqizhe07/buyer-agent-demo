@@ -21,16 +21,54 @@
  *     market order that expires or is canceled may have filled in part;
  *   · the library's precision helpers cut a size to the step but check no minimum, so the smallest size and worth are checked here too;
  *   · a refusal is judged by what the exchange said, not only by the class the library picked: it files some under the wrong one.
+ *
+ * Beyond market and limit orders, only where the library and the exchange both take it and the trader has checked how the exchange keeps
+ * it afterwards — OKX, Binance, Bybit, Coinbase and Kraken, each against the library's source and the exchange's docs:
+ *   · a STOP-LIMIT is the exchange's own (OKX's trigger order, Binance's STOP_LOSS_LIMIT and its futures STOP, Bybit's conditional order,
+ *     Coinbase's stop_limit_stop_limit_gtc, Kraken's stop-loss-limit). A STOP with a worst price goes as one whose limit is that worst price
+ *     — filled at once and the rest canceled where the exchange takes a time in force on the order a trigger places — the way a market order
+ *     with a worst price goes as a limit order there; a stop with none goes as the exchange's stop-market, where it has one;
+ *   · OKX keeps trigger orders in a book of their own (algo orders), and so does Binance its futures stops (the algo service): such an
+ *     order's ref says so (`trigger:<id>`), so that every later look, cancel and change goes to that book, across restarts of the account
+ *     too. Once it fires, the order it placed is followed instead, under that order's own id;
+ *   · the times in force and post-only each market takes, as the library lists them for that kind of market; reduce-only only on OKX's,
+ *     Binance's and Bybit's perpetuals and futures, where the trader has checked that it reaches the exchange;
+ *   · an open order changed in place where the exchange changes it in place (amend: never a cancel-and-replace, which would leave what had
+ *     filled with the old order), what is held in perpetuals and futures (positions), and a perpetual's leverage (setLeverage);
+ *   · no close of its own: OKX's closes the whole position at the market, with no size and no worst price, and Coinbase's is for its futures,
+ *     whose positions are not listed here. The account closes a position with a reduce-only order, which goes inside a worst price.
  */
 import { isRefusal, type Refusal } from "../../core/errors.ts";
 import { no } from "../refuse.ts";
 import type { KeyFile } from "./credentials.ts";
 import { exchangeSaidNo, isBinance, isBybit, isOkx, type ExchangeClient } from "./exchange.ts";
-import { badOrder, ceilTo, floorTo, inDollars, notionalOf, onStep, pick, plain, DONE, type LiveTrader, type Market, type OrderRequest, type OrderState, type OrderStatus, type OrderType } from "./trade.ts";
+import { badOrder, ceilTo, floorTo, inDollars, notionalOf, onStep, pick, plain, DONE, type LiveTrader, type Market, type OrderChange, type OrderRequest, type OrderState, type OrderStatus, type OrderType, type Position, type TimeInForce } from "./trade.ts";
 import { num, redact, type LiveProbe } from "./types.ts";
 
 type Dict = Record<string, unknown>;
 type Kind = "spot" | "perp" | "future";
+/** a time in force as the library takes it */
+type Tif = "GTC" | "IOC" | "FOK";
+
+/** what the trader uses of the library beyond what a connection reads (exchange.ts): an order changed in place, what is held, a perpetual's
+ * leverage and margin mode, and OKX's own call that changes a trigger order (the library's editOrder changes only a take-profit or stop-loss
+ * algo order there) */
+interface Library extends ExchangeClient {
+  editOrder?(id: string, symbol: string, type: string, side: string, amount?: number, price?: number, params?: Dict): Promise<unknown>;
+  fetchPositions?(symbols?: string[], params?: Dict): Promise<unknown[]>;
+  setLeverage?(leverage: number, symbol?: string, params?: Dict): Promise<unknown>;
+  setMarginMode?(marginMode: string, symbol?: string, params?: Dict): Promise<unknown>;
+  /** OKX: POST /api/v5/trade/amend-algos */
+  privatePostTradeAmendAlgos?(request: Dict): Promise<unknown>;
+}
+
+/** the exchanges whose stops, flags, order changes, positions and leverage the trader has checked (see the head of this file) */
+type Family = "okx" | "binance" | "bybit" | "coinbase" | "kraken";
+const familyOf = (id: string): Family | undefined => (isOkx(id) ? "okx" : isBinance(id) ? "binance" : isBybit(id) ? "bybit" : id === "coinbase" ? "coinbase" : id === "kraken" ? "kraken" : undefined);
+
+/** an order in an exchange's book of trigger orders, apart from its order book (OKX's algo orders, Binance's futures algo service) */
+const TRIGGER = "trigger:";
+const triggerId = (ref: string): string | undefined => (ref.startsWith(TRIGGER) && ref.length > TRIGGER.length ? ref.slice(TRIGGER.length) : undefined);
 
 /** how the library counts a precision (base/functions/number.js): a step, a number of decimal places, or a number of significant digits */
 const DECIMAL_PLACES = 2;
@@ -40,11 +78,15 @@ const TICK_SIZE = 4;
 const LIST_MS = 5 * 60_000;
 const WELL_KNOWN = ["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "ADA", "LINK", "AVAX", "LTC"];
 const QUOTES = ["USDT", "USDC", "USD"];
+const WORDS: Record<OrderType, string> = { market: "market", limit: "limit", stop: "stop", stop_limit: "stop-limit" };
 
 const obj = (v: unknown): Dict => (v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Dict) : {});
 const str = (v: unknown): string | undefined => (typeof v === "string" && v !== "" ? v : typeof v === "number" ? String(v) : undefined);
 const pos = (v: unknown): number | undefined => (num(v) > 0 ? num(v) : undefined);
+const finite = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : typeof v === "string" && v.trim() !== "" && Number.isFinite(Number(v)) ? Number(v) : undefined);
 const yes = (v: unknown): boolean => v === true || v === "true";
+const positive = (x: number | undefined): x is number => x !== undefined && Number.isFinite(x) && x > 0;
+const and = (xs: string[]): string => (xs.length < 2 ? xs.join("") : `${xs.slice(0, -1).join(", ")} and ${xs[xs.length - 1]}`);
 
 /** a precision as the step it stands for; `undefined` when the exchange counts significant digits, which have no fixed step */
 function stepOf(p: unknown, mode: number): number | undefined {
@@ -70,6 +112,9 @@ const INVALID = /filter failure|too much precision|INVALID_(SIZE|PRICE)_PRECISIO
 const INVALID_KINDS = new Set(["InvalidOrder", "BadSymbol", "DuplicateOrderId", "OrderImmediatelyFillable", "OrderNotFillable", "ContractUnavailable"]);
 /** an order call that failed this way may still have reached the exchange (OKX 50004: "does not indicate success or failure of order") */
 const UNSURE = new Set(["RequestTimeout", "NetworkError", "ExchangeNotAvailable", "TimeoutError", "AbortError"]);
+/** a leverage or margin mode that is already what was asked: Binance -4046 "No need to change margin type." (the library's
+ * MarginModeAlreadySet), Bybit 110026 (the same class) and 110043 "Set leverage not modified" (filed as a bad request) */
+const UNCHANGED = /"?110043"?|leverage not modified|No need to change margin type/i;
 
 class Said extends Error {
   constructor(name: string, message: string) {
@@ -94,6 +139,8 @@ export function exchangeTrader(client: ExchangeClient, venue: string, name: stri
   const now = opts.now ?? Date.now;
   const key: KeyFile = Object.fromEntries(secrets.map((s, i) => [String(i), s]));
   const id = client.id;
+  const lib = client as Library;
+  const fam = familyOf(id);
   const mode = typeof client.precisionMode === "number" ? client.precisionMode : TICK_SIZE;
   let loadedAt = 0;
   let all = new Map<string, Dict>();
@@ -108,7 +155,8 @@ export function exchangeTrader(client: ExchangeClient, venue: string, name: stri
     return undefined;
   };
   const dollars = (r: Dict, kind: Kind) => inDollars(String(r.quote ?? "")) && (kind === "spot" || inDollars(String(r.settle ?? "")));
-  const offersContracts = () => (loadedAt ? list.some((m) => m.kind !== "spot") : client.has?.swap === true || client.has?.future === true);
+  const contractsHere = client.has?.swap === true || client.has?.future === true;
+  const offersContracts = () => (loadedAt ? list.some((m) => m.kind !== "spot") : contractsHere);
   const allowed = (kind: Kind) => mayTrade(id, probe.can, kind === "spot" ? "spot" : "contract");
   const feature = (kind: Kind): Dict => {
     const f = obj(client.features);
@@ -119,6 +167,14 @@ export function exchangeTrader(client: ExchangeClient, venue: string, name: stri
     const o = obj(client.options);
     return feature("spot").marketBuyRequiresPrice === true || o.createMarketBuyOrderRequiresPrice === true || obj(o.createOrder).createMarketBuyOrderRequiresPrice === true;
   };
+  /** Binance lists the order types of each market (exchangeInfo `orderTypes`), and the library refuses one not on the list */
+  const orderTypesOf = (r: Dict): string[] | undefined => {
+    const t = obj(r.info).orderTypes;
+    return Array.isArray(t) ? t.map((x) => String(x).toUpperCase()) : undefined;
+  };
+  /** the exchange takes a time in force on the limit order a stop places, in this kind of market: Binance on STOP_LOSS_LIMIT and on its
+   * futures algo order, Bybit on a conditional order, OKX on its futures' and perpetuals' trigger orders only (advanceOrdType) */
+  const childTif = (kind: Kind): boolean => fam === "binance" || fam === "bybit" || (fam === "okx" && kind !== "spot");
 
   /** what the library threw, as the account's refusal, in the exchange's own words with nothing secret in them */
   const fail = (err: unknown, ref?: string): Refusal => {
@@ -138,6 +194,8 @@ export function exchangeTrader(client: ExchangeClient, venue: string, name: stri
     if (INVALID_KINDS.has(kind) || INVALID.test(said)) return { ...badOrder(venue, name, "it does not take this order as written (its size, step, price or minimum)"), native };
     return plainNo;
   };
+  /** a refusal that is the exchange's own and final, after which nothing more is asked of it */
+  const final = (r: Refusal) => r.code === "E_VENUE_PERMISSION" || r.code === "E_VENUE_UNAUTHORIZED" || r.code === "E_VENUE_GEOBLOCKED" || r.code === "E_VENUE_UNREACHABLE";
 
   /** the library's market list, kept five minutes; a list that cannot be reloaded is used as it was */
   const load = async (): Promise<Refusal | undefined> => {
@@ -171,31 +229,32 @@ export function exchangeTrader(client: ExchangeClient, venue: string, name: stri
     return undefined;
   };
 
-  /** whether the exchange takes orders in it now, and which; the exchange's own flags where the library leaves them in `info` */
-  const tradable = (r: Dict, symbol: string): { open: boolean; note?: string; types: OrderType[] } => {
+  /** whether the exchange takes orders in it now, and which; the exchange's own flags where the library leaves them in `info`. `held`: the
+   * exchange holds the market to limit orders, or to ones that rest on its book */
+  const tradable = (r: Dict, symbol: string): { open: boolean; note?: string; types: OrderType[]; held?: "limit_only" | "post_only" } => {
     const info = obj(r.info);
     let types: OrderType[] = ["market", "limit"];
-    // Binance lists the order types of each market (exchangeInfo `orderTypes`), and the library refuses one not on the list
-    if (Array.isArray(info.orderTypes)) {
-      const listed = info.orderTypes.map((t) => String(t).toUpperCase());
-      types = types.filter((t) => listed.includes(t.toUpperCase()));
-    }
+    let held: "limit_only" | "post_only" | undefined;
+    const listed = orderTypesOf(r);
+    if (listed) types = types.filter((t) => listed.includes(t.toUpperCase()));
     const notes: string[] = [];
     if (id === "coinbase") {
       // Coinbase product flags (GET /api/v3/brokerage/market/products): the library reads only trading_disabled into `active`
       if (yes(info.cancel_only)) return { open: false, note: `${name} takes only cancellations in ${symbol} now`, types };
       if (yes(info.limit_only)) {
         types = ["limit"];
+        held = "limit_only";
         notes.push(`${name} takes only limit orders in ${symbol} now`);
       }
       if (yes(info.post_only)) {
         types = ["limit"];
+        held = "post_only";
         notes.push(`${name} takes only orders that rest on its book in ${symbol} now: a limit order that would fill at once is refused`);
       }
     }
     if (id === "kraken" && typeof info.status === "string" && info.status !== "online") {
       // Kraken AssetPairs `status`: limit_only and post_only still take limit orders; the library counts only "online" as active
-      if (info.status === "limit_only" || info.status === "post_only") return { open: true, note: `${name} has ${symbol} in ${info.status.replace("_", "-")} mode: limit orders only${info.status === "post_only" ? ", and only ones that rest on its book" : ""}`, types: ["limit"] };
+      if (info.status === "limit_only" || info.status === "post_only") return { open: true, note: `${name} has ${symbol} in ${info.status.replace("_", "-")} mode: limit orders only${info.status === "post_only" ? ", and only ones that rest on its book" : ""}`, types: ["limit"], held: info.status };
       return { open: false, note: `${name} has ${symbol} in ${info.status.replace(/_/g, "-")} mode`, types };
     }
     if (r.active === false) {
@@ -203,7 +262,43 @@ export function exchangeTrader(client: ExchangeClient, venue: string, name: stri
       return { open: false, note: `${name} is not trading ${symbol} now${word ? ` (it says: ${word})` : ""}`, types };
     }
     if (types.includes("market") && r.spot === true && !isBybit(id) && buysByCost()) notes.push(`${name} takes a market buy only by what it costs: a market buy here goes as a limit order at its worst price, filled at once`);
-    return { open: true, ...(notes.length ? { note: notes.join(" · ") } : {}), types };
+    return { open: true, ...(notes.length ? { note: notes.join(" · ") } : {}), types, ...(held ? { held } : {}) };
+  };
+
+  /** the stop orders a market takes through the library, where the trader knows how the exchange keeps them afterwards: OKX's trigger orders
+   * and Bybit's conditional orders in every market; Binance's where the market lists the stop-limit (STOP_LOSS_LIMIT in spot, STOP in
+   * futures); Coinbase's and Kraken's stop-limits in spot */
+  const stopsIn = (r: Dict, kind: Kind): OrderType[] => {
+    const listed = orderTypesOf(r) ?? [];
+    if (fam === "okx" || fam === "bybit") return ["stop", "stop_limit"];
+    if (fam === "binance") return listed.includes(kind === "spot" ? "STOP_LOSS_LIMIT" : "STOP") ? ["stop", "stop_limit"] : [];
+    if ((fam === "coinbase" || fam === "kraken") && kind === "spot") return ["stop", "stop_limit"];
+    return [];
+  };
+
+  /** what a market takes besides market and limit orders: its stops (only where it takes both and is not held to limit orders), the times in
+   * force and post-only the library lists for this kind of market (Binance's post-only is LIMIT_MAKER, which a spot market lists or not),
+   * reduce-only on a contract where the trader has checked it, the most leverage a contract takes, and whether a sell can only sell what is
+   * held (a spot market here trades the account's own coins, with no borrowing: OKX tdMode cash, Bybit isLeverage 0) */
+  const options = (r: Dict, kind: Kind, t: { types: OrderType[]; held?: string | undefined }) => {
+    const limits = t.types.includes("limit");
+    const tif = obj(feature(kind).timeInForce);
+    const listed = orderTypesOf(r);
+    const types: OrderType[] = [...t.types, ...(t.types.includes("market") && t.held === undefined ? stopsIn(r, kind) : [])];
+    const tifs = limits ? (t.held === "post_only" ? ["GTC"] : ["GTC", "IOC", "FOK"]).filter((k) => tif[k] === true).map((k) => k.toLowerCase() as TimeInForce) : [];
+    const postOnly = limits && (tif.PO === true || t.held === "post_only") && !(fam === "binance" && kind === "spot" && !(listed ?? []).includes("LIMIT_MAKER"));
+    const reduceOnly = kind !== "spot" && (fam === "okx" || fam === "binance" || fam === "bybit");
+    const sellsReduce = kind === "spot" && fam !== undefined;
+    const maxLeverage = kind !== "spot" ? pos(obj(obj(r.limits).leverage).max) : undefined;
+    // the times in force each type takes here, as place holds them (tifOf): a market order fills at once (never gtc), a stop waits until
+    // canceled (gtc only), a stop-limit's order takes ioc or fok only where the exchange takes them on the order a stop places
+    const tifsByType: Partial<Record<OrderType, TimeInForce[]>> = {};
+    if (tifs.length) {
+      if (types.includes("market")) tifsByType.market = tifs.filter((x) => x !== "gtc");
+      if (types.includes("stop")) tifsByType.stop = tifs.filter((x) => x === "gtc");
+      if (types.includes("stop_limit")) tifsByType.stop_limit = childTif(kind) ? tifs : tifs.filter((x) => x === "gtc");
+    }
+    return { types, tifs, tifsByType, postOnly, reduceOnly, sellsReduce, maxLeverage };
   };
 
   function toMarket(r: Dict, kind: Kind): Market {
@@ -222,6 +317,7 @@ export function exchangeTrader(client: ExchangeClient, venue: string, name: stri
     const pair = `${base}/${quote}`;
     const label = kind === "spot" ? `${pair} spot` : `${pair} ${kind === "perp" ? "perpetual" : `future${expiry ? ` to ${expiry}` : ""}`}${settle && settle !== quote ? `, settled in ${settle}` : ""}`;
     const t = tradable(r, symbol);
+    const more = options(r, kind, t);
     const counting = mode === SIGNIFICANT_DIGITS ? `${name} counts prices here in ${num(precision.price)} significant digits` : undefined;
     const note = [t.note, counting].filter(Boolean).join(" · ");
     return {
@@ -237,7 +333,13 @@ export function exchangeTrader(client: ExchangeClient, venue: string, name: stri
       ...(kind !== "spot" ? { contractSize: pos(r.contractSize) ?? 1 } : {}),
       open: t.open,
       ...(note ? { note } : {}),
-      types: t.types,
+      types: more.types,
+      ...(more.tifs.length ? { tifs: more.tifs } : {}),
+      ...(Object.keys(more.tifsByType).length ? { tifsByType: more.tifsByType } : {}),
+      ...(more.postOnly ? { postOnly: true } : {}),
+      ...(more.reduceOnly ? { reduceOnly: true } : {}),
+      ...(more.sellsReduce ? { sellsReduce: true } : {}),
+      ...(more.maxLeverage !== undefined ? { maxLeverage: more.maxLeverage } : {}),
     };
   }
 
@@ -275,11 +377,15 @@ export function exchangeTrader(client: ExchangeClient, venue: string, name: stri
     else status = filled > 0 ? "partial" : "pending";
     const average = pos(o.average) ?? (filled > 0 && pos(o.cost) ? num(o.cost) / (filled * (contractSize ?? 1)) : undefined);
     const fee = feeUsd(o);
-    const info = obj(o.info);
-    const venueWord = str(info.status) ?? str(info.state) ?? str(info.orderStatus);
+    const venueWord = venueWordOf(o);
     const native: Dict = { id: str(o.id) ?? ref ?? null, clientOrderId: str(o.clientOrderId) ?? null, symbol: str(o.symbol) ?? null, type: str(o.type) ?? null, side: str(o.side) ?? null, status: word ?? null, ...(venueWord ? { venueStatus: venueWord } : {}), amount: o.amount ?? null, filled: o.filled ?? null, average: o.average ?? null, cost: o.cost ?? null, fees: Array.isArray(o.fees) ? o.fees : [] };
     return { ref: str(o.id) ?? ref ?? "", status, filledQty: filled, ...(average !== undefined ? { avgPrice: average } : {}), ...(fee !== undefined ? { feeUsd: fee } : {}), native };
   };
+  /** the exchange's own status word for an order, from what the library left in `info` (an algo order's `state` at OKX, `algoStatus` at Binance) */
+  function venueWordOf(o: Dict): string | undefined {
+    const info = obj(o.info);
+    return str(info.status) ?? str(info.state) ?? str(info.orderStatus) ?? str(info.algoStatus);
+  }
 
   /** the order's fees in dollars, when every fee it paid was in dollars; read from `fees` (Coinbase's and Kraken's `fee.cost` is a string) */
   function feeUsd(o: Dict): number | undefined {
@@ -294,7 +400,9 @@ export function exchangeTrader(client: ExchangeClient, venue: string, name: stri
   const able = (m: keyof ExchangeClient): boolean => typeof client[m] === "function" && (client.has === undefined || Boolean(client.has[m]));
   const listed = (rows: unknown, ref: string): Dict | undefined => (Array.isArray(rows) ? rows.map(obj).find((o) => str(o.id) === ref) : undefined);
 
-  /** what became of an order: fetchOrder where the exchange has it; elsewhere what it has instead (ccxt.md §5) */
+  /** what became of an order in the exchange's order book: fetchOrder where the exchange has it; elsewhere what it has instead (ccxt.md §5).
+   * Bybit's conditional orders are in the same lists: a unified account lists all kinds of order unless told otherwise (v5 Get open orders,
+   * orderFilter) */
   const lookup = async (ref: string, symbol: string): Promise<Dict> => {
     if (isBybit(id)) {
       // Bybit: open orders by GET /v5/order/realtime, closed ones by GET /v5/order/history; its fetchOrder wants `acknowledged`
@@ -332,13 +440,50 @@ export function exchangeTrader(client: ExchangeClient, venue: string, name: stri
     throw new Said("OrderNotFound", `order ${ref} was not found`);
   };
 
+  /** whether a trigger order has fired, and the order it placed then: OKX's `ordId` (or the first of `ordIdList`) once the algo order is
+   * effective (Get algo order details), Binance's `actualOrderId` once the algo order is TRIGGERED, or FINISHED in the order book (Query Algo
+   * Order) */
+  const firedAs = (algo: Dict): { fired: boolean; child?: string } => {
+    const info = obj(algo.info);
+    const word = str(info.state) ?? str(info.algoStatus);
+    if (word !== "effective" && word !== "partially_effective" && word !== "TRIGGERED" && word !== "FINISHED") return { fired: false };
+    const many = Array.isArray(info.ordIdList) ? info.ordIdList.map(str).filter((x): x is string => x !== undefined) : [];
+    const child = str(info.ordId) ?? many[0] ?? str(info.actualOrderId);
+    return { fired: true, ...(child ? { child } : {}) };
+  };
+
+  /** a trigger order as its book shows it, when there is no order it placed to read instead */
+  const algoState =(algo: Dict, contractSize: number | undefined, ref: string): OrderState => {
+    const s = { ...stateOf(algo, contractSize, ref), ref };
+    const word = venueWordOf(algo);
+    // fired with the order it placed not named yet, or on its way to the order book (Binance TRIGGERING): taken, not settled. Never filled
+    // by the algo order's own word: the library calls an effective one closed and fills it whole, before anything has traded
+    if (firedAs(algo).fired || word === "TRIGGERING") return { ref, status: "pending", filledQty: 0, native: s.native };
+    // OKX order_failed: it fired and the order it was to place failed (failCode says why, e.g. 51008); the library calls it canceled
+    if (word === "order_failed") return { ref, status: "rejected", filledQty: 0, native: { ...(s.native as Dict), failCode: str(obj(algo.info).failCode) ?? null } };
+    return s;
+  };
+
+  /** what became of an order, under the ref the account follows it by. An order in a trigger book is read there; once it has fired, the order
+   * it placed is read instead and answered under its own id, which the account follows from then on */
+  const read = async (ref: string, symbol: string, contractSize: number | undefined): Promise<OrderState> => {
+    const t = triggerId(ref);
+    if (t === undefined) return stateOf(await lookup(ref, symbol), contractSize, ref);
+    const algo = obj(await client.fetchOrder!(t, symbol, { trigger: true }));
+    const { child } = firedAs(algo);
+    if (child === undefined) return algoState(algo, contractSize, ref);
+    const s = stateOf(await lookup(child, symbol), contractSize, child);
+    return { ...s, native: { ...(s.native as Dict), trigger: { id: t, status: venueWordOf(algo) ?? null } } };
+  };
+
   /** an order looked up by the account's id, after an order call that may or may not have reached the exchange (ccxt.md §5, by client id).
-   * `null`: looked, and none is there; `undefined`: this exchange cannot be asked that way through the library */
-  const byClientId = async (symbol: string, cid: string): Promise<Dict | null | undefined> => {
+   * `null`: looked, and none is there; `undefined`: this exchange cannot be asked that way through the library. `book`: the order went to the
+   * exchange's trigger book, where OKX knows it by algoClOrdId and Binance by clientAlgoId (the library maps clientOrderId to both) */
+  const byClientId = async (symbol: string, cid: string, book: boolean): Promise<Dict | null | undefined> => {
     const mine = (rows: unknown) => (Array.isArray(rows) ? rows.map(obj).find((o) => str(o.clientOrderId) === cid) : undefined);
     if ((isOkx(id) || isBinance(id)) && client.fetchOrder) {
       try {
-        return obj(await client.fetchOrder(undefined, symbol, { clientOrderId: cid }));
+        return obj(await client.fetchOrder(undefined, symbol, { clientOrderId: cid, ...(book ? { trigger: true } : {}) }));
       } catch (err) {
         if (String((err as { name?: string })?.name) === "OrderNotFound") return null;
         throw err;
@@ -352,6 +497,12 @@ export function exchangeTrader(client: ExchangeClient, venue: string, name: stri
       return mine(await client.fetchOpenOrders(undefined, undefined, undefined, { clientOrderId: cid })) ?? mine(await client.fetchClosedOrders(undefined, undefined, undefined, { clientOrderId: cid })) ?? null;
     }
     return undefined;
+  };
+  /** an order found by the account's id, as the account keeps it: under the trigger book's ref when it went there */
+  const foundState = (found: Dict, contractSize: number | undefined, book: boolean): OrderState => {
+    if (!book) return stateOf(found, contractSize);
+    const ref = TRIGGER + (str(found.id) ?? "");
+    return algoState(found, contractSize, ref);
   };
 
   /** the account's id as the exchange takes it: Coinbase as client_order_id; OKX alphanumeric up to 32; Kraken a short UUID (32 hex) or up to
@@ -377,9 +528,402 @@ export function exchangeTrader(client: ExchangeClient, venue: string, name: stri
     return badOrder(venue, name, `a ${what} in ${symbol} ${step ? `moves in steps of ${plain(step)}` : "is counted in fewer digits"}${changed ? `: ${plain(x)} would go as ${sent}` : ""}`, { [what]: x, ...(changed ? { wouldSend: sent } : {}), ...(step ? { step } : {}) });
   };
 
-  return {
+  /** a worst price on the market's tick, never looser than asked: a buy's down to the tick, a sell's up */
+  const boundOf = (o: Pick<OrderRequest, "side" | "worstPrice">, m: Market, raw: Dict): { price: number; step: number | undefined } => {
+    const worst = o.worstPrice!;
+    const step = m.priceStep ?? (mode === SIGNIFICANT_DIGITS ? sigStep(worst, num(obj(raw.precision).price)) : undefined);
+    return { price: o.side === "buy" ? floorTo(worst, step) : ceilTo(worst, step), step };
+  };
+
+  /** the order's shape against its type and the market's flags, before anything is asked of the exchange */
+  const shapeNo = (o: OrderRequest, m: Market): Refusal | undefined => {
+    const limited = o.type === "limit" || o.type === "stop_limit";
+    const stopped = o.type === "stop" || o.type === "stop_limit";
+    const w = WORDS[o.type];
+    if (limited ? !positive(o.limitPrice) : o.limitPrice !== undefined) return badOrder(venue, name, limited ? `a ${w} order has a limit price` : `a ${w} order has no limit price`);
+    if (stopped ? !positive(o.stopPrice) : o.stopPrice !== undefined) return badOrder(venue, name, stopped ? `a ${w} order has a stop price that triggers it` : `a ${w} order has no stop price`);
+    if (o.worstPrice !== undefined && !((o.type === "market" || o.type === "stop") && positive(o.worstPrice))) return badOrder(venue, name, "a worst price belongs to a market or stop order, and is more than zero");
+    if (o.postOnly && o.type !== "limit") return badOrder(venue, name, "post-only is for a limit order: it rests on the book as a maker, or is refused");
+    if (o.postOnly && !m.postOnly) return badOrder(venue, name, `it takes no post-only orders in ${m.name}`);
+    if (o.reduceOnly && !m.reduceOnly) return badOrder(venue, name, `it takes no reduce-only orders in ${m.name}`);
+    return undefined;
+  };
+
+  /** the time in force an order goes with, as the library takes it; `undefined`: the exchange's own default. Only one the market lists, and
+   * only where it means something for this kind of order */
+  const timeInForce = (o: OrderRequest, m: Market, kind: Kind): Tif | undefined | Refusal => {
+    if (o.tif === undefined) return undefined;
+    if (!(m.tifs ?? []).includes(o.tif)) return badOrder(venue, name, m.tifs?.length ? `it takes ${and(m.tifs)} in ${m.name}, not ${o.tif}` : `it takes no time-in-force choice in ${m.name}: its own default applies`);
+    if (o.postOnly && o.tif !== "gtc") return badOrder(venue, name, `a post-only order rests on the book until canceled: it takes no ${o.tif}`);
+    const tif = o.tif.toUpperCase() as Tif;
+    if (o.type === "limit") return tif;
+    if (o.type === "market") {
+      // a market order fills at once and the rest is canceled: that is IOC already. All or nothing needs a worst price to bound it
+      if (o.tif === "ioc") return undefined;
+      if (o.tif === "fok" && o.worstPrice !== undefined) return "FOK";
+      return badOrder(venue, name, o.tif === "fok" ? "a market order that fills whole or not at all needs a worst price: it then goes as a limit order there, filled at once in full or not at all" : "a market order fills at once: it does not wait until canceled");
+    }
+    if (o.type === "stop") {
+      // a stop waits for its trigger until canceled, and then fills at once
+      if (o.tif === "gtc") return undefined;
+      return badOrder(venue, name, `a stop waits for its trigger until canceled and then fills at once: it takes no ${o.tif}`);
+    }
+    if (o.tif === "gtc") return undefined;
+    return childTif(kind) ? tif : badOrder(venue, name, `it takes no ${o.tif} on the limit order a stop places in ${m.name}: that order waits on the book until canceled`);
+  };
+
+  /** OKX fires a trigger order when the price crosses its trigger from where it is when the order is placed ("place a market or limit order
+   * when a specific price level is crossed": Place algo order, Trigger order), and Bybit takes no direction on a spot conditional order
+   * (triggerDirection is for linear and inverse only: v5 Place order). So a buy stop goes above the price now and a sell stop below, or it
+   * would fire on the move the other way */
+  const crossesNo = async (o: OrderRequest, m: Market): Promise<Refusal | undefined> => {
+    if (!client.fetchTicker) return badOrder(venue, name, `the account cannot see the price of ${m.name} here, so a stop's side of it cannot be checked`);
+    let t: Dict;
+    try {
+      t = obj(await client.fetchTicker(m.symbol));
+    } catch (err) {
+      return fail(err);
+    }
+    const bid = pos(t.bid);
+    const ask = pos(t.ask);
+    const last = pos(t.last) ?? pos(t.close) ?? (bid !== undefined && ask !== undefined ? (bid + ask) / 2 : undefined);
+    if (last === undefined) return badOrder(venue, name, `it shows no price for ${m.name} now, so a stop's side of it cannot be checked`);
+    const stop = o.stopPrice!;
+    if (o.side === "buy" ? stop > last : stop < last) return undefined;
+    return badOrder(venue, name, `a ${o.side} stop goes ${o.side === "buy" ? "above" : "below"} the price now (${plain(last)}): at ${plain(stop)} it would fire when the price ${o.side === "buy" ? "falls" : "rises"} to it`, { price: last, stopPrice: stop });
+  };
+
+  /** a stop or a stop-limit as the library sends it to this exchange: its trigger, and the order it places then — a limit order at the
+   * stop-limit's limit or at a stop's worst price, or for a stop with none a market order. `book`: the exchange keeps it in its trigger book */
+  const stopOrder = async (o: OrderRequest, m: Market, kind: Kind, raw: Dict, tif: Tif | undefined, params: Dict): Promise<{ type: "market" | "limit"; price?: number; sentAs?: string; book: boolean } | Refusal> => {
+    const stop = o.stopPrice!;
+    const stopNo = exact(m.symbol, stop, "price", m.priceStep);
+    if (stopNo) return stopNo;
+    let limit: number | undefined;
+    let bounded = false;
+    if (o.type === "stop_limit") {
+      limit = o.limitPrice!;
+      const priceNo = exact(m.symbol, limit, "price", m.priceStep);
+      if (priceNo) return priceNo;
+    } else if (o.worstPrice !== undefined) {
+      const b = boundOf(o, m, raw);
+      if (!(b.price > 0)) return badOrder(venue, name, `a worst price of ${plain(o.worstPrice)} is under the smallest price step in ${m.name}`);
+      const priceNo = exact(m.symbol, b.price, "price", b.step);
+      if (priceNo) return priceNo;
+      // a worst price lies past the trigger, the way the price moves to reach it: a buy stop's at or above its stop, a sell stop's at or below
+      if (o.side === "buy" ? b.price < stop - 1e-12 : b.price > stop + 1e-12) return badOrder(venue, name, `a ${o.side} stop's worst price is at or ${o.side === "buy" ? "above" : "below"} its stop price: ${plain(b.price)} is not, against ${plain(stop)}`, { stopPrice: stop, worstPrice: o.worstPrice });
+      limit = b.price;
+      bounded = true;
+    }
+    // the time in force of the order the trigger places: a stop kept inside its worst price fills at once and the rest is canceled, where
+    // the exchange takes that there; a stop-limit's is the one asked
+    const child: Tif | undefined = bounded ? (childTif(kind) ? "IOC" : undefined) : tif;
+    const sentAs = bounded ? `a stop at ${plain(stop)} that places a limit order at ${plain(limit!)}${child === "IOC" ? ", filled at once (IOC)" : ", which rests on the book if it does not fill at once"}: a stop kept inside its worst price` : limit === undefined ? `a stop at ${plain(stop)} that places a market order: it has no worst price` : undefined;
+    const done = (book: boolean) => ({ type: limit === undefined ? ("market" as const) : ("limit" as const), ...(limit !== undefined ? { price: limit } : {}), ...(sentAs ? { sentAs } : {}), book });
+    const listedTypes = orderTypesOf(raw) ?? [];
+    if (fam === "okx") {
+      if (o.reduceOnly) return badOrder(venue, name, "OKX lists no reduce-only flag on a trigger order (Place algo order, Trigger order): a stop there cannot be held to shrinking a position");
+      if (kind === "spot" && limit === undefined && o.side === "buy") return badOrder(venue, name, `a stop buy in ${m.name} needs a worst price: OKX takes no size unit on a trigger order (error 51281), and reads a spot market buy's size in ${m.quote} to spend`);
+      const wrong = await crossesNo(o, m);
+      if (wrong) return wrong;
+      params.triggerPrice = stop;
+      // OKX knows a trigger order by algoClOrdId (Place algo order); the library writes the account's id as clOrdId, which OKX echoes as deprecated
+      params.algoClOrdId = params.clientOrderId;
+      // OKX refuses tgtCcy on a trigger order (error 51281 "Trigger order do not support the tgtCcy parameter"), and the library adds tgtCcy
+      // base_ccy to every spot order; a key set to undefined comes back over it and leaves the request (okx.js createOrderRequest)
+      if (kind === "spot") params.tgtCcy = undefined;
+      // advanceOrdType: the sub-order of a trigger order, fok or ioc, for futures and perpetuals only (Place algo order)
+      else if (child === "IOC" || child === "FOK") params.advanceOrdType = child.toLowerCase();
+      return done(true);
+    }
+    if (fam === "binance") {
+      // STOP_LOSS / STOP_LOSS_LIMIT in spot, STOP_MARKET / STOP in futures, the futures ones on the algo service (POST /fapi/v1/algoOrder): a buy
+      // fires when the price rises to its stop, a sell when it falls (New order; New Algo Order)
+      if (limit === undefined && !listedTypes.includes(kind === "spot" ? "STOP_LOSS" : "STOP_MARKET")) return badOrder(venue, name, `it takes a stop in ${m.name} only as a stop-limit: give the stop a worst price`);
+      params.triggerPrice = stop;
+      if (limit !== undefined && child) params.timeInForce = child;
+      return done(kind !== "spot");
+    }
+    if (fam === "bybit") {
+      if (kind === "spot") {
+        // a classic account lists only active spot orders unless told to look for conditional ones (v5 Get open orders, orderFilter), so the
+        // account places spot stops on a unified account, where it can follow them
+        let unified: unknown;
+        try {
+          unified = client.isUnifiedEnabled ? await client.isUnifiedEnabled() : undefined;
+        } catch (err) {
+          return fail(err);
+        }
+        if (!(Array.isArray(unified) && unified[1] === true)) return badOrder(venue, name, "the account places spot stops at Bybit on a unified account only: a classic account lists them apart from its orders");
+        const wrong = await crossesNo(o, m);
+        if (wrong) return wrong;
+      } else {
+        // triggerDirection 1 fires when the price rises to the trigger, 2 when it falls to it (v5 Place order)
+        params.triggerDirection = o.side === "buy" ? "ascending" : "descending";
+      }
+      params.triggerPrice = stop;
+      if (limit !== undefined && child) params.timeInForce = child;
+      return done(false);
+    }
+    if (fam === "coinbase") {
+      if (limit === undefined) return badOrder(venue, name, "it takes a stop only as a stop-limit (stop_limit_stop_limit_gtc): give the stop a worst price");
+      params.triggerPrice = stop;
+      // STOP_DIRECTION_STOP_UP fires when the last trade goes above the stop, STOP_DOWN when it goes below (Create order, stop_direction).
+      // The library's own default for a stop is the other way round (a buy fires on the way down), so the direction is always sent
+      params.stop_direction = o.side === "buy" ? "STOP_DIRECTION_STOP_UP" : "STOP_DIRECTION_STOP_DOWN";
+      return done(false);
+    }
+    if (fam === "kraken") {
+      // stop-loss places a market order, stop-loss-limit a limit order at price2, when the price reaches `price` (AddOrder, ordertype); a buy
+      // fires on the way up, a sell on the way down
+      params.stopLossPrice = stop;
+      return done(false);
+    }
+    return badOrder(venue, name, `it takes no stop orders through the account in ${m.name}`);
+  };
+
+  /** Cancel an order where it is: a trigger order in the trigger book. Bybit cancels a spot conditional order only when told it is one
+   * (v5 Cancel order: orderFilter StopOrder, Order by default), so a spot order it does not know as a plain one is asked for as that. A
+   * trigger order that has fired is the order it placed: that order is canceled instead */
+  const cancel = async (ref: string, symbol: string): Promise<OrderState | Refusal> => {
+    const f = await find(symbol);
+    const cs = isRefusal(f) ? undefined : f.m.contractSize;
+    const sym = isRefusal(f) ? symbol : f.m.symbol;
+    const t = triggerId(ref);
+    const tries: Dict[] = t !== undefined ? [{ trigger: true }] : isBybit(id) && !isRefusal(f) && f.kind === "spot" ? [{}, { trigger: true }] : [{}];
+    let answer: Dict | undefined;
+    let r: Refusal | undefined;
+    for (const params of tries) {
+      try {
+        answer = obj(await client.cancelOrder!(t ?? ref, sym, params));
+        r = undefined;
+        break;
+      } catch (err) {
+        r = fail(err, ref);
+        if (r.code !== "E_ACCOUNT_ORDER_UNKNOWN") break;
+      }
+    }
+    if (r || !answer) {
+      const refused = r ?? no("E_VENUE_REJECTED", { venue, message: `${name} did not answer the cancel` });
+      if (final(refused)) return refused;
+      // filled already, canceled already, fired, or not there: what the exchange shows now is the answer
+      try {
+        const s = await read(ref, sym, cs);
+        if (DONE.has(s.status)) return s;
+        if (t !== undefined && s.ref !== ref) return cancel(s.ref, symbol);
+      } catch {
+        // it does not show it either: its refusal stands
+      }
+      return refused;
+    }
+    // most exchanges answer a cancel with the id alone (Kraken with a count): the order as it stands is asked again
+    try {
+      const s = await read(ref, sym, cs);
+      // a trigger order that fired on the way: the order it placed is what is canceled now
+      if (t !== undefined && s.ref !== ref && !DONE.has(s.status)) return cancel(s.ref, symbol);
+      return s;
+    } catch {
+      // the cancel was taken but what became of the order cannot be read now: it is not called canceled with nothing filled (it may have
+      // filled in part, or still fill on the way: Bybit and Coinbase cancel later), so the account follows it until the exchange says
+      return { ...stateOf(answer, cs, ref), ref };
+    }
+  };
+
+  /** Change an open order in place, where the exchange changes it in place and keeps its id and what had filled: OKX amend-order (and
+   * amend-algos for a trigger order), Binance's futures Modify Order (a limit order), Bybit's v5 amend, Coinbase's Edit order (a limit order)
+   * and Kraken's AmendOrder. A size given is the order's new whole size, as each of them takes it */
+  const amend = async (ref: string, symbol: string, change: OrderChange, order: OrderRequest): Promise<OrderState | Refusal> => {
+    const f = await find(symbol);
+    if (isRefusal(f)) return f;
+    const { m, kind, raw } = f;
+    const sym = m.symbol;
+    const t = triggerId(ref);
+    const closed = (message: string) => no("E_VENUE_RAIL_CLOSED", { venue, message: `${name} ${message}` });
+    if (change.qty === undefined && change.limitPrice === undefined && change.stopPrice === undefined) return badOrder(venue, name, "a change is to the size, the limit or the stop");
+    const limited = order.type === "limit" || order.type === "stop_limit";
+    const stopped = order.type === "stop" || order.type === "stop_limit";
+    if (change.limitPrice !== undefined && !limited) return badOrder(venue, name, `a ${WORDS[order.type]} order has no limit price to change`);
+    if (change.stopPrice !== undefined && !stopped) return badOrder(venue, name, `a ${WORDS[order.type]} order has no stop price to change`);
+    if (change.qty !== undefined) {
+      if (!positive(change.qty)) return badOrder(venue, name, "a size is more than zero");
+      const sizeNo = exact(sym, change.qty, "size", m.qtyStep);
+      if (sizeNo) return sizeNo;
+      if (m.minQty !== undefined && change.qty < m.minQty - 1e-12) return badOrder(venue, name, `the smallest order in ${m.name} is ${plain(m.minQty)} ${kind === "spot" ? m.base : "contracts"}`, { minQty: m.minQty });
+    }
+    for (const p of [change.limitPrice, change.stopPrice]) {
+      if (p === undefined) continue;
+      if (!positive(p)) return badOrder(venue, name, "a price is more than zero");
+      const priceNo = exact(sym, p, "price", m.priceStep);
+      if (priceNo) return priceNo;
+    }
+    // where a stop waits in a trigger book, an order-book ref means it has fired: the order it placed has no stop left to move
+    const fired = stopped && t === undefined && (fam === "okx" || (fam === "binance" && kind !== "spot"));
+    if (fired && change.stopPrice !== undefined) return badOrder(venue, name, "this stop has fired: the order it placed has no stop price to change");
+    // a stop kept inside its worst price is a stop-limit at that price. A change carries no new worst price, so the stop may move only as
+    // far as it: a buy stop up to it, a sell stop down to it
+    const bound = order.type === "stop" && order.worstPrice !== undefined ? boundOf(order, m, raw).price : undefined;
+    if (bound !== undefined && change.stopPrice !== undefined && (order.side === "buy" ? change.stopPrice > bound + 1e-12 : change.stopPrice < bound - 1e-12)) return badOrder(venue, name, `this ${order.side} stop's worst price is ${plain(bound)}: a stop at ${plain(change.stopPrice)} would be past it. Cancel it and place it again with a new worst price`, { worstPrice: bound });
+    const limitNow = change.limitPrice ?? order.limitPrice ?? bound;
+
+    let call: () => Promise<unknown>;
+    if (fam === "okx") {
+      if (t !== undefined) {
+        // POST /api/v5/trade/amend-algos (Amend algo order): a trigger order's newTriggerPx and newOrdPx go together, newSz is its new size;
+        // the library's editOrder takes only take-profit and stop-loss algo orders there
+        const stop = change.stopPrice ?? order.stopPrice;
+        if (stop === undefined) return badOrder(venue, name, "a stop changed in place keeps its stop price: it is not known here");
+        const request: Dict = { instId: String(raw.id), algoId: t, ...(change.qty !== undefined ? { newSz: client.amountToPrecision?.(sym, change.qty) ?? plain(change.qty) } : {}), newTriggerPx: client.priceToPrecision?.(sym, stop) ?? plain(stop), newOrdPx: limitNow === undefined ? "-1" : (client.priceToPrecision?.(sym, limitNow) ?? plain(limitNow)) };
+        if (!lib.privatePostTradeAmendAlgos) return closed("changes no trigger order in place through the library: cancel it and place it again");
+        call = () => lib.privatePostTradeAmendAlgos!(request);
+      } else {
+        // POST /api/v5/trade/amend-order: newSz is the new whole size, what has filled included (Amend order)
+        call = () => lib.editOrder!(ref, sym, "limit", order.side, change.qty, change.limitPrice);
+      }
+    } else if (fam === "binance") {
+      if (kind === "spot") return closed("changes a spot order only by canceling it and placing a new one (its cancel-replace call), which would leave what had filled with the old order: cancel it, and place the new one");
+      if (t !== undefined) return closed("changes no stop in its futures algo book in place, through the library: cancel it, and place it again");
+      // PUT /fapi/v1/order (Modify Order): limit orders only, the quantity (the new whole size, above what has filled) and the price together
+      if (limitNow === undefined) return closed("changes only a limit order in place in its futures");
+      call = () => lib.editOrder!(ref, sym, "limit", order.side, change.qty ?? order.qty, limitNow);
+    } else if (fam === "bybit") {
+      // POST /v5/order/amend: in place, a conditional order too, its qty the new whole size (v5 Amend order)
+      call = () => lib.editOrder!(ref, sym, limitNow === undefined ? "market" : "limit", order.side, change.qty, change.limitPrice, change.stopPrice !== undefined ? { triggerPrice: client.priceToPrecision?.(sym, change.stopPrice) ?? plain(change.stopPrice) } : {});
+    } else if (fam === "coinbase") {
+      if (order.type !== "limit") return closed("changes only limit orders in place (Edit order: ONLY_LIMIT_ORDER_EDITS_SUPPORTED): cancel the stop, and place it again");
+      // POST /api/v3/brokerage/orders/edit takes the new size (the whole order, at least what has filled) and the price together
+      call = () => lib.editOrder!(ref, sym, "limit", order.side, change.qty ?? order.qty, change.limitPrice ?? order.limitPrice);
+    } else if (fam === "kraken") {
+      // POST /0/private/AmendOrder: in place, the txid kept; order_qty the new whole size, limit_price, trigger_price (Amend Order)
+      call = () => lib.editOrder!(ref, sym, "limit", order.side, change.qty, change.limitPrice, change.stopPrice !== undefined ? { stopLossPrice: change.stopPrice } : {});
+    } else return closed("changes no order in place through the account: cancel it and place another");
+
+    let answer: Dict;
+    try {
+      answer = obj(await call());
+    } catch (err) {
+      const r = fail(err, ref);
+      if (final(r)) return r;
+      // an order that filled or was canceled before the change reached it, or a stop that fired: said so, and the account's next look shows it
+      try {
+        const s = await read(ref, sym, m.contractSize);
+        if (DONE.has(s.status)) return no("E_VENUE_REJECTED", { venue, message: `${name}: the order is ${s.status} already, so nothing was changed`, detail: { order: ref, status: s.status }, native: r.native });
+        if (t !== undefined && s.ref !== ref) return no("E_VENUE_REJECTED", { venue, message: `${name}: this stop has fired, so nothing was changed. The order it placed (${s.ref}) is what stands now: it is followed from the next look, and can be changed then`, detail: { order: ref, placed: s.ref }, native: r.native });
+      } catch {
+        // it does not show it either: its refusal stands
+      }
+      return r;
+    }
+    // Coinbase answers a change it did not make with success false, which the library does not raise (Edit order: errors[].edit_failure_reason)
+    const info = obj(answer.info);
+    if (fam === "coinbase" && info.success === false) {
+      const errors = Array.isArray(info.errors) ? info.errors.map(obj) : [obj(info.errors)];
+      const why = errors.map((e) => str(e.edit_failure_reason) ?? str(e.preview_failure_reason)).find((x) => x && !/^UNKNOWN_/.test(x));
+      return no("E_VENUE_REJECTED", { venue, message: `${name} did not change the order${why ? ` (${why})` : ""}`, native: { said: why ?? null } });
+    }
+    // the order as it stands after: under its own ref, which a change in place keeps (Kraken answers with the change's own id, not the order's)
+    try {
+      return await read(ref, sym, m.contractSize);
+    } catch {
+      return { ref, status: "pending", filledQty: 0, native: { changed: true } };
+    }
+  };
+
+  /** What is held in perpetuals and futures the account trades (dollar-settled, linear): OKX GET /api/v5/account/positions, Binance GET
+   * /fapi/v3/positionRisk (after its leverage brackets), Bybit GET /v5/position/list once per settle coin (it asks for one: USDT, USDC) */
+  const positions = async (): Promise<Position[] | Refusal> => {
+    const failed = await load();
+    if (failed) return failed;
+    let rows: unknown[] = [];
+    try {
+      if (fam === "bybit") for (const settleCoin of ["USDT", "USDC"]) rows = rows.concat(await lib.fetchPositions!(undefined, { settleCoin }));
+      else rows = await lib.fetchPositions!();
+    } catch (err) {
+      return fail(err);
+    }
+    const out: Position[] = [];
+    for (const p of rows.map(obj)) {
+      const raw = all.get(str(p.symbol) ?? "");
+      const kind = raw ? kindOf(raw) : undefined;
+      if (!raw || !kind || kind === "spot" || !dollars(raw, kind)) continue;
+      const contracts = num(p.contracts);
+      const qty = Math.abs(contracts);
+      if (!(qty > 0)) continue;
+      const m = toMarket(raw, kind);
+      const mark = pos(p.markPrice);
+      const usd = pos(Math.abs(num(p.notional))) ?? (mark !== undefined ? Number((qty * (m.contractSize ?? 1) * mark).toFixed(10)) : undefined);
+      const mm = p.marginMode === "cross" || p.marginMode === "isolated" ? p.marginMode : undefined;
+      out.push({
+        symbol: m.symbol,
+        name: m.name,
+        kind: m.kind,
+        side: p.side === "short" || p.side === "long" ? p.side : contracts < 0 ? "short" : "long",
+        qty,
+        entryPrice: pos(p.entryPrice),
+        markPrice: mark,
+        usd,
+        unrealizedUsd: finite(p.unrealizedPnl),
+        leverage: pos(p.leverage),
+        marginMode: mm,
+        liquidationPrice: pos(p.liquidationPrice),
+        native: { symbol: m.symbol, side: p.side ?? null, contracts: p.contracts ?? null, contractSize: p.contractSize ?? null, notional: p.notional ?? null, entryPrice: p.entryPrice ?? null, markPrice: p.markPrice ?? null, unrealizedPnl: p.unrealizedPnl ?? null, leverage: p.leverage ?? null, marginMode: p.marginMode ?? null, liquidationPrice: p.liquidationPrice ?? null },
+      });
+    }
+    return out;
+  };
+
+  /** A perpetual's leverage, and its margin mode where the exchange sets it for one market: Binance per symbol (POST /fapi/v1/marginType, then
+   * POST /fapi/v1/leverage). OKX takes the margin mode on each order, and the account's orders there go in cross margin (the library's tdMode
+   * cross), so it sets the cross leverage (POST /api/v5/account/set-leverage). Bybit sets a unified account's margin mode for the whole
+   * account (POST /v5/account/set-margin-mode), so the account sets only the leverage there (POST /v5/position/set-leverage), and a classic
+   * account's mode per symbol (POST /v5/position/switch-isolated) */
+  const setLeverage = async (symbol: string, leverage: number, marginMode?: "cross" | "isolated"): Promise<{ leverage: number; marginMode?: "cross" | "isolated" | undefined; native: unknown } | Refusal> => {
+    const f = await find(symbol);
+    if (isRefusal(f)) return f;
+    const { m, kind } = f;
+    if (kind === "spot") return badOrder(venue, name, `leverage is set on a perpetual or a future; ${m.name} is spot`);
+    if (!(Number.isInteger(leverage) && leverage >= 1)) return badOrder(venue, name, "leverage is a whole number, 1 or more");
+    if (m.maxLeverage !== undefined && leverage > m.maxLeverage) return badOrder(venue, name, `it takes at most ${m.maxLeverage}x in ${m.name}`, { maxLeverage: m.maxLeverage });
+    // a leverage or margin mode already what was asked is not a refusal
+    const tolerant = async (run: () => Promise<unknown>): Promise<unknown> => {
+      try {
+        return await run();
+      } catch (err) {
+        const e = err as { name?: string; message?: string };
+        if (e?.name === "MarginModeAlreadySet" || e?.name === "NoChange" || UNCHANGED.test(String(e?.message ?? ""))) return { unchanged: true, said: redact(String(e?.message ?? ""), secrets).slice(0, 160) };
+        throw err;
+      }
+    };
+    try {
+      if (fam === "okx") {
+        if (marginMode === "isolated") return badOrder(venue, name, "OKX takes the margin mode on each order, and the account's orders there go in cross margin: the leverage it sets is cross");
+        const r = obj(await tolerant(() => lib.setLeverage!(leverage, m.symbol, { marginMode: "cross" })));
+        return { leverage, marginMode: "cross", native: Array.isArray(r.data) ? (r.data[0] ?? r) : r };
+      }
+      if (fam === "binance") {
+        const mm = marginMode ? await tolerant(() => lib.setMarginMode!(marginMode, m.symbol)) : undefined;
+        const r = obj(await tolerant(() => lib.setLeverage!(leverage, m.symbol)));
+        return { leverage: pos(r.leverage) ?? leverage, ...(marginMode ? { marginMode } : {}), native: { leverage: r, ...(mm !== undefined ? { marginMode: mm } : {}) } };
+      }
+      if (fam === "bybit") {
+        if (marginMode) {
+          const unified = client.isUnifiedEnabled ? await client.isUnifiedEnabled() : undefined;
+          if (Array.isArray(unified) && (unified[0] === true || unified[1] === true)) return badOrder(venue, name, "Bybit sets a unified account's margin mode for the whole account, not one market: set it at Bybit, then set the leverage here without one");
+          const mm = await tolerant(() => lib.setMarginMode!(marginMode, m.symbol, { leverage }));
+          const r = await tolerant(() => lib.setLeverage!(leverage, m.symbol));
+          return { leverage, marginMode, native: { marginMode: mm, leverage: r } };
+        }
+        const r = await tolerant(() => lib.setLeverage!(leverage, m.symbol));
+        return { leverage, native: r };
+      }
+    } catch (err) {
+      return fail(err);
+    }
+    return no("E_VENUE_RAIL_CLOSED", { venue, message: `${name} sets no leverage from the account` });
+  };
+
+  const trader: LiveTrader = {
     can: (() => {
-      const kinds = [allowed("spot"), ...(client.has?.swap === true || client.has?.future === true ? [allowed("perp")] : [])];
+      const kinds = [allowed("spot"), ...(contractsHere ? [allowed("perp")] : [])];
       return kinds.includes(true) ? true : kinds.every((k) => k === false) ? false : "unknown";
     })(),
     get what() {
@@ -413,39 +957,54 @@ export function exchangeTrader(client: ExchangeClient, venue: string, name: stri
     async place(o: OrderRequest) {
       const f = await find(o.symbol);
       if (isRefusal(f)) return f;
-      const { m, kind } = f;
+      const { m, kind, raw } = f;
       const symbol = m.symbol;
       if (!m.open) return no("E_VENUE_MARKET_CLOSED", { venue, message: `${name}: ${m.name} takes no orders now${m.note ? ` (${m.note})` : ""}` });
-      if (!m.types.includes(o.type)) return badOrder(venue, name, `it takes ${m.types.join(" and ")} orders in ${m.name}, not ${o.type} orders`);
+      if (!m.types.includes(o.type)) return badOrder(venue, name, `it takes ${and(m.types.map((t) => WORDS[t]))} orders in ${m.name}, not ${WORDS[o.type] ?? o.type} orders`);
       if (!(Number.isFinite(o.qty) && o.qty > 0)) return badOrder(venue, name, "a size is more than zero");
-      if (o.type === "limit" && !(o.limitPrice !== undefined && Number.isFinite(o.limitPrice) && o.limitPrice > 0)) return badOrder(venue, name, "a limit order has a limit price");
-      if (o.type === "market" && o.limitPrice !== undefined) return badOrder(venue, name, "a market order has no limit price");
-      if (o.worstPrice !== undefined && !(o.type === "market" && Number.isFinite(o.worstPrice) && o.worstPrice > 0)) return badOrder(venue, name, "a worst price belongs to a market order, and is more than zero");
+      const shape = shapeNo(o, m);
+      if (shape) return shape;
+      const tif = timeInForce(o, m, kind);
+      if (isRefusal(tif)) return tif;
 
       const sizeNo = exact(symbol, o.qty, "size", m.qtyStep);
       if (sizeNo) return sizeNo;
       if (m.minQty !== undefined && o.qty < m.minQty - 1e-12) return badOrder(venue, name, `the smallest order in ${m.name} is ${plain(m.minQty)} ${kind === "spot" ? m.base : "contracts"}`, { minQty: m.minQty });
       const { cid, params } = idParam(o.clientId);
-      let type: OrderType = o.type;
+      if (o.postOnly) params.postOnly = true;
+      if (o.reduceOnly) params.reduceOnly = true;
+      let type: "market" | "limit" = o.type === "limit" || o.type === "stop_limit" ? "limit" : "market";
       let price: number | undefined;
       let sentAs: string | undefined;
+      let book = false;
       if (o.type === "limit") {
         price = o.limitPrice!;
         const priceNo = exact(symbol, price, "price", m.priceStep);
         if (priceNo) return priceNo;
+        // a post-only order rests until canceled by its nature, and goes with no time in force: the library makes Binance's futures one GTX
+        // and its spot one LIMIT_MAKER (which takes none), and a timeInForce sent with it would come back over the GTX
+        if (tif && !o.postOnly) params.timeInForce = tif;
+      } else if (o.type === "stop" || o.type === "stop_limit") {
+        const s = await stopOrder(o, m, kind, raw, tif, params);
+        if (isRefusal(s)) return s;
+        type = s.type;
+        price = s.price;
+        sentAs = s.sentAs;
+        book = s.book;
       } else if (o.worstPrice !== undefined) {
-        // a market order kept inside its worst price: a limit order there, filled at once (IOC), the rest canceled. A buy's worst price goes
-        // down to the tick and a sell's up, so it is never looser than asked
-        const step = m.priceStep ?? (mode === SIGNIFICANT_DIGITS ? sigStep(o.worstPrice, num(obj(f.raw.precision).price)) : undefined);
-        price = o.side === "buy" ? floorTo(o.worstPrice, step) : ceilTo(o.worstPrice, step);
+        // a market order kept inside its worst price: a limit order there, filled at once (IOC), the rest canceled — or filled whole at once
+        // or not at all (FOK), when that is asked. A buy's worst price goes down to the tick and a sell's up, so it is never looser than asked
+        const b = boundOf(o, m, raw);
+        price = b.price;
         if (!(price > 0)) return badOrder(venue, name, `a worst price of ${plain(o.worstPrice)} is under the smallest price step in ${m.name}`);
-        const priceNo = exact(symbol, price, "price", step);
+        const priceNo = exact(symbol, price, "price", b.step);
         if (priceNo) return priceNo;
         type = "limit";
         // where the library says the exchange takes no IOC here, the limit order at the worst price is sent as it is
         const ioc = obj(feature(kind).timeInForce).IOC !== false;
-        if (ioc) params.timeInForce = "IOC";
-        sentAs = `a limit order at ${plain(price)}${ioc ? " that fills at once (IOC)" : ""}: a market order kept inside its worst price`;
+        if (tif === "FOK") params.timeInForce = "FOK";
+        else if (ioc) params.timeInForce = "IOC";
+        sentAs = `a limit order at ${plain(price)}${tif === "FOK" ? " that fills whole at once or not at all (FOK)" : ioc ? " that fills at once (IOC)" : ""}: a market order kept inside its worst price`;
       } else {
         // a plain market order: sized in the coin, and no price goes with it
         if (o.side === "buy" && kind === "spot") {
@@ -466,7 +1025,8 @@ export function exchangeTrader(client: ExchangeClient, venue: string, name: stri
         // OKX shrinks a spot market order to the balance unless told not to (Place order: banAmend)
         if (isOkx(id) && kind === "spot") params.banAmend = true;
       }
-      if (price !== undefined && m.minNotional !== undefined && notionalOf(m, o.qty, price) < m.minNotional - 1e-9) return badOrder(venue, name, `the smallest order in ${m.name} is worth ${plain(m.minNotional)} ${m.quote}`, { minNotional: m.minNotional });
+      const worth = price ?? o.stopPrice;
+      if (worth !== undefined && m.minNotional !== undefined && notionalOf(m, o.qty, worth) < m.minNotional - 1e-9) return badOrder(venue, name, `the smallest order in ${m.name} is worth ${plain(m.minNotional)} ${m.quote}`, { minNotional: m.minNotional });
 
       let created: Dict;
       try {
@@ -477,72 +1037,56 @@ export function exchangeTrader(client: ExchangeClient, venue: string, name: stri
         // the order call did not come back: whether the order is at the exchange is asked by the account's id, before anything else is said
         let found: Dict | null | undefined;
         try {
-          found = await byClientId(symbol, cid);
+          found = await byClientId(symbol, cid, book);
         } catch {
           found = undefined;
         }
-        if (found) return stateOf(found, m.contractSize);
+        if (found) return foundState(found, m.contractSize, book);
         return no("E_VENUE_UNREACHABLE", { venue, message: found === null ? `${name} did not confirm the order, and shows none under the account's id ${cid} now: look at its open orders before placing it again` : `${name} did not confirm the order: it may or may not have been placed. Look at its open orders before placing it again (the account's id for it: ${cid})`, detail: { clientOrderId: cid }, native: r.native });
       }
-      const ref = str(created.id);
-      if (!ref) {
-        const found = await byClientId(symbol, cid).catch(() => undefined);
-        if (found) return stateOf(found, m.contractSize);
+      const venueId = str(created.id);
+      if (!venueId) {
+        const found = await byClientId(symbol, cid, book).catch(() => undefined);
+        if (found) return foundState(found, m.contractSize, book);
         return no("E_VENUE_REJECTED", { venue, message: `${name} answered the order without an order id: look at its open orders before placing it again (the account's id for it: ${cid})`, detail: { clientOrderId: cid } });
       }
+      const ref = book ? TRIGGER + venueId : venueId;
       // what the order call answered is little more than the id at most exchanges: what became of it is asked at once
-      let seen: Dict | undefined;
+      let s: OrderState;
+      let seen = false;
       try {
-        seen = await lookup(ref, symbol);
+        s = await read(ref, symbol, m.contractSize);
+        seen = true;
       } catch {
-        seen = undefined;
+        s = book ? algoState(created, m.contractSize, ref) : stateOf(created, m.contractSize, ref);
       }
-      const s = stateOf(seen ?? created, m.contractSize, ref);
       // Binance's order answer carries the fills and their fees; its fetchOrder does not
-      if (s.feeUsd === undefined && seen) {
+      if (s.feeUsd === undefined && seen && !book) {
         const fee = feeUsd(created);
         if (fee !== undefined) s.feeUsd = fee;
       }
       return { ...s, native: { ...(s.native as Dict), clientOrderId: cid, ...(sentAs ? { sentAs } : {}) } };
     },
 
-    async cancel(ref, symbol) {
-      const f = await find(symbol);
-      const cs = isRefusal(f) ? undefined : f.m.contractSize;
-      const sym = isRefusal(f) ? symbol : f.m.symbol;
-      let answer: Dict;
-      try {
-        answer = obj(await client.cancelOrder!(ref, sym));
-      } catch (err) {
-        const r = fail(err, ref);
-        if (r.code === "E_VENUE_PERMISSION" || r.code === "E_VENUE_UNAUTHORIZED" || r.code === "E_VENUE_GEOBLOCKED" || r.code === "E_VENUE_UNREACHABLE") return r;
-        // filled already, canceled already, or not there: what the exchange shows now is the answer
-        try {
-          const s = stateOf(await lookup(ref, sym), cs, ref);
-          if (DONE.has(s.status)) return s;
-        } catch {
-          // it does not show it either: its refusal stands
-        }
-        return r;
-      }
-      // most exchanges answer a cancel with the id alone (Kraken with a count): the order as it stands is asked again
-      try {
-        return stateOf(await lookup(ref, sym), cs, ref);
-      } catch {
-        // the cancel was taken but what became of the order cannot be read now: it is not called canceled with nothing filled (it may have
-        // filled in part, or still fill on the way: Bybit and Coinbase cancel later), so the account follows it until the exchange says
-        return stateOf(answer, cs, ref);
-      }
-    },
+    cancel,
 
     async status(ref, symbol) {
       const f = await find(symbol);
       const cs = isRefusal(f) ? undefined : f.m.contractSize;
       try {
-        return stateOf(await lookup(ref, isRefusal(f) ? symbol : f.m.symbol), cs, ref);
+        return await read(ref, isRefusal(f) ? symbol : f.m.symbol, cs);
       } catch (err) {
         return fail(err, ref);
       }
     },
   };
+  // an order changed in place, what is held and a perpetual's leverage: only at the exchanges checked for each, and only where the library
+  // has the call there; no close of its own (see the head of this file). Binance changes only a futures order in place: where it has no
+  // futures (Binance.US) it changes none
+  if (fam !== undefined && !(fam === "binance" && !contractsHere) && client.has?.editOrder === true && typeof lib.editOrder === "function") trader.amend = amend;
+  if ((fam === "okx" || fam === "binance" || fam === "bybit") && contractsHere) {
+    if (client.has?.fetchPositions === true && typeof lib.fetchPositions === "function") trader.positions = positions;
+    if (client.has?.setLeverage === true && typeof lib.setLeverage === "function") trader.setLeverage = setLeverage;
+  }
+  return trader;
 }

@@ -55,7 +55,7 @@ export function orderLine(o: LiveOrder, agentName: (address: string) => string):
     kind: o.side,
     account: o.venue,
     accountName: o.venueName,
-    description: `${cap(o.side)} ${qty(o.qty)} ${o.base}${o.name && o.name !== o.base ? ` · ${o.name}` : ""} · ${o.type === "limit" ? `limit ${plain(o.limitPrice ?? 0)}` : "market"}${o.avgPrice ? ` · at ${plain(Number(o.avgPrice.toPrecision(10)))}` : ""}${done}`,
+    description: `${cap(o.side)} ${qty(o.qty)} ${o.base}${o.name && o.name !== o.base ? ` · ${o.name}` : ""} · ${o.type === "limit" ? `limit ${plain(o.limitPrice ?? 0)}` : o.type === "stop" ? `stop at ${plain(o.stopPrice ?? 0)}` : o.type === "stop_limit" ? `stop at ${plain(o.stopPrice ?? 0)}, limit ${plain(o.limitPrice ?? 0)}` : "market"}${o.avgPrice ? ` · at ${plain(Number(o.avgPrice.toPrecision(10)))}` : ""}${done}`,
     amountUsd: Number((sign * filled).toFixed(2)) || 0,
     worthUsd: Number(notionalOf(o, o.qty, o.limitPrice ?? o.price).toFixed(2)),
     ...(o.feeUsd !== undefined ? { feeUsd: o.feeUsd } : {}),

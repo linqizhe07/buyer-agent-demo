@@ -56,8 +56,8 @@ export interface LiveWriter {
     swap: boolean | "unknown";
     /** money can be sent to it */
     receive: boolean;
-    /** money leaves it by the user's wallet, by mm, or not by this account */
-    send: "wallet" | "mm" | false;
+    /** money leaves it by the user's wallet, by mm, by a key this account holds (an agent wallet), or not by this account */
+    send: "wallet" | "mm" | "account" | false;
   };
   /** where money for this venue goes on a network: the exchange's own deposit address, or the wallet's own address */
   depositAddress(asset: string, network: ChainName): Promise<{ address: Hex; tag?: string | undefined } | Refusal>;
@@ -68,7 +68,7 @@ export interface LiveWriter {
   swap?(r: { sell: string; buy: string; amount: number }): Promise<LiveReceipt | Refusal>;
   /** a browser wallet: the transaction the wallet is asked to send */
   walletTx?(r: { asset: string; amount: number; to: Hex; network: ChainName }): Promise<WalletTx | Refusal>;
-  /** the MetaMask Agent Wallet: mm sends it */
+  /** the MetaMask Agent Wallet: mm sends it · an agent wallet: the account signs and sends it */
   send?(r: { asset: string; amount: number; to: Hex; network: ChainName }): Promise<LiveReceipt | Refusal>;
   /** has something this venue started landed? */
   landed?(ref: string, asset: string, sinceMs: number): Promise<Landed>;

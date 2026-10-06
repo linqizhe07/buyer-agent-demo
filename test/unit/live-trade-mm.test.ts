@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { isRefusal, type Refusal } from "../../src/core/errors.ts";
 import { metamaskSource, MmError, parseMm, realMm, type MmNotice, type RunMm } from "../../src/portfolio/live/metamask.ts";
-import { inDollars, type LiveTrader, type Market } from "../../src/portfolio/live/trade.ts";
+import { inDollars, type LiveTrader, type Market, type OrderRequest, type Position } from "../../src/portfolio/live/trade.ts";
 import type { LiveSource } from "../../src/portfolio/live/types.ts";
 
 /** TRADING through MetaMask's mm command line, against a stand-in for mm that records every command and answers what each test says, in
@@ -227,6 +227,8 @@ describe("a swap through mm", () => {
     const x = await boot({ "swap quote": quotes(ETH_PRICES) }, {});
     const m = ok(await x.t.market("ETH/usdc@base"));
     expect(m).toEqual<Market>({ symbol: "ETH/USDC@Base", name: "ETH on Base", kind: "token", base: "ETH", quote: "USDC", price: 2490, bid: 2480, ask: 2500, qtyStep: 1e-8, open: true, note: expect.stringContaining("exact-input: a buy spends qty × ask in USDC and gets about qty") as unknown as string, types: ["market"] });
+    // a swap is a market order and nothing more: no time in force, post-only, reduce-only or leverage is said
+    expect(Object.keys(m).filter((k) => ["tifs", "postOnly", "reduceOnly", "maxLeverage"].includes(k))).toEqual([]);
     // the dollar side by its pinned address, never by symbol; never --yes, never --all-quotes; quotes run with MetaMask's switch off
     expect(argvs(x.calls)).toEqual([
       ["swap", "quote", "--from", USDC_BASE, "--to", "ETH", "--amount", "100", "--from-chain-id", "8453", "--slippage", "0.5", "--json"],
@@ -301,6 +303,23 @@ describe("a swap through mm", () => {
     const moved = refusal(await x.t.place({ symbol: "ETH/USDC@Base", side: "buy", type: "market", qty: 0.2, clientId: CLIENT }));
     expect([moved.code, moved.message]).toEqual(["E_ACCOUNT_REQUOTE", "the price moved: at worst this swap buys at 2645.502646 USDC per ETH, over the 2550 allowed. Nothing was swapped"]);
     expect(x.calls.map((c) => c.args[1])).toEqual(["quote"]);
+  });
+
+  it("stays a market order: a time in force, post-only, reduce-only or a stop is refused before anything is asked", async () => {
+    const x = await boot({ "swap quote": quotes(ETH_PRICES), "swap execute": SUBMITTED });
+    ok(await x.t.market("ETH/USDC@Base"));
+    x.calls.splice(0);
+    const sell = (o: Partial<OrderRequest>, clientId: string) => x.t.place({ symbol: "ETH/USDC@Base", side: "sell", type: "market", qty: 0.5, clientId, ...o });
+    const flags: Array<[Partial<OrderRequest>, string]> = [[{ tif: "fok" }, "s1"], [{ tif: "ioc" }, "s2"], [{ tif: "gtc" }, "s3"], [{ postOnly: true }, "s4"], [{ reduceOnly: true }, "s5"]];
+    for (const [o, id] of flags) {
+      const r = refusal(await sell(o, id));
+      expect([r.code, r.message]).toEqual(["E_VENUE_ORDER_INVALID", "MetaMask's swaps: a swap takes no time in force, post-only or reduce-only: it lands whole on chain, or reverts"]);
+    }
+    expect(refusal(await sell({ type: "stop", stopPrice: 2400, worstPrice: 2350 }, "s6")).message).toBe("MetaMask's swaps: a swap is a market order: mm takes no limit or stop price");
+    expect(refusal(await sell({ type: "stop_limit", stopPrice: 2400, limitPrice: 2390 }, "s7")).code).toBe("E_VENUE_ORDER_INVALID");
+    // a stop price on a market order is not dropped quietly
+    expect(refusal(await sell({ stopPrice: 2400 }, "s8")).message).toBe("MetaMask's swaps: a swap is a market order: mm takes no limit or stop price");
+    expect(x.calls).toEqual([]);
   });
 
   it("with MetaMask's own switch off, prints the commands that would run and runs none", async () => {
@@ -431,7 +450,9 @@ describe("a Polymarket order through mm", () => {
   it("market(): the outcome's book, its tick and minimum, and whether Polymarket takes orders in it now", async () => {
     const x = await boot(PM_MARKET);
     const m = ok(await x.t.market(`${SLUG}:yes`));
-    expect(m).toEqual<Market>({ symbol: `${SLUG}:Yes`, name: "Fed cuts rates in December? · Yes", kind: "event", base: "Yes", quote: "pUSD", price: 0.175, bid: 0.17, ask: 0.18, minQty: 5, qtyStep: 0.01, priceStep: 0.01, open: true, note: expect.stringContaining("a Polymarket order through mm, paid in pUSD") as unknown as string, types: ["limit", "market"] });
+    expect(m).toEqual<Market>({ symbol: `${SLUG}:Yes`, name: "Fed cuts rates in December? · Yes", kind: "event", base: "Yes", quote: "pUSD", price: 0.175, bid: 0.17, ask: 0.18, minQty: 5, qtyStep: 0.01, priceStep: 0.01, open: true, note: expect.stringContaining("a Polymarket order through mm, paid in pUSD") as unknown as string, types: ["limit", "market"], tifs: ["gtc", "ioc", "fok"], postOnly: true, sellsReduce: true });
+    // what mm predict place takes, and nothing it does not: no reduce-only flag, no leverage
+    expect(Object.keys(m).filter((k) => k === "reduceOnly" || k === "maxLeverage")).toEqual([]);
     expect(inDollars(m.quote)).toBe(true);
     expect(argvs(x.calls)).toEqual([["predict", "markets", "get", "--market", SLUG, "--json"], ["predict", "book", TID_YES, "--json"]]);
     // by an outcome's token id: the book names the market, the market names the outcome, and the account's symbol is the same
@@ -617,6 +638,188 @@ describe("a Polymarket order through mm", () => {
   });
 });
 
+// ---- a Polymarket order's time in force and post-only ------------------------------------------------------------------
+
+describe("a Polymarket order's time in force and post-only, as mm predict place takes them", () => {
+  const BUY = { symbol: `${SLUG}:Yes`, side: "buy", type: "limit", qty: 10, limitPrice: 0.18 } as const;
+  /** what mm was sent from the price on: the price, the order type, --post-only when asked */
+  const tail = (calls: Call[]) => {
+    const a = calls.find((c) => c.args[1] === "place")!.args;
+    return a.slice(a.indexOf("--price"));
+  };
+
+  it("each time in force is the order type mm takes: GTC rests, IOC is FAK, FOK is FOK; a market order is FAK unless FOK is asked", async () => {
+    // a resting order is live on the book; one that fills at once comes back matched
+    const answer = (args: string[]) => placed(args.includes("GTC") ? {} : args.includes("sell") ? { status: "matched", makingAmount: "10", takingAmount: "1.7" } : { status: "matched", makingAmount: "1.8", takingAmount: "10" });
+    const x = await boot({ ...PM_MARKET, "predict geoblock": NOT_BLOCKED, "predict place": answer });
+    ok(await x.t.market(`${SLUG}:Yes`));
+    const sent = async (o: Partial<OrderRequest>, clientId: string) => {
+      x.calls.splice(0);
+      const r = ok(await x.t.place({ ...BUY, clientId, ...o }));
+      return [...tail(x.calls), r.status];
+    };
+    expect(await sent({}, "t1")).toEqual(["--price", "0.18", "--order-type", "GTC", "--json", "open"]);
+    expect(await sent({ tif: "gtc" }, "t2")).toEqual(["--price", "0.18", "--order-type", "GTC", "--json", "open"]);
+    // IOC and FOK at a limit: the limit is the worst price a fill may take
+    expect(await sent({ tif: "ioc" }, "t3")).toEqual(["--price", "0.18", "--order-type", "FAK", "--json", "filled"]);
+    expect(await sent({ tif: "fok" }, "t4")).toEqual(["--price", "0.18", "--order-type", "FOK", "--json", "filled"]);
+    const atMarket = { type: "market", limitPrice: undefined, worstPrice: 0.18 } as const;
+    expect(await sent(atMarket, "t5")).toEqual(["--price", "0.18", "--order-type", "FAK", "--json", "filled"]);
+    expect(await sent({ ...atMarket, tif: "ioc" }, "t6")).toEqual(["--price", "0.18", "--order-type", "FAK", "--json", "filled"]);
+    expect(await sent({ ...atMarket, tif: "fok" }, "t7")).toEqual(["--price", "0.18", "--order-type", "FOK", "--json", "filled"]);
+    // a FOK sell at market: its worst price snapped up to the tick, never looser
+    expect(await sent({ side: "sell", type: "market", limitPrice: undefined, worstPrice: 0.1666, tif: "fok" }, "t8")).toEqual(["--price", "0.17", "--order-type", "FOK", "--json", "filled"]);
+  });
+
+  it("what mm or Polymarket would not take is refused before anything is asked: a GTC market order, DAY, post-only that could take, reduce-only, a stop", async () => {
+    const x = await boot({ ...PM_MARKET, "predict geoblock": NOT_BLOCKED, "predict place": placed({}) });
+    ok(await x.t.market(`${SLUG}:Yes`));
+    x.calls.splice(0);
+    const refused = async (o: Partial<OrderRequest>, clientId: string) => {
+      const r = refusal(await x.t.place({ ...BUY, clientId, ...o }));
+      expect(r.code).toBe("E_VENUE_ORDER_INVALID");
+      return r.message;
+    };
+    expect(await refused({ type: "market", limitPrice: undefined, tif: "gtc" }, "r1")).toBe("Polymarket: a market order fills at once (IOC or FOK): only a limit order rests until canceled");
+    expect(await refused({ tif: "day" }, "r2")).toBe("Polymarket: mm places GTC, IOC or FOK orders here, not DAY");
+    expect(await refused({ tif: "ioc", postOnly: true }, "r3")).toBe("Polymarket: a post-only order rests on the book or is refused, and IOC never rests: mm takes --post-only only for an order that rests (GTC)");
+    expect(await refused({ tif: "fok", postOnly: true }, "r4")).toContain("FOK never rests");
+    expect(await refused({ type: "market", limitPrice: undefined, postOnly: true }, "r5")).toBe("Polymarket: post-only is for a limit order");
+    // mm has no reduce-only flag: a reduce-only order is not sent as a plain one
+    expect(await refused({ reduceOnly: true }, "r6")).toBe("Polymarket: mm takes no reduce-only flag for an order here");
+    expect(await refused({ side: "sell", type: "market", limitPrice: undefined, reduceOnly: true }, "r7")).toBe("Polymarket: mm takes no reduce-only flag for an order here");
+    expect(await refused({ type: "stop", limitPrice: undefined, stopPrice: 0.2, worstPrice: 0.21 }, "r8")).toBe("Polymarket: mm places limit and market orders here, not stop orders");
+    expect(await refused({ type: "stop_limit", stopPrice: 0.2 }, "r9")).toBe("Polymarket: mm places limit and market orders here, not stop-limit orders");
+    expect(await refused({ stopPrice: 0.2 }, "r10")).toBe("Polymarket: mm places no stop orders here, so an order carries no stop price");
+    // a time in force from outside the type (an agent's JSON): nothing but GTC, FAK or FOK ever reaches mm's argv
+    expect(await refused({ tif: "constructor" as unknown as OrderRequest["tif"] }, "r11")).toBe("Polymarket: mm places GTC, IOC or FOK orders here, not CONSTRUCTOR");
+    // with MetaMask's switch on, not even Polymarket's region check was asked
+    expect(x.calls).toEqual([]);
+  });
+
+  it("post-only rides on a GTC limit order as --post-only; one priced to take at once is refused as written", async () => {
+    const x = await boot({ ...PM_MARKET, "predict geoblock": NOT_BLOCKED, "predict place": placed({}) });
+    ok(await x.t.market(`${SLUG}:Yes`));
+    x.calls.splice(0);
+    const r = ok(await x.t.place({ ...BUY, limitPrice: 0.17, postOnly: true, clientId: "p1" }));
+    expect(x.calls).toEqual([
+      { args: ["predict", "geoblock", "--json"] },
+      { args: ["predict", "place", "--token-id", TID_YES, "--side", "buy", "--size", "10", "--price", "0.17", "--order-type", "GTC", "--post-only", "--json"], timeoutMs: 660_000 },
+    ]);
+    expect([r.status, r.filledQty]).toEqual(["open", 0]);
+    x.calls.splice(0);
+    ok(await x.t.place({ ...BUY, limitPrice: 0.17, tif: "gtc", postOnly: true, clientId: "p2" }));
+    expect(tail(x.calls)).toEqual(["--price", "0.17", "--order-type", "GTC", "--post-only", "--json"]);
+    // Polymarket's own words for a post-only order that would have taken at once
+    x.answers["predict place"] = fail("PREDICT_ERROR", "invalid post-only order: order crosses book");
+    const crossed = refusal(await x.t.place({ ...BUY, postOnly: true, clientId: "p3" }));
+    expect([crossed.code, crossed.message]).toEqual(["E_VENUE_ORDER_INVALID", "Polymarket: invalid post-only order: order crosses book"]);
+    // in Polymarket's post-only mode, an order that is not post-only is turned away in its words
+    x.answers["predict place"] = fail("PREDICT_ERROR", "post-only mode: only post-only orders and cancels are allowed");
+    const plainOne = refusal(await x.t.place({ ...BUY, clientId: "p4" }));
+    expect([plainOne.code, plainOne.message]).toEqual(["E_VENUE_MARKET_CLOSED", "Polymarket takes no orders here now: post-only mode: only post-only orders and cancels are allowed"]);
+  });
+
+  it("what became of an IOC or FOK order: IOC's unfilled rest is canceled, FOK fills whole, and a FOK Polymarket killed placed nothing", async () => {
+    const x = await boot({ ...PM_MARKET, "predict geoblock": NOT_BLOCKED });
+    ok(await x.t.market(`${SLUG}:Yes`));
+    x.answers["predict place"] = placed({ status: "matched", makingAmount: "0.54", takingAmount: "3" });
+    const ioc = ok(await x.t.place({ ...BUY, tif: "ioc", clientId: "i1" }));
+    expect([ioc.status, ioc.filledQty, ioc.avgPrice]).toEqual(["canceled", 3, 0.18]);
+    // the same answer to a GTC order: its rest is still on the book
+    const gtc = ok(await x.t.place({ ...BUY, clientId: "g1" }));
+    expect([gtc.status, gtc.filledQty]).toEqual(["partial", 3]);
+    // a FOK buy spends size × price whole, and gets more shares than asked when the book is better
+    x.answers["predict place"] = placed({ status: "matched", makingAmount: "1.8", takingAmount: "10.5" });
+    const fok = ok(await x.t.place({ ...BUY, tif: "fok", clientId: "f1" }));
+    expect([fok.status, fok.filledQty, fok.avgPrice]).toEqual(["filled", 10.5, 0.1714285714]);
+    x.answers["predict place"] = fail("PREDICT_ORDER_NOT_FILLED", "order couldn't be fully filled. FOK orders are fully filled or killed.");
+    expect(refusal(await x.t.place({ ...BUY, tif: "fok", clientId: "f2" })).code).toBe("E_VENUE_REJECTED");
+    // killed, it placed nothing: the same id may be tried again
+    x.answers["predict place"] = placed({ status: "matched", makingAmount: "1.8", takingAmount: "10" });
+    expect(ok(await x.t.place({ ...BUY, tif: "fok", clientId: "f2" })).status).toBe("filled");
+  });
+
+  it("with MetaMask's own switch off (anything but 1 is off), a post-only or FOK order prints what would run and runs nothing", async () => {
+    for (const env of [{}, { PORTFOLIO_MM_WRITES: "true" }, { PORTFOLIO_MM_WRITES: "0" }]) {
+      const x = await boot(PM_MARKET, env);
+      ok(await x.t.market(`${SLUG}:Yes`));
+      x.calls.splice(0);
+      const post = refusal(await x.t.place({ ...BUY, limitPrice: 0.17, postOnly: true, clientId: CLIENT }));
+      expect([post.code, post.message]).toEqual(["E_WALLET_LIVE_WRITES_OFF", `MetaMask's own switch is off (PORTFOLIO_MM_WRITES is not 1). The commands that would run: mm predict geoblock --json, then mm predict place --token-id ${TID_YES} --side buy --size 10 --price 0.17 --order-type GTC --post-only --json`]);
+      const fok = refusal(await x.t.place({ ...BUY, side: "sell", type: "market", limitPrice: undefined, worstPrice: 0.17, tif: "fok", clientId: "w2" }));
+      expect(fok.code).toBe("E_WALLET_LIVE_WRITES_OFF");
+      expect((fok.detail as { commands: string[] }).commands).toEqual(["mm predict geoblock --json", `mm predict place --token-id ${TID_YES} --side sell --size 10 --price 0.17 --order-type FOK --json`]);
+      expect(x.calls).toEqual([]);
+    }
+  });
+});
+
+// ---- what is held ------------------------------------------------------------------------------------------------------------
+
+describe("positions(): what the Predict deposit wallet holds at Polymarket", () => {
+  const DEPOSIT = "0x00000000000000000000000000000000000000Dd";
+  /** one row of Polymarket's Data API GET /positions, with every field it documents, as mm passes it on */
+  const row = (over: Record<string, unknown> = {}) => ({ proxyWallet: DEPOSIT, asset: TID_YES, conditionId: CID, size: 25, avgPrice: 0.16, initialValue: 4, currentValue: 4.375, cashPnl: 0.375, percentPnl: 9.375, totalBought: 25, realizedPnl: 0, percentRealizedPnl: 0, curPrice: 0.175, redeemable: false, mergeable: false, title: "Fed cuts rates in December?", slug: SLUG, icon: "https://example.invalid/fed.png", eventSlug: "fed-decision-in-december", outcome: "Yes", outcomeIndex: 0, oppositeOutcome: "No", oppositeAsset: TID_NO, endDate: "2026-12-31", negativeRisk: false, ...over });
+  /** `mm predict positions --json`: the rows under result.positions, beside the owner and the deposit wallet (mm calls it makerAddress) */
+  const held = (rows: unknown[]) => ({ command: "positions", params: {}, result: { chainId: 137, ownerAddress: WALLET, makerAddress: DEPOSIT, positions: rows } });
+  const RESOLVED = `5${"1".repeat(76)}`;
+  const ODD = `7${"3".repeat(76)}`;
+
+  it("each holding as the account's position, under the symbol market() opens; a read, so it runs with MetaMask's switch off", async () => {
+    const x = await boot(
+      {
+        ...PM_MARKET,
+        "predict positions": held([
+          row(),
+          // nothing held is not a position
+          row({ asset: TID_NO, outcome: "No", size: 0, currentValue: 0 }),
+          // resolved and lost: still held until it is redeemed, and worth 0
+          row({ asset: RESOLVED, conditionId: `0x${"ab".repeat(32)}`, slug: "will-it-rain-on-october-1", title: "Will it rain on October 1?", outcome: "No", size: 40, avgPrice: 0.3, curPrice: 0, currentValue: 0, cashPnl: -12, redeemable: true }),
+          // a slug the account's symbols cannot carry: named by its token id; figures given as strings are read as numbers
+          row({ asset: ODD, slug: "Odd Slug!", size: "7.5", avgPrice: "0.5", curPrice: "0.52", currentValue: "3.9", cashPnl: "0.15" }),
+        ]),
+      },
+      {},
+    );
+    const list = ok(await x.t.positions!());
+    expect(argvs(x.calls)).toEqual([["predict", "positions", "--json"]]);
+    expect(list.map((p) => p.symbol)).toEqual([`${SLUG}:Yes`, "will-it-rain-on-october-1:No", ODD]);
+    expect(list[0]).toEqual<Position>({ symbol: `${SLUG}:Yes`, name: "Fed cuts rates in December? · Yes", kind: "event", side: "long", qty: 25, entryPrice: 0.16, markPrice: 0.175, usd: 4.375, unrealizedUsd: 0.375, native: { tokenId: TID_YES, conditionId: CID, outcome: "Yes", size: 25, avgPrice: 0.16, curPrice: 0.175, currentValue: 4.375, cashPnl: 0.375, redeemable: false, endDate: "2026-12-31" } });
+    expect(list[1]).toMatchObject({ name: "Will it rain on October 1? · No (resolved)", side: "long", qty: 40, entryPrice: 0.3, markPrice: 0, usd: 0, unrealizedUsd: -12, native: { redeemable: true } });
+    expect(list[2]).toMatchObject({ qty: 7.5, entryPrice: 0.5, markPrice: 0.52, usd: 3.9, unrealizedUsd: 0.15 });
+    // the position's symbol is the market market() opens, so a sell of those shares goes to the same outcome
+    x.calls.splice(0);
+    expect(ok(await x.t.market(list[0]!.symbol)).symbol).toBe(list[0]!.symbol);
+    expect(argvs(x.calls)).toEqual([["predict", "markets", "get", "--market", SLUG, "--json"], ["predict", "book", TID_YES, "--json"]]);
+  });
+
+  it("a wallet that never set up Predict holds nothing there; mm's other refusals are the account's, in mm's words", async () => {
+    const x = await boot({ "predict positions": fail("PREDICT_SETUP_REQUIRED", `Run Predict setup for owner ${WALLET} before this operation.`) }, { ...ON, MM_PASSWORD: PASSWORD });
+    expect(ok(await x.t.positions!())).toEqual([]);
+    const says = async (answer: unknown) => {
+      x.answers["predict positions"] = answer;
+      return refusal(await x.t.positions!());
+    };
+    expect((await says(fail("AUTH_FAILED", "Authentication failed."))).code).toBe("E_VENUE_UNAUTHORIZED");
+    expect((await says(fail("NOT_INITIALIZED", "Project not initialized."))).code).toBe("E_VENUE_UNAUTHORIZED");
+    expect((await says(fail("RATE_LIMITED", "Too many requests"))).code).toBe("E_VENUE_UNREACHABLE");
+    expect((await says(fail("NETWORK_UNREACHABLE", "fetch failed"))).code).toBe("E_VENUE_UNREACHABLE");
+    const down = await says(fail("PREDICT_ERROR", "Polymarket fetch positions failed: Bad Gateway"));
+    expect([down.code, down.message, (down.native as { command: string }).command]).toEqual(["E_VENUE_REJECTED", "Polymarket refused to list what the Predict deposit wallet holds: Polymarket fetch positions failed: Bad Gateway", "mm predict positions --json"]);
+    const unread = await says({ command: "positions", params: {}, result: { chainId: 137, ownerAddress: WALLET } });
+    expect([unread.code, unread.message]).toEqual(["E_VENUE_REJECTED", "Polymarket answered in a way this connection could not read"]);
+    const leaked = await says(fail("WALLET_ERROR", `could not unlock with --password ${PASSWORD}`));
+    expect((leaked.native as { said: string }).said).toBe("could not unlock with --password •••");
+  });
+
+  it("offers no amend, close or leverage: mm has no command for them here, and selling the shares is an order", async () => {
+    const x = await boot();
+    expect(typeof x.t.positions).toBe("function");
+    expect([x.t.amend, x.t.close, x.t.setLeverage]).toEqual([undefined, undefined, undefined]);
+  });
+});
+
 // ---- markets ------------------------------------------------------------------------------------------------------------
 
 describe("markets(query)", () => {
@@ -636,6 +839,7 @@ describe("markets(query)", () => {
     expect(first.length).toBeLessThanOrEqual(20);
     expect(first.slice(0, 3).map((m) => m.symbol)).toEqual(["ETH/USDC@Base", "ETH/USDC@Ethereum", "ETH/USDC@Arbitrum"]);
     expect(first.every((m) => inDollars(m.quote) && m.types.join() === "market" && m.open)).toBe(true);
+    expect(first.every((m) => !("tifs" in m) && !("postOnly" in m) && !("reduceOnly" in m))).toBe(true);
     // Polygon has no swap here, Linea no pinned USDC: neither is offered
     expect(first.some((m) => /@(Polygon|Optimism|BNB Chain)$/.test(m.symbol) || m.symbol.includes("Linea"))).toBe(false);
     expect(ok(await x.t.markets("wbtc")).map((m) => m.symbol)).toEqual(["WBTC/USDC@Ethereum", "WBTC/USDC@Arbitrum"]);
@@ -656,6 +860,11 @@ describe("markets(query)", () => {
     expect(pm.map((m) => [m.symbol, m.quote, m.price, m.minQty, m.priceStep, m.open])).toEqual([
       [`${SLUG}:Yes`, "pUSD", 0.175, 5, 0.01, true],
       [`${SLUG}:No`, "pUSD", 0.825, 5, 0.01, true],
+    ]);
+    // listed as market() opens them: GTC, IOC and FOK, post-only, and no reduce-only
+    expect(pm.map((m) => [m.types.join(), m.tifs?.join(), m.postOnly, "reduceOnly" in m])).toEqual([
+      ["limit,market", "gtc,ioc,fok", true, false],
+      ["limit,market", "gtc,ioc,fok", true, false],
     ]);
     expect(x.calls.at(-1)!.args).toEqual(["predict", "markets", "get", "--market", SLUG, "--json"]);
     // free text is not searched at Polymarket: mm's search output is not documented

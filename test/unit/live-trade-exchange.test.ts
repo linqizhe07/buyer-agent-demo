@@ -323,11 +323,13 @@ describe("the markets it lists", () => {
 });
 
 describe("one market, with a fresh price", () => {
-  it("OKX spot: the ticker's last, bid and ask; steps from the market's precision (a step, TICK_SIZE), the smallest size; open; both order types", async () => {
+  it("OKX spot: the ticker's last, bid and ask; steps from the market's precision (a step, TICK_SIZE), the smallest size; open; what it takes", async () => {
     const { t, seen, answer } = okx();
     answer(okxTicker);
     const m = ok(await t.market("btc/usdt"));
-    expect(m).toEqual({ symbol: "BTC/USDT", name: "BTC/USDT spot", kind: "spot", base: "BTC", quote: "USDT", price: 85573.7, bid: 85573.7, ask: 85573.8, minQty: 0.00001, qtyStep: 1e-8, priceStep: 0.1, open: true, types: ["market", "limit"] } satisfies Market);
+    // stops are OKX's trigger orders; the times in force and post-only the library lists for OKX spot, and the ones each type takes (a market
+    // order never gtc, a stop gtc only, and in spot the order a stop places rests until canceled); a cash account sells only what it holds
+    expect(m).toEqual({ symbol: "BTC/USDT", name: "BTC/USDT spot", kind: "spot", base: "BTC", quote: "USDT", price: 85573.7, bid: 85573.7, ask: 85573.8, minQty: 0.00001, qtyStep: 1e-8, priceStep: 0.1, open: true, types: ["market", "limit", "stop", "stop_limit"], tifs: ["gtc", "ioc", "fok"], tifsByType: { market: ["ioc", "fok"], stop: ["gtc"], stop_limit: ["gtc"] }, postOnly: true, sellsReduce: true } satisfies Market);
     expect(seen.map((r) => `${r.method} ${r.url}`)).toEqual(["GET https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT"]);
   });
 
@@ -347,7 +349,7 @@ describe("one market, with a fresh price", () => {
     const doge = ok(await t.market("DOGE/USD"));
     expect([doge.open, doge.note]).toEqual([false, "Coinbase takes only cancellations in DOGE/USD now"]);
     const btc = ok(await t.market("BTC/USD"));
-    expect([btc.open, btc.types, btc.minNotional, btc.note]).toEqual([true, ["market", "limit"], 1, "Coinbase takes a market buy only by what it costs: a market buy here goes as a limit order at its worst price, filled at once"]);
+    expect([btc.open, btc.types, btc.minNotional, btc.note]).toEqual([true, ["market", "limit", "stop", "stop_limit"], 1, "Coinbase takes a market buy only by what it costs: a market buy here goes as a limit order at its worst price, filled at once"]);
   });
 
   it("Binance: a market at a break is closed in its own word; its own list of order types; Kraken's tick size, and its limit-only mode", async () => {
@@ -782,5 +784,492 @@ describe("what the exchange says no to, in its own words", () => {
     leak.answer(new Error(`okx something odd with ${OKX.secret} and ${OKX.password}`));
     const l = said(await leak.t.status(OKX_ORD, "BTC/USDT"), ALL_SECRETS);
     expect(JSON.stringify(l.native)).toContain("•••");
+  });
+});
+
+// ==================================================================================================================================
+// stops, the times in force and flags each market takes, an order changed in place, what is held, and a perpetual's leverage
+
+const OKX_PERP = { ...OKX_MARKETS[5]!, limits: { amount: { min: 0.01 }, cost: {}, price: {}, leverage: { min: 1, max: 100 } } };
+/** OKX with its spot pair, a perpetual that says its most leverage, and an inverse perpetual (whose positions the account does not list) */
+function okxPerp() {
+  const v = venue("okx", OKX, [OKX_MARKETS[0]!, OKX_PERP, OKX_MARKETS[6]!]);
+  return { ...v, t: exchangeTrader(v.x, "okx", "OKX", Object.values(OKX), { can: ["read", "trade"] }, { now: () => NOW }) };
+}
+const BYBIT_PERP = linear("BTCUSDT", "BTC", "USDT", { contractSize: 1, precision: { amount: 0.001, price: 0.1 }, limits: { amount: { min: 0.001 }, cost: { min: 5 }, price: {}, leverage: { min: 1, max: 100 } } });
+function bybitBoth(unified = true) {
+  const v = venue("bybit", BYBIT, [BYBIT_MARKETS[0]!, BYBIT_PERP], { enableUnifiedAccount: unified, enableUnifiedMargin: false });
+  return { ...v, t: exchangeTrader(v.x, "bybit", "Bybit", Object.values(BYBIT), { can: ["read", "trade spot", "trade contracts"] }, { now: () => NOW }) };
+}
+
+const OKX_ALGO = "1836487817828872192";
+const OKX_CHILD = "312269865356374099";
+/** Place algo order (POST /api/v5/trade/order-algo) */
+const okxAlgoAck = { body: { code: "0", msg: "", data: [{ algoClOrdId: CID, algoId: OKX_ALGO, clOrdId: "", sCode: "0", sMsg: "", tag: "" }] } };
+/** Get algo order details (GET /api/v5/trade/order-algo): a trigger order */
+const okxAlgo = (state: string, over: Dict = {}) => ({ body: { code: "0", msg: "", data: [{ instType: "SPOT", instId: "BTC-USDT", ordId: "", ordIdList: [], ccy: "", clOrdId: "", algoId: OKX_ALGO, sz: "0.001", closeFraction: "", ordType: "trigger", side: "sell", posSide: "net", tdMode: "cash", tgtCcy: "", state, lever: "", triggerPx: "80000", triggerPxType: "last", ordPx: "79900", actualSz: "", actualPx: "", actualSide: "", advanceOrdType: "", reduceOnly: "false", triggerTime: "", last: "85573.7", failCode: "", algoClOrdId: CID, cTime: "1791230000123", uTime: "1791230000123", ...over }] } });
+const okxSwapTicker = { body: { code: "0", msg: "", data: [{ instType: "SWAP", instId: "BTC-USDT-SWAP", last: "85580.1", askPx: "85580.2", bidPx: "85580.1", ts: "1791225482263" }] } };
+
+const BIN_ALGO = 3358;
+const BIN_FUT = 8389765519;
+/** New Algo Order / Query Algo Order (USDⓈ-M futures, /fapi/v1/algoOrder) */
+const binAlgo = (algoStatus: string, over: Dict = {}) => ({ body: { algoId: BIN_ALGO, clientAlgoId: CID, algoType: "CONDITIONAL", orderType: "STOP", symbol: "BTCUSDT", side: "BUY", positionSide: "BOTH", timeInForce: "FOK", quantity: "0.002", algoStatus, triggerPrice: "90000.0", price: "91000.0", actualOrderId: "", actualPrice: "0.00000", icebergQuantity: null, selfTradePreventionMode: "EXPIRE_MAKER", workingType: "CONTRACT_PRICE", priceMatch: "NONE", closePosition: false, priceProtect: false, reduceOnly: true, createTime: 1791230000123, updateTime: 1791230000123, triggerTime: 0, goodTillDate: 0, ...over } });
+/** Query Order (USDⓈ-M futures, GET /fapi/v1/order) */
+const binFut = (status: string, executedQty: string, cumQuote: string, over: Dict = {}) => ({ body: { orderId: BIN_FUT, symbol: "BTCUSDT", status, clientOrderId: CID, price: "91000.0", avgPrice: executedQty === "0" ? "0.00" : "90950.0", origQty: "0.002", executedQty, cumQty: executedQty, cumQuote, timeInForce: "GTC", type: "LIMIT", reduceOnly: false, closePosition: false, side: "BUY", positionSide: "BOTH", stopPrice: "0", workingType: "CONTRACT_PRICE", priceProtect: false, origType: "LIMIT", time: 1791230000123, updateTime: 1791230000456, ...over } });
+
+const bybitAck = { body: { retCode: 0, retMsg: "OK", result: { orderId: BYBIT_ORD, orderLinkId: CID }, retExtInfo: {}, time: 1791230000123 } };
+const bybitTicker = { body: { retCode: 0, retMsg: "OK", result: { category: "spot", list: [{ symbol: "BTCUSDT", bid1Price: "85573.6", bid1Size: "1", ask1Price: "85573.8", ask1Size: "1", lastPrice: "85573.7", prevPrice24h: "85000", price24hPcnt: "0.0067", highPrice24h: "86000", lowPrice24h: "84000", turnover24h: "1", volume24h: "1" }] }, retExtInfo: {}, time: 1791230000123 } };
+const bybitLinearList = (rows: Dict[]) => ({ body: { retCode: 0, retMsg: "OK", result: { nextPageCursor: "", category: "linear", list: rows }, retExtInfo: {}, time: 1791230000500 } });
+
+describe("what each market takes besides market and limit orders", () => {
+  it("OKX: stops (its trigger orders) everywhere; on a perpetual reduce-only and its most leverage; a spot sell sells only what is held", async () => {
+    const { t, seen } = okxPerp();
+    const [spot, perp] = ok(await t.markets("")).filter((m) => m.base === "BTC");
+    expect([spot!.types, spot!.tifs, spot!.postOnly, spot!.reduceOnly, spot!.sellsReduce, spot!.maxLeverage]).toEqual([["market", "limit", "stop", "stop_limit"], ["gtc", "ioc", "fok"], true, undefined, true, undefined]);
+    expect([perp!.symbol, perp!.types, perp!.tifs, perp!.postOnly, perp!.reduceOnly, perp!.sellsReduce, perp!.maxLeverage]).toEqual(["BTC/USDT:USDT", ["market", "limit", "stop", "stop_limit"], ["gtc", "ioc", "fok"], true, true, undefined, 100]);
+    expect(seen).toEqual([]);
+  });
+
+  it("Binance by each market's own list of order types: STOP_LOSS_LIMIT for a spot stop, STOP for a futures one, LIMIT_MAKER for post-only", async () => {
+    const { t } = binance();
+    const all = ok(await t.markets(""));
+    const by = (s: string) => all.find((m) => m.symbol === s)!;
+    expect([by("BTC/USDT").types, by("BTC/USDT").tifs, by("BTC/USDT").postOnly, by("BTC/USDT").reduceOnly]).toEqual([["market", "limit", "stop", "stop_limit"], ["gtc", "ioc", "fok"], true, undefined]);
+    // a market that lists LIMIT and LIMIT_MAKER only: no market order, so no stop
+    expect([by("XYZ/USDT").types, by("XYZ/USDT").postOnly]).toEqual([["limit"], true]);
+    expect([by("BTC/USDT:USDT").types, by("BTC/USDT:USDT").reduceOnly, by("BTC/USDT:USDT").sellsReduce]).toEqual([["market", "limit", "stop", "stop_limit"], true, undefined]);
+  });
+
+  it("Coinbase and Kraken: stop-limits in spot, no reduce-only; a market held to limit orders takes no stop, and one held to post-only no IOC", async () => {
+    const c = coinbase();
+    const cb = ok(await c.t.markets(""));
+    expect(cb.map((m) => [m.symbol, m.types, m.tifs, m.postOnly ?? false, m.reduceOnly ?? false])).toEqual([
+      ["BTC/USD", ["market", "limit", "stop", "stop_limit"], ["gtc", "ioc", "fok"], true, false],
+      ["SOL/USD", ["limit"], ["gtc", "ioc", "fok"], true, false],
+    ]);
+    const k = kraken();
+    const kr = ok(await k.t.markets(""));
+    expect(kr.map((m) => [m.symbol, m.types])).toEqual([
+      ["BTC/USD", ["market", "limit", "stop", "stop_limit"]],
+      ["ETH/USD", ["limit"]],
+      ["CELR/USD", ["market", "limit", "stop", "stop_limit"]],
+    ]);
+    const post = venue("kraken", KRAKEN, [{ ...KRAKEN_MARKETS[0]!, active: false, info: { altname: "XBTUSD", status: "post_only", tick_size: "0.1" } }]);
+    const held = ok(await exchangeTrader(post.x, "kraken", "Kraken", [], { can: [] }, { now: () => NOW }).markets(""));
+    expect([held[0]!.types, held[0]!.tifs, held[0]!.postOnly]).toEqual([["limit"], ["gtc"], true]);
+  });
+
+  it("an exchange the trader has not checked: market and limit orders as before, the times in force its library lists, nothing more", async () => {
+    const x = {
+      id: "someex",
+      markets: { "BTC/USDT": spot("BTCUSDT", "BTC", "USDT"), "BTC/USDT:USDT": linear("BTCUSDT", "BTC", "USDT") },
+      has: { swap: true, editOrder: true, fetchPositions: true, setLeverage: true },
+      features: { spot: { createOrder: { timeInForce: { GTC: true, IOC: true, FOK: false, PO: false } } } },
+      async loadMarkets() {},
+      async fetchBalance() {
+        return {};
+      },
+    } satisfies ExchangeClient;
+    const t = exchangeTrader(x, "someex", "Someex", [], { can: [] });
+    const [s, p] = ok(await t.markets(""));
+    expect([s!.types, s!.tifs, s!.postOnly, s!.sellsReduce, p!.types, p!.tifs, p!.reduceOnly]).toEqual([["market", "limit"], ["gtc", "ioc"], undefined, undefined, ["market", "limit"], undefined, undefined]);
+    expect([t.amend, t.positions, t.setLeverage, t.close]).toEqual([undefined, undefined, undefined, undefined]);
+  });
+});
+
+describe("a stop, as the library sends it", () => {
+  it("OKX: a trigger order in its algo book (POST /api/v5/trade/order-algo), the id as algoClOrdId, no tgtCcy (51281); followed as trigger:<algoId>", async () => {
+    const { t, seen, answer } = okx();
+    answer(okxTicker, okxAlgoAck, okxAlgo("live"));
+    const s = ok(await t.place({ symbol: "BTC/USDT", side: "sell", type: "stop_limit", qty: 0.001, stopPrice: 80000, limitPrice: 79900, clientId: CID }));
+    // the price first: OKX fires a trigger order when the price crosses it from where it is, so a sell stop must be below it
+    expect(seen.map((r) => `${r.method} ${r.url}`)).toEqual(["GET https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT", "POST https://www.okx.com/api/v5/trade/order-algo", `GET https://www.okx.com/api/v5/trade/order-algo?instId=BTC-USDT&algoId=${OKX_ALGO}`]);
+    expect(okxSigned(seen[1]!, "/api/v5/trade/order-algo")).toEqual({ instId: "BTC-USDT", side: "sell", ordType: "trigger", sz: "0.001", tdMode: "cash", triggerPx: "80000", orderPx: "79900", clOrdId: CID, algoClOrdId: CID });
+    expect([s.ref, s.status, s.filledQty]).toEqual([`trigger:${OKX_ALGO}`, "open", 0]);
+    expect(s.native).toMatchObject({ clientOrderId: CID, venueStatus: "live" });
+  });
+
+  it("OKX perpetual: a stop with a worst price places a limit order there that fills at once (advanceOrdType ioc), a buy's worst price down to the tick", async () => {
+    const { t, seen, answer } = okx();
+    answer(okxSwapTicker, okxAlgoAck, okxAlgo("live", { instType: "SWAP", instId: "BTC-USDT-SWAP", sz: "1", side: "buy", tdMode: "cross", triggerPx: "90000", ordPx: "91800", advanceOrdType: "ioc" }));
+    const s = ok(await t.place({ symbol: "BTC/USDT:USDT", side: "buy", type: "stop", qty: 1, stopPrice: 90000, worstPrice: 91800.04, clientId: CID }));
+    expect(okxSigned(seen[1]!, "/api/v5/trade/order-algo")).toEqual({ instId: "BTC-USDT-SWAP", side: "buy", ordType: "trigger", sz: "1", tdMode: "cross", triggerPx: "90000", orderPx: "91800", clOrdId: CID, algoClOrdId: CID, advanceOrdType: "ioc" });
+    expect(s.native).toMatchObject({ sentAs: "a stop at 90000 that places a limit order at 91800, filled at once (IOC): a stop kept inside its worst price" });
+  });
+
+  it("OKX refuses before anything is sent: a spot stop buy with no worst price, a reduce-only stop; after the price only: a stop on the wrong side of it", async () => {
+    const { t, seen, answer } = okx();
+    const buy = said(await t.place({ symbol: "BTC/USDT", side: "buy", type: "stop", qty: 0.001, stopPrice: 90000, clientId: CID }), ALL_SECRETS);
+    expect([buy.code, buy.message]).toEqual(["E_VENUE_ORDER_INVALID", "OKX: a stop buy in BTC/USDT spot needs a worst price: OKX takes no size unit on a trigger order (error 51281), and reads a spot market buy's size in USDT to spend"]);
+    const p = okxPerp();
+    const reduce = said(await p.t.place({ symbol: "BTC/USDT:USDT", side: "sell", type: "stop", qty: 1, stopPrice: 80000, worstPrice: 78400, reduceOnly: true, clientId: CID }), ALL_SECRETS);
+    expect(reduce.message).toContain("OKX lists no reduce-only flag on a trigger order");
+    expect([seen.length, p.seen.length]).toEqual([0, 0]);
+    answer(okxTicker);
+    const wrong = said(await t.place({ symbol: "BTC/USDT", side: "sell", type: "stop_limit", qty: 0.001, stopPrice: 86000, limitPrice: 85900, clientId: CID }), ALL_SECRETS);
+    expect([wrong.code, wrong.message, seen.length]).toEqual(["E_VENUE_ORDER_INVALID", "OKX: a sell stop goes below the price now (85573.7): at 86000 it would fire when the price rises to it", 1]);
+  });
+
+  it("Binance spot: a stop with a worst price is STOP_LOSS_LIMIT at it, IOC, a sell's worst price up to the tick; with none it is refused (no STOP_LOSS listed)", async () => {
+    const { t, seen, answer } = binance();
+    answer(binOrder("NEW", "0.00000000", "0.00000000", { type: "STOP_LOSS_LIMIT", side: "SELL", price: "78400.01000000", stopPrice: "80000.00000000", timeInForce: "IOC" }), binOrder("NEW", "0.00000000", "0.00000000", { type: "STOP_LOSS_LIMIT", side: "SELL", stopPrice: "80000.00000000" }));
+    const s = ok(await t.place({ symbol: "BTC/USDT", side: "sell", type: "stop", qty: 0.001, stopPrice: 80000, worstPrice: 78400.004, clientId: CID }));
+    const [unsigned, signature] = seen[0]!.body!.split("&signature=");
+    expect(signature).toBe(hmac("sha256", BINANCE.secret, unsigned!, "hex"));
+    expect(form(unsigned)).toEqual({ timestamp: String(NOW), symbol: "BTCUSDT", side: "SELL", newClientOrderId: CID, newOrderRespType: "FULL", type: "STOP_LOSS_LIMIT", quantity: "0.001", price: "78400.01", stopPrice: "80000", timeInForce: "IOC", recvWindow: "10000" });
+    expect([s.ref, s.status]).toEqual(["28", "open"]);
+    const bare = said(await t.place({ symbol: "BTC/USDT", side: "sell", type: "stop", qty: 0.001, stopPrice: 80000, clientId: CID }), ALL_SECRETS);
+    expect([bare.message, seen.length]).toEqual(["Binance: it takes a stop in BTC/USDT spot only as a stop-limit: give the stop a worst price", 2]);
+  });
+
+  it("Binance futures: a stop on the algo service (POST /fapi/v1/algoOrder), the id as clientAlgoId, reduce-only and FOK; followed as trigger:<algoId>", async () => {
+    const { t, seen, answer } = binance();
+    answer(binAlgo("NEW"), binAlgo("NEW"));
+    const s = ok(await t.place({ symbol: "BTC/USDT:USDT", side: "buy", type: "stop_limit", qty: 0.002, stopPrice: 90000, limitPrice: 91000, tif: "fok", reduceOnly: true, clientId: CID }));
+    expect([seen[0]!.method, seen[0]!.url]).toEqual(["POST", "https://fapi.binance.com/fapi/v1/algoOrder"]);
+    expect(form(seen[0]!.body!.split("&signature=")[0])).toEqual({ timestamp: String(NOW), symbol: "BTCUSDT", side: "BUY", clientAlgoId: CID, newOrderRespType: "RESULT", type: "STOP", quantity: "0.002", price: "91000", triggerPrice: "90000", timeInForce: "FOK", reduceOnly: "true", algoType: "CONDITIONAL", recvWindow: "10000" });
+    expect(seen[1]!.url).toMatch(new RegExp(`^https://fapi\\.binance\\.com/fapi/v1/algoOrder\\?timestamp=${NOW}&symbol=BTCUSDT&algoId=${BIN_ALGO}&recvWindow=10000&signature=[0-9a-f]{64}$`));
+    expect([s.ref, s.status, s.filledQty]).toEqual([`trigger:${BIN_ALGO}`, "open", 0]);
+  });
+
+  it("Bybit: a perpetual's stop says its direction (triggerDirection 1 up, 2 down); a spot stop needs a unified account and the price's side", async () => {
+    const { t, seen, answer } = bybitBoth();
+    answer(bybitAck, bybitLinearList([bybitRow("Untriggered", "0", "0", "", { orderType: "Limit", qty: "0.002", price: "91800", triggerPrice: "90000", leavesQty: "0.002" })]));
+    const s = ok(await t.place({ symbol: "BTC/USDT:USDT", side: "buy", type: "stop", qty: 0.002, stopPrice: 90000, worstPrice: 91800, clientId: CID }));
+    expect(JSON.parse(seen[0]!.body!)).toEqual({ symbol: "BTCUSDT", side: "Buy", orderType: "Limit", timeInForce: "IOC", orderLinkId: CID, price: "91800", category: "linear", qty: "0.002", triggerDirection: 1, triggerPrice: "90000" });
+    expect([s.ref, s.status]).toEqual([BYBIT_ORD, "open"]);
+    answer(bybitTicker, bybitAck, bybitList([bybitRow("Untriggered", "0", "0", "", { side: "Sell", price: "79900", triggerPrice: "80000" })]));
+    ok(await t.place({ symbol: "BTC/USDT", side: "sell", type: "stop_limit", qty: 0.001, stopPrice: 80000, limitPrice: 79900, clientId: CID }));
+    expect(seen[2]!.url).toBe("https://api.bybit.com/v5/market/tickers?symbol=BTCUSDT&category=spot");
+    expect(JSON.parse(seen[3]!.body!)).toEqual({ symbol: "BTCUSDT", side: "Sell", orderType: "Limit", orderFilter: "StopOrder", orderLinkId: CID, price: "79900", category: "spot", qty: "0.001", triggerPrice: "80000" });
+    const classic = bybitBoth(false);
+    const r = said(await classic.t.place({ symbol: "BTC/USDT", side: "sell", type: "stop_limit", qty: 0.001, stopPrice: 80000, limitPrice: 79900, clientId: CID }), ALL_SECRETS);
+    expect([r.message, classic.seen.length]).toEqual(["Bybit: the account places spot stops at Bybit on a unified account only: a classic account lists them apart from its orders", 0]);
+  });
+
+  it("Coinbase: stop_limit_stop_limit_gtc with its direction always sent (the library's default runs a stop the other way); a stop needs a worst price", async () => {
+    const { t, seen, answer } = coinbase();
+    const stopCfg = { stop_limit_stop_limit_gtc: { base_size: "0.001", limit_price: "79900", stop_price: "80000", stop_direction: "STOP_DIRECTION_STOP_DOWN" } };
+    answer(cbAck("SELL"), cbOrder("OPEN", "0", "0", "0", { side: "SELL", order_type: "STOP_LIMIT", order_configuration: stopCfg, trigger_status: "STOP_PENDING" }));
+    const s = ok(await t.place({ symbol: "BTC/USD", side: "sell", type: "stop_limit", qty: 0.001, stopPrice: 80000, limitPrice: 79900, clientId: CID }));
+    expect(JSON.parse(seen[0]!.body!)).toEqual({ client_order_id: CID, product_id: "BTC-USD", side: "SELL", order_configuration: stopCfg });
+    expect([s.ref, s.status]).toEqual([CB_ORD, "open"]);
+    answer(cbAck(), cbOrder("OPEN", "0", "0", "0", { order_type: "STOP_LIMIT", trigger_status: "STOP_PENDING" }));
+    const up = ok(await t.place({ symbol: "BTC/USD", side: "buy", type: "stop", qty: 0.001, stopPrice: 90000, worstPrice: 91800.007, clientId: CID }));
+    expect(JSON.parse(seen[2]!.body!).order_configuration).toEqual({ stop_limit_stop_limit_gtc: { base_size: "0.001", limit_price: "91800", stop_price: "90000", stop_direction: "STOP_DIRECTION_STOP_UP" } });
+    expect(up.native).toMatchObject({ sentAs: "a stop at 90000 that places a limit order at 91800, which rests on the book if it does not fill at once: a stop kept inside its worst price" });
+    const bare = said(await t.place({ symbol: "BTC/USD", side: "sell", type: "stop", qty: 0.001, stopPrice: 80000, clientId: CID }), ALL_SECRETS);
+    const ioc = said(await t.place({ symbol: "BTC/USD", side: "sell", type: "stop_limit", qty: 0.001, stopPrice: 80000, limitPrice: 79900, tif: "ioc", clientId: CID }), ALL_SECRETS);
+    expect([bare.message, ioc.message, seen.length]).toEqual(["Coinbase: it takes a stop only as a stop-limit (stop_limit_stop_limit_gtc): give the stop a worst price", "Coinbase: it takes no ioc on the limit order a stop places in BTC/USD spot: that order waits on the book until canceled", 4]);
+  });
+
+  it("Kraken: stop-loss-limit (price the trigger, price2 the limit), and stop-loss for a stop with no worst price", async () => {
+    const { t, seen, answer } = kraken();
+    const added = { body: { error: [], result: { descr: { order: "sell 0.00100000 XBTUSD @ stop loss 80000.0 -> limit 79900.0" }, txid: [KR_ORD] } } };
+    answer(added, krQuery("open", "0.00000000", "0", "0", "0"), added, krQuery("open", "0.00000000", "0", "0", "0"));
+    ok(await t.place({ symbol: "BTC/USD", side: "sell", type: "stop_limit", qty: 0.001, stopPrice: 80000, limitPrice: 79900, clientId: CID }));
+    expect(form(seen[0]!.body)).toEqual({ nonce: String(NOW), pair: "XXBTZUSD", type: "sell", ordertype: "stop-loss-limit", volume: "0.001", cl_ord_id: CID, price: "80000", price2: "79900" });
+    const bare = ok(await t.place({ symbol: "BTC/USD", side: "sell", type: "stop", qty: 0.001, stopPrice: 80000, clientId: CID }));
+    // the library counts its own nonce up from one request to the next
+    expect(form(seen[2]!.body)).toEqual({ nonce: String(NOW + 2), pair: "XXBTZUSD", type: "sell", ordertype: "stop-loss", volume: "0.001", cl_ord_id: CID, price: "80000" });
+    expect(bare.native).toMatchObject({ sentAs: "a stop at 80000 that places a market order: it has no worst price" });
+  });
+
+  it("checked before anything is sent: a stop's worst price on the wrong side of it, a stop price on a limit order, a stop without one", async () => {
+    const { t, seen } = kraken();
+    const wrong = said(await t.place({ symbol: "BTC/USD", side: "sell", type: "stop", qty: 0.001, stopPrice: 80000, worstPrice: 80100, clientId: CID }), ALL_SECRETS);
+    expect(wrong.message).toBe("Kraken: a sell stop's worst price is at or below its stop price: 80100 is not, against 80000");
+    const onLimit = said(await t.place({ symbol: "BTC/USD", side: "buy", type: "limit", qty: 0.001, limitPrice: 60000, stopPrice: 61000, clientId: CID }), ALL_SECRETS);
+    const without = said(await t.place({ symbol: "BTC/USD", side: "sell", type: "stop", qty: 0.001, clientId: CID }), ALL_SECRETS);
+    expect([onLimit.message, without.message, seen.length]).toEqual(["Kraken: a limit order has no stop price", "Kraken: a stop order has a stop price that triggers it", 0]);
+  });
+
+  it("an OKX trigger order whose call did not come back is looked up by algoClOrdId in the algo book", async () => {
+    class Timeout extends Error {
+      override name = "RequestTimeout";
+    }
+    const { t, seen, answer } = okx();
+    answer(okxTicker, new Timeout("okx POST https://www.okx.com/api/v5/trade/order-algo request timed out (12000 ms)"), okxAlgo("live"));
+    const s = ok(await t.place({ symbol: "BTC/USDT", side: "sell", type: "stop_limit", qty: 0.001, stopPrice: 80000, limitPrice: 79900, clientId: CID }));
+    expect([s.ref, s.status, seen[2]!.url]).toEqual([`trigger:${OKX_ALGO}`, "open", `https://www.okx.com/api/v5/trade/order-algo?instId=BTC-USDT&algoClOrdId=${CID}`]);
+  });
+});
+
+describe("the times in force and flags, as the library sends them", () => {
+  it("post-only: OKX ordType post_only, Binance LIMIT_MAKER, Bybit timeInForce PostOnly, Coinbase post_only, Kraken oflags post", async () => {
+    const o = okx();
+    o.answer(okxAck(), okxOrder("live", "0", "", { ordType: "post_only" }));
+    ok(await o.t.place({ symbol: "BTC/USDT", side: "buy", type: "limit", qty: 0.001, limitPrice: 60000, postOnly: true, clientId: CID }));
+    expect(okxSigned(o.seen[0]!, "/api/v5/trade/batch-orders")).toEqual([{ instId: "BTC-USDT", side: "buy", ordType: "post_only", sz: "0.001", tdMode: "cash", tgtCcy: "base_ccy", px: "60000", clOrdId: CID }]);
+    const b = binance();
+    b.answer(binOrder("NEW", "0.00000000", "0.00000000", { type: "LIMIT_MAKER" }), binOrder("NEW", "0.00000000", "0.00000000", { type: "LIMIT_MAKER" }));
+    ok(await b.t.place({ symbol: "BTC/USDT", side: "buy", type: "limit", qty: 0.001, limitPrice: 60000, postOnly: true, clientId: CID }));
+    expect(form(b.seen[0]!.body!.split("&signature=")[0])).toMatchObject({ type: "LIMIT_MAKER", price: "60000", quantity: "0.001" });
+    expect(form(b.seen[0]!.body!.split("&signature=")[0]).timeInForce).toBeUndefined();
+    // a futures post-only order is GTX, and a "gtc" asked with it goes as nothing, so that it cannot come back over the GTX
+    b.answer(binFut("NEW", "0", "0", { timeInForce: "GTX" }), binFut("NEW", "0", "0", { timeInForce: "GTX" }));
+    ok(await b.t.place({ symbol: "BTC/USDT:USDT", side: "buy", type: "limit", qty: 0.002, limitPrice: 91000, postOnly: true, tif: "gtc", clientId: CID }));
+    expect(form(b.seen[2]!.body!.split("&signature=")[0])).toMatchObject({ type: "LIMIT", price: "91000", timeInForce: "GTX" });
+    const y = bybit(true);
+    y.answer(bybitAck, bybitList([bybitRow("New", "0", "0", "")]));
+    ok(await y.t.place({ symbol: "BTC/USDT", side: "buy", type: "limit", qty: 0.001, limitPrice: 60000, postOnly: true, clientId: CID }));
+    expect(JSON.parse(y.seen[0]!.body!)).toEqual({ symbol: "BTCUSDT", side: "Buy", orderType: "Limit", timeInForce: "PostOnly", orderLinkId: CID, price: "60000", category: "spot", qty: "0.001" });
+    const c = coinbase();
+    c.answer(cbAck(), cbOrder("OPEN", "0", "0", "0"));
+    ok(await c.t.place({ symbol: "BTC/USD", side: "buy", type: "limit", qty: 0.001, limitPrice: 60000, postOnly: true, clientId: CID }));
+    expect(JSON.parse(c.seen[0]!.body!).order_configuration).toEqual({ limit_limit_gtc: { base_size: "0.001", limit_price: "60000", post_only: true } });
+    const k = kraken();
+    k.answer({ body: { error: [], result: { descr: { order: "buy 0.00100000 XBTUSD @ limit 60000.0" }, txid: [KR_ORD] } } }, krQuery("open", "0.00000000", "0", "0", "0"));
+    ok(await k.t.place({ symbol: "BTC/USD", side: "buy", type: "limit", qty: 0.001, limitPrice: 60000, postOnly: true, clientId: CID }));
+    expect(form(k.seen[0]!.body)).toMatchObject({ ordertype: "limit", price: "60000", oflags: "post" });
+  });
+
+  it("a time in force: OKX ordType fok, Binance IOC, Coinbase limit_limit_fok and sor_limit_ioc, Kraken timeinforce; a market order with a worst price FOK", async () => {
+    const o = okx();
+    o.answer(okxAck(), okxOrder("canceled", "0", "", { ordType: "fok" }));
+    ok(await o.t.place({ symbol: "BTC/USDT", side: "buy", type: "limit", qty: 0.001, limitPrice: 60000, tif: "fok", clientId: CID }));
+    expect((okxSigned(o.seen[0]!, "/api/v5/trade/batch-orders") as Dict[])[0]).toMatchObject({ ordType: "fok", px: "60000" });
+    const b = binance();
+    b.answer(binOrder("EXPIRED", "0.00000000", "0.00000000", { timeInForce: "IOC" }), binOrder("EXPIRED", "0.00000000", "0.00000000", { timeInForce: "IOC" }), binOrder("FILLED", "0.00100000", "87.28522000", { timeInForce: "FOK" }), binOrder("FILLED", "0.00100000", "87.28522000", { timeInForce: "FOK" }));
+    ok(await b.t.place({ symbol: "BTC/USDT", side: "buy", type: "limit", qty: 0.001, limitPrice: 60000, tif: "ioc", clientId: CID }));
+    expect(form(b.seen[0]!.body!.split("&signature=")[0])).toMatchObject({ type: "LIMIT", timeInForce: "IOC" });
+    const fok = ok(await b.t.place({ symbol: "BTC/USDT", side: "buy", type: "market", qty: 0.001, worstPrice: 87285.22, tif: "fok", clientId: CID }));
+    expect(form(b.seen[2]!.body!.split("&signature=")[0])).toMatchObject({ type: "LIMIT", timeInForce: "FOK", price: "87285.22" });
+    expect(fok.native).toMatchObject({ sentAs: "a limit order at 87285.22 that fills whole at once or not at all (FOK): a market order kept inside its worst price" });
+    const c = coinbase();
+    c.answer(cbAck(), cbOrder("CANCELLED", "0", "0", "0"), cbAck(), cbOrder("FILLED", "0.001", "60000", "0.36"));
+    ok(await c.t.place({ symbol: "BTC/USD", side: "buy", type: "limit", qty: 0.001, limitPrice: 60000, tif: "fok", clientId: CID }));
+    ok(await c.t.place({ symbol: "BTC/USD", side: "buy", type: "limit", qty: 0.001, limitPrice: 60000, tif: "ioc", clientId: CID }));
+    expect([JSON.parse(c.seen[0]!.body!).order_configuration, JSON.parse(c.seen[2]!.body!).order_configuration]).toEqual([{ limit_limit_fok: { base_size: "0.001", limit_price: "60000" } }, { sor_limit_ioc: { base_size: "0.001", limit_price: "60000" } }]);
+    const k = kraken();
+    k.answer({ body: { error: [], result: { descr: { order: "buy 0.00100000 XBTUSD @ limit 60000.0" }, txid: [KR_ORD] } } }, krQuery("canceled", "0.00000000", "0", "0", "0"));
+    ok(await k.t.place({ symbol: "BTC/USD", side: "buy", type: "limit", qty: 0.001, limitPrice: 60000, tif: "fok", clientId: CID }));
+    expect(form(k.seen[0]!.body)).toMatchObject({ ordertype: "limit", timeinforce: "FOK" });
+  });
+
+  it("reduce-only on a perpetual: OKX reduceOnly true, Binance reduceOnly=true, Bybit reduceOnly true", async () => {
+    const o = okx();
+    o.answer(okxAck(), okxOrder("live", "0", "", { instId: "BTC-USDT-SWAP", instType: "SWAP", sz: "1", side: "sell", reduceOnly: "true" }));
+    ok(await o.t.place({ symbol: "BTC/USDT:USDT", side: "sell", type: "limit", qty: 1, limitPrice: 90000, reduceOnly: true, clientId: CID }));
+    expect(okxSigned(o.seen[0]!, "/api/v5/trade/batch-orders")).toEqual([{ instId: "BTC-USDT-SWAP", side: "sell", ordType: "limit", sz: "1", tdMode: "cross", px: "90000", clOrdId: CID, reduceOnly: true }]);
+    const b = binance();
+    b.answer(binFut("NEW", "0", "0", { side: "SELL", reduceOnly: true }), binFut("NEW", "0", "0", { side: "SELL", reduceOnly: true }));
+    ok(await b.t.place({ symbol: "BTC/USDT:USDT", side: "sell", type: "limit", qty: 0.002, limitPrice: 91000, reduceOnly: true, clientId: CID }));
+    expect([b.seen[0]!.url, form(b.seen[0]!.body!.split("&signature=")[0])]).toEqual(["https://fapi.binance.com/fapi/v1/order", { timestamp: String(NOW), symbol: "BTCUSDT", side: "SELL", newClientOrderId: CID, newOrderRespType: "RESULT", type: "LIMIT", quantity: "0.002", price: "91000", reduceOnly: "true", timeInForce: "GTC", recvWindow: "10000" }]);
+    const y = bybitBoth();
+    y.answer(bybitAck, bybitLinearList([bybitRow("New", "0", "0", "", { side: "Sell", qty: "0.002", leavesQty: "0.002", price: "91000" })]));
+    ok(await y.t.place({ symbol: "BTC/USDT:USDT", side: "sell", type: "limit", qty: 0.002, limitPrice: 91000, reduceOnly: true, clientId: CID }));
+    expect(JSON.parse(y.seen[0]!.body!)).toEqual({ symbol: "BTCUSDT", side: "Sell", orderType: "Limit", orderLinkId: CID, price: "91000", category: "linear", qty: "0.002", reduceOnly: true });
+  });
+
+  it("refused before anything is sent: a flag the market does not list, post-only off a limit order or with IOC, a time in force that means nothing there", async () => {
+    const { t, seen } = okx();
+    const cases: Array<[Parameters<LiveTrader["place"]>[0], string]> = [
+      [{ symbol: "BTC/USDT", side: "buy", type: "market", qty: 0.001, postOnly: true, clientId: CID }, "OKX: post-only is for a limit order: it rests on the book as a maker, or is refused"],
+      [{ symbol: "BTC/USDT", side: "buy", type: "limit", qty: 0.001, limitPrice: 60000, postOnly: true, tif: "ioc", clientId: CID }, "OKX: a post-only order rests on the book until canceled: it takes no ioc"],
+      [{ symbol: "BTC/USDT", side: "buy", type: "limit", qty: 0.001, limitPrice: 60000, tif: "day", clientId: CID }, "OKX: it takes gtc, ioc and fok in BTC/USDT spot, not day"],
+      [{ symbol: "BTC/USDT", side: "sell", type: "limit", qty: 0.001, limitPrice: 60000, reduceOnly: true, clientId: CID }, "OKX: it takes no reduce-only orders in BTC/USDT spot"],
+      [{ symbol: "BTC/USDT", side: "sell", type: "market", qty: 0.001, tif: "gtc", clientId: CID }, "OKX: a market order fills at once: it does not wait until canceled"],
+      [{ symbol: "BTC/USDT", side: "sell", type: "market", qty: 0.001, tif: "fok", clientId: CID }, "OKX: a market order that fills whole or not at all needs a worst price: it then goes as a limit order there, filled at once in full or not at all"],
+      [{ symbol: "BTC/USDT", side: "sell", type: "stop", qty: 0.001, stopPrice: 80000, worstPrice: 78400, tif: "ioc", clientId: CID }, "OKX: a stop waits for its trigger until canceled and then fills at once: it takes no ioc"],
+      [{ symbol: "BTC/USDT", side: "sell", type: "stop_limit", qty: 0.001, stopPrice: 80000, limitPrice: 79900, tif: "ioc", clientId: CID }, "OKX: it takes no ioc on the limit order a stop places in BTC/USDT spot: that order waits on the book until canceled"],
+    ];
+    for (const [order, message] of cases) expect(said(await t.place(order), ALL_SECRETS).message).toBe(message);
+    expect(seen).toEqual([]);
+  });
+});
+
+describe("what became of a stop, and taking it off the book", () => {
+  it("OKX: an untriggered trigger order is open; once it has fired the order it placed is followed, under that order's id; one that failed is rejected", async () => {
+    const { t, seen, answer } = okx();
+    answer(okxAlgo("live"));
+    expect(ok(await t.status(`trigger:${OKX_ALGO}`, "BTC/USDT")).status).toBe("open");
+    answer(okxAlgo("effective", { ordId: OKX_CHILD, ordIdList: [OKX_CHILD], actualSz: "0.001", actualPx: "79900", actualSide: "sell", triggerTime: "1791230009999" }), okxOrder("filled", "0.001", "79950", { ordId: OKX_CHILD, side: "sell", px: "79900", fee: "-0.08", feeCcy: "USDT" }));
+    const fired = ok(await t.status(`trigger:${OKX_ALGO}`, "BTC/USDT"));
+    expect(seen.slice(1).map((r) => r.url)).toEqual([`https://www.okx.com/api/v5/trade/order-algo?instId=BTC-USDT&algoId=${OKX_ALGO}`, `https://www.okx.com/api/v5/trade/order?instId=BTC-USDT&ordId=${OKX_CHILD}`]);
+    expect([fired.ref, fired.status, fired.filledQty, fired.avgPrice, fired.feeUsd]).toEqual([OKX_CHILD, "filled", 0.001, 79950, 0.08]);
+    expect(fired.native).toMatchObject({ trigger: { id: OKX_ALGO, status: "effective" } });
+    // fired with the order it placed not named yet: taken, not settled; never filled by the algo order's own word
+    answer(okxAlgo("effective"));
+    expect(ok(await t.status(`trigger:${OKX_ALGO}`, "BTC/USDT"))).toMatchObject({ ref: `trigger:${OKX_ALGO}`, status: "pending", filledQty: 0 });
+    answer(okxAlgo("order_failed", { failCode: "51008" }));
+    const failed = ok(await t.status(`trigger:${OKX_ALGO}`, "BTC/USDT"));
+    expect([failed.status, failed.native]).toEqual(["rejected", expect.objectContaining({ failCode: "51008", venueStatus: "order_failed" })]);
+  });
+
+  it("OKX: a trigger order is canceled in its book (POST /api/v5/trade/cancel-algos); one that has fired has the order it placed canceled instead", async () => {
+    const { t, seen, answer } = okx();
+    answer({ body: { code: "0", msg: "", data: [{ algoId: OKX_ALGO, sCode: "0", sMsg: "" }] } }, okxAlgo("canceled"));
+    const s = ok(await t.cancel(`trigger:${OKX_ALGO}`, "BTC/USDT"));
+    expect(okxSigned(seen[0]!, "/api/v5/trade/cancel-algos")).toEqual([{ algoId: OKX_ALGO, instId: "BTC-USDT" }]);
+    expect([s.ref, s.status, s.filledQty]).toEqual([`trigger:${OKX_ALGO}`, "canceled", 0]);
+    const late = okx();
+    late.answer({ body: { code: "1", msg: "", data: [{ algoId: OKX_ALGO, sCode: "51400", sMsg: "Cancellation failed as the order has been filled, canceled or does not exist" }] } }, okxAlgo("effective", { ordId: OKX_CHILD }), okxOrder("live", "0", "", { ordId: OKX_CHILD, side: "sell", px: "79900" }), { body: { code: "0", msg: "", data: [{ clOrdId: "", ordId: OKX_CHILD, ts: "1791230000999", sCode: "0", sMsg: "" }] } }, okxOrder("canceled", "0", "", { ordId: OKX_CHILD, side: "sell", px: "79900" }));
+    const child = ok(await late.t.cancel(`trigger:${OKX_ALGO}`, "BTC/USDT"));
+    expect(late.seen.map((r) => `${r.method} ${r.url.split("?")[0]}`)).toEqual(["POST https://www.okx.com/api/v5/trade/cancel-algos", "GET https://www.okx.com/api/v5/trade/order-algo", "GET https://www.okx.com/api/v5/trade/order", "POST https://www.okx.com/api/v5/trade/cancel-order", "GET https://www.okx.com/api/v5/trade/order"]);
+    expect(okxSigned(late.seen[3]!, "/api/v5/trade/cancel-order")).toEqual({ instId: "BTC-USDT", ordId: OKX_CHILD });
+    expect([child.ref, child.status]).toEqual([OKX_CHILD, "canceled"]);
+    // canceled in its book just as it fired: the order it placed is canceled too, not left on the book
+    const race = okx();
+    race.answer({ body: { code: "0", msg: "", data: [{ algoId: OKX_ALGO, sCode: "0", sMsg: "" }] } }, okxAlgo("effective", { ordId: OKX_CHILD }), okxOrder("live", "0", "", { ordId: OKX_CHILD, side: "sell", px: "79900" }), { body: { code: "0", msg: "", data: [{ clOrdId: "", ordId: OKX_CHILD, ts: "1791230000999", sCode: "0", sMsg: "" }] } }, okxOrder("canceled", "0", "", { ordId: OKX_CHILD, side: "sell", px: "79900" }));
+    const both = ok(await race.t.cancel(`trigger:${OKX_ALGO}`, "BTC/USDT"));
+    expect([race.seen[3]!.url, both.ref, both.status]).toEqual(["https://www.okx.com/api/v5/trade/cancel-order", OKX_CHILD, "canceled"]);
+  });
+
+  it("Binance futures: an algo order is read and canceled at /fapi/v1/algoOrder; once TRIGGERED the order it placed (actualOrderId) is followed", async () => {
+    const { t, seen, answer } = binance();
+    answer(binAlgo("TRIGGERED", { actualOrderId: String(BIN_FUT), actualPrice: "90950.0", triggerTime: 1791230009999 }), binFut("FILLED", "0.002", "181.9"));
+    const fired = ok(await t.status(`trigger:${BIN_ALGO}`, "BTC/USDT:USDT"));
+    expect(seen.map((r) => r.url.split("?")[0])).toEqual(["https://fapi.binance.com/fapi/v1/algoOrder", "https://fapi.binance.com/fapi/v1/order"]);
+    expect(seen[1]!.url).toContain(`orderId=${BIN_FUT}`);
+    expect([fired.ref, fired.status, fired.filledQty, fired.avgPrice]).toEqual([String(BIN_FUT), "filled", 0.002, 90950]);
+    answer({ body: { algoId: BIN_ALGO, clientAlgoId: CID, code: "200", msg: "success" } }, binAlgo("CANCELED"));
+    const s = ok(await t.cancel(`trigger:${BIN_ALGO}`, "BTC/USDT:USDT"));
+    expect([seen[2]!.method, seen[2]!.url.split("?")[0], seen[3]!.url.split("?")[0]]).toEqual(["DELETE", "https://fapi.binance.com/fapi/v1/algoOrder", "https://fapi.binance.com/fapi/v1/algoOrder"]);
+    expect(seen[2]!.url).toContain(`algoId=${BIN_ALGO}`);
+    expect([s.ref, s.status]).toEqual([`trigger:${BIN_ALGO}`, "canceled"]);
+  });
+
+  it("Bybit: a spot conditional order it does not know as a plain order is canceled as one (orderFilter StopOrder)", async () => {
+    const { t, seen, answer } = bybit(true);
+    answer({ body: { retCode: 170213, retMsg: "Order does not exist.", result: {}, retExtInfo: {}, time: 1 } }, bybitAck, bybitList([]), bybitList([bybitRow("Deactivated", "0", "0", "", { triggerPrice: "80000" })]));
+    const s = ok(await t.cancel(BYBIT_ORD, "BTC/USDT"));
+    expect(seen.slice(0, 2).map((r) => JSON.parse(r.body!).orderFilter)).toEqual(["Order", "StopOrder"]);
+    expect([s.ref, s.status]).toEqual([BYBIT_ORD, "canceled"]);
+  });
+});
+
+describe("an open order changed in place", () => {
+  const limitBuy = { symbol: "BTC/USDT", side: "buy" as const, type: "limit" as const, qty: 0.001, limitPrice: 60000, clientId: CID };
+
+  it("OKX: amend-order for an order on the book (newSz the whole size); amend-algos for a trigger order, its trigger and order price together", async () => {
+    const { t, seen, answer } = okx();
+    answer({ body: { code: "0", msg: "", data: [{ clOrdId: CID, ordId: OKX_ORD, reqId: "", sCode: "0", sMsg: "" }] } }, okxOrder("live", "0", "", { sz: "0.002", px: "60100" }));
+    const s = ok(await t.amend!(OKX_ORD, "BTC/USDT", { qty: 0.002, limitPrice: 60100 }, limitBuy));
+    expect(okxSigned(seen[0]!, "/api/v5/trade/amend-order")).toEqual({ instId: "BTC-USDT", ordId: OKX_ORD, newSz: "0.002", newPx: "60100" });
+    expect([s.ref, s.status]).toEqual([OKX_ORD, "open"]);
+    answer({ body: { code: "0", msg: "", data: [{ algoClOrdId: CID, algoId: OKX_ALGO, reqId: "", sCode: "0", sMsg: "" }] } }, okxAlgo("live", { triggerPx: "80100" }));
+    const stop = ok(await t.amend!(`trigger:${OKX_ALGO}`, "BTC/USDT", { stopPrice: 80100 }, { symbol: "BTC/USDT", side: "sell", type: "stop_limit", qty: 0.001, stopPrice: 80000, limitPrice: 79900, clientId: CID }));
+    expect(okxSigned(seen[2]!, "/api/v5/trade/amend-algos")).toEqual({ instId: "BTC-USDT", algoId: OKX_ALGO, newTriggerPx: "80100", newOrdPx: "79900" });
+    expect([stop.ref, stop.status]).toEqual([`trigger:${OKX_ALGO}`, "open"]);
+  });
+
+  it("Binance: a futures limit order by Modify Order (quantity and price together); spot only cancels and replaces, so it is refused", async () => {
+    const { t, seen, answer } = binance();
+    answer(binFut("NEW", "0", "0", { price: "90900.0" }), binFut("NEW", "0", "0", { price: "90900.0" }));
+    const s = ok(await t.amend!(String(BIN_FUT), "BTC/USDT:USDT", { limitPrice: 90900 }, { symbol: "BTC/USDT:USDT", side: "buy", type: "limit", qty: 0.002, limitPrice: 91000, clientId: CID }));
+    expect([seen[0]!.method, seen[0]!.url, form(seen[0]!.body!.split("&signature=")[0])]).toEqual(["PUT", "https://fapi.binance.com/fapi/v1/order", { timestamp: String(NOW), symbol: "BTCUSDT", side: "BUY", orderId: String(BIN_FUT), quantity: "0.002", price: "90900", recvWindow: "10000" }]);
+    expect([s.ref, s.status]).toEqual([String(BIN_FUT), "open"]);
+    const spot = said(await t.amend!("28", "BTC/USDT", { limitPrice: 60100 }, limitBuy), ALL_SECRETS);
+    const algo = said(await t.amend!(`trigger:${BIN_ALGO}`, "BTC/USDT:USDT", { stopPrice: 90100 }, { symbol: "BTC/USDT:USDT", side: "buy", type: "stop_limit", qty: 0.002, stopPrice: 90000, limitPrice: 91000, clientId: CID }), ALL_SECRETS);
+    expect([spot.code, algo.code, seen.length]).toEqual(["E_VENUE_RAIL_CLOSED", "E_VENUE_RAIL_CLOSED", 2]);
+    expect(spot.message).toContain("cancel-replace");
+  });
+
+  it("Bybit: v5 amend, a stop's trigger too; a stop kept inside its worst price is not moved past it", async () => {
+    const { t, seen, answer } = bybitBoth();
+    answer(bybitAck, bybitLinearList([bybitRow("Untriggered", "0", "0", "", { qty: "0.002", leavesQty: "0.002", price: "91800", triggerPrice: "90100" })]));
+    const order = { symbol: "BTC/USDT:USDT", side: "buy" as const, type: "stop" as const, qty: 0.002, stopPrice: 90000, worstPrice: 91800, clientId: CID };
+    const s = ok(await t.amend!(BYBIT_ORD, "BTC/USDT:USDT", { stopPrice: 90100 }, order));
+    expect([seen[0]!.url, JSON.parse(seen[0]!.body!)]).toEqual(["https://api.bybit.com/v5/order/amend", { symbol: "BTCUSDT", orderId: BYBIT_ORD, category: "linear", triggerPrice: "90100", triggerBy: "LastPrice" }]);
+    expect([s.ref, s.status]).toEqual([BYBIT_ORD, "open"]);
+    const past = said(await t.amend!(BYBIT_ORD, "BTC/USDT:USDT", { stopPrice: 92000 }, order), ALL_SECRETS);
+    expect([past.message, seen.length]).toEqual(["Bybit: this buy stop's worst price is 91800: a stop at 92000 would be past it. Cancel it and place it again with a new worst price", 2]);
+  });
+
+  it("Coinbase: Edit order with the size and price together, and a change it did not make (success false) is its refusal; a stop is not edited", async () => {
+    const { t, seen, answer } = coinbase();
+    answer({ body: { success: true, errors: [] } }, cbOrder("OPEN", "0", "0", "0", { order_configuration: { limit_limit_gtc: { base_size: "0.002", limit_price: "60000", post_only: false } } }));
+    const s = ok(await t.amend!(CB_ORD, "BTC/USD", { qty: 0.002 }, { ...limitBuy, symbol: "BTC/USD" }));
+    expect([seen[0]!.url, JSON.parse(seen[0]!.body!)]).toEqual(["https://api.coinbase.com/api/v3/brokerage/orders/edit", { order_id: CB_ORD, size: "0.002", price: "60000" }]);
+    expect([s.ref, s.status]).toEqual([CB_ORD, "open"]);
+    answer({ body: { success: false, errors: [{ edit_failure_reason: "CANNOT_EDIT_TO_BELOW_FILLED_SIZE", preview_failure_reason: "UNKNOWN_PREVIEW_FAILURE_REASON" }] } });
+    const r = said(await t.amend!(CB_ORD, "BTC/USD", { qty: 0.0001 }, { ...limitBuy, symbol: "BTC/USD" }), ALL_SECRETS);
+    expect([r.code, r.message, seen.length]).toEqual(["E_VENUE_REJECTED", "Coinbase did not change the order (CANNOT_EDIT_TO_BELOW_FILLED_SIZE)", 3]);
+    const stop = said(await t.amend!(CB_ORD, "BTC/USD", { stopPrice: 80100 }, { symbol: "BTC/USD", side: "sell", type: "stop_limit", qty: 0.001, stopPrice: 80000, limitPrice: 79900, clientId: CID }), ALL_SECRETS);
+    expect([stop.code, seen.length]).toEqual(["E_VENUE_RAIL_CLOSED", 3]);
+  });
+
+  it("Kraken: AmendOrder keeps the txid (its answer is the change's own id, which is not the order's): order_qty, limit_price, trigger_price", async () => {
+    const { t, seen, answer } = kraken();
+    answer({ body: { error: [], result: { amend_id: "TJSMEH-AA67V-YUSQ6O" } } }, krQuery("open", "0.00000000", "0", "0", "0"), { body: { error: [], result: { amend_id: "TJSMEH-AA67V-YUSQ7P" } } }, krQuery("open", "0.00000000", "0", "0", "0"));
+    const s = ok(await t.amend!(KR_ORD, "BTC/USD", { qty: 0.002, limitPrice: 60100 }, { ...limitBuy, symbol: "BTC/USD" }));
+    expect([seen[0]!.url, form(seen[0]!.body)]).toEqual(["https://api.kraken.com/0/private/AmendOrder", { nonce: String(NOW), txid: KR_ORD, order_qty: "0.002", limit_price: "60100" }]);
+    expect([s.ref, s.status, form(seen[1]!.body).txid]).toEqual([KR_ORD, "open", KR_ORD]);
+    ok(await t.amend!(KR_ORD, "BTC/USD", { stopPrice: 80100 }, { symbol: "BTC/USD", side: "sell", type: "stop", qty: 0.001, stopPrice: 80000, clientId: CID }));
+    expect(form(seen[2]!.body)).toEqual({ nonce: String(NOW + 2), txid: KR_ORD, trigger_price: "80100" });
+  });
+
+  it("an order that filled before the change reached it is said to be filled, and nothing is changed", async () => {
+    const { t, answer } = okx();
+    answer({ body: { code: "1", msg: "All operations failed", data: [{ clOrdId: "", ordId: OKX_ORD, reqId: "", sCode: "51503", sMsg: "Order modification failed as the order has been filled, canceled or does not exist" }] } }, okxOrder("filled", "0.001", "59995.2"));
+    const r = said(await t.amend!(OKX_ORD, "BTC/USDT", { limitPrice: 60100 }, limitBuy), ALL_SECRETS);
+    expect([r.code, r.message, r.detail]).toEqual(["E_VENUE_REJECTED", "OKX: the order is filled already, so nothing was changed", { order: OKX_ORD, status: "filled" }]);
+    // a trigger order that fired before its change reached it: what stands now is the order it placed
+    answer({ body: { code: "1", msg: "", data: [{ algoClOrdId: "", algoId: OKX_ALGO, reqId: "", sCode: "51400", sMsg: "Order modification failed as the order has been canceled or does not exist" }] } }, okxAlgo("effective", { ordId: OKX_CHILD }), okxOrder("live", "0", "", { ordId: OKX_CHILD, side: "sell", px: "79900" }));
+    const fired = said(await t.amend!(`trigger:${OKX_ALGO}`, "BTC/USDT", { stopPrice: 80100 }, { symbol: "BTC/USDT", side: "sell", type: "stop_limit", qty: 0.001, stopPrice: 80000, limitPrice: 79900, clientId: CID }), ALL_SECRETS);
+    expect([fired.message, fired.detail]).toEqual([`OKX: this stop has fired, so nothing was changed. The order it placed (${OKX_CHILD}) is what stands now: it is followed from the next look, and can be changed then`, { order: `trigger:${OKX_ALGO}`, placed: OKX_CHILD }]);
+  });
+});
+
+describe("what is held, and a perpetual's leverage", () => {
+  it("OKX positions: dollar-settled perpetuals only, in contracts, with what they are worth; an inverse one and an empty one are not listed", async () => {
+    const { t, seen, answer } = okxPerp();
+    const row = (instId: string, posQty: string, over: Dict = {}) => ({ adl: "1", availPos: "", avgPx: "80000", cTime: "1", ccy: "USDT", imr: "17.1", instId, instType: "SWAP", interest: "0", last: "85580.1", lever: "5", liqPx: "102000", markPx: "85580.1", mgnMode: "cross", mgnRatio: "100", mmr: "0.6", notionalUsd: "855.801", pos: posQty, posCcy: "", posId: "1", posSide: "net", uTime: "2", upl: "-55.8", uplRatio: "-0.3", realizedPnl: "0", ...over });
+    answer({ body: { code: "0", msg: "", data: [row("BTC-USDT-SWAP", "-1"), row("BTC-USD-SWAP", "3", { ccy: "BTC" }), row("BTC-USDT-SWAP", "0", { posId: "2" })] } });
+    const list = ok(await t.positions!());
+    expect(seen.map((r) => r.url)).toEqual(["https://www.okx.com/api/v5/account/positions"]);
+    expect(list.map(({ native: _native, ...p }) => p)).toEqual([{ symbol: "BTC/USDT:USDT", name: "BTC/USDT perpetual", kind: "perp", side: "short", qty: 1, entryPrice: 80000, markPrice: 85580.1, usd: 855.801, unrealizedUsd: -55.8, leverage: 5, marginMode: "cross", liquidationPrice: 102000 }]);
+  });
+
+  it("Binance positions: GET /fapi/v3/positionRisk after its leverage brackets; Bybit's once per settle coin, USDT and USDC", async () => {
+    const { t, seen, answer } = binance();
+    answer({ body: [{ symbol: "BTCUSDT", brackets: [{ bracket: 1, initialLeverage: 125, notionalCap: 50000, notionalFloor: 0, maintMarginRatio: 0.004, cum: 0 }] }] }, { body: [{ symbol: "BTCUSDT", positionSide: "BOTH", positionAmt: "0.002", entryPrice: "90000.0", breakEvenPrice: "90036.0", markPrice: "91000.0", unRealizedProfit: "2.0", liquidationPrice: "45000.0", isolatedMargin: "0", notional: "182.0", marginAsset: "USDT", isolatedWallet: "0", initialMargin: "36.4", maintMargin: "0.728", positionInitialMargin: "36.4", openOrderInitialMargin: "0", adl: 1, bidNotional: "0", askNotional: "0", updateTime: 1791230000456 }] });
+    const list = ok(await t.positions!());
+    expect(seen.map((r) => r.url.split("?")[0])).toEqual(["https://fapi.binance.com/fapi/v1/leverageBracket", "https://fapi.binance.com/fapi/v3/positionRisk"]);
+    expect(list.map((p) => [p.symbol, p.kind, p.side, p.qty, p.entryPrice, p.markPrice, p.usd, p.unrealizedUsd, p.liquidationPrice])).toEqual([["BTC/USDT:USDT", "perp", "long", 0.002, 90000, 91000, 182, 2, 45000]]);
+    const y = bybitBoth();
+    const posRow = { positionIdx: 0, riskId: 1, riskLimitValue: "2000000", symbol: "BTCUSDT", side: "Sell", size: "0.002", avgPrice: "90000", positionValue: "180", tradeMode: 0, autoAddMargin: 0, positionStatus: "Normal", leverage: "5", markPrice: "91000", liqPrice: "108000", bustPrice: "", positionIM: "36", positionMM: "1", takeProfit: "", stopLoss: "", trailingStop: "0", unrealisedPnl: "-2", curRealisedPnl: "0", cumRealisedPnl: "0", adlRankIndicator: 2, createdTime: "1791230000123", updatedTime: "1791230000456", seq: 1, isReduceOnly: false };
+    y.answer(bybitLinearList([posRow]), bybitLinearList([]));
+    const held = ok(await y.t.positions!());
+    expect(y.seen.map((r) => r.url)).toEqual(["https://api.bybit.com/v5/position/list?settleCoin=USDT&limit=200&category=linear", "https://api.bybit.com/v5/position/list?settleCoin=USDC&limit=200&category=linear"]);
+    expect(held.map((p) => [p.symbol, p.side, p.qty, p.usd, p.leverage, p.liquidationPrice])).toEqual([["BTC/USDT:USDT", "short", 0.002, 180, 5, 108000]]);
+  });
+
+  it("OKX leverage: the cross leverage, as the account's orders there go in cross margin; isolated is refused, as is more than the market takes", async () => {
+    const { t, seen, answer } = okxPerp();
+    answer({ body: { code: "0", msg: "", data: [{ instId: "BTC-USDT-SWAP", lever: "5", mgnMode: "cross", posSide: "" }] } });
+    const r = ok(await t.setLeverage!("BTC/USDT:USDT", 5));
+    expect(okxSigned(seen[0]!, "/api/v5/account/set-leverage")).toEqual({ lever: 5, mgnMode: "cross", instId: "BTC-USDT-SWAP" });
+    expect(r).toEqual({ leverage: 5, marginMode: "cross", native: { instId: "BTC-USDT-SWAP", lever: "5", mgnMode: "cross", posSide: "" } });
+    const iso = said(await t.setLeverage!("BTC/USDT:USDT", 5, "isolated"), ALL_SECRETS);
+    const big = said(await t.setLeverage!("BTC/USDT:USDT", 101), ALL_SECRETS);
+    const spotLev = said(await t.setLeverage!("BTC/USDT", 2), ALL_SECRETS);
+    expect([iso.message, big.message, spotLev.message, seen.length]).toEqual(["OKX: OKX takes the margin mode on each order, and the account's orders there go in cross margin: the leverage it sets is cross", "OKX: it takes at most 100x in BTC/USDT perpetual", "OKX: leverage is set on a perpetual or a future; BTC/USDT spot is spot", 1]);
+  });
+
+  it("Binance leverage: the margin type per symbol, then the leverage; a margin type already set is not a refusal", async () => {
+    const { t, seen, answer } = binance();
+    answer({ status: 400, body: { code: -4046, msg: "No need to change margin type." } }, { body: { leverage: 5, maxNotionalValue: "50000000", symbol: "BTCUSDT" } });
+    const r = ok(await t.setLeverage!("BTC/USDT:USDT", 5, "isolated"));
+    expect(seen.map((q) => `${q.method} ${q.url}`)).toEqual(["POST https://fapi.binance.com/fapi/v1/marginType", "POST https://fapi.binance.com/fapi/v1/leverage"]);
+    expect([form(seen[0]!.body).marginType, form(seen[1]!.body).leverage]).toEqual(["ISOLATED", "5"]);
+    expect([r.leverage, r.marginMode]).toEqual([5, "isolated"]);
+  });
+
+  it("Bybit leverage: set-leverage, a leverage already set is not a refusal; a unified account's margin mode is the whole account's, so it is refused", async () => {
+    const { t, seen, answer } = bybitBoth();
+    answer({ body: { retCode: 110043, retMsg: "Set leverage not modified", result: {}, retExtInfo: {}, time: 1 } });
+    const r = ok(await t.setLeverage!("BTC/USDT:USDT", 5));
+    expect([seen[0]!.url, JSON.parse(seen[0]!.body!)]).toEqual(["https://api.bybit.com/v5/position/set-leverage", { symbol: "BTCUSDT", buyLeverage: "5", sellLeverage: "5", category: "linear" }]);
+    expect(r.leverage).toBe(5);
+    const mm = said(await t.setLeverage!("BTC/USDT:USDT", 5, "isolated"), ALL_SECRETS);
+    expect([mm.message, seen.length]).toEqual(["Bybit: Bybit sets a unified account's margin mode for the whole account, not one market: set it at Bybit, then set the leverage here without one", 1]);
+  });
+
+  it("no exchange here has a close of its own: the account closes with a reduce-only order; Coinbase and Kraken list no positions and set no leverage", () => {
+    for (const t of [okx().t, binance().t, bybit(true).t, coinbase().t, kraken().t]) expect(t.close).toBeUndefined();
+    for (const t of [coinbase().t, kraken().t]) expect([t.positions, t.setLeverage]).toEqual([undefined, undefined]);
+    for (const t of [okx().t, binance().t, bybit(true).t, coinbase().t, kraken().t]) expect(typeof t.amend).toBe("function");
   });
 });

@@ -380,7 +380,9 @@ describe("a wallet proves an address is the user's", () => {
     expect(isRefusal(await proofs.prove(wallet.address, "not a signature"))).toBe(true);
 
     const ok = await proofs.prove(wallet.address, await wallet.signMessage({ message: c.message }));
-    expect(ok).toEqual({ address: wallet.address, wallet: "OKX Wallet", at: 5_000_000 });
+    expect(ok).toMatchObject({ address: wallet.address, wallet: "OKX Wallet", at: 5_000_000, message: expect.stringContaining(wallet.address) });
+    // the sentence and the signature are kept: a restarted account checks the proof again (account/restore.ts)
+    expect(isRefusal(ok) ? "" : ok.signature).toMatch(/^0x[0-9a-f]{130}$/);
     expect(proofs.proven(wallet.address.toLowerCase())?.wallet).toBe("OKX Wallet");
     // a sentence is signed once; a proof is good for ten minutes
     expect(isRefusal(await proofs.prove(wallet.address, await wallet.signMessage({ message: c.message })))).toBe(true);

@@ -200,7 +200,8 @@ describe("real money at venues connected live", () => {
     expect([view.accountChain, view.quote?.live]).toEqual(["Live · real money", { toAddress: w.address, network: "Arbitrum", capUsd: 100 }]);
 
     const p = paidLive(await x.move({ kind: "withdraw", from: "okx", to: "wallet-mine", asset: "USDC", network: "Arbitrum", amount: "25" }));
-    expect(withdraws(x)).toEqual([["withdraw", "USDC", 25, w.address, undefined, { network: "ARBITRUM", clientId: p.id.replace(/[^A-Za-z0-9]/g, "") }]]);
+    // the exchange's idempotency key: the payment's id and this run's, which a later run does not hand out again
+    expect(withdraws(x)).toEqual([["withdraw", "USDC", 25, w.address, undefined, { network: "ARBITRUM", clientId: expect.stringMatching(new RegExp(`^${p.id.replace(/[^A-Za-z0-9]/g, "")}[0-9a-f]{12}$`)) }]]);
     expect([p.status, p.kind, p.live, p.feeUsd, p.authority]).toEqual(["pending", "withdraw", { kind: "withdraw", toAddress: w.address, network: "Arbitrum" }, 0.1, "owner"]);
 
     // the exchange is asked whether it went, at most every twenty seconds

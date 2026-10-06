@@ -28,14 +28,17 @@ README 的「Account：资金的机场」讲这一层**是什么**，这里讲**
 | 接你真实的账户，下单、动钱（终端打印配对码） | `npm run account`，打开 <http://127.0.0.1:4820>（`npm run portfolio` 同） |
 | 每一单、每一笔最多 $5 | `npm run account -- --live-cap 5`（默认 $100） |
 | 只读：不下单、不动钱 | `npm run account -- --read-only` |
+| 随时在线：开机自启、挂了自动拉起（macOS） | `npm run account:service -- install --live-cap 20`（第 10 条） |
+| 从零开始，不接着以前的运行 | `npm run account -- --fresh` |
 | 扮演一个 agent，对跑着的服务发请求 | `npx tsx examples/account/agent-seat.ts whoami` |
 | 让 Claude Code、Codex 这类 agent 来当 agent | `claude mcp add portfolio -- npx tsx src/portfolio/mcp.ts` |
+| 让 DeepSeek Harness 来当 agent | 第 11 条的配置 |
 | 模拟账户里的规则，一个脚本从头走到尾，不起服务 | `npx tsx examples/account/headless.ts` |
 | 十四个 beat 的断言脚本 | `npm run account:demo` |
 
 `npm run account -- --port 4821 --home /tmp/x` 另起一个互不相干的实例。`--classic` 是原来的模拟对账单，不挂这一层。
 
-页面从上到下：头部（Account、Conservative / Aggressive、"Trading on · up to $100 an order" 或 "Read-only"）· 净值、配置条和流动性 · 等你批的卡 · Accounts · Statement · Agents · Devices。`seat` 是这个别名：
+页面从上到下：头部（Account、Conservative / Aggressive、"Trading on · up to $100 an order" 或 "Read-only"，下面一行是 agent 的会话到哪天、杠杆上限）· 净值、配置条和流动性（重启过的，下面一行写着接回了什么）· 等你批的卡 · Accounts · Positions · Statement · Agents · Agent wallets · Devices。`seat` 是这个别名：
 
 ```bash
 alias seat='npx tsx examples/account/agent-seat.ts'
@@ -47,7 +50,8 @@ alias seat='npx tsx examples/account/agent-seat.ts'
 
 - 不是 owner 时，页面顶上有一行 "This browser can look but not sign."，按钮都是灰的。让 owner 的浏览器在 Devices 里点 "Let it sign"。点 "Require both" 则变成两个都签才算数。
 - 配对码输错五次就不再收，重启服务换一个新码。
-- 服务重启后账户又没有 owner，连接也要重新接。想干净地重来，换一个 `--port` 和 `--home`。
+- 服务重启后**还是这个浏览器当 owner**，不用再配对（第 10 条）。新浏览器要在 Devices 里被加进来。想干净地重来，`--fresh`，或换一个 `--port` 和 `--home`。
+- 这个浏览器的数据被清掉了（换了浏览器、清了站点数据），它就不再是 owner，也没有别的 owner 能把新浏览器加进来：用 `npm run account -- --fresh` 重来一次（以前签的授权不会带过来，账本和钥匙文件都还在）。
 
 ## 2 · 接你真的账户
 
@@ -103,8 +107,10 @@ trading limit: every venue on the account now · up to $25 an order · $100 of o
 - 每单上限、总额、到期，三样都算。拆成许多小单也过不了总额。等批的卡占着它那份额度；没成交就撤掉的单，那份额度退回来。
 - 全勾上等于「所有账户」，指签字那一刻接上的账户。之后接上的不算，要再存一次点它的名。
 - 交易额度和挪钱额度是两样：有交易额度的 agent 不能把钱挪出场所，有挪钱额度的不能下单。
+- **付钱给别人**是第三样额度：表单里 "Payments from an agent wallet"，"May pay" 填可以付的域名（逗号隔开），或勾 "any payee"；Per payment、Budget 是它自己的。钱从 agent 钱包出（第 7b 条）。
+- **"Everything"**：一键勾上所有能交易的账户、账户之间挪钱、任何收款方。金额还是你填，每一样还是一次签名。
 
-MCP 席位同理：它的钥匙由 MCP 客户端的名字派生（环境变量 `PORTFOLIO_AGENT` 可以改名），工具 `portfolio_account` 返回它的地址、有没有被授权、额度还剩多少。
+**agent 的钥匙是它自己的**：席位第一次运行时在 `~/.buyer-agent-demo/seats/<名字>.json` 生成一把，权限 600，以后一直用这把。不再从名字推出来，所以知道名字的人拿不到它（`PORTFOLIO_SEAT_KEYS=sim` 才回到从名字推，只给测试和演示用）。MCP 席位同理（`PORTFOLIO_AGENT` 定名字），工具 `portfolio_account` 返回它的地址、有没有被授权、额度还剩多少。
 
 会被拒：没点名 `E_MANDATE_RECIPIENT` · 超每单 `E_MANDATE_PER_ORDER_CAP` · 超总额 `E_MANDATE_BUDGET` · 到期 `E_MANDATE_EXPIRED` · 没有额度 `E_MANDATE_NONE`。
 
@@ -124,11 +130,13 @@ MCP 席位同理：它的钥匙由 MCP 客户端的名字派生（环境变量 `
 账户那一行点 "Trade…"：
 
 1. Market 里打几个字母（BTC、AAPL、FED），下拉里是这个场所交易的、以美元计价的市场。选一个，下面马上是它的价格和买一卖一；收盘了会写 "Closed now"。
-2. Buy / Sell，数量按美元（Dollars）或按单位（币、股、合约），Market 或 Limit（Limit 填价格）。
+2. Buy / Sell，数量按美元（Dollars）或按单位（币、股、合约）。Type 里只有这个市场接受的：Market、Limit、Stop（价格到了 Stop price 按市价成交）、Stop limit（到了按 Limit price 挂限价）。市场支持的话，下面还有 Time in force（Until canceled / Fill now, rest canceled / All now or nothing / Today only）、Post-only（只做 maker）、Reduce-only（只减仓）。永续合约多一行 Leverage：填倍数、选 Cross / Isolated，点 "Set"，是一次签名。
 3. 预览：确切数量（按美元下的单向下取整到这个市场的步长）、按什么价格估的值、市价买单最多花多少。"What you sign" 展开是要签的每个字段。
 4. 点 "Sign and place"。从钱包换币的，钱包会请你确认（要先授权的，先确认授权、等它上链，再确认换币）。
 
-Statement 最上面 "Under way" 里多一行：挂着的单每十秒问一次场所，有 "Cancel"，两单以上时右上有 "Cancel all N open"。成交、撤掉之后它落进下面的流水。
+Statement 最上面 "Under way" 里多一行：挂着的单每十秒问一次场所，有 "Cancel"，两单以上时右上有 "Cancel all N open"。场所能改单的（Alpaca、Kalshi、一部分交易所），还有 "Change…"：改数量、限价、触发价，账户按现在的价格重新估值，签了就改；改成比原来更值钱的，算一笔差额的新单（agent 也一样：激进下额度内直接改，保守下出卡）。成交、撤掉之后它落进下面的流水。
+
+**Positions**：能列持仓的场所（永续、股票、事件合约）在 Accounts 下面多一块，每个持仓一行：方向、数量、开仓价、标记价、浮盈亏、杠杆、强平价，右边 "Close"。你在页面上点 Close 是你自己签名，直接执行。agent 平仓不占额度（它只会减少持有），但持仓可能是你自己的，所以和下单一样看模式：保守模式出卡等你批；激进模式在它的每单上限以内直接平，超过也出卡。场所有自己的平仓接口就用它，没有就发一张 reduce-only 市价单；市场不接受 reduce-only 的，不发（免得反向开仓）。
 
 **Statement** 是银行流水的样子：一行一笔交易（成交、提现、划转、跨链、换币），日期、说明、账户、金额（买入 −、卖出 +，挪钱照原数）、状态，下一行小字是谁做的、手续费、场所的编号或交易哈希。上面三个下拉按月份、账户、类型筛；最后一行是这一屏的合计（买了多少、卖了多少、挪了多少、手续费）。"Download CSV" 下载这一屏，"Print" 只打印流水。流水从账本文件读，重启以后还在。
 
@@ -147,7 +155,9 @@ seat order okx sell BTC/USDT 0.0001 70000
 seat cancel okx ord-0001
 ```
 
-MCP 里是 `portfolio_live_markets {venue, query | symbol}`、`portfolio_live_order {venue, symbol, side, orderType, qty | usd, limitPrice}`、`portfolio_live_cancel {venue, order}`。Conservative 下回答是 `202` 和一张卡；你签了才下，MCP 的 `portfolio_approval` 告诉 agent 结果。Aggressive 下额度内回答直接是 `200` 和订单：
+MCP 里是 `portfolio_live_markets {venue, query | symbol}`、`portfolio_live_order {venue, symbol, side, orderType, qty | usd, limitPrice, stopPrice, tif, postOnly, reduceOnly}`、`portfolio_live_cancel {venue, order}`、`portfolio_live_amend {venue, order, qty, limitPrice, stopPrice}`、`portfolio_live_positions {venue}`、`portfolio_live_close {venue, symbol, qty}`、`portfolio_live_leverage {venue, symbol, leverage, marginMode}`。等结果用 `portfolio_wait {card | order | payment}`：变了马上回，最多等 55 秒，不用自己反复查。流水用 `portfolio_statement {mine}`。
+
+agent 设杠杆有一条你签的上限：头部那行 "their leverage up to 1x · Change"，默认 1 倍（即不让加杠杆），改大是一次签名。Conservative 下回答是 `202` 和一张卡；你签了才下，MCP 的 `portfolio_approval` 告诉 agent 结果。Aggressive 下额度内回答直接是 `200` 和订单：
 
 ```
 202 ▣ card-0001 waits for the owner · Example seat asks to buy 0.00008 BTC at OKX · market · about $5.00
@@ -178,6 +188,21 @@ seat move bridge wallet wallet 25 USDC Arbitrum Base   # agent 请求（MCP 的 
 会被拒：目的地不是你的 `E_ACCOUNT_DESTINATION` · 地址或手续费变了 `E_ACCOUNT_REQUOTE` · 钥匙不许提币 `E_VENUE_PERMISSION` · 地址不在交易所白名单 `E_VENUE_WITHDRAW_WHITELIST` · 同一条链、只看的钱包、没有桥能送 `E_ACCOUNT_BAD_ACTION` / `E_VENUE_RAIL_CLOSED` · 钱包报来的哈希不是构造的那笔 `E_VENUE_REJECTED`。
 
 **比价**：下单弹窗里选好市场，下面一行是同一个东西在你其他账户的价格："OKX is 0.20% better to buy: 62,031 · Trade there"，点了就在那家开同一单。agent 用 `portfolio_live_compare {base, side, usd}`。
+
+## 7b · agent 付钱给别人：agent 钱包
+
+agent 付 API 调用、按次计费的服务，用的是一个 **agent 钱包**：账户在本机替它生成一个钱包（钥匙在 `~/.buyer-agent-demo/agent-wallets/<名字>.json`，600，agent 拿不到），你往里放一笔备用金，agent 在你签的付款额度内自己付。最坏情况损失的是这笔备用金。
+
+1. **建**：Agent wallets 里填 Name、选 For agent、Keep up to（打算放多少），点 "Make it"（一次签名）。它出现在 Accounts 里，"Agent wallet · research"，余额从链上读。
+2. **充值**："Top up…"，选从哪个账户出（交易所提币或钱包发），目的地就是这个 agent 钱包。或者直接往它的地址打 USDC（Base、Arbitrum、Optimism、Polygon、Ethereum 都行）。
+3. **给额度**：Agents 里 "Payments from an agent wallet"（第 3 条）。
+4. **agent 付**：`portfolio_pay {url, maxAmount, from: "research", method?, body?}`。账户先问收款方，从它自己的回答里读价格、收款地址、哪条链；只付 Circle 在那条链上的 USDC。说得通的协议：x402 V2（`PAYMENT-REQUIRED` / `PAYMENT-SIGNATURE` / `PAYMENT-RESPONSE`）、x402 V1（402 JSON / `X-PAYMENT`）、MPP charge（`WWW-Authenticate: Payment`，EVM 方法）。签的是一张一分钟内有效的 EIP-3009 授权，不用 gas。
+   - 保守：每一笔都是一张卡，卡上写着付给谁、哪个地址、多少、哪条链、什么协议。
+   - 激进：付过的收款方直接付；第一次付一个新域名还是卡（批了就钉住它的地址），除非你签的是 "any payee"。
+   - 付没付成看链：USDC 合约自己记的授权用没用掉、收款方回执里那笔转账的发送方、收款方、金额对不对。收款方先给了数据没结算的，那笔钱先压着（`{paid: "not yet"}`），链上看到用掉了再记账，过期了就放回额度。
+5. **取回**："Take back…"：从 agent 钱包发回你自己的交易所或钱包。这是一笔链上转账，agent 钱包自己付 gas，所以那条链上要有一点它的原生币（Base 上几分钱的 ETH 就够）；没有就拒，不签。
+
+会被拒：没点这个域名 `E_MANDATE_RECIPIENT`（请求根本不发出去）· 要价超过 maxAmount `E_PAYEE_OVERCHARGE` · 收款地址和钉住的不一样 `E_PAYEE_CHANGED`（像攻击，告诉用户）· 不是 USDC、不是认识的链 `E_PAYEE_UNSUPPORTED` · 钱包里不够 `E_WALLET_INSUFFICIENT` · MPP session、AP2 在真钱上不付 `E_PAYEE_UNSUPPORTED` · 地址是本机或内网的 URL：不发。
 
 ## 8 · 批卡、拒卡
 
@@ -215,14 +240,73 @@ seat order okx buy BTC/USDT '$5'
 curl -s http://127.0.0.1:4820/api/overview | python3 -c "import json,sys; o=json.load(sys.stdin); print(o['chain'], o['ledgerPath'])"
 ```
 
-- 文件在 `$BUYER_HOME/portfolio/`（默认 `~/.buyer-agent-demo`），每次启动一个新文件。
-- 账户的状态在内存里：重启之后账户是空的，要重新接，Robinhood 要重新登录；重启前下的单在场所那边照旧，账户不再跟踪，去场所看。账本文件留着：以前收过的指令，重启之后不会再收第二次；发给场所的客户端编号每次启动都不同，不会撞上以前的单。
+- 文件在 `$BUYER_HOME/portfolio/`（默认 `~/.buyer-agent-demo`），每次启动一个新文件，第一行写着它接着哪个文件。
+- 重启以后账户从这条账本链重建（第 10 条）。以前收过的指令不会再收第二次；发给场所的客户端编号每次启动都不同，不会撞上以前的单。
+
+## 10 · 随时在线：后台服务，重启不丢
+
+**重启不丢**：每次运行的账本第一行写着它接着上一次的哪个文件，这条链就是账户。启动时从最早一个文件读起，重建：
+- owner 的浏览器（配对那一行记着设备的公钥，以及它输过配对码）：重启后不用再配对。只读模式也要配对码；没输过码就进来的 owner，在要码的那次运行里不算数，要重新配对；
+- 加进来的设备（申请加入那一行记着它的公钥）：你签名让它成为签名人的那一步，重启后照样成立，之后它签的也照样算；
+- 你签过的每一条长期指令（放 agent 进来、撤销、各种额度、地址簿、签名人、接上和拔掉的账户、切到激进、agent 的会话和杠杆上限）：每一条都**重新验签**，按当时的时间重放；验不过的跳过，并写明；
+- 每份额度用了多少、钉住的收款地址；某条指令被跳过时，后面的额度编号不会错位；
+- 收款方还拿着、没兑现的付款授权：继续占着额度，兑现了照记，过期了才放；
+- 账户重新接上：用你当初签的同一个凭据引用（钥匙文件、地址、本机的 mm）；钱包的证明是它当初签的那句话，再验一次；agent 钱包从它的钥匙文件；
+- 没完成的单和在途的钱接着跟（只问，不重发）；编号接着往下排，ord-0007 永远是同一单。
+
+页面净值下面一行写着接回了什么，没接上的在 details 里（例如 Robinhood 的登录令牌只在内存里，要重新登录）。被撤销的钥匙、你结束的会话，重启后照样是关的（头部 "Start a new one" 重开会话，一次签名）；重启也不会把会话延长。每条签过名的指令只收一次，重启以后同一个信封再来也不收（真钱转账在十分钟有效期里重启，也不会转第二次）。最新的一次运行看运行序号，不看文件名，电脑时钟被往回调过也不会漏掉后面的运行。
+
+不会被带回的：`--fresh` 启动；旧版本写的、没有那一行的账本；哈希链断了的文件（只读到断点，之后的不信）。有人往账本里加一行伪造的授权，签名验不过，不会生效；把一条真签名的行再抄一遍，只算一次；没签名的行（例如一条把 agent 杠杆上限写成 50 倍的设置记录）放不宽你没签过的东西。
+
+防不住的：一个以你本人身份在这台电脑上运行、能改文件的程序。它能改账本里没签名的行（比如把某份额度的已用金额改回 0），也能直接读 agent 钱包和交易所钥匙文件。哈希链防的是意外损坏，不是这种程序；钥匙文件只让你本人可读（0600），挡的是这台电脑上的其他用户。
+
+**后台服务**（macOS 的 launchd，不要管理员权限）：
+
+```bash
+npm run account:service -- install --live-cap 20
+```
+
+| 命令 | 做什么 |
+|---|---|
+| `npm run account:service -- install <参数>` | 登录后自动跑 `npm run account -- <参数>`，进程意外退出 30 秒后拉起；日志在 `~/.buyer-agent-demo/logs/`，只有你能读 |
+| `npm run account:service -- status` | 在不在跑，有没有应答 |
+| `npm run account:service -- restart` | 重启（改了代码之后），状态接着来 |
+| `npm run account:service -- logs` | 最后几十行日志 |
+| `npm run account:service -- code` | 还没有 owner 时的配对码 |
+| `npm run account:service -- uninstall` | 停掉并移出 launchd，账本和钥匙不动 |
+
+它跑的是这个目录里的代码：改了代码，`restart` 以后生效。装之前先停掉终端里跑着的那个（同一个端口只能有一个）。
+
+## 11 · 让各种 agent 接进来
+
+所有 agent 走同一个 MCP 席位（`src/portfolio/mcp.ts`，stdio），钥匙是它自己的（第 3 条）。
+
+- Claude Code：`claude mcp add portfolio -- npx tsx src/portfolio/mcp.ts`（在这个目录里）。
+- DeepSeek Harness（`dsh`）：在 `$DSH_HOME/profiles/<名字>/cordis.patch.yml` 里加一条（或启动时 `--patch` 这个文件），工具名是 `mcp__account__portfolio_live_order` 这样：
+
+```yaml
+- insert:
+    - id: mcp-account
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: account
+        transport: stdio
+        command: npx
+        args: ['tsx', 'src/portfolio/mcp.ts']
+        cwd: /Users/<你>/demo
+        env:
+          PORTFOLIO_AGENT: deepseek-harness
+```
+
+dsh 启动 stdio 子进程时会去掉名字里带 KEY、SECRET、TOKEN、PASSWORD 的环境变量，要传的写进 `env`。它的单次工具调用默认 60 秒超时，`portfolio_wait` 最多等 55 秒，刚好在里面。
+
+- 别的 agent：照 `examples/account/agent-seat.ts`，自己的钥匙签一条指令，`POST /api/exchange`。
 
 # 下半 · 模拟账户里的规则
 
 页面上没有下面这些。它们跑在进程里的模拟账户上：八个模拟场所（Alpaca、Binance、OKX、Hyperliquid、MetaMask Agent Wallet、Kalshi、Polymarket、Ondo）、三个模拟收款方（`data.sim`、`infer.sim`、`shop.sim`）和一个可以快进的时钟。`examples/account/headless.ts` 把 owner 和 agent 的指令从头走了一遍；`npm run account:demo` 的十四个 beat 每个放行一件事、拒绝一件事。每条写的是签哪条动作、模拟账户怎么答。
 
-## 10 · 插一个模拟的交易所钱包
+## 12 · 插一个模拟的交易所钱包
 
 owner 签 `connectVenue {venue, connector, label, credentialRef}`，一个新场所就出现在账户里：余额、跑道、agent 的权限一起出现，不改一行代码。
 
@@ -253,7 +337,7 @@ Kraken plugged in · the venue says this credential can read, trade, withdraw ·
 
 会被拒：已经在账户上 `E_ACCOUNT_BAD_ACTION` · 目录里没有 `E_WALLET_ACCOUNT_UNKNOWN` · 连接器不对 `E_VENUE_REJECTED`。只认真实账户的服务器拒绝所有模拟连接器。
 
-## 11 · 给 agent 一个 float
+## 13 · 给 agent 一个 float
 
 owner 签 `createSubAccount {name, agent, float}`，再从链上钱包充进去（`sendAsset` 到 `sub:<name>`）。
 
@@ -263,7 +347,7 @@ float 是 agent 对外付款用的那笔钱，也是一次出错最多能丢的�
 - 充不过上限，在途的补给也算：`E_WALLET_FLOAT_CAP`。
 - 只有 owner 能收回（`sendAsset` 从 `sub:<name>` 回 `metamask`）：agent 的钥匙被撤销之后，float 里的钱靠这个拿回来。
 
-## 12 · owner 在模拟场所之间挪钱
+## 14 · owner 在模拟场所之间挪钱
 
 owner 先问路线（`account.resolve(…)`），再签 `sendAsset`：签的不只是「挪多少」，还有这条路线的哈希、最高费用、最晚到账，报价变了就要重签（`E_ACCOUNT_REQUOTE`）。
 
@@ -280,7 +364,7 @@ owner 先问路线（`account.resolve(…)`），再签 `sendAsset`：签的不�
 
 **在途**：钱离开一处、还没到下一处时，付款单是 `pending`，写明哪一腿在飞、什么时候到。这笔钱不在任何余额里，谁也花不了。模拟时钟用 `svc.advance(ms)` 快进。
 
-## 13 · agent 在模拟场所之间挪钱
+## 15 · agent 在模拟场所之间挪钱
 
 agent 签 `agentSendAsset`（挪钱）或 `agentSwap`（换币）：
 
@@ -298,7 +382,7 @@ agent 签 `agentSendAsset`（挪钱）或 `agentSwap`（换币）：
 
 往外面的地址转是 `E_ACCOUNT_NOT_HOME`：agent 的钥匙只能让钱回家。
 
-## 14 · agent 付一个 API（x402）
+## 16 · agent 付一个 API（x402）
 
 agent 签 `agentPay {url, maxAmount, fromSubAccount}`：付什么、这一次最多花多少、从哪个 float 出。agent 不知道也不用知道对方说哪种协议，那是账户的事。owner 先签一份 `approveSpend`，`scope: "payees"`，`allow` 写收款方的 host。
 
@@ -325,7 +409,7 @@ agent 签 `agentPay {url, maxAmount, fromSubAccount}`：付什么、这一次最
 | `E_PAYEE_UNVERIFIED` | 对方的质询或回执验不过 |
 | `E_WALLET_INSUFFICIENT` | float 不够 |
 
-## 15 · 按次计费的服务（MPP）
+## 17 · 按次计费的服务（MPP）
 
 一次一付是 `https://infer.sim/v1/answers`。会话是 `https://infer.sim/v1/stream`：存一次押金，之后每次调用签一张累计凭单。第一次的卡上写明押金：
 
@@ -349,7 +433,7 @@ agent 签 `agentPay {url, maxAmount, fromSubAccount}`：付什么、这一次最
 - 押金在托管合约里时占着预算。
 - 收款方不理：账户直接向托管合约申请退出，宽限期（15 分钟）过后钱自己回来。
 
-## 16 · agent 买东西（AP2）
+## 18 · agent 买东西（AP2）
 
 从 float 付 `https://shop.sim/items/desk-feed-pro`。第一次同样出卡；批准之后商户要 agent 用自己的钥匙签两份 mandate：「这次结账」和「这笔付款」。agent 先拿回商户签过的结账单，核对总价不超过「最多」才签，再发一次：
 
@@ -360,7 +444,7 @@ the merchant asks for mandates on checkout co_000002 (29 USD): signing with the 
 
 不写 float 的付款是 `E_PAYEE_UNSUPPORTED · shop.sim is paid in USDC: name the float that pays`：账户上没有卡，卡支付（ACP）没有搭。
 
-## 17 · 付给别人（Send）
+## 19 · 付给别人（Send）
 
 1. owner 签 `setDestination {label, address, chain, token}`，把收款人放进地址簿。
 2. 等一天（`svc.advance(DAY)`）。
@@ -370,7 +454,7 @@ the merchant asks for mandates on checkout co_000002 (29 USD): signing with the 
 
 会被拒：不在地址簿里，或者地址对但链不对 `E_ACCOUNT_DESTINATION` · 还在一天冷静期里 `E_ACCOUNT_DEST_COOLING` · 在黑名单上 `E_WALLET_BLOCKLIST`。
 
-## 18 · Unified：让账户挑来源
+## 20 · Unified：让账户挑来源
 
 owner 签 `userSetAbstraction {abstraction: "unifiedAccount"}`。之后 agent 的 `agentSendAsset` 可以不写来源，账户在授权点名的场所里挑最快到的：
 
@@ -380,7 +464,7 @@ owner 签 `userSetAbstraction {abstraction: "unifiedAccount"}`。之后 agent �
 
 Separate 下同一条指令是 `E_ACCOUNT_SOURCE`。
 
-## 19 · 写你自己的 agent 席位
+## 21 · 写你自己的 agent 席位
 
 `examples/account/agent-seat.ts` 就是一个完整的席位。要点四个：
 
@@ -391,15 +475,15 @@ Separate 下同一条指令是 `E_ACCOUNT_SOURCE`。
 
 别的语言要自己实现签名，定义在 `src/portfolio/account/sign.ts`：`AGENT_DOMAIN`、`AGENT_TYPE`、`agentActionHash`。不想起服务，就像 `examples/account/headless.ts` 那样在进程里直接调 `svc.exchange(envelope)`。
 
-## 20 · 加一种连接器
+## 22 · 加一种连接器
 
-真实连接在 `src/portfolio/live/index.ts` 里一种一个（交易所走统一接口库，其他各有各的）。模拟的连接器，统一接口库覆盖的交易所不用加：在目录里写 `"connector": "unified"`（第 10 条）。一家交易所有自己的请求格式、想让账本里记下它原生的请求时，才加一份声明：
+真实连接在 `src/portfolio/live/index.ts` 里一种一个（交易所走统一接口库，其他各有各的）。模拟的连接器，统一接口库覆盖的交易所不用加：在目录里写 `"connector": "unified"`（第 12 条）。一家交易所有自己的请求格式、想让账本里记下它原生的请求时，才加一份声明：
 
 1. `src/portfolio/account/doors.ts` 的 `EXCHANGES` 加一项：`label`、`credential`、`probe`（问钥匙权限的那个调用）、`deposit`、`withdraw`、`convert`、`inside`（它内部的账本之间怎么挪）。
 2. 同一个文件的 `nativeRequest` 里加一个分支，把一腿写成它自己的请求。
 3. `test/unit/account-connect.test.ts` 里照着已有的加一条。
 
-## 21 · 攻击它
+## 23 · 攻击它
 
 ```bash
 npx vitest run test/attack

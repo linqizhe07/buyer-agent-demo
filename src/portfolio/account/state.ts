@@ -156,8 +156,18 @@ const limit = (message: string, detail: Record<string, unknown> = {}): Refusal =
 const bad = (message: string): Refusal => no("E_ACCOUNT_BAD_ACTION", { message });
 const isAddress = (v: string): boolean => /^0x[0-9a-fA-F]{40}$/.test(v);
 
+/** how an account that holds REAL money shapes these: a payees limit may cover every payee (the agent wallet's float, the per-payment line
+ * and the budget bound it), and an agent wallet's address is the address of a key this machine made for it (account/keystore.ts) */
+export interface ApplyOptions {
+  anyPayee?: boolean | undefined;
+  walletAddress?: ((name: string) => Hex | Refusal) | undefined;
+}
+
 /** What an account-shaping owner action does to the state, or why the account refuses it. `envelope` is kept where the action is a standing approval. */
-export function applyOwner(state: AccountState, action: OwnerAction, envelope: Envelope, nowMs: number, venuesNow: string[] = []): AccountState | Refusal {
+/** a sub-account's name as its key file and venue know it: lower case, letters and digits, the rest one dash (keystore.ts slugOf) */
+const nameKey = (name: string): string => name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+
+export function applyOwner(state: AccountState, action: OwnerAction, envelope: Envelope, nowMs: number, venuesNow: string[] = [], opts: ApplyOptions = {}): AccountState | Refusal {
   const at = new Date(nowMs).toISOString();
   const s: AccountState = { ...state };
   switch (action.type) {
@@ -211,7 +221,7 @@ export function applyOwner(state: AccountState, action: OwnerAction, envelope: E
       }
       if (agentStatus(s, agent, nowMs) !== "ok") return bad("a spending approval is for an agent key that is authorised now");
       if (!allow.length) return bad("a spending approval names where the money may go");
-      if (action.scope === "payees" && named.includes("*")) return bad("an approval never covers every payee: name them");
+      if (action.scope === "payees" && named.includes("*") && !opts.anyPayee) return bad("an approval never covers every payee: name them");
       if (!(perPayment > 0) || perPayment > budget) return bad("the per-payment maximum is more than zero and no more than the budget");
       if (!(action.validUntil > nowMs) || action.validUntil > nowMs + MAX_AGENT_DAYS * DAY) return limit(`a spending approval ends in the future, at most ${MAX_AGENT_DAYS} days away`, { maxDays: MAX_AGENT_DAYS });
       const seq = s.seq + 1;
@@ -224,12 +234,18 @@ export function applyOwner(state: AccountState, action: OwnerAction, envelope: E
       const agent = action.agent.toLowerCase() as Hex;
       const cap = micro(action.float);
       if (!name || name.length > 16) return bad("a sub-account's name is 1 to 16 characters");
+      if (!nameKey(name)) return bad("a sub-account's name has a letter or a digit in it");
       if (Number.isNaN(cap) || !(cap > 0)) return bad("a sub-account's float is more than zero");
       if (agentStatus(s, agent, nowMs) !== "ok") return bad("a sub-account belongs to an agent key that is authorised now");
-      if (s.subAccounts.some((x) => x.name === name)) return bad(`a sub-account named "${name}" exists`);
+      // a wallet's key file and its place on the page go by its name in lower case, letters and digits only: "Ops", "ops" and "o.p.s" would
+      // be one key, so they are one name
+      const same = s.subAccounts.find((x) => nameKey(x.name) === nameKey(name));
+      if (same) return bad(same.name === name ? `a sub-account named "${name}" exists` : `"${name}" is the same name as the sub-account "${same.name}" (a name is told apart by its letters and digits, not their case or the marks between them)`);
       if (s.subAccounts.length >= MAX_SUB_ACCOUNTS) return limit(`at most ${MAX_SUB_ACCOUNTS} sub-accounts`, { max: MAX_SUB_ACCOUNTS });
+      const address = opts.walletAddress ? opts.walletAddress(name) : simKey(`sub-account:${name}`).address;
+      if (typeof address !== "string") return address;
       const seq = s.seq + 1;
-      return { ...s, seq, subAccounts: [...s.subAccounts, { id: `sub-${String(seq).padStart(4, "0")}`, name, agent, address: simKey(`sub-account:${name}`).address, capMicro: cap, balanceMicro: 0, at }] };
+      return { ...s, seq, subAccounts: [...s.subAccounts, { id: `sub-${String(seq).padStart(4, "0")}`, name, agent, address: address.toLowerCase() as Hex, capMicro: cap, balanceMicro: 0, at }] };
     }
     case "userSetAbstraction":
       if (action.abstraction !== "disabled" && action.abstraction !== "unifiedAccount") return bad('the account type is "disabled" (separate) or "unifiedAccount"');
@@ -284,7 +300,7 @@ export function spendFor(s: AccountState, agent: string, scope: SpendApproval["s
 
 /** Does this approval cover a payment of `amount` to `target` now? The answer names the limit that said no. */
 export function covers(a: SpendApproval, target: string, amountMicro: number, nowMs: number): Refusal | null {
-  if (!a.allow.includes(target) && !(a.scope === "venues" && a.allow.includes("*"))) return no("E_MANDATE_RECIPIENT", { message: a.scope === "trade" ? `the trading limit does not cover "${target}" (it covers ${a.allow.join(", ")})` : `"${target}" is not in the spending approval (${a.allow.join(", ")})`, detail: { approval: a.id, allow: a.allow, target } });
+  if (!a.allow.includes(target) && !((a.scope === "venues" || a.scope === "payees") && a.allow.includes("*"))) return no("E_MANDATE_RECIPIENT", { message: a.scope === "trade" ? `the trading limit does not cover "${target}" (it covers ${a.allow.join(", ")})` : `"${target}" is not in the spending approval (${a.allow.join(", ")})`, detail: { approval: a.id, allow: a.allow, target } });
   if (amountMicro > a.perPaymentMicro) return no("E_MANDATE_PER_ORDER_CAP", { ...(a.scope === "trade" ? { message: `an order of $${(amountMicro / 1e6).toFixed(2)} is more than the $${(a.perPaymentMicro / 1e6).toFixed(2)} an order the trading limit allows` } : {}), detail: { approval: a.id, perPayment: a.perPaymentMicro / 1e6, amount: amountMicro / 1e6 } });
   const left = a.budgetMicro - a.spentMicro - a.reservedMicro;
   if (amountMicro > left) return no("E_MANDATE_BUDGET", { message: `the spending approval has $${(left / 1e6).toFixed(2)} left of $${(a.budgetMicro / 1e6).toFixed(2)}; $${(amountMicro / 1e6).toFixed(2)} is more than that`, detail: { approval: a.id, budget: a.budgetMicro / 1e6, spent: a.spentMicro / 1e6, reserved: a.reservedMicro / 1e6, amount: amountMicro / 1e6 } });

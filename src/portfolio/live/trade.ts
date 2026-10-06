@@ -5,8 +5,16 @@
  *
  *   markets(query)      what can be traded there that matches a few letters
  *   market(symbol)      one market, with a fresh price, the smallest order, the steps of size and price, and whether it is open now
- *   place(order)        one order, at the venue, with the account's id for it (the venue's idempotency key, where it takes one)
+ *   place(order)        one order, at the venue, with the account's id for it (the venue's idempotency key, where it takes one):
+ *                       market, limit, stop (a market order once a trigger price is reached) or stop-limit, with the time in force,
+ *                       post-only and reduce-only flags the venue takes in that market
  *   cancel / status     what became of it: open, partly filled, filled, canceled, rejected
+ *   amend               an open order changed in place — its size, its limit, its stop — where the venue can
+ *   positions / close   what is held there (perpetuals, shares, event contracts), and a position closed at the venue
+ *   setLeverage         a perpetual's leverage and margin mode, where the venue lets it be set
+ *
+ * A trader offers only what its venue really takes: an option a market does not list (`types`, `tifs`, `postOnly`, `reduceOnly`) is
+ * refused by the account before the venue is asked, and a method a trader does not have is a door the account says is closed there.
  *
  * Nothing here decides WHETHER an order is placed. The account's door does that (account/live-orders.ts): the server's switch and cap, the
  * owner's signature or the agent's limit, the mode. A trader only speaks the venue's language, and its refusal is the venue's own.
@@ -19,7 +27,12 @@ import { no } from "../refuse.ts";
 import { isStable } from "./types.ts";
 
 export type Side = "buy" | "sell";
-export type OrderType = "market" | "limit";
+/** market · limit · stop (a market order once the price reaches `stopPrice`) · stop_limit (a limit order at `limitPrice` once it does) */
+export type OrderType = "market" | "limit" | "stop" | "stop_limit";
+/** how long an order stays: until canceled · what fills at once, the rest canceled · all at once or nothing · until the session's end */
+export type TimeInForce = "gtc" | "ioc" | "fok" | "day";
+export const ORDER_TYPES: readonly OrderType[] = ["market", "limit", "stop", "stop_limit"];
+export const TIFS: readonly TimeInForce[] = ["gtc", "ioc", "fok", "day"];
 export type MarketKind = "spot" | "perp" | "future" | "stock" | "crypto" | "event" | "token";
 
 export interface Market {
@@ -49,6 +62,20 @@ export interface Market {
   note?: string | undefined;
   /** the order types the venue takes here */
   types: OrderType[];
+  /** the times in force it takes here (absent: only its own default, which is not chosen) */
+  tifs?: TimeInForce[] | undefined;
+  /** where a venue takes a time in force for some order types only (Robinhood: "day" for a crypto stop, not a crypto limit): per type, the
+   * ones it takes. A type not named takes all of `tifs` */
+  tifsByType?: Partial<Record<OrderType, TimeInForce[]>> | undefined;
+  /** a limit order may be post-only here: it rests on the book as a maker, or is refused rather than taking */
+  postOnly?: boolean | undefined;
+  /** an order may be reduce-only here: it can only shrink a position, never open or grow one */
+  reduceOnly?: boolean | undefined;
+  /** a sell here can only sell what is held (a prediction market's shares, a cash account's coins): it can never open a short, so a plain
+   * sell of what is held closes a long without a reduce-only flag */
+  sellsReduce?: boolean | undefined;
+  /** the most leverage a perpetual takes here, when the venue says */
+  maxLeverage?: number | undefined;
 }
 
 export interface OrderRequest {
@@ -65,6 +92,41 @@ export interface OrderRequest {
   /** the account's id for this order: the venue's idempotency key where it takes one, so a retry is the same order and not a second one.
    * Thirty-two lower-case hex digits, new for every order in every run of the account */
   clientId: string;
+  /** a stop or stop-limit order: the price that triggers it (a buy stop when the price rises to it, a sell stop when it falls to it). A STOP
+   * order also carries `worstPrice`: where the venue can, the trader bounds its fill there (a stop-limit at that price) */
+  stopPrice?: number | undefined;
+  /** only when the market lists it in `tifs`; absent: the venue's own default */
+  tif?: TimeInForce | undefined;
+  /** only for a limit order, and only where the market says `postOnly` */
+  postOnly?: boolean | undefined;
+  /** only where the market says `reduceOnly` */
+  reduceOnly?: boolean | undefined;
+}
+
+/** an open order changed in place: what changes, as the venue would take it (the rest stays) */
+export interface OrderChange {
+  qty?: number | undefined;
+  limitPrice?: number | undefined;
+  stopPrice?: number | undefined;
+}
+
+/** something held at a venue: a perpetual's position, shares, event contracts */
+export interface Position {
+  symbol: string;
+  name: string;
+  kind: MarketKind;
+  side: "long" | "short";
+  /** in base units, as orders are sized there (contracts for a perpetual) */
+  qty: number;
+  entryPrice?: number | undefined;
+  markPrice?: number | undefined;
+  /** what it is worth now, in dollars */
+  usd?: number | undefined;
+  unrealizedUsd?: number | undefined;
+  leverage?: number | undefined;
+  marginMode?: "cross" | "isolated" | undefined;
+  liquidationPrice?: number | undefined;
+  native: unknown;
 }
 
 /** `pending`: taken by the venue, not yet on its book (or, from a wallet, waiting for the wallet to send it) */
@@ -105,6 +167,15 @@ export interface LiveTrader {
   /** a wallet's DEX order whose approval is now on chain: the swap built again from a fresh quote, held to the same order (its size, side and
    * worst price), so a slow approval does not leave the wallet a stale swap that reverts */
   requote?(order: OrderRequest): Promise<OrderState | Refusal>;
+  /** an open order changed in place where the venue can (Alpaca's replace, an exchange's edit, Kalshi's amend). `order` is the order as it
+   * was placed, `change` what is to differ. The answer is the order as it stands after: its ref may be new (a replace is a new order) */
+  amend?(ref: string, symbol: string, change: OrderChange, order: OrderRequest): Promise<OrderState | Refusal>;
+  /** what is held here, where the venue lists positions */
+  positions?(): Promise<Position[] | Refusal>;
+  /** a position closed by the venue's own call (Alpaca's DELETE /positions); absent: the account closes it with a reduce-only market order */
+  close?(symbol: string, qty: number, clientId: string): Promise<OrderState | Refusal>;
+  /** a perpetual's leverage, and its margin mode where the venue lets it be set */
+  setLeverage?(symbol: string, leverage: number, marginMode?: "cross" | "isolated"): Promise<{ leverage: number; marginMode?: "cross" | "isolated" | undefined; native: unknown } | Refusal>;
 }
 
 // ---- sizes and prices ------------------------------------------------------------------------------

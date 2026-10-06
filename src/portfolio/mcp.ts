@@ -14,9 +14,10 @@
  *
  * With the account layer mounted (the service's default) this seat HOLDS AN AGENT KEY and signs
  * every write with it: the service takes no unsigned write, and what the key may do is what the
- * owner authorised on the Account page — nothing until then. The key is derived from the seat's
- * name (`agent:<name>`), like every key in this simulation: it is public by construction. A real
- * seat generates its key and keeps it in the operating system's key store.
+ * owner authorised on the Account page — nothing until then. The key is the seat's own: made the
+ * first time this seat runs, kept in <home>/seats/<name>.json (the user's alone), the same ever
+ * after (account/keystore.ts). PORTFOLIO_SEAT_KEYS=sim derives it from the name instead, as the
+ * simulation's keys are — public by construction, for tests and demos only.
  *
  * Claude Code:  claude mcp add portfolio -- npx tsx src/portfolio/mcp.ts
  */
@@ -26,6 +27,8 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { ap2Answer, ap2CheckoutHash, jwsParse, type Ap2Needs } from "./account/protocols.ts";
 import { micro, signAgent, simKey, type AgentAction, type SimKey } from "./account/sign.ts";
+import { mustKey, seatKey as storedSeatKey } from "./account/keystore.ts";
+import { defaultHome } from "./home.ts";
 
 const BASE = process.env.PORTFOLIO_URL ?? "http://127.0.0.1:4820";
 
@@ -46,8 +49,15 @@ const text = (payload: unknown, isError = false): CallToolResult => ({ isError, 
 
 // ---- the seat's key ---------------------------------------------------------------------------
 
-/** this seat's agent key: two curves from one label — secp256k1 signs the account's instructions, P-256 signs AP2 mandates */
-const seatKey = (): SimKey => simKey(`agent:${agentOf().id}`);
+/** this seat's agent key, two curves — secp256k1 signs the account's instructions, P-256 signs AP2 mandates. Its own, kept in the home;
+ * derived from the seat's name only under PORTFOLIO_SEAT_KEYS=sim */
+const seats = new Map<string, SimKey>();
+const seatKey = (): SimKey => {
+  const id = agentOf().id;
+  let k = seats.get(id);
+  if (!k) seats.set(id, (k = process.env.PORTFOLIO_SEAT_KEYS === "sim" ? simKey(`agent:${id}`) : mustKey(storedSeatKey(defaultHome(), id))));
+  return k;
+};
 
 let layered: boolean | undefined;
 /** does the service take signed instructions (the account layer), or is it the original eight accounts? */
@@ -282,7 +292,11 @@ server.registerTool(
       totalUsd: a.totalUsd,
       inFlightUsd: a.inFlightUsd,
       approvals: a.spend.filter((s) => s.agent === me).map((s) => ({ scope: s.scope, allow: s.allow, perPaymentUsd: s.perPaymentUsd, budgetUsd: s.budgetUsd, leftUsd: Number((s.budgetUsd - s.spentUsd - s.reservedUsd).toFixed(6)), ...(s.windowHours ? { onePerHours: s.windowHours } : {}), validUntil: s.validUntil, expired: s.expired, ...(s.scope === "payees" ? { pinnedAddresses: s.payTo } : {}) })),
-      floats: a.subAccounts.filter((s) => s.agent === me).map((s) => ({ name: s.name, balanceUsd: s.balanceUsd, capUsd: s.capUsd })),
+      floats: a.subAccounts.filter((s) => s.agent === me).map((s) => {
+        // on the real account an agent wallet's money is what the chains say, read on its own line of the account
+        const live = a.venues.find((v) => v.id === `agent-${s.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")}`);
+        return { name: s.name, address: s.address, balanceUsd: live ? live.usd : s.balanceUsd, capUsd: s.capUsd, ...(live ? { holdings: (live.holdings ?? []).filter((h) => h.amount).map((h) => ({ asset: h.asset, amount: h.amount, usd: h.usd })) } : {}) };
+      }),
       venues: a.venues.map((v) => (v.live ? { id: v.id, name: v.name, frontLine: v.frontLine, usd: v.usd, live: true, trading: liveTrading(v, !!a.connectLive?.writes?.on), realMoney: liveMoney(v, !!a.connectLive?.writes?.on), holdings: (v.holdings ?? []).filter((h) => h.amount).slice(0, 30).map((h) => ({ asset: h.asset, amount: h.amount, usd: h.usd })), ...(v.address ? { address: v.address, proven: v.proven ?? "watched, not proven" } : {}) } : { id: v.id, name: v.name, frontLine: v.frontLine, usd: v.usd, movableUsd: v.cashUsd, ...(v.restricted ? { restricted: v.restricted } : { moneyIn: `${v.in.text} (${v.in.access})`, moneyOut: `${v.out.text} (${v.out.access})${v.out.why ? ` — ${v.out.why}` : ""}` }), ...(v.ledgers.length ? { ledgers: v.ledgers } : {}) })),
       ...(a.connectLive?.writes?.on ? { realMoney: { on: true, capUsd: a.connectLive.writes.capUsd } } : {}),
       waitingForOwner: a.cards,
@@ -369,23 +383,83 @@ server.registerTool(
   "portfolio_live_order",
   {
     description:
-      "Place a REAL order at a venue the owner connected live, signed with this seat's key: buy or sell `symbol` (exactly as portfolio_live_markets returns it), a size in the market's own units (`qty`: coins, shares, contracts) OR in dollars (`usd`, rounded down to the market's step), a market order or a limit order at `limitPrice`. It must be inside the trading limit the owner signed for this seat (which venues, how much an order, how much in all, until when — portfolio_account shows it) and no bigger than the server's cap. What happens next is the owner's mode. Conservative (the default): the order becomes a card the owner signs, showing the size, the price and what it is worth — the answer is {pending: true, card}; poll portfolio_approval, and once approved its `outcome` is the order. Aggressive: inside the limit it is placed at once and the answer is the order (status open, partial, filled …). Trading never moves money out of the venue. A refusal ({ok: false, code}) is not to be retried as is: E_MANDATE_* (your limit), E_ACCOUNT_LIMIT (the server's cap), E_VENUE_ORDER_INVALID (below the smallest order, off a step), E_VENUE_MARKET_CLOSED, E_ACCOUNT_UNPRICED, E_VENUE_* (the venue's own answer: funds, permissions, region), E_WALLET_LIVE_WRITES_OFF (the server is read-only).",
+      "Place a REAL order at a venue the owner connected live, signed with this seat's key: buy or sell `symbol` (exactly as portfolio_live_markets returns it), a size in the market's own units (`qty`: coins, shares, contracts) OR in dollars (`usd`, rounded down to the market's step): a market order, a limit order at `limitPrice`, a stop order (a market order once the price reaches `stopPrice`) or a stop_limit (a limit at `limitPrice` once it does) — with a time in force (`tif`), `postOnly` or `reduceOnly` only where the market lists them (portfolio_live_markets says which). It must be inside the trading limit the owner signed for this seat (which venues, how much an order, how much in all, until when — portfolio_account shows it) and no bigger than the server's cap. What happens next is the owner's mode. Conservative (the default): the order becomes a card the owner signs, showing the size, the price and what it is worth — the answer is {pending: true, card}; poll portfolio_approval, and once approved its `outcome` is the order. Aggressive: inside the limit it is placed at once and the answer is the order (status open, partial, filled …). Trading never moves money out of the venue. A refusal ({ok: false, code}) is not to be retried as is: E_MANDATE_* (your limit), E_ACCOUNT_LIMIT (the server's cap), E_VENUE_ORDER_INVALID (below the smallest order, off a step), E_VENUE_MARKET_CLOSED, E_ACCOUNT_UNPRICED, E_VENUE_* (the venue's own answer: funds, permissions, region), E_WALLET_LIVE_WRITES_OFF (the server is read-only).",
     inputSchema: {
       venue: z.string().describe("the live venue's id"),
       symbol: z.string().describe("the market, as portfolio_live_markets returns it"),
       side: z.enum(["buy", "sell"]),
-      orderType: z.enum(["market", "limit"]).optional().describe("default market"),
+      orderType: z.enum(["market", "limit", "stop", "stop_limit"]).optional().describe("default market"),
       qty: z.number().positive().optional().describe("size in the market's units; give this or usd"),
       usd: z.number().positive().optional().describe("size in dollars; give this or qty"),
-      limitPrice: z.number().positive().optional().describe("for a limit order: the price, in dollars per unit"),
+      limitPrice: z.number().positive().optional().describe("limit and stop_limit orders: the price, in dollars per unit"),
+      stopPrice: z.number().positive().optional().describe("stop and stop_limit orders: the price that triggers it"),
+      tif: z.enum(["gtc", "ioc", "fok", "day"]).optional().describe("time in force, only where the market lists it; default the venue's own"),
+      postOnly: z.boolean().optional().describe("a limit order that only rests on the book (maker), where the market takes it"),
+      reduceOnly: z.boolean().optional().describe("an order that can only shrink a position, where the market takes it"),
     },
   },
-  async ({ venue, symbol, side, orderType, qty, usd, limitPrice }) => {
+  async ({ venue, symbol, side, orderType, qty, usd, limitPrice, stopPrice, tif, postOnly, reduceOnly }) => {
     if (!(await layer())) return text({ ok: false, error: "this service runs without the account layer (--classic): use portfolio_order" }, true);
     if ((qty === undefined) === (usd === undefined)) return text({ ok: false, error: "give the size once: qty (the market's units) or usd (dollars)" }, true);
     const type = orderType ?? "market";
-    if (type === "limit" && limitPrice === undefined) return text({ ok: false, error: "a limit order needs limitPrice" }, true);
-    return answer(await sign({ type: "agentLiveOrder", venue, symbol, side, orderType: type, qty: qty !== undefined ? String(qty) : "", usd: usd !== undefined ? String(usd) : "", limitPrice: type === "limit" ? String(limitPrice) : "" }));
+    const limited = type === "limit" || type === "stop_limit";
+    const stopped = type === "stop" || type === "stop_limit";
+    if (limited && limitPrice === undefined) return text({ ok: false, error: `a ${type} order needs limitPrice` }, true);
+    if (stopped && stopPrice === undefined) return text({ ok: false, error: `a ${type} order needs stopPrice` }, true);
+    return answer(await sign({ type: "agentLiveOrder", venue, symbol, side, orderType: type, qty: qty !== undefined ? String(qty) : "", usd: usd !== undefined ? String(usd) : "", limitPrice: limited ? String(limitPrice) : "", ...(stopped ? { stopPrice: String(stopPrice) } : {}), ...(tif ? { tif } : {}), ...(postOnly ? { postOnly: "true" } : {}), ...(reduceOnly ? { reduceOnly: "true" } : {}) }));
+  },
+);
+
+server.registerTool(
+  "portfolio_live_amend",
+  {
+    description:
+      "Change an order THIS seat placed, in place, at a venue that changes orders (portfolio_account shows your open orders; a venue that cannot answers E_VENUE_RAIL_CLOSED — cancel and place again there): its new size (`qty`), limit (`limitPrice`) or stop (`stopPrice`); what you leave out stays. Made smaller or cheaper, it simply goes. Made worth MORE, the difference is judged like a new order: Aggressive inside your trading limit at once, Conservative on a card the owner signs ({pending: true, card}). The answer is the order as it stands after.",
+    inputSchema: { venue: z.string(), order: z.string().describe("its id on the account, e.g. ord-0007"), qty: z.number().positive().optional(), limitPrice: z.number().positive().optional(), stopPrice: z.number().positive().optional() },
+  },
+  async ({ venue, order, qty, limitPrice, stopPrice }) => {
+    if (!(await layer())) return text({ ok: false, error: "this service runs without the account layer (--classic)" }, true);
+    return answer(await sign({ type: "agentLiveAmend", venue, order, qty: qty !== undefined ? String(qty) : "", limitPrice: limitPrice !== undefined ? String(limitPrice) : "", stopPrice: stopPrice !== undefined ? String(stopPrice) : "" }));
+  },
+);
+
+server.registerTool(
+  "portfolio_live_positions",
+  {
+    description: "What is held at a venue connected live, as the venue lists it: perpetual positions (side, size, entry and mark price, unrealised profit, leverage, liquidation price), shares, event contracts. Read this before portfolio_live_close. A read.",
+    inputSchema: { venue: z.string().describe("the live venue's id") },
+    annotations: { readOnlyHint: true },
+  },
+  async ({ venue }) => {
+    const r = await call("GET", `/api/account/positions?${new URLSearchParams({ venue })}`);
+    const b = r.body as { refusal?: { code: string; message: string }; positions?: unknown };
+    if (b.refusal) return text({ ok: false, code: b.refusal.code, message: b.refusal.message }, true);
+    return text({ ok: true, positions: b.positions });
+  },
+);
+
+server.registerTool(
+  "portfolio_live_close",
+  {
+    description:
+      "Close a position at a venue connected live — all of it, or `qty` of it — where your trading limit lets you trade. It only shrinks what is held, so it does not count against your limit; but a position may be the owner's own, so it is answered like an order: in Conservative a card the owner answers (wait on it with portfolio_wait), in Aggressive at once when it is worth no more than your per-order limit, else a card. The venue's own close where it has one; otherwise a reduce-only market order, and only in a market that takes reduce-only (so it can never open a position the other way). The answer is the closing order.",
+    inputSchema: { venue: z.string(), symbol: z.string().describe("the position's market, as portfolio_live_positions lists it"), qty: z.number().positive().optional().describe("how much of it; all of it when left out") },
+  },
+  async ({ venue, symbol, qty }) => {
+    if (!(await layer())) return text({ ok: false, error: "this service runs without the account layer (--classic)" }, true);
+    return answer(await sign({ type: "agentLiveClose", venue, symbol, qty: qty !== undefined ? String(qty) : "" }));
+  },
+);
+
+server.registerTool(
+  "portfolio_live_leverage",
+  {
+    description: "Set a perpetual's leverage (and its margin mode: cross or isolated) at a venue that lets it be set, where your trading limit lets you trade — up to the most the owner lets agents use (1x unless the owner signed more; E_ACCOUNT_LIMIT says the cap).",
+    inputSchema: { venue: z.string(), symbol: z.string().describe("a perpetual's market"), leverage: z.number().int().min(1).max(200), marginMode: z.enum(["cross", "isolated"]).optional() },
+  },
+  async ({ venue, symbol, leverage, marginMode }) => {
+    if (!(await layer())) return text({ ok: false, error: "this service runs without the account layer (--classic)" }, true);
+    return answer(await sign({ type: "agentLiveLeverage", venue, symbol, leverage: String(leverage), marginMode: marginMode ?? "" }));
   },
 );
 
@@ -405,13 +479,13 @@ server.registerTool(
   "portfolio_pay",
   {
     description:
-      "Pay for something at a URL — an API call, a metered service, an item in a shop — up to `maxAmount` dollars, from one of your floats (`from`: the sub-account's name). You do not pay yourself and you never hold the float's key: you sign this request, and the ACCOUNT asks the payee, reads the price and the receiving address out of the payee's own answer, and speaks whatever protocol the payee does (x402, MPP charge or session, AP2 with mandates this seat signs with its own key). It pays only a host the owner named in a `payees` spending approval, only inside that approval's per-payment maximum and budget, and only at the address the owner approved for that host. The FIRST payment to a payee comes back as {pending: true, card}: the owner is shown who is paid, where and how much; once they approve, the card's `outcome` (portfolio_approval) holds the payment and the data it bought — do not pay again; if instead it says mandates are needed (a shop paid from a float), call this tool once more. Later payments return {payment, data} at once. A metered service (an MPP session) locks a deposit from the float on the first call and spends from it call by call: when you are done, call again with `close: true` and the rest comes back. Refusals are final: E_PAYEE_OVERCHARGE (it asked for more than maxAmount), E_PAYEE_CHANGED (its address is not the approved one — tell the user, this is what an attack looks like), E_PAYEE_REDIRECT, E_PAYEE_UNVERIFIED, E_MANDATE_* (the approval's limits), E_WALLET_INSUFFICIENT (the float). A server that holds real accounts only has no payees yet, and refuses this.",
-    inputSchema: { url: z.string().url().describe("https URL of what is being paid for"), maxAmount: z.number().nonnegative().describe("the most this one call may cost, in US dollars"), from: z.string().describe("the float (sub-account name) that pays"), close: z.boolean().optional().describe("end the payment session at this URL and bring the unused deposit back") },
+      "Pay for something at a URL — an API call, a metered service, an item in a shop — up to `maxAmount` dollars, from one of your agent wallets / floats (`from`: its name; portfolio_account lists yours under `floats`). On the user's REAL account it is real USDC from an agent wallet the account holds the key of: x402 (V1 and V2) and MPP charges, on Base, Arbitrum, Optimism, Polygon or Ethereum; `method`/`body` ask a POST API. You do not pay yourself and you never hold the wallet's key: you sign this request, and the ACCOUNT asks the payee, reads the price and the receiving address out of the payee's own answer, and speaks whatever protocol the payee does (x402, MPP charge or session, AP2 with mandates this seat signs with its own key — sessions and AP2 on the simulated account only). It pays only a host the owner named in a `payees` spending approval, only inside that approval's per-payment maximum and budget, and only at the address the owner approved for that host. The FIRST payment to a payee comes back as {pending: true, card}: the owner is shown who is paid, where and how much; once they approve, the card's `outcome` (portfolio_approval) holds the payment and the data it bought — do not pay again; if instead it says mandates are needed (a shop paid from a float), call this tool once more. Later payments return {payment, data} at once. A metered service (an MPP session) locks a deposit from the float on the first call and spends from it call by call: when you are done, call again with `close: true` and the rest comes back. Refusals are final: E_PAYEE_OVERCHARGE (it asked for more than maxAmount), E_PAYEE_CHANGED (its address is not the approved one — tell the user, this is what an attack looks like), E_PAYEE_REDIRECT, E_PAYEE_UNVERIFIED, E_MANDATE_* (the approval's limits), E_WALLET_INSUFFICIENT (the float). On the real account: Conservative makes every payment a card; Aggressive pays a payee paid before at once (and any payee at once when the owner signed `*`). A payee that answers before settling on chain gets {paid: 'not yet'}: the amount stays set aside until the chain shows it used or it lapses.",
+    inputSchema: { url: z.string().url().describe("https URL of what is being paid for"), maxAmount: z.number().nonnegative().describe("the most this one call may cost, in US dollars"), from: z.string().describe("the agent wallet / float that pays"), close: z.boolean().optional().describe("end the payment session at this URL and bring the unused deposit back (simulated account)"), method: z.enum(["GET", "POST"]).optional().describe("how the payee is asked (default GET)"), body: z.string().max(64_000).optional().describe("a POST's body"), contentType: z.string().max(100).optional().describe("the body's content type (default application/json)") },
   },
-  async ({ url, maxAmount, from, close }) => {
+  async ({ url, maxAmount, from, close, method, body, contentType }) => {
     if (!(await layer())) return text({ ok: false, error: "this service runs without the account layer (--classic): it pays no one" }, true);
     const key = seatKey();
-    const base = { type: "agentPay" as const, url, maxAmount: String(maxAmount), fromSubAccount: from };
+    const base = { type: "agentPay" as const, url, maxAmount: String(maxAmount), fromSubAccount: from, ...(method && method !== "GET" ? { method } : {}), ...(body !== undefined ? { body } : {}), ...(contentType ? { contentType } : {}) };
     const first = await sign({ ...base, ...(close ? { close: true } : {}), ...(close ? {} : { cnf: key.jwk }) });
     const needs = first.body.result as Ap2Needs | undefined;
     if (first.body.refusal || needs?.needs !== "mandates") return answer(first);
@@ -435,6 +509,68 @@ server.registerTool(
   },
 );
 
+/** what a waited-on thing is now: a card's status, an order's status and fill, a payment's status */
+async function stateOf(what: { card?: string | undefined; order?: string | undefined; payment?: string | undefined }): Promise<{ key: string; value: unknown } | { error: string }> {
+  if (what.card) {
+    const r = await call("GET", "/api/overview");
+    const ap = (r.body as OverviewLite).approvals?.find((x) => x.id === what.card) as (Record<string, unknown> & { status?: string }) | undefined;
+    return ap ? { key: String(ap.status), value: ap } : { error: `no card ${what.card}` };
+  }
+  const r = await call("GET", "/api/account");
+  if (r.status >= 400) return { error: "this service runs without the account layer (--classic)" };
+  const a = r.body as AccountLite;
+  if (what.order) {
+    const o = (a.orders ?? []).find((x) => x.id === what.order) as (Record<string, unknown> & { status?: string; filledQty?: number }) | undefined;
+    return o ? { key: `${o.status}:${o.filledQty}`, value: orderView(o) } : { error: `no order ${what.order} on the account` };
+  }
+  const p = a.payments.find((x) => x.id === what.payment);
+  return p ? { key: p.status, value: p } : { error: `no payment ${what.payment} on the account` };
+}
+
+server.registerTool(
+  "portfolio_wait",
+  {
+    description:
+      "Wait for something to change instead of asking again and again: a card the owner has not answered yet (`card`), an order on its way or on the book (`order`), a movement in flight (`payment`). It returns as soon as it changes — a card answered, an order filled, part filled, canceled, a movement landed or failed — or after `timeoutSec` (at most 55) with `changed: false` and how it stands. Call it again to keep waiting. A read: it changes nothing.",
+    inputSchema: { card: z.string().optional().describe("a card id, e.g. card-0003"), order: z.string().optional().describe("an order id, e.g. ord-0007"), payment: z.string().optional().describe("a payment id, e.g. pay-0002"), timeoutSec: z.number().int().positive().max(55).optional().describe("how long to wait at most (default 30)") },
+    annotations: { readOnlyHint: true },
+  },
+  async ({ card, order, payment, timeoutSec }) => {
+    if ([card, order, payment].filter(Boolean).length !== 1) return text({ ok: false, error: "wait for one thing: a card, an order or a payment" }, true);
+    const first = await stateOf({ card, order, payment });
+    if ("error" in first) return text({ ok: false, error: first.error }, true);
+    // a card already answered, an order already done: nothing to wait for
+    const settled = (k: string) => (card ? k !== "pending" : order ? /^(filled|canceled|rejected|expired):/.test(k) : ["settled", "failed", "returned"].includes(k));
+    if (settled(first.key)) return text({ ok: true, changed: false, done: true, now: first.value });
+    const until = Date.now() + (timeoutSec ?? 30) * 1000;
+    while (Date.now() < until) {
+      await new Promise((r) => setTimeout(r, 1000));
+      const now = await stateOf({ card, order, payment });
+      if ("error" in now) return text({ ok: false, error: now.error }, true);
+      if (now.key !== first.key) return text({ ok: true, changed: true, done: settled(now.key), was: first.key.split(":")[0], now: now.value });
+    }
+    return text({ ok: true, changed: false, done: false, now: first.value });
+  },
+);
+
+server.registerTool(
+  "portfolio_statement",
+  {
+    description:
+      "The account's statement, like a bank's: every transaction at the user's real venues — orders (buys, sells) and movements (withdrawals, transfers, swaps, bridges, payments) — one line each, as it stands now, newest first, across restarts of the account. Each line: when, what, where, the dollars of it (a buy is money out, a sell money in), the fee, its status, and who did it (the owner, or an agent on the owner's yes or inside its limit). `mine: true` keeps only this seat's. A read.",
+    inputSchema: { mine: z.boolean().optional().describe("only this seat's own transactions"), limit: z.number().int().positive().max(200).optional().describe("how many lines (default 50)") },
+    annotations: { readOnlyHint: true },
+  },
+  async ({ mine, limit }) => {
+    const r = await call("GET", "/api/account/statement");
+    const b = r.body as { lines?: Array<Record<string, unknown> & { by?: string }>; refusal?: { code: string; message: string } };
+    if (b.refusal || !Array.isArray(b.lines)) return text({ ok: false, error: b.refusal?.message ?? "no statement on this service" }, true);
+    const name = agentOf().name;
+    const lines = mine ? b.lines.filter((l) => String(l.by ?? "").startsWith(`${name},`)) : b.lines;
+    return text({ ok: true, lines: lines.slice(0, limit ?? 50), total: lines.length });
+  },
+);
+
 server.registerTool(
   "portfolio_openness",
   { description: "The three layers per account: what the credential can do (and who enforces it), what the user opened to the agent and what the wallet still keeps, and the venue's own second line. Read this before planning a cross-account action.", inputSchema: {}, annotations: { readOnlyHint: true } },
@@ -447,4 +583,4 @@ server.registerTool(
 );
 
 await server.connect(new StdioServerTransport());
-process.stderr.write(`[agent-portfolio-manager] up (stdio) → ${BASE} · this seat signs with a key derived from its name (agent:<name>); the owner authorises it on the Account page\n`);
+process.stderr.write(`[agent-portfolio-manager] up (stdio) → ${BASE} · this seat signs with ${process.env.PORTFOLIO_SEAT_KEYS === "sim" ? "a key derived from its name (agent:<name>, PORTFOLIO_SEAT_KEYS=sim)" : "its own key, kept in <home>/seats"}; the owner authorises it on the Account page\n`);

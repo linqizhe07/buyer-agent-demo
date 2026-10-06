@@ -155,8 +155,8 @@ details.opts .row{margin-top:10px}
   table.stmt td:nth-child(4){grid-column:2;grid-row:2;text-align:right}
   table.stmt td:nth-child(5){grid-column:1/-1;grid-row:3}
   .open-t td:first-child{grid-column:1/-1}
-  #agents table tr{display:grid;grid-template-columns:minmax(0,1fr);gap:4px;padding:10px 0;border-bottom:1px solid var(--line)}
-  section #agents table td,section #agents table td.r{border:0;padding:0;text-align:left}
+  #agents table tr,#wallets table tr{display:grid;grid-template-columns:minmax(0,1fr);gap:4px;padding:10px 0;border-bottom:1px solid var(--line)}
+  section #agents table td,section #agents table td.r,section #wallets table td,section #wallets table td.r{border:0;padding:0;text-align:left;white-space:normal}
   dialog .row{grid-template-columns:1fr}
   td .why{max-width:none}
   .add input.l{width:100%}
@@ -190,3 +190,28 @@ details.liq summary b{color:var(--ink);font-weight:500}
 details.liq[open] summary{margin-bottom:6px}
 dialog .elsewhere:empty{display:none}
 dialog .elsewhere{margin-top:-4px;font-size:12px;color:var(--ink)}
+
+/* the dial line under the modes, and the restore line under the total */
+#dial { margin-top: 4px; }
+#restored { margin-top: 6px; }
+/* the ticket's extra choices: a time in force, post-only, reduce-only, leverage */
+.chk1 { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; margin-right: 14px; align-self: flex-end; padding-bottom: 8px; }
+#tk-more { align-items: flex-end; flex-wrap: wrap; }
+#tk-lev input.xs { width: 88px; display: inline-block; }
+#tk-lev select { display: inline-block; width: auto; }
+/* positions: profit up, loss down */
+.pos-t td.up { color: var(--sage); }
+.pos-t td.down { color: var(--rust, #b4532a); }
+/* the agents form's payments block: a row of its own, its fields side by side */
+.add details.pay { flex-basis: 100%; margin: 2px 0 0; }
+details.pay summary { cursor: pointer; font-size: 13px; color: var(--muted, #6b6b6b); }
+details.pay .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; margin-top: 8px; }
+/* a checkbox with its words beside it, in the forms and the dialogs alike (their labels otherwise stack a field's name over it) */
+.add label.chk1, dialog label.chk1 { flex-direction: row; align-items: center; text-transform: none; letter-spacing: 0; font-family: "IBM Plex Sans", "Helvetica Neue", Arial, sans-serif; font-size: 13px; color: var(--ink); white-space: nowrap; }
+.add label.chk1 input, dialog label.chk1 input { width: auto; flex: none; margin: 0; }
+#everything { margin-right: 10px; }
+@media (max-width: 640px) {
+  .pos-t td:nth-child(3) { display: none; }
+  .chk1 { padding-bottom: 0; }
+}
+

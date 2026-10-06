@@ -11,9 +11,16 @@
  *   GET    /trade-api/v2/api_keys                         the key's own scopes: `write` or `write::trade` places orders, `read` alone does not
  *   POST   /trade-api/v2/portfolio/events/orders          place (the V2 endpoint; the old /portfolio/orders writes were removed in June 2026)
  *   DELETE /trade-api/v2/portfolio/events/orders/{id}     cancel, with ?market_ticker= so Kalshi routes it to the market's shard
+ *   POST   /trade-api/v2/portfolio/events/orders/{id}/amend   a resting order's price or size changed in place (amend-order-v2.md)
  *   GET    /trade-api/v2/portfolio/orders/{id}            what became of it: resting, executed, canceled
  *   GET    /trade-api/v2/portfolio/orders?ticker=         the orders on one market: those resting (a sell counts them), one by its client id
  *   GET    /trade-api/v2/portfolio/fills?order_id=        the price of each fill, in YES and in NO terms, and its fee
+ *   GET    /trade-api/v2/portfolio/positions?count_filter=position   what is held, for the trader's positions
+ *   GET    /trade-api/v2/markets?tickers=…                those positions' markets, for their names and prices
+ *
+ * What an order may say (create-order-v2.md): every Kalshi event order is a limit order with a price, and it says how long it stays —
+ * good_till_canceled, immediate_or_cancel or fill_or_kill, which V2 requires; a good-till-canceled one may carry an `expiration_time`, which
+ * is how a day order is sent. It may be post_only, and reduce_only when it fills at once. Kalshi has no stop orders on event contracts.
  *
  * Each request carries three headers: the key's id, a millisecond timestamp, and a signature over `timestamp + METHOD + path` — the path
  * with its `/trade-api/v2` prefix and without the query string, the body never signed — made with the private key that came with the id:
@@ -27,7 +34,7 @@ import { constants, createPrivateKey, sign as cryptoSign, type KeyObject } from 
 import { isRefusal, type Refusal } from "../../core/errors.ts";
 import { no } from "../refuse.ts";
 import { readSecretFile, type KeyFile, type KeyShape } from "./credentials.ts";
-import { badOrder, onStep, pick, plain, type LiveTrader, type Market, type OrderRequest, type OrderState, type OrderStatus } from "./trade.ts";
+import { badOrder, onStep, pick, plain, type LiveTrader, type Market, type OrderRequest, type OrderState, type OrderStatus, type Position, type Side, type TimeInForce } from "./trade.ts";
 import { asRefusal, num, redact, REGION, unreachable, venueSaidNo, type Http, type HttpReply, type LiveBalance, type LiveSource } from "./types.ts";
 
 export const KALSHI_KEY: KeyShape = { required: ["keyId"], optional: ["privateKeyFile", "privateKey", "demo"], example: '{"keyId": "…", "privateKeyFile": "credentials/kalshi/private-key.pem"} (the .pem is the file Kalshi gives you when the key is made; a key made with write access places orders, a read-only one only reads)' };
@@ -110,7 +117,7 @@ export async function kalshiSource(req: { venue: string; label: string; referenc
       probe: {
         can: [],
         note: "a Kalshi key carries the scopes it was made with: read to see the account, write (or write::trade) to place and cancel orders here; positions are shown at what they cost, which is what Kalshi reports",
-        native: { calls: ["GET /trade-api/v2/portfolio/balance", "GET /trade-api/v2/portfolio/positions", "GET /trade-api/v2/api_keys", "POST /trade-api/v2/portfolio/events/orders", "DELETE /trade-api/v2/portfolio/events/orders/{order_id}", "GET /trade-api/v2/portfolio/orders/{order_id}"], signed: key.asymmetricKeyType === "ed25519" ? "Ed25519" : "RSA-PSS SHA-256", demo },
+        native: { calls: ["GET /trade-api/v2/portfolio/balance", "GET /trade-api/v2/portfolio/positions", "GET /trade-api/v2/api_keys", "POST /trade-api/v2/portfolio/events/orders", "DELETE /trade-api/v2/portfolio/events/orders/{order_id}", "POST /trade-api/v2/portfolio/events/orders/{order_id}/amend", "GET /trade-api/v2/portfolio/orders/{order_id}"], signed: key.asymmetricKeyType === "ed25519" ? "Ed25519" : "RSA-PSS SHA-256", demo },
       },
       read,
       readOnlyBecause: "Kalshi's API moves no money: deposits and withdrawals are made at Kalshi",
@@ -139,6 +146,14 @@ const LIST_MS = 5 * 60_000;
 const FRESH_MS = 30_000;
 /** what an empty search starts from: the Fed's rate and decision, CPI, the S&P 500, Bitcoin — the most-traded market of each */
 const KNOWN = ["KXFED", "KXFEDDECISION", "KXCPI", "KXINX", "KXBTCD"];
+/** The account's time in force as V2's create takes it: `time_in_force` is required there and is one of good_till_canceled,
+ * immediate_or_cancel, fill_or_kill (create-order-v2.md). A day order is Kalshi's own too — over FIX, Day "expires 11:59:59.999pm ET" and
+ * "Kalshi stores Day orders as explicit deadlines" (fix/order-entry.md) — and over REST that deadline is an `expiration_time` in Unix
+ * seconds: "To place an expiring order, set `time_in_force` to `good_till_canceled` and provide this `expiration_time`" */
+const TIF_WIRE: Record<TimeInForce, string> = { gtc: "good_till_canceled", ioc: "immediate_or_cancel", fok: "fill_or_kill", day: "good_till_canceled" };
+const KALSHI_TIFS: TimeInForce[] = ["gtc", "ioc", "fok", "day"];
+/** a day order this close to the day's end would end before it rests: Kalshi refuses an expiry that is not in the future (changelog 2025-11-21) */
+const DAY_MARGIN_S = 10;
 
 const enc = encodeURIComponent;
 const round = (x: number, places = 6): number => Number(x.toFixed(places));
@@ -174,6 +189,55 @@ function snapTo(bands: Band[], p: number, dir: "down" | "up"): number | undefine
 function parse(symbol: string): { ticker: string; outcome: Outcome } | undefined {
   const m = /^([A-Za-z0-9][A-Za-z0-9._-]*):(YES|NO)$/i.exec(symbol.trim());
   return m ? { ticker: m[1]!.toUpperCase(), outcome: m[2]!.toUpperCase() as Outcome } : undefined;
+}
+
+/** the YES leg's side of the book: buying YES and selling NO are bids, buying NO and selling YES are asks */
+const sideOf = (outcome: Outcome, side: Side): BookSide => ((outcome === "YES") === (side === "buy") ? "bid" : "ask");
+
+/** a limit price in the outcome's own terms as the YES-leg price Kalshi is sent, in centicents — or why Kalshi would not take it */
+function limitYes(venue: string, name: string, m: Market, bands: Band[], outcome: Outcome, lp: number | undefined): number | Refusal {
+  const c = (lp ?? NaN) * CC;
+  if (!(lp !== undefined && lp > 0 && lp < 1) || Math.abs(c - Math.round(c)) > 1e-6) return badOrder(venue, name, "a price at Kalshi is in dollars, more than 0 and less than 1, at most four decimals", { limitPrice: lp });
+  const yesC = outcome === "YES" ? Math.round(c) : CC - Math.round(c);
+  if (onGrid(bands, yesC)) return yesC;
+  const b = bandAt(bands, yesC);
+  return badOrder(venue, name, `a price in ${m.name} moves in steps of ${plain((b?.step ?? 100) / CC)}${b ? ` between ${plain(outcome === "YES" ? b.start / CC : 1 - b.end / CC)} and ${plain(outcome === "YES" ? b.end / CC : 1 - b.start / CC)}` : ""}`, { limitPrice: lp, priceStep: (b?.step ?? 100) / CC });
+}
+
+const ET = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "numeric", second: "numeric", hourCycle: "h23" });
+/** New York's wall clock at an instant, written as if it were UTC: less the instant, that is New York's offset from UTC then */
+function etWall(ms: number): { y: number; mo: number; d: number; wall: number } {
+  const p: Record<string, number> = {};
+  for (const x of ET.formatToParts(new Date(ms))) if (x.type !== "literal") p[x.type] = Number(x.value);
+  return { y: p.year!, mo: p.month!, d: p.day!, wall: Date.UTC(p.year!, p.month! - 1, p.day!, p.hour!, p.minute!, p.second!) };
+}
+
+/** When a Kalshi day order placed at `nowMs` ends, in Unix seconds: 23:59:59 in New York that day. Kalshi's own Day deadline is
+ * 11:59:59.999pm ET (fix/order-entry.md) and `expiration_time` takes whole seconds, so this is the last whole second before it, never after.
+ * New York's offset is read at the deadline itself and not now, so a day on which the clocks change between EDT and EST ends at its own
+ * midnight */
+export function kalshiDayEnd(nowMs: number): number {
+  const today = etWall(nowMs);
+  const target = Date.UTC(today.y, today.mo - 1, today.d, 23, 59, 59);
+  let at = target - (today.wall - Math.floor(nowMs / 1000) * 1000);
+  at = target - (etWall(at).wall - at);
+  return Math.floor(at / 1000);
+}
+
+/** What V2's create does not take, or not together, said before anything is sent. Every Kalshi event order is a limit order: market orders
+ * were removed 2026-02-11 (the account's market order goes as a limit at its worst price that fills at once), and event contracts have no stop
+ * orders — Kalshi's stop-loss and take-profit triggers belong to its margin product (/margin/…/exit_trigger, changelog 2026-08-20) */
+function notTaken(order: OrderRequest, tif: TimeInForce, s: { ticker: string; outcome: Outcome }): string | undefined {
+  const market = order.type === "market";
+  if (!market && order.type !== "limit") return `Kalshi has no ${order.type === "stop_limit" ? "stop-limit" : String(order.type)} orders on event contracts: it takes limit orders, and the account's market order goes as a limit that fills at once`;
+  if (!KALSHI_TIFS.includes(tif)) return `Kalshi takes good-till-canceled, immediate-or-cancel, fill-or-kill and day orders, not "${String(tif).slice(0, 20)}"`;
+  if (market && (tif === "gtc" || tif === "day")) return "a market order at Kalshi is a limit at its worst price that fills at once (immediate-or-cancel), or all at once or not at all (fill-or-kill): one that rests on the book is a limit order";
+  if (order.postOnly && market) return "post-only is for a limit order: a market order takes from the book";
+  if (order.postOnly && (tif === "ioc" || tif === "fok")) return "a post-only order rests on the book as a maker: one that must fill at once never rests, so Kalshi would cancel it at once";
+  if (order.reduceOnly && order.side === "buy") return `reduce-only at Kalshi is a sell of contracts held: a buy of ${s.ticker}:${s.outcome} only opens or grows a position in it (${s.ticker}:${s.outcome === "YES" ? "NO" : "YES"} held is reduced by selling it)`;
+  // "Orders with reduce_only set to true will be rejected unless time_in_force is immediate_or_cancel" (create-order-v2.md)
+  if (order.reduceOnly && tif !== "ioc") return "Kalshi takes reduce-only only on an order that fills at once (immediate-or-cancel): a market sell, or a limit sell with ioc";
+  return undefined;
 }
 
 /** Kalshi's prices are dollar strings (the cent fields were removed 2026-01-15): a market without them is not one the account can price */
@@ -219,7 +283,9 @@ function toMarket(m: Rec, outcome: Outcome, paused?: string, caveat?: string): M
   // the finest band's step: every valid price is a whole number of it. The coarsest would push the account's worst price for a market order
   // off the book on a mixed grid (a 0.048 ask, 2% over, floored to the cent, is 0.04); the trader checks the full grid before anything goes
   const priceStep = Math.min(...bandsOf(m).map((b) => b.step)) / CC;
-  return { symbol: `${ticker}:${outcome}`, name: `${words} · ${yes ? "Yes" : "No"}`, kind: "event", base: `${ticker}:${outcome}`, quote: "USD", price, bid, ask, minQty: COUNT_STEP, qtyStep: COUNT_STEP, priceStep, open, ...(note ? { note } : {}), types: ["market", "limit"] };
+  // What V2's create takes in every event market: limit orders (the account's market order goes as one), the four times in force above,
+  // post_only, and reduce_only — which Kalshi takes only on an order that fills at once, so the trader holds it to a sell sent ioc
+  return { symbol: `${ticker}:${outcome}`, name: `${words} · ${yes ? "Yes" : "No"}`, kind: "event", base: `${ticker}:${outcome}`, quote: "USD", price, bid, ask, minQty: COUNT_STEP, qtyStep: COUNT_STEP, priceStep, open, ...(note ? { note } : {}), types: ["market", "limit"], tifs: [...KALSHI_TIFS], tifsByType: { market: ["ioc", "fok"], limit: [...KALSHI_TIFS] }, postOnly: true, reduceOnly: true };
 }
 
 /** Kalshi's answer that is not a yes, as the account's refusal, with Kalshi's own words in `native`. Kalshi does not enumerate its REST
@@ -241,9 +307,12 @@ function kalshiNo(venue: string, name: string, r: HttpReply, secrets: string[], 
   if (/balance_too_low|insufficient/.test(t)) return no("E_VENUE_INSUFFICIENT", { venue, message: `${name}: not enough cash for this order on the exchange shard its market trades on${shard !== undefined ? ` (shard ${shard})` : ""}. An order sent through Kalshi's API counts only the cash already on that shard`, native });
   if (/invalid_order_size|incorrect quantity|order size/.test(t)) return { ...badOrder(venue, name, "Kalshi does not take an order of this size (counts are in steps of 0.01 contracts)"), native };
   if (/market_inactive|market_already_closed|market_closed|market is closed|not active|exchange_paused|trading_paused|paused/.test(t)) return no("E_VENUE_MARKET_CLOSED", { venue, message: `${name}: the market takes no orders now`, native });
+  // a post-only order that would cross is canceled rather than refused (its last_update_reason is PostOnlyCrossCancel, changelog 2026-06-04),
+  // but a batch reported it as an error ("invalid order" · "post only cross", changelog 2025-10-24): either way it is said as what it is
+  if (/post.?only/.test(t)) return { ...badOrder(venue, name, "post-only: at this price the order would have taken from the book at once, so Kalshi did not rest it"), native };
   if (/invalid_price|price|tick/.test(t)) return { ...badOrder(venue, name, "the price is not on this market's price grid"), native };
   if (/risk_limit|position limit|position_floor/.test(t)) return { ...badOrder(venue, name, "over Kalshi's limit for one market"), native };
-  if (/invalid_order|post.?only/.test(t)) return { ...badOrder(venue, name, "Kalshi does not take this order as written"), native };
+  if (/invalid_order/.test(t)) return { ...badOrder(venue, name, "Kalshi does not take this order as written"), native };
   return no("E_VENUE_REJECTED", { venue, message: `${name} refused the request (HTTP ${r.status})`, native });
 }
 
@@ -261,6 +330,8 @@ function kalshiTrader(o: { venue: string; name: string; keyId: string; call: Cal
   const badSymbol = (symbol: string) => no("E_ACCOUNT_BAD_ACTION", { venue, message: `a Kalshi market is named <ticker>:YES or <ticker>:NO, not "${symbol.slice(0, 60)}"` });
   const looks = new Map<string, Look>();
   let scopes: { at: number; can: boolean | "unknown"; list?: string[]; caveat?: string } | undefined;
+  /** a key Kalshi lists without a trading scope: its write is refused here, never sent */
+  const mayNot = () => no("E_VENUE_PERMISSION", { venue, message: `${name}: this key may not trade — Kalshi lists its scopes as ${scopes?.list?.join(", ") || "none"}. A Kalshi key keeps the scopes it was made with: make one with write (or write::trade) at Kalshi`, native: { scopes: scopes?.list } });
   let universe: { at: number; list: Market[] } | undefined;
   const series = new Map<string, { at: number; list: Rec[] }>();
 
@@ -383,17 +454,49 @@ function kalshiTrader(o: { venue: string; name: string; keyId: string; call: Cal
     return { ref: String(ord.order_id ?? ""), status, filledQty: filled, ...(f ? { avgPrice: f.avg } : {}), ...(filled > 0 || fee > 0 ? { feeUsd: round(fee) } : {}), native: ord };
   };
 
+  /** GET /portfolio/orders/{id}: the order as Kalshi has it now */
+  const orderOf = async (ref: string): Promise<Rec | Refusal> => {
+    const r = await call("GET", `/portfolio/orders/${enc(ref)}`);
+    if (r.status === 404) return no("E_ACCOUNT_ORDER_UNKNOWN", { venue, message: `${name} has no order ${ref} for this key (an order done before Kalshi's historical cutoff is only in GET /historical/orders)`, native: { status: 404, said: saidOf(r.text, secrets) } });
+    if (r.status !== 200) return fail(r);
+    const ord = isRec(r.body) && isRec(r.body.order) ? r.body.order : undefined;
+    return ord ?? no("E_VENUE_REJECTED", { venue, message: `${name} answered without the order ${ref}` });
+  };
+
   const status = async (ref: string, symbol: string): Promise<OrderState | Refusal> => {
     try {
-      const r = await call("GET", `/portfolio/orders/${enc(ref)}`);
-      if (r.status === 404) return no("E_ACCOUNT_ORDER_UNKNOWN", { venue, message: `${name} has no order ${ref} for this key (an order done before Kalshi's historical cutoff is only in GET /historical/orders)`, native: { status: 404, said: saidOf(r.text, secrets) } });
-      if (r.status !== 200) return fail(r);
-      const ord = isRec(r.body) && isRec(r.body.order) ? r.body.order : undefined;
-      if (!ord) return no("E_VENUE_REJECTED", { venue, message: `${name} answered without the order ${ref}` });
-      return await stateOf(ord, parse(symbol)?.outcome);
+      const ord = await orderOf(ref);
+      return isRefusal(ord) ? ord : await stateOf(ord, parse(symbol)?.outcome);
     } catch (err) {
       return asRefusal(venue, name, err, secrets);
     }
+  };
+
+  /** What of one outcome is free to sell: what is held (GET /portfolio/positions?ticker=), less what the orders already resting on the same
+   * side of the book will take out of it first (GET /portfolio/orders?status=resting). Kalshi nets a market into one position, so selling
+   * past it would buy the other side */
+  const freeToSell = async (ticker: string, outcome: Outcome, side: BookSide): Promise<{ held: number; resting: number; free: number; position: unknown } | Refusal> => {
+    const [r, os] = await Promise.all([call("GET", `/portfolio/positions?ticker=${enc(ticker)}&limit=200`), call("GET", `/portfolio/orders?ticker=${enc(ticker)}&status=resting&limit=200`)]);
+    if (r.status !== 200 || !isRec(r.body)) return fail(r);
+    if (os.status !== 200 || !isRec(os.body)) return fail(os);
+    const p = (Array.isArray(r.body.market_positions) ? (r.body.market_positions as unknown[]).filter(isRec) : []).find((x) => String(x.ticker ?? "").toUpperCase() === ticker);
+    const n = num(p?.position_fp);
+    const held = outcome === "YES" ? Math.max(0, n) : Math.max(0, -n);
+    const resting = round((Array.isArray(os.body.orders) ? (os.body.orders as unknown[]).filter(isRec) : []).filter((x) => x.book_side === side).reduce((a, x) => a + num(x.remaining_count_fp), 0), 2);
+    return { held, resting, free: Math.max(0, round(held - resting, 2)), position: p ?? { market_positions: [] } };
+  };
+
+  /** The markets of some tickers, for their names and prices: GET /markets?tickers=… (comma-separated, get-markets.md), of any status — a
+   * position outlives its market's close until it settles — a hundred at a time. A page that cannot be read leaves its positions named by
+   * their ticker, with what they cost and no price */
+  const marketsOf = async (tickers: string[]): Promise<Map<string, Rec>> => {
+    const out = new Map<string, Rec>();
+    const wanted = [...new Set(tickers)];
+    for (let i = 0; i < wanted.length; i += 100) {
+      const chunk = wanted.slice(i, i + 100);
+      for (const m of await listed(`/markets?tickers=${chunk.map(enc).join(",")}&limit=${chunk.length}`).catch(() => [] as Rec[])) out.set(String(m.ticker ?? "").toUpperCase(), m);
+    }
+    return out;
   };
 
   /** An order Kalshi did not answer for (a timeout, a 5xx) or answered 409 for (that client id is taken) may be at Kalshi already: look for it
@@ -450,29 +553,36 @@ function kalshiTrader(o: { venue: string; name: string; keyId: string; call: Cal
         const s = parse(order.symbol);
         if (!s) return badSymbol(order.symbol);
         if (!(order.qty >= COUNT_STEP - 1e-12) || !onStep(order.qty, COUNT_STEP)) return badOrder(venue, name, "a count at Kalshi is in steps of 0.01 contracts, at least 0.01", { qty: order.qty, qtyStep: COUNT_STEP });
+        const market = order.type === "market";
+        // how long it stays, as asked, or as it always was here when not: a market order fills at once, a limit order rests until canceled
+        const tif: TimeInForce = order.tif ?? (market ? "ioc" : "gtc");
+        const why = notTaken(order, tif, s);
+        if (why) return badOrder(venue, name, why);
+        let expires: number | undefined;
+        if (tif === "day") {
+          const now = o.clock();
+          expires = kalshiDayEnd(now);
+          if (expires - now / 1000 < DAY_MARGIN_S) return badOrder(venue, name, "a day order at Kalshi ends at 11:59:59pm ET, seconds from now: it would end before it rested. Send it good-till-canceled, or after midnight ET", { expiresAt: expires });
+        }
         const l = await recent(s.ticker);
         if (isRefusal(l)) return l;
         const m = toMarket(l.m, s.outcome, l.paused, l.caveat);
-        if (scopes?.can === false) return no("E_VENUE_PERMISSION", { venue, message: `${name}: this key may not trade — Kalshi lists its scopes as ${scopes.list?.join(", ") || "none"}. A Kalshi key keeps the scopes it was made with: make one with write (or write::trade) at Kalshi`, native: { scopes: scopes.list } });
+        if (scopes?.can === false) return mayNot();
         if (!m.open) return no("E_VENUE_MARKET_CLOSED", { venue, message: `${name}: ${m.name} takes no orders now${m.note ? ` (${m.note})` : ""}` });
         const bands = bandsOf(l.m);
         // the YES leg: buying YES and selling NO are bids, buying NO and selling YES are asks, and a NO price n is the YES price 1 − n
-        const side: BookSide = (s.outcome === "YES") === (order.side === "buy") ? "bid" : "ask";
+        const side = sideOf(s.outcome, order.side);
         const yesOf = (outcomeC: number) => (s.outcome === "YES" ? outcomeC : CC - outcomeC);
         let yesC: number;
         if (order.type === "limit") {
-          const lp = order.limitPrice ?? NaN;
-          const c = lp * CC;
-          if (!(lp > 0 && lp < 1) || Math.abs(c - Math.round(c)) > 1e-6) return badOrder(venue, name, "a price at Kalshi is in dollars, more than 0 and less than 1, at most four decimals", { limitPrice: order.limitPrice });
-          yesC = yesOf(Math.round(c));
-          if (!onGrid(bands, yesC)) {
-            const b = bandAt(bands, yesC);
-            return badOrder(venue, name, `a price in ${m.name} moves in steps of ${plain((b?.step ?? 100) / CC)}${b ? ` between ${plain(s.outcome === "YES" ? b.start / CC : 1 - b.end / CC)} and ${plain(s.outcome === "YES" ? b.end / CC : 1 - b.start / CC)}` : ""}`, { limitPrice: order.limitPrice, priceStep: (b?.step ?? 100) / CC });
-          }
+          const p = limitYes(venue, name, m, bands, s.outcome, order.limitPrice);
+          if (isRefusal(p)) return p;
+          yesC = p;
         } else {
           // Kalshi takes no market orders (removed 2026-02-11). The account's market order is an immediate-or-cancel limit at the worst price
           // the account gave it (trade.ts: the most a buy pays, the least a sell takes), or, without one, at the book the account just looked
-          // at — put on the grid in the safe direction: it fills at that price or better, and what does not fill there at once is canceled.
+          // at — put on the grid in the safe direction: it fills at that price or better, and what does not fill there at once is canceled
+          // (or, sent fill-or-kill, all of it fills there at once or none does).
           const book = order.side === "buy" ? m.ask : m.bid;
           if (book === undefined) return badOrder(venue, name, `no one is ${order.side === "buy" ? "selling" : "buying"} ${m.name} right now, so a market order has nothing to take: try a limit order`);
           const at = order.worstPrice !== undefined && order.worstPrice > 0 ? order.worstPrice : book;
@@ -482,34 +592,31 @@ function kalshiTrader(o: { venue: string; name: string; keyId: string; call: Cal
           yesC = snapped;
         }
         // A sell is of contracts held. Kalshi nets a market into one position, so an ask on YES that finds no YES held opens NO instead — a
-        // purchase, and at a low price a far bigger one than the sell was valued at. So the position is read first (GET
-        // /portfolio/positions?ticker=), less what the orders already resting on the same side of the book will take out of it before this one
-        // (GET /portfolio/orders?status=resting); a market sell also goes reduce_only, which Kalshi takes only with immediate_or_cancel. A
-        // resting limit sell cannot be reduce_only: it is held to what is free when it is placed, and every later sell here counts it.
+        // purchase, and at a low price a far bigger one than the sell was valued at. So what is free to sell is read first: what is held, less
+        // what the orders already resting on the same side of the book will take out of it before this one. A sell that fills at once
+        // (immediate-or-cancel: a market sell, or a limit sell sent ioc) also goes reduce_only, which Kalshi takes only then. A resting sell,
+        // or a fill-or-kill one, cannot be reduce_only: it is held to what is free when it is placed, and every later sell here counts it.
         if (order.side === "sell") {
-          const [r, o] = await Promise.all([call("GET", `/portfolio/positions?ticker=${enc(s.ticker)}&limit=200`), call("GET", `/portfolio/orders?ticker=${enc(s.ticker)}&status=resting&limit=200`)]);
-          if (r.status !== 200 || !isRec(r.body)) return fail(r);
-          if (o.status !== 200 || !isRec(o.body)) return fail(o);
-          const p = (Array.isArray(r.body.market_positions) ? (r.body.market_positions as unknown[]).filter(isRec) : []).find((x) => String(x.ticker ?? "").toUpperCase() === s.ticker);
-          const n = num(p?.position_fp);
-          const held = s.outcome === "YES" ? Math.max(0, n) : Math.max(0, -n);
-          const resting = round((Array.isArray(o.body.orders) ? (o.body.orders as unknown[]).filter(isRec) : []).filter((x) => x.book_side === side).reduce((a, x) => a + num(x.remaining_count_fp), 0), 2);
-          const free = Math.max(0, round(held - resting, 2));
-          if (order.qty > free + 1e-9) return no("E_VENUE_INSUFFICIENT", { venue, message: `${name}: you hold ${plain(held)} ${m.symbol}${resting > 0 ? `, and orders already resting on Kalshi's book sell ${plain(Math.min(resting, held))} of it: ${plain(free)} is free to sell, fewer than the ${plain(order.qty)} asked` : `, fewer than the ${plain(order.qty)} to sell`}. A sell here is of what is held: selling more at Kalshi would buy the other side`, detail: { held, qty: order.qty, ...(resting > 0 ? { resting } : {}) }, native: p ?? { market_positions: [] } });
+          const f = await freeToSell(s.ticker, s.outcome, side);
+          if (isRefusal(f)) return f;
+          const { held, resting, free } = f;
+          if (order.qty > free + 1e-9) return no("E_VENUE_INSUFFICIENT", { venue, message: `${name}: you hold ${plain(held)} ${m.symbol}${resting > 0 ? `, and orders already resting on Kalshi's book sell ${plain(Math.min(resting, held))} of it: ${plain(free)} is free to sell, fewer than the ${plain(order.qty)} asked` : `, fewer than the ${plain(order.qty)} to sell`}. A sell here is of what is held: selling more at Kalshi would buy the other side`, detail: { held, qty: order.qty, ...(resting > 0 ? { resting } : {}) }, native: f.position });
         }
-        const market = order.type === "market";
         const body: Rec = {
           ticker: s.ticker,
           side,
           count: order.qty.toFixed(2),
           price: (yesC / CC).toFixed(4),
-          time_in_force: market ? "immediate_or_cancel" : "good_till_canceled",
+          time_in_force: TIF_WIRE[tif],
           // required on V2: an order that would match the account's own resting order is the one canceled, and what matched stands
           self_trade_prevention_type: "taker_at_cross",
           // the account's id is Kalshi's idempotency key: a second order under it is refused with 409. The docs say only "string" (and
           // suggest a UUID): it is kept to letters, digits, dashes and underscores
           client_order_id: order.clientId.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 64),
-          ...(market && order.side === "sell" ? { reduce_only: true } : {}),
+          // a day order: good_till_canceled with the day's deadline, in Unix seconds
+          ...(expires !== undefined ? { expiration_time: expires } : {}),
+          ...(order.postOnly ? { post_only: true } : {}),
+          ...((order.reduceOnly || order.side === "sell") && tif === "ioc" ? { reduce_only: true } : {}),
         };
         // no answer, a 5xx, or a 201 that could not be read, and the order not among Kalshi's yet: it may be there all the same — never "not placed"
         const unknown = (why: string, native: unknown) => no("E_VENUE_UNREACHABLE", { venue, message: `${name} ${why}, and it is not among Kalshi's orders yet: it may have been taken all the same. Look at Kalshi's orders for ${String(body.client_order_id)} before placing it again`, detail: { clientOrderId: body.client_order_id, placed: "unknown" }, native });
@@ -557,6 +664,117 @@ function kalshiTrader(o: { venue: string; name: string; keyId: string; call: Cal
     },
 
     status,
+
+    /** A resting order changed in place: POST /portfolio/events/orders/{id}/amend (amend-order-v2.md). Its body is the order's whole new
+     * terms — ticker, side, price and count, all four required — and `count` is the order's whole size, "already filled count plus the
+     * desired resting remaining count", as the account's qty is. "Amending only expiry or decreasing size preserves queue position.
+     * Increasing size or changing price forfeits queue position." An amend that leaves `expiration_time` out keeps the order's expiry, so a
+     * day order stays one. Kalshi has no stop to change. */
+    async amend(ref, symbol, change, order) {
+      try {
+        const s = parse(symbol);
+        if (!s) return badSymbol(symbol);
+        if (change.stopPrice !== undefined) return badOrder(venue, name, "Kalshi has no stop orders on event contracts: there is no stop price to change");
+        if (change.qty === undefined && change.limitPrice === undefined) return no("E_ACCOUNT_BAD_ACTION", { venue, message: "a change to an order at Kalshi is a new size, a new limit, or both: neither was given" });
+        if (change.qty !== undefined && (!(change.qty >= COUNT_STEP - 1e-12) || !onStep(change.qty, COUNT_STEP))) return badOrder(venue, name, "a count at Kalshi is in steps of 0.01 contracts, at least 0.01", { qty: change.qty, qtyStep: COUNT_STEP });
+        const l = await recent(s.ticker);
+        if (isRefusal(l)) return l;
+        const m = toMarket(l.m, s.outcome, l.paused, l.caveat);
+        if (scopes?.can === false) return mayNot();
+        // a paused market takes no amend either: while trading is paused only cancels go through (maintenance_and_pauses.md)
+        if (!m.open) return no("E_VENUE_MARKET_CLOSED", { venue, message: `${name}: ${m.name} takes no orders now${m.note ? ` (${m.note})` : ""}` });
+        const side = sideOf(s.outcome, order.side);
+        const asked = change.limitPrice === undefined ? undefined : limitYes(venue, name, m, bandsOf(l.m), s.outcome, change.limitPrice);
+        if (isRefusal(asked)) return asked;
+        // the order as Kalshi has it now: what is not changed is sent as Kalshi has it, not as the account remembers it
+        const live = await orderOf(ref);
+        if (isRefusal(live)) return live;
+        if (String(live.ticker ?? "").toUpperCase() !== s.ticker || live.book_side !== side) return no("E_VENUE_REJECTED", { venue, message: `${name}'s order ${ref} is ${live.book_side === "bid" ? "a bid" : live.book_side === "ask" ? "an ask" : "an order"} on ${String(live.ticker ?? "another market")}, not the ${order.side} of ${m.symbol} it was taken for: nothing was changed`, native: { order_id: live.order_id, ticker: live.ticker, book_side: live.book_side } });
+        if (live.status !== "resting") {
+          const was = await stateOf(live, s.outcome);
+          return no("E_VENUE_REJECTED", { venue, message: `${name}: the order is no longer on the book (${was.status}${was.filledQty > 0 ? `, ${plain(was.filledQty)} filled` : ""}): there is nothing to change`, native: { order: live } });
+        }
+        const filled = num(live.fill_count_fp);
+        const total = round(filled + num(live.remaining_count_fp), 2);
+        // a portfolio answer carries up to six decimals; a request takes two to four, and an unchanged price goes back as it rests
+        const nowC = Math.round(num(live.yes_price_dollars) * CC);
+        const yesC = asked ?? nowC;
+        const count = change.qty ?? total;
+        if (count <= filled + 1e-9) return badOrder(venue, name, `${plain(filled)} of this order has filled already: its size can come down to more than that, not to ${plain(count)}. To stop the rest, cancel it`, { qty: count, filledQty: filled });
+        // already so: nothing is sent
+        if (yesC === nowC && Math.abs(count - total) < 1e-9) return await stateOf(live, s.outcome);
+        // a sell made bigger sells more of what is held: the more must be free, as for a new sell (this order's own rest already counts)
+        const more = round(count - total, 2);
+        if (order.side === "sell" && more > 0) {
+          const f = await freeToSell(s.ticker, s.outcome, side);
+          if (isRefusal(f)) return f;
+          if (more > f.free + 1e-9) return no("E_VENUE_INSUFFICIENT", { venue, message: `${name}: you hold ${plain(f.held)} ${m.symbol}, and orders resting on Kalshi's book, this one among them, already sell ${plain(Math.min(f.resting, f.held))} of it: ${plain(f.free)} more is free to sell, fewer than the ${plain(more)} more asked. A sell here is of what is held: selling more at Kalshi would buy the other side`, detail: { held: f.held, resting: f.resting, more }, native: f.position });
+        }
+        const body: Rec = { ticker: s.ticker, side, price: (yesC / CC).toFixed(4), count: count.toFixed(2) };
+        // An amend sets the price and the size, it does not add to them: sent twice, it is the same change. One Kalshi did not answer is read
+        // back — made, if the order shows it; if not, said as unknown, never as "not changed"
+        const unanswered = async (why: string, native: unknown): Promise<OrderState | Refusal> => {
+          const back = await orderOf(ref).catch(() => undefined);
+          if (back && !isRefusal(back) && Math.round(num(back.yes_price_dollars) * CC) === yesC && Math.abs(num(back.fill_count_fp) + num(back.remaining_count_fp) - count) < 1e-9) return await stateOf(back, s.outcome);
+          return no("E_VENUE_UNREACHABLE", { venue, message: `${name} ${why}, and the order does not show the change yet: it may have been made all the same. Read the order before changing it again (sent again, the same change is the same change)`, detail: { ref, changed: "unknown" }, native });
+        };
+        let r: HttpReply;
+        try {
+          r = await call("POST", `/portfolio/events/orders/${enc(ref)}/amend`, body);
+        } catch (err) {
+          return await unanswered("did not answer the change", isRefusal(err) ? err.native : undefined);
+        }
+        if (r.status >= 500) return await unanswered(`answered the change with HTTP ${r.status}`, { status: r.status, said: saidOf(r.text, secrets) });
+        if (r.status === 404) {
+          // filled or canceled since it was read
+          const now = await status(ref, symbol);
+          if (isRefusal(now)) return now;
+          return no("E_VENUE_REJECTED", { venue, message: `${name} did not take the change (HTTP 404): the order is ${now.status} now${now.filledQty > 0 ? `, ${plain(now.filledQty)} filled` : ""}`, native: { status: 404, said: saidOf(r.text, secrets), order: now.native } });
+        }
+        if (r.status !== 200) return fail(r, l.m.exchange_index !== undefined ? num(l.m.exchange_index) : undefined);
+        // the answer is {order_id, remaining_count?, fill_count?, average_fill_price?, …}, the counts only when the size changed or something
+        // filled: the order itself is read
+        const id = isRec(r.body) && typeof r.body.order_id === "string" && r.body.order_id ? r.body.order_id : ref;
+        const now = await status(id, symbol);
+        if (!isRefusal(now)) return { ...now, native: { amend: r.body, order: now.native } };
+        return no("E_VENUE_UNREACHABLE", { venue, message: `${name} took the change, but the order could not be read back: it is read again in a few seconds`, native: { amend: r.body, read: now.native } });
+      } catch (err) {
+        return asRefusal(venue, name, err, secrets);
+      }
+    },
+
+    /** What is held here: GET /portfolio/positions, one row per market with its position netted — `position_fp` above zero is YES held,
+     * below zero NO (get-positions.md) — and each market's name and price from GET /markets?tickers=. What a position cost is Kalshi's
+     * `market_exposure_dollars`; what it is worth is its outcome's price now, or $1 or $0 a contract once its market has a result. */
+    async positions() {
+      try {
+        const rows: Rec[] = [];
+        let cursor = "";
+        // the positions not yet settled (Kalshi's default) and not flat (count_filter=position), a page at a time and not for ever: five pages of two hundred
+        for (let page = 0; page < 5; page++) {
+          const r = await call("GET", `/portfolio/positions?count_filter=position&limit=200${cursor ? `&cursor=${enc(cursor)}` : ""}`);
+          if (r.status !== 200 || !isRec(r.body)) return fail(r);
+          rows.push(...(Array.isArray(r.body.market_positions) ? (r.body.market_positions as unknown[]).filter(isRec) : []).filter((p) => typeof p.ticker === "string" && num(p.position_fp) !== 0));
+          cursor = typeof r.body.cursor === "string" ? r.body.cursor : "";
+          if (!cursor) break;
+        }
+        const markets = await marketsOf(rows.map((p) => String(p.ticker).toUpperCase()));
+        return rows.map((p): Position => {
+          const ticker = String(p.ticker).toUpperCase();
+          const n = num(p.position_fp);
+          const outcome: Outcome = n > 0 ? "YES" : "NO";
+          const qty = Math.abs(n);
+          const cost = num(p.market_exposure_dollars);
+          const m = markets.get(ticker);
+          const mk = m ? toMarket(m, outcome) : undefined;
+          // a market with a result pays $1 a contract to the side that won and nothing to the other, whatever its last trade was
+          const mark = m?.result === "yes" || m?.result === "no" ? (m.result === outcome.toLowerCase() ? 1 : 0) : mk?.price;
+          return { symbol: `${ticker}:${outcome}`, name: mk?.name ?? `${ticker} · ${outcome === "YES" ? "Yes" : "No"}`, kind: "event", side: "long", qty, ...(cost > 0 ? { entryPrice: round(cost / qty) } : {}), ...(mark !== undefined ? { markPrice: mark, usd: round(qty * mark), ...(cost > 0 ? { unrealizedUsd: round(qty * mark - cost) } : {}) } : {}), native: p };
+        });
+      } catch (err) {
+        return asRefusal(venue, name, err, secrets);
+      }
+    },
   };
 
   /** the create answer (201): {order_id, fill_count, remaining_count, average_fill_price?, average_fee_paid?} — not the order itself */
@@ -564,7 +782,8 @@ function kalshiTrader(o: { venue: string; name: string; keyId: string; call: Cal
     const ref = String(b.order_id);
     const filled = num(b.fill_count);
     const rest = num(b.remaining_count);
-    // what did not fill and is not resting was canceled: the rest of an immediate-or-cancel order, a self-trade
+    // what did not fill and is not resting was canceled: the rest of an immediate-or-cancel order, a fill-or-kill order that could not fill
+    // whole, a post-only order that would have crossed, a self-trade
     const status: OrderStatus = filled >= qty - 1e-9 ? "filled" : rest > 1e-9 ? (filled > 0 ? "partial" : "open") : "canceled";
     let avgPrice: number | undefined;
     let feeUsd: number | undefined;

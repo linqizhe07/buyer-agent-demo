@@ -20,6 +20,7 @@
       <div class="seg" id="mode"><button type="button" data-mode="guard" aria-pressed="false">Conservative</button><button type="button" data-mode="open" aria-pressed="false">Aggressive</button></div>
       <div class="dim small" id="mode-note"></div>
       <div id="writes"></div>
+      <div class="dim small" id="dial"></div>
     </div>
   </header>
 
@@ -27,6 +28,7 @@
     <div>
       <div class="num" id="total">—</div>
       <div class="sub dim" id="sub">—</div>
+      <div class="dim small" id="restored" hidden></div>
     </div>
     <button type="button" class="ink" id="connect">Connect an account</button>
   </section>
@@ -42,8 +44,10 @@
   <section id="waiting" hidden></section>
 
   <section><h2 class="sec">Accounts <span class="tools" id="accounts-tools"></span></h2><div id="accounts"></div></section>
+  <section id="positions-sec" hidden><h2 class="sec">Positions</h2><div id="positions"></div></section>
   <section id="statement-sec"><h2 class="sec">Statement <span class="tools" id="statement-tools"></span></h2><div class="print-head" id="print-head"></div><div id="open-now"></div><div class="filters" id="statement-filters"></div><div id="statement"></div></section>
   <section><h2 class="sec">Agents</h2><div id="agents"></div></section>
+  <section id="wallets-sec"><h2 class="sec">Agent wallets</h2><div id="wallets"></div></section>
   <section><h2 class="sec">Devices</h2><div id="devices"></div></section>
 </main>
 
