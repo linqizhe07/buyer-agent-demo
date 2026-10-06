@@ -12,7 +12,10 @@
  *                      It reads accounts, holdings and the best bid and ask, and places (market, limit, stop and stop-limit), follows and
  *                      cancels orders (v2: the fee-tier orders).
  *   Stock Tokens       api.robinhood.com/rhj/assets and /rhj/prices/{symbol} — no key: each token's contract on Robinhood Chain (4663),
- *                      and its bid in dollars per token. A wallet's tokens are read from the chain (address.ts).
+ *                      and its bid in dollars per token. A wallet's tokens are read from the chain (address.ts), and traded from a proven
+ *                      wallet against USDG on Robinhood Chain through LI.FI (dex.ts), which Robinhood names among the aggregators that
+ *                      quote them (docs.robinhood.com/chain/building-with-stock-tokens). This list is what makes a token on that chain a
+ *                      Stock Token: an address it does not name is not one, whatever its symbol.
  *
  * None of the three moves money in or out: Robinhood's deposits and withdrawals are made in Robinhood's own app. An order moves money
  * between what the user holds at Robinhood: dollars into BTC, shares into dollars.
@@ -484,7 +487,16 @@ export interface StockToken {
   name: string;
   chain: ChainName;
   address: Hex;
+  /** as Robinhood's list says (`tokenDecimals`); a swap still reads them from the token itself */
+  decimals?: number | undefined;
 }
+
+/** Who issues the Stock Tokens and whom they are not for, in the issuer's own words (docs.robinhood.com/chain/stock-tokens, read
+ * 2026-10-06). The account knows nothing of where its owner lives: these words go with every Stock Token market, so the owner reads them
+ * before signing, and the account never looks for a way around them */
+export const STOCK_TOKEN_ISSUER = "Robinhood Assets (Jersey) Limited";
+export const STOCK_TOKEN_TERMS =
+  "Robinhood: Stock Tokens “may not be offered, sold, or delivered, directly or indirectly, in the United States or to, or for the account or benefit of, U.S. persons”, and are restricted in other places, Canada, the United Kingdom and Switzerland among them";
 
 /** the token list changes slowly: asked again after ten minutes, kept per network so a test's stand-in is never handed another's list */
 const lists = new WeakMap<Http, { at: number; tokens: StockToken[] }>();
@@ -500,7 +512,7 @@ export async function stockTokens(http: Http, now: number): Promise<StockToken[]
     if (a.status !== "ASSET_STATUS_ACTIVE" || typeof a.tokenSymbol !== "string") continue;
     for (const d of (Array.isArray(a.deployments) ? a.deployments : []) as Array<Record<string, unknown>>) {
       const chain = CHAIN_BY_ID.get(Number(d.chainId));
-      if (chain && typeof d.contractAddress === "string" && isAddress(d.contractAddress, { strict: false })) tokens.push({ symbol: a.tokenSymbol, name: String(a.tokenName ?? a.tokenSymbol), chain, address: getAddress(d.contractAddress) });
+      if (chain && typeof d.contractAddress === "string" && isAddress(d.contractAddress, { strict: false })) tokens.push({ symbol: a.tokenSymbol, name: String(a.tokenName ?? a.tokenSymbol), chain, address: getAddress(d.contractAddress), ...(Number.isInteger(a.tokenDecimals) ? { decimals: Number(a.tokenDecimals) } : {}) });
     }
   }
   lists.set(http, { at: now, tokens });
@@ -538,7 +550,9 @@ export async function stockTokenBids(http: Http, symbols: string[], now: number)
   return out;
 }
 
-/** the Stock Tokens an address holds, priced; a list or a chain that does not answer is said, not thrown */
+/** the Stock Tokens an address holds, priced; a list or a chain that does not answer is said, not thrown. A Stock Token is held as an RWA:
+ * it is Robinhood's debt security that tracks a share, not the share, and it is sold from the wallet as `<SYMBOL>/USDG@Robinhood Chain`
+ * (dex.ts), the market the holding's row finds by its symbol and its chain */
 export async function stockTokenHoldings(holder: Hex, chain: ChainReader, http: Http, now: number): Promise<{ rows: LiveBalance[]; unread?: string }> {
   let tokens: StockToken[];
   try {
@@ -552,7 +566,7 @@ export async function stockTokenHoldings(holder: Hex, chain: ChainReader, http: 
   const held = read.rows.filter((b) => b.amount > 0);
   const bid = await stockTokenBids(http, [...new Set(held.map((b) => b.asset))], now);
   return {
-    rows: held.map((b) => ({ asset: b.asset, amount: b.amount, ...(bid.has(b.asset) ? { usd: b.amount * bid.get(b.asset)! } : {}), where: `${b.chain} · Stock Token`, class: "equity" })),
+    rows: held.map((b) => ({ asset: b.asset, amount: b.amount, ...(bid.has(b.asset) ? { usd: b.amount * bid.get(b.asset)! } : {}), where: `${b.chain} · Stock Token`, class: "rwa" })),
     ...(read.failed.length ? { unread: `${read.failed.join(", ")} did not answer` } : {}),
   };
 }

@@ -20,6 +20,12 @@
  *   GET /v2/positions                                what is held, for the trader too
  *   DELETE /v2/positions/{symbol}?qty=               close a position: Alpaca places a market order of its own for it
  *
+ * and, to read the market (Market Data API, nothing placed):
+ *
+ *   GET data.alpaca.markets/v2/stocks/snapshots      many stocks at once, keyed by symbol: latestTrade, dailyBar, prevDailyBar
+ *   GET data.alpaca.markets/v1beta3/crypto/us/snapshots   many coin pairs at once, under `snapshots`
+ *   GET data.alpaca.markets/v2/stocks/bars, …/v1beta3/crypto/us/bars   price history (bars keyed by symbol)
+ *
  * Two headers carry the key (APCA-API-KEY-ID, APCA-API-SECRET-KEY); nothing is signed. An individual key has no scopes: any key can place
  * orders, and none can move cash — deposits and withdrawals are not in this API at all, which is why the account's door for this venue says
  * "at the venue". An order moves money only inside the Alpaca account: dollars into shares or coins, and back.
@@ -27,7 +33,7 @@
 import { isRefusal, type Refusal } from "../../core/errors.ts";
 import { no } from "../refuse.ts";
 import type { KeyFile, KeyShape } from "./credentials.ts";
-import { badOrder, ceilTo, DONE, floorTo, inDollars, pick, plain, type LiveTrader, type Market, type OrderRequest, type OrderState, type OrderStatus, type Position, type TimeInForce } from "./trade.ts";
+import { badOrder, ceilTo, CANDLE_INTERVALS, DONE, floorTo, inDollars, pick, plain, type Candle, type CandleInterval, type LiveTrader, type Market, type MarketStats, type OrderRequest, type OrderState, type OrderStatus, type Position, type TimeInForce } from "./trade.ts";
 import { asRefusal, num, REGION, redact, unreachable, venueSaidNo, type Http, type HttpReply, type LiveBalance, type LiveSource } from "./types.ts";
 
 export const ALPACA_KEY: KeyShape = { required: ["keyId", "secret"], optional: ["paper"], example: '{"keyId": "…", "secret": "…"} (add "paper": "true" for a paper-trading account)' };
@@ -35,7 +41,7 @@ export const ALPACA_KEY: KeyShape = { required: ["keyId", "secret"], optional: [
 const LIVE = "https://api.alpaca.markets";
 const PAPER = "https://paper-api.alpaca.markets";
 
-export async function alpacaSource(req: { venue: string; label: string; reference: string; key: KeyFile; http: Http }): Promise<{ source: LiveSource; first: LiveBalance[] } | Refusal> {
+export async function alpacaSource(req: { venue: string; label: string; reference: string; key: KeyFile; http: Http; clock?: (() => number) | undefined }): Promise<{ source: LiveSource; first: LiveBalance[] } | Refusal> {
   const paper = req.key.paper === "true";
   const base = paper ? PAPER : LIVE;
   // a paper account says so in its name, whatever the owner called it
@@ -51,18 +57,32 @@ export async function alpacaSource(req: { venue: string; label: string; referenc
     if (r.status !== 200 || r.body === undefined) throw venueSaidNo(req.venue, name, r.status, r.text, secrets);
     return r.body;
   };
+  /** A position as a balance. A coin is named by its base, as positions() names its market (BTCUSD is BTC), so that it is one row with the
+   * same coin held elsewhere. A short is not something held: it is carried as what it is, a negative amount worth what buying it back
+   * costs (Alpaca's market_value, negative), so that the venue's total is net of it as Alpaca's own equity is — and it is a short
+   * position in positions(), never a positive holding */
+  const balanceOf = (p: Record<string, unknown>): LiveBalance => {
+    const crypto = String(p.asset_class ?? "") === "crypto";
+    const raw = String(p.symbol ?? "?").toUpperCase();
+    const asset = crypto ? (raw.includes("/") ? raw.slice(0, raw.indexOf("/")) : (/^([A-Z0-9]+)USD$/.exec(raw)?.[1] ?? raw)) : raw;
+    const q = num(p.qty);
+    const where = crypto ? "crypto" : "stocks";
+    const cls = crypto ? "crypto" : "equity";
+    if (p.side === "short" || q < 0) return { asset, amount: -Math.abs(q), usd: -Math.abs(num(p.market_value)), where: `${where} · short`, class: cls };
+    return { asset, amount: q, usd: num(p.market_value), where, class: cls };
+  };
   const read = async (): Promise<LiveBalance[]> => {
     const account = (await get("/v2/account")) as Record<string, unknown>;
     const positions = (await get("/v2/positions")) as Array<Record<string, unknown>>;
     if (!account || typeof account !== "object") throw venueSaidNo(req.venue, name, 200, "the account came back empty", secrets);
     return [
       { asset: "USD", amount: num(account.cash), usd: num(account.cash), where: "cash", class: "cash" },
-      ...(Array.isArray(positions) ? positions : []).map((p): LiveBalance => ({ asset: String(p.symbol ?? "?"), amount: Math.abs(num(p.qty)), usd: num(p.market_value), where: String(p.asset_class ?? "") === "crypto" ? "crypto" : "stocks", class: String(p.asset_class ?? "") === "crypto" ? "crypto" : "equity" })),
+      ...(Array.isArray(positions) ? positions : []).map(balanceOf),
     ];
   };
   try {
     const first = await read();
-    const trader = alpacaTrader({ venue: req.venue, name, base, keyId: req.key.keyId!, secret: req.key.secret!, http: req.http });
+    const trader = alpacaTrader({ venue: req.venue, name, base, keyId: req.key.keyId!, secret: req.key.secret!, http: req.http, clock: req.clock ?? Date.now });
     const source: LiveSource = { name, kind: "broker", reference: req.reference, via: `Alpaca Trading API${paper ? " · paper" : ""}`, probe: { can: ["read", "trade"], note: "an Alpaca key has no scopes: any key can place orders, and no key can move cash", native: { calls: ["GET /v2/account", "GET /v2/positions"], paper } }, read, readOnlyBecause: "Alpaca's API moves no cash: deposits and withdrawals are made at Alpaca", trader };
     return { source, first };
   } catch (err) {
@@ -81,6 +101,12 @@ const RETRY_MS = 10 * 60_000;
 const KNOWN = ["SPY", "QQQ", "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "BTC/USD", "ETH/USD", "SOL/USD"];
 const STOCK = /^[A-Z][A-Z0-9.]{0,14}$/;
 const PAIR = /^([A-Z0-9]{1,15})\/([A-Z0-9]{1,15})$/;
+/** the most markets one stats call reads: one snapshots request for the stocks among them, one for the pairs */
+const STATS_MAX = 100;
+/** the most bars one history reads, the latest first, in one request */
+const BARS = 300;
+/** a bar's size in Alpaca's words (timeframe: [1-59]Min, [1-23]Hour, 1Day) */
+const TIMEFRAME: Record<CandleInterval, string> = { "5m": "5Min", "1h": "1Hour", "1d": "1Day" };
 
 type Json = Record<string, unknown>;
 const isObj = (v: unknown): v is Json => !!v && typeof v === "object" && !Array.isArray(v);
@@ -137,10 +163,12 @@ const PDT = /pattern day trad/i;
 const CLOSED = /market (is )?closed|only allowed during market hours|outside (of )?(regular |market |trading )*hours|\b(asset|symbol|security|contract)\b.{0,40}\bnot (tradable|active)\b|halted/i;
 const SIZE_403 = /not fractionable|cannot be sold short/i;
 
+/** the calendar day in New York of a moment, as 2026-10-05: a stock's session is a New York day */
+const nyDay = (ms: number): string => new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(ms);
 /** "2026-10-06T09:30:00-04:00" as "2026-10-06 09:30": Alpaca's clock speaks New York time */
 const nyTime = (s: unknown): string => (typeof s === "string" && s.length >= 16 ? `${s.slice(0, 10)} ${s.slice(11, 16)}` : "");
 
-function alpacaTrader(c: { venue: string; name: string; base: string; keyId: string; secret: string; http: Http }): LiveTrader {
+function alpacaTrader(c: { venue: string; name: string; base: string; keyId: string; secret: string; http: Http; clock: () => number }): LiveTrader {
   const secrets = [c.keyId, c.secret];
   const auth = { "APCA-API-KEY-ID": c.keyId, "APCA-API-SECRET-KEY": c.secret };
   let listed: { at: number; all: Market[] } | undefined;
@@ -666,7 +694,92 @@ function alpacaTrader(c: { venue: string; name: string; base: string; keyId: str
       }
     },
     // no setLeverage: Alpaca sets no leverage per position (an account's margin is the account's)
+
+    // The latest of many markets at once, from the Market Data API's snapshots: GET /v2/stocks/snapshots?symbols= (keyed by symbol), on the
+    // feed this key may use as for a quote (Alpaca's default: all exchanges with its subscription, IEX without one), and GET
+    // /v1beta3/crypto/us/snapshots?symbols= (under `snapshots`) for dollar pairs, at most a hundred markets. A price is the latest trade.
+    // A stock's day is its latest session's bar (dailyBar) against the session before (prevDailyBar), the change a broker shows for a stock,
+    // which trades in sessions and not around the clock; its high and low are that session's — said only while that session is today's in
+    // New York: on a weekend, or the next morning, the last session's move is not what the last 24 hours did, and none is said. No volume is said for a stock: without a
+    // subscription the feed is IEX's alone, a few percent of the market, and the answer does not say which feed it is. A coin's bars are
+    // calendar days, so its daily bar is the day so far and not the last 24 hours: of a coin, only its price. No symbols: the well-known ones
+    async stats(symbols) {
+      try {
+        const asked = [...new Set((symbols ?? KNOWN).map((s) => s.trim().toUpperCase()).filter(Boolean))];
+        if (asked.length > STATS_MAX) return no("E_VENUE_REJECTED", { venue: c.venue, message: `${c.name}: at most ${STATS_MAX} markets are read at once, not ${asked.length}`, detail: { max: STATS_MAX } });
+        const stocks = asked.filter((s) => !PAIR.test(s) && STOCK.test(s));
+        const coins = asked.filter((s) => inDollars(PAIR.exec(s)?.[2] ?? ""));
+        const [st, co] = await Promise.all([stocks.length ? soft(`${DATA}/v2/stocks/snapshots?symbols=${stocks.join(",")}`) : undefined, coins.length ? soft(`${DATA}/v1beta3/crypto/us/snapshots?symbols=${coins.join(",")}`) : undefined]);
+        const out = new Map<string, MarketStats>();
+        if (isObj(st) && !isRefusal(st)) {
+          for (const s of stocks) {
+            const day = isObj(st[s]) ? stockDay(st[s] as Json) : undefined;
+            if (day) out.set(s, day);
+          }
+        }
+        const snaps = isObj(co) && !isRefusal(co) && isObj(co.snapshots) ? co.snapshots : undefined;
+        for (const s of coins) {
+          const x = snaps?.[s];
+          const price = isObj(x) && isObj(x.latestTrade) ? positive(x.latestTrade.p) : undefined;
+          if (price !== undefined) out.set(s, { price });
+        }
+        const refused = [st, co].find((x): x is Refusal => isRefusal(x));
+        return !out.size && refused ? refused : out;
+      } catch (err) {
+        return asRefusal(c.venue, c.name, err, secrets);
+      }
+    },
+
+    // Price history from the bars endpoints: GET /v2/stocks/bars (Alpaca's default feed for bars: all exchanges, 15 minutes behind without a
+    // subscription, so no end is sent) and GET /v1beta3/crypto/us/bars, one symbol, 5Min, 1Hour or 1Day bars from `sinceMs`, the latest 300
+    // (sort desc), given back oldest first. A bar's volume is in shares or coins
+    async candles(raw, interval, sinceMs) {
+      try {
+        if (!CANDLE_INTERVALS.includes(interval)) return no("E_VENUE_REJECTED", { venue: c.venue, message: `${c.name}: price history comes in bars of ${CANDLE_INTERVALS.join(", ")}, not ${String(interval)}` });
+        if (!(Number.isFinite(sinceMs) && sinceMs >= 0)) return no("E_VENUE_REJECTED", { venue: c.venue, message: `${c.name}: a price history starts at a time, in milliseconds` });
+        const symbol = raw.trim().toUpperCase();
+        const pair = PAIR.exec(symbol);
+        if (pair && !inDollars(pair[2]!)) return no("E_ACCOUNT_UNPRICED", { venue: c.venue, message: `${symbol} is priced in ${pair[2]}: the account trades markets priced in dollars, so that every limit means dollars` });
+        if (!pair && !STOCK.test(symbol)) return no("E_VENUE_REJECTED", { venue: c.venue, message: `${c.name} lists no market "${raw.trim()}": a stock is its ticker (AAPL), a coin a pair (BTC/USD)` });
+        // RFC-3339, to the second
+        const start = new Date(Math.floor(sinceMs)).toISOString().replace(/\.\d{3}Z$/, "Z");
+        const query = `symbols=${symbol}&timeframe=${TIMEFRAME[interval]}&start=${encodeURIComponent(start)}&limit=${BARS}&sort=desc`;
+        const body = await getJson(pair ? `${DATA}/v1beta3/crypto/us/bars?${query}` : `${DATA}/v2/stocks/bars?${query}`);
+        const rows = isObj(body) && isObj(body.bars) && Array.isArray(body.bars[symbol]) ? (body.bars[symbol] as unknown[]) : [];
+        const bars = new Map<number, Candle>();
+        for (const b of rows) {
+          if (!isObj(b)) continue;
+          const t = Date.parse(String(b.t ?? ""));
+          const [o, h, l, cl] = [positive(b.o), positive(b.h), positive(b.l), positive(b.c)];
+          if (!Number.isFinite(t) || o === undefined || h === undefined || l === undefined || cl === undefined) continue;
+          const v = typeof b.v === "number" && Number.isFinite(b.v) && b.v >= 0 ? b.v : undefined;
+          bars.set(t, { t, o, h, l, c: cl, ...(v !== undefined ? { v } : {}) });
+        }
+        return [...bars.values()].sort((x, y) => x.t - y.t);
+      } catch (err) {
+        return asRefusal(c.venue, c.name, err, secrets);
+      }
+    },
   };
+
+  /** a stock's latest session from its snapshot: the latest trade, and the session's bar against the one before it. A change (and the
+   * session's high and low) is said only when both bars are there, the latest is the later one, and it is TODAY's session in New York — a
+   * daily bar starts at midnight there (dailyBar.t 04:00Z or 05:00Z) — so that Friday's move is not shown as the last 24 hours' all weekend */
+  function stockDay(x: Json): MarketStats | undefined {
+    const day = isObj(x.dailyBar) ? x.dailyBar : undefined;
+    const before = isObj(x.prevDailyBar) ? x.prevDailyBar : undefined;
+    const price = (isObj(x.latestTrade) ? positive(x.latestTrade.p) : undefined) ?? positive(day?.c);
+    const close = positive(day?.c);
+    const prev = positive(before?.c);
+    const dayAt = Date.parse(String(day?.t ?? ""));
+    const later = dayAt > Date.parse(String(before?.t ?? ""));
+    const today = Number.isFinite(dayAt) && nyDay(dayAt) === nyDay(c.clock());
+    const change = close !== undefined && prev !== undefined && later && today ? close - prev : undefined;
+    const high = today ? positive(day?.h) : undefined;
+    const low = today ? positive(day?.l) : undefined;
+    if (price === undefined && change === undefined) return undefined;
+    return { ...(price !== undefined ? { price } : {}), ...(change !== undefined ? { change24h: Number(change.toFixed(10)), changePct24h: Number(((change / prev!) * 100).toFixed(10)) } : {}), ...(high !== undefined ? { high24h: high } : {}), ...(low !== undefined ? { low24h: low } : {}) };
+  }
 
   /** Alpaca did not answer an order, or a change to one: its docs say not to send it again until it is known. Asked by the account's id, it
    * is either there (and returned as placed), not there, or still unknown — never sent twice from here */

@@ -30,7 +30,9 @@ export interface ExchangeClient {
   loadMarkets?(reload?: boolean): Promise<unknown>;
   fetchTime?(): Promise<unknown>;
   fetchBalance(params?: Record<string, unknown>): Promise<Record<string, unknown>>;
-  fetchTickers?(symbols?: string[]): Promise<Record<string, { last?: number | undefined; close?: number | undefined }>>;
+  /** `params`: the kind of market where the exchange lists its tickers by kind (`{ type: "swap" }`); the trader also reads a ticker's last
+   * 24 hours (percentage, change, quoteVolume, high, low) */
+  fetchTickers?(symbols?: string[], params?: Record<string, unknown>): Promise<Record<string, { last?: number | undefined; close?: number | undefined; [field: string]: unknown }>>;
   /** Binance: GET /sapi/v1/account/apiRestrictions */
   sapiGetAccountApiRestrictions?(): Promise<Record<string, unknown>>;
   /** OKX: GET /api/v5/account/config */
@@ -68,6 +70,13 @@ export interface ExchangeClient {
   fetchOrders?(symbol?: string, since?: number, limit?: number, params?: Record<string, unknown>): Promise<unknown[]>;
   /** Bybit: whether the account is unified, which decides how a spot market buy is sized; the library caches the answer */
   isUnifiedEnabled?(): Promise<unknown>;
+  // what reads the market for the account (no key needed by the exchange) — used only by exchange-trade.ts
+  /** the bar sizes the library knows for this exchange, by its own names ("5m", "1h", "1d") */
+  timeframes?: Record<string, unknown> | undefined;
+  /** bars as [start ms, open, high, low, close, volume], oldest first */
+  fetchOHLCV?(symbol: string, timeframe?: string, since?: number, limit?: number, params?: Record<string, unknown>): Promise<unknown[]>;
+  /** a perpetual's funding: `fundingRate` and `fundingTimestamp`, when it is paid */
+  fetchFundingRate?(symbol: string, params?: Record<string, unknown>): Promise<unknown>;
 }
 
 /** the library's ids for one exchange on several hosts (ccxt.md §0): OKX is also okxus and myokx (EEA) */

@@ -263,3 +263,18 @@ describe("across chains: what the review found", () => {
   });
 });
 
+
+describe("a bridge goes by the bridge's own chains", () => {
+  it("out of Robinhood Chain in USDG: the door asks the bridge for routes from there (it is not a network money is sent or withdrawn on)", async () => {
+    const x = await boot();
+    x.bridge.chains.push("Robinhood Chain");
+    const p = await x.engine.prepare({ type: "liveMove", ...x.draft, network: "Robinhood Chain", asset: "USDG", toAsset: "USDC", toLedger: "Arbitrum" });
+    if (isRefusal(p)) throw new Error(p.message);
+    expect(x.bridge.asked.at(-1)).toEqual({ to: x.wallet.address, fromChain: "Robinhood Chain", toChain: "Arbitrum", asset: "USDG", toAsset: "USDC", amount: 25 });
+    // a chain the bridge does not carry is refused before anything is asked
+    const asked = x.bridge.asked.length;
+    x.bridge.chains.pop();
+    expect(refusal(await x.engine.prepare({ type: "liveMove", ...x.draft, network: "Robinhood Chain", asset: "USDG", toAsset: "USDC", toLedger: "Arbitrum" })).message).toMatch(/^a bridge leaves one of /);
+    expect(x.bridge.asked.length).toBe(asked);
+  });
+});

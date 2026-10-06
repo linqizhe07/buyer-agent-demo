@@ -16,7 +16,8 @@ export interface StatementLine {
   at: string;
   /** when it was last seen to change */
   updatedAt: string;
-  type: "trade" | "transfer";
+  /** an order · a movement of money · money put into a venue's earn product or taken back out (account/live-earn.ts) */
+  type: "trade" | "transfer" | "earn";
   /** buy · sell · withdraw · deposit · send · transfer · swap · bridge */
   kind: string;
   account: string;
@@ -34,6 +35,9 @@ export interface StatementLine {
   status: string;
   /** who did it: you, or an agent — on your yes, or inside its limit */
   by: string;
+  /** where an agent did it: its key's address, and its name on the account */
+  agent?: string | undefined;
+  agentName?: string | undefined;
   /** the venue's id for it, or the transaction's hash */
   ref?: string | undefined;
 }
@@ -61,6 +65,7 @@ export function orderLine(o: LiveOrder, agentName: (address: string) => string):
     ...(o.feeUsd !== undefined ? { feeUsd: o.feeUsd } : {}),
     status: o.walletTxs && !o.ref && o.status === "pending" ? "waiting for wallet" : o.status,
     by: o.authority === "agent" ? `${agentName(o.agent ?? "")}, ${o.card ? "approved by you" : "inside its limit"}` : "You",
+    ...(o.authority === "agent" && o.agent ? { agent: o.agent, agentName: agentName(o.agent) } : {}),
     ...(o.ref ? { ref: o.ref } : {}),
   };
 }
@@ -87,6 +92,7 @@ export function paymentLine(p: Payment, run: string, name: (venue: string) => st
     ...(p.status === "settled" && p.feeUsd ? { feeUsd: p.live?.kind === "bridge" ? Number(Math.max(p.feeUsd, p.amountUsd - p.receiveUsd).toFixed(2)) : p.feeUsd } : {}),
     status: p.status === "authorized" ? "waiting for wallet" : p.status,
     by: p.authority === "agent" ? `${agentName(p.agent ?? "")}, ${p.card ? "approved by you" : "inside its limit"}` : "You",
+    ...(p.authority === "agent" && p.agent ? { agent: p.agent, agentName: agentName(p.agent) } : {}),
     ...(p.live?.txHash ? { ref: p.live.txHash } : leg?.ref ? { ref: leg.ref } : {}),
   };
 }

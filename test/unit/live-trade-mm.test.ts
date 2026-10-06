@@ -34,8 +34,8 @@ interface Call {
   timeoutMs?: number;
 }
 
-/** "swap quote", "predict place", "predict markets get", "wallet requests list" … */
-const commandOf = (args: string[]): string => args.slice(0, ["markets", "requests"].includes(args[1] ?? "") ? 3 : 2).join(" ");
+/** "swap quote", "predict place", "predict markets get", "wallet requests list", "perps open", "earn supply" … */
+const commandOf = (args: string[]): string => args.slice(0, args[0] !== "perps" && args[0] !== "earn" && ["markets", "requests"].includes(args[1] ?? "") ? 3 : 2).join(" ");
 
 /** mm as a stand-in: an answer by command (a list is answered in turn, its last one from then on; a function sees the argv); an MmError is
  * thrown as mm's own failure; anything not set up fails the way mm would */
@@ -212,7 +212,7 @@ describe("the MetaMask Agent Wallet's source", () => {
     expect(opened.source.writer?.can.send).toBe("mm");
     const t = opened.source.trader!;
     expect(t.can).toBe("unknown");
-    expect(t.what).toBe("token swaps against USDC on Ethereum, Optimism, BNB Chain, Polygon, Base, Arbitrum, and Polymarket prediction orders, sent by MetaMask's mm");
+    expect(t.what).toBe("token swaps against USDC on Ethereum, Optimism, BNB Chain, Polygon, Base, Arbitrum, Polymarket prediction orders and Hyperliquid perpetuals, sent by MetaMask's mm");
     expect(opened.source.noTradeBecause).toBeUndefined();
     // a session that cannot show the wallet is still refused as before
     const none = standIn({ "wallet show": fail("ENOENT", "the mm command line is not installed on this machine (spawn mm ENOENT)") });
@@ -450,7 +450,7 @@ describe("a Polymarket order through mm", () => {
   it("market(): the outcome's book, its tick and minimum, and whether Polymarket takes orders in it now", async () => {
     const x = await boot(PM_MARKET);
     const m = ok(await x.t.market(`${SLUG}:yes`));
-    expect(m).toEqual<Market>({ symbol: `${SLUG}:Yes`, name: "Fed cuts rates in December? · Yes", kind: "event", base: "Yes", quote: "pUSD", price: 0.175, bid: 0.17, ask: 0.18, minQty: 5, qtyStep: 0.01, priceStep: 0.01, open: true, note: expect.stringContaining("a Polymarket order through mm, paid in pUSD") as unknown as string, types: ["limit", "market"], tifs: ["gtc", "ioc", "fok"], postOnly: true, sellsReduce: true });
+    expect(m).toEqual<Market>({ symbol: `${SLUG}:Yes`, name: "Fed cuts rates in December? · Yes", kind: "event", base: "Yes", quote: "pUSD", price: 0.175, bid: 0.17, ask: 0.18, minQty: 5, qtyStep: 0.01, priceStep: 0.01, open: true, note: expect.stringContaining("a Polymarket order through mm, paid in pUSD") as unknown as string, types: ["limit", "market"], tifs: ["gtc", "ioc", "fok"], postOnly: true, sellsReduce: true, closeTime: "2026-12-31T00:00:00Z", group: { id: CID, title: "Fed cuts rates in December?" }, outcome: "Yes" });
     // what mm predict place takes, and nothing it does not: no reduce-only flag, no leverage
     expect(Object.keys(m).filter((k) => k === "reduceOnly" || k === "maxLeverage")).toEqual([]);
     expect(inDollars(m.quote)).toBe(true);
@@ -779,11 +779,13 @@ describe("positions(): what the Predict deposit wallet holds at Polymarket", () 
           // a slug the account's symbols cannot carry: named by its token id; figures given as strings are read as numbers
           row({ asset: ODD, slug: "Odd Slug!", size: "7.5", avgPrice: "0.5", curPrice: "0.52", currentValue: "3.9", cashPnl: "0.15" }),
         ]),
+        // nothing at Hyperliquid: an account that never deposited there holds nothing
+        "perps positions": [[]],
       },
       {},
     );
     const list = ok(await x.t.positions!());
-    expect(argvs(x.calls)).toEqual([["predict", "positions", "--json"]]);
+    expect(argvs(x.calls)).toEqual([["predict", "positions", "--json"], ["perps", "positions", "--venue", "hyperliquid", "--json"]]);
     expect(list.map((p) => p.symbol)).toEqual([`${SLUG}:Yes`, "will-it-rain-on-october-1:No", ODD]);
     expect(list[0]).toEqual<Position>({ symbol: `${SLUG}:Yes`, name: "Fed cuts rates in December? · Yes", kind: "event", side: "long", qty: 25, entryPrice: 0.16, markPrice: 0.175, usd: 4.375, unrealizedUsd: 0.375, native: { tokenId: TID_YES, conditionId: CID, outcome: "Yes", size: 25, avgPrice: 0.16, curPrice: 0.175, currentValue: 4.375, cashPnl: 0.375, redeemable: false, endDate: "2026-12-31" } });
     expect(list[1]).toMatchObject({ name: "Will it rain on October 1? · No (resolved)", side: "long", qty: 40, entryPrice: 0.3, markPrice: 0, usd: 0, unrealizedUsd: -12, native: { redeemable: true } });
@@ -795,7 +797,7 @@ describe("positions(): what the Predict deposit wallet holds at Polymarket", () 
   });
 
   it("a wallet that never set up Predict holds nothing there; mm's other refusals are the account's, in mm's words", async () => {
-    const x = await boot({ "predict positions": fail("PREDICT_SETUP_REQUIRED", `Run Predict setup for owner ${WALLET} before this operation.`) }, { ...ON, MM_PASSWORD: PASSWORD });
+    const x = await boot({ "predict positions": fail("PREDICT_SETUP_REQUIRED", `Run Predict setup for owner ${WALLET} before this operation.`), "perps positions": [[]] }, { ...ON, MM_PASSWORD: PASSWORD });
     expect(ok(await x.t.positions!())).toEqual([]);
     const says = async (answer: unknown) => {
       x.answers["predict positions"] = answer;
@@ -813,10 +815,25 @@ describe("positions(): what the Predict deposit wallet holds at Polymarket", () 
     expect((leaked.native as { said: string }).said).toBe("could not unlock with --password •••");
   });
 
-  it("offers no amend, close or leverage: mm has no command for them here, and selling the shares is an order", async () => {
+  it("offers no amend (mm has no command for it); close and leverage are for Hyperliquid's perpetuals, and a Polymarket close sells the shares", async () => {
     const x = await boot();
     expect(typeof x.t.positions).toBe("function");
-    expect([x.t.amend, x.t.close, x.t.setLeverage]).toEqual([undefined, undefined, undefined]);
+    expect(x.t.amend).toBeUndefined();
+    expect([typeof x.t.close, typeof x.t.setLeverage]).toEqual(["function", "function"]);
+    // leverage is for a perpetual: a Polymarket outcome or a swap has none, and nothing reaches mm
+    expect(refusal(await x.t.setLeverage!(`${SLUG}:Yes`, 2)).code).toBe("E_VENUE_RAIL_CLOSED");
+    expect(refusal(await x.t.close!("ETH/USDC@Base", 1, CLIENT)).code).toBe("E_VENUE_RAIL_CLOSED");
+    expect(x.calls).toEqual([]);
+  });
+
+  it("a Polymarket position is closed by selling its shares: a market order (FAK) at the account's room under the bid, after Polymarket's own region check", async () => {
+    const x = await boot({ ...PM_MARKET, "predict geoblock": NOT_BLOCKED, "predict place": placed({ status: "matched", makingAmount: "10", takingAmount: "1.7" }) });
+    const s = ok(await x.t.close!(`${SLUG}:Yes`, 10, CLIENT));
+    expect(s.status).toBe("filled");
+    const place = x.calls.find((c) => c.args[1] === "place")!.args;
+    // the bid is 0.17: 2% under it, up to the tick, is 0.17 (0.1666 → 0.17)
+    expect(place).toEqual(["predict", "place", "--token-id", TID_YES, "--side", "sell", "--size", "10", "--price", "0.17", "--order-type", "FAK", "--json"]);
+    expect(argvs(x.calls).findIndex((a) => a[1] === "geoblock")).toBeLessThan(argvs(x.calls).findIndex((a) => a[1] === "place"));
   });
 });
 
@@ -877,5 +894,224 @@ describe("markets(query)", () => {
   it("says so when mm cannot list its chains", async () => {
     const x = await boot({ "chains list": fail("AUTH_FAILED", "Authentication failed.") });
     expect(refusal(await x.t.markets("")).code).toBe("E_VENUE_UNAUTHORIZED");
+  });
+});
+
+// ---- reading the market through mm: what Gamma's market says, and events to discover --------------------------------------------
+
+describe("what a Polymarket market says through mm, beyond its order rules", () => {
+  it("its end, the pUSD traded in 24 hours on every outcome, the day's change on the first outcome only, and its question by condition id", async () => {
+    const x = await boot({ "predict markets get": marketGet({ volume24hr: 51234.5, oneDayPriceChange: -0.015 }), "predict book": bookOf() });
+    const yes = ok(await x.t.market(`${SLUG}:Yes`));
+    expect([yes.closeTime, yes.volumeUsd24h, yes.change24h, yes.group, yes.outcome]).toEqual(["2026-12-31T00:00:00Z", 51234.5, -0.015, { id: CID, title: "Fed cuts rates in December?" }, "Yes"]);
+    x.answers["predict book"] = bookOf({ asset_id: TID_NO });
+    const no = ok(await x.t.market(TID_NO));
+    expect([no.volumeUsd24h, "change24h" in no, no.group, no.outcome]).toEqual([51234.5, false, yes.group, "No"]);
+  });
+});
+
+describe("events(): Polymarket's event contracts to discover, through mm predict events list", () => {
+  const CID2 = `0x${"beef0000".repeat(8)}`;
+  const TID2_YES = `5${"1111111111".repeat(7)}5`;
+  const TID2_NO = `6${"2222222222".repeat(7)}6`;
+  const fedMarket = { id: "900001", slug: SLUG, question: "Fed cuts rates in December?", conditionId: CID, active: true, closed: false, acceptingOrders: true, enableOrderBook: true, orderMinSize: 5, orderPriceMinTickSize: 0.01, endDate: "2026-12-10T19:00:00Z", volume24hr: 820000, oneDayPriceChange: 0.03, outcomes: [{ price: "0.175", name: "Yes", tokenId: TID_YES }, { price: "0.825", name: "No", tokenId: TID_NO }] };
+  const btcMarket = { ...fedMarket, id: "900002", slug: "bitcoin-up-or-down-today", question: "Bitcoin up or down today?", conditionId: CID2, endDate: "2026-10-05T20:00:00Z", volume24hr: 1500000, oneDayPriceChange: -0.1, outcomes: [{ price: "0.6", name: "Up", tokenId: TID2_YES }, { price: "0.4", name: "Down", tokenId: TID2_NO }] };
+  const shut = { ...fedMarket, id: "900003", slug: "a-closed-market", conditionId: `0x${"dead0000".repeat(8)}`, closed: true, volume24hr: 9_000_000 };
+  // mm folds the outcomes from clobTokenIds: a market without them comes back with "Unknown" ids, which nothing can trade
+  const unknownIds = { ...fedMarket, id: "900004", slug: "a-v2-market", conditionId: `0x${"abcd0000".repeat(8)}`, volume24hr: 7_000_000, outcomes: [{ price: "0.5", name: "Yes", tokenId: "Unknown" }, { price: "0.5", name: "No", tokenId: "Unknown" }] };
+  const answer = (events: unknown[]) => ({ command: "events", params: {}, result: { events } });
+  const EVENTS = [
+    { id: "70001", slug: "fed-december", title: "Fed in December", tags: [{ id: "100328", label: "Economy", slug: "economy" }], markets: [fedMarket, shut, unknownIds] },
+    { id: "70002", slug: "bitcoin-today", title: "Bitcoin today", tags: [{ id: "21", label: "Crypto", slug: "crypto" }], markets: [btcMarket] },
+  ];
+
+  it("active events, busiest first: every outcome of every market open for orders, most traded first; a read, so it runs with MetaMask's switch off and asks no region check", async () => {
+    const x = await boot({ "predict events": answer(EVENTS) }, {});
+    const list = ok(await x.t.events!({ limit: 4 }));
+    expect(argvs(x.calls)).toEqual([["predict", "events", "list", "--active", "--order", "volume24hr", "--limit", "5", "--json"]]);
+    expect(list.map((m) => [m.symbol, m.group?.id, m.outcome, m.volumeUsd24h, m.change24h, m.closeTime, m.open])).toEqual([
+      ["bitcoin-up-or-down-today:Up", CID2, "Up", 1500000, -0.1, "2026-10-05T20:00:00Z", true],
+      ["bitcoin-up-or-down-today:Down", CID2, "Down", 1500000, undefined, "2026-10-05T20:00:00Z", true],
+      [`${SLUG}:Yes`, CID, "Yes", 820000, 0.03, "2026-12-10T19:00:00Z", true],
+      [`${SLUG}:No`, CID, "No", 820000, undefined, "2026-12-10T19:00:00Z", true],
+    ]);
+    // listed as market() opens them, and without a category: none was asked, and Gamma's events carry tags, not one
+    expect(list.every((m) => m.quote === "pUSD" && m.tifs?.join() === "gtc,ioc,fok" && !("category" in m))).toBe(true);
+    expect(list.some((m) => /a-closed-market|a-v2-market/.test(m.symbol))).toBe(false);
+  });
+
+  it("one category is Polymarket's tag (--tag-slug), said in its words; a window is --end-date-min and --end-date-max, each market's own end held to it", async () => {
+    const x = await boot({ "predict events": answer(EVENTS) });
+    const crypto = ok(await x.t.events!({ category: "Crypto", limit: 10 }));
+    expect(x.calls[0]!.args).toEqual(["predict", "events", "list", "--active", "--order", "volume24hr", "--limit", "5", "--tag-slug", "crypto", "--json"]);
+    expect(crypto.map((m) => [m.symbol, m.category])).toEqual([["bitcoin-up-or-down-today:Up", "Crypto"], ["bitcoin-up-or-down-today:Down", "Crypto"]]);
+    x.calls.splice(0);
+    // eight hours from NOW: the Fed market ends in December, past the window, though mm listed its event
+    const soon = ok(await x.t.events!({ closingWithinMs: 8 * 3_600_000, limit: 10 }));
+    expect(x.calls[0]!.args).toEqual(["predict", "events", "list", "--active", "--order", "volume24hr", "--limit", "5", "--end-date-min", "2026-10-05T14:00:00.000Z", "--end-date-max", "2026-10-05T22:00:00.000Z", "--json"]);
+    expect(soon.map((m) => m.symbol)).toEqual(["bitcoin-up-or-down-today:Up", "bitcoin-up-or-down-today:Down"]);
+    // a category that is no tag's words never reaches mm's argv (nor one that would start with "-")
+    x.calls.splice(0);
+    expect(refusal(await x.t.events!({ category: "---", limit: 10 })).code).toBe("E_ACCOUNT_BAD_ACTION");
+    expect(refusal(await x.t.events!({ closingWithinMs: Number.NaN, limit: 10 })).code).toBe("E_ACCOUNT_BAD_ACTION");
+    expect(ok(await x.t.events!({ limit: 0 }))).toEqual([]);
+    expect(x.calls).toEqual([]);
+  });
+
+  it("mm's refusal is the account's, in mm's words; an answer without events is one this connection could not read; and there is no price history", async () => {
+    const x = await boot({ "predict events": [fail("RATE_LIMITED", "Too many requests"), { command: "events", params: {}, result: {} }] });
+    expect(refusal(await x.t.events!({ limit: 4 })).code).toBe("E_VENUE_UNREACHABLE");
+    expect(refusal(await x.t.events!({ limit: 4 }))).toMatchObject({ code: "E_VENUE_REJECTED", message: "Polymarket answered in a way this connection could not read" });
+    expect(x.t.candles).toBeUndefined();
+  });
+});
+
+// ---- perpetuals at Hyperliquid, through mm perps ---------------------------------------------------------------------------
+
+/** rows of `mm perps markets`, shaped like mm 7.0.0's SDK maps Hyperliquid's own asset contexts (strings, as Hyperliquid sends them) */
+const BTC_ROW = { venue: "hyperliquid", symbol: "BTC", maxLeverage: 40, sizeDecimals: 5, markPrice: "60000.0", oraclePrice: "60010.0", fundingRate: "0.0000125", openInterest: "12345.6", volume24h: "2500000000.0" };
+const ETH_ROW = { venue: "hyperliquid", symbol: "ETH", maxLeverage: 25, sizeDecimals: 4, markPrice: "3000.0", oraclePrice: "3000.5", fundingRate: "-0.00001", openInterest: "99000", volume24h: "900000000.0" };
+/** a HIP-3 market of a builder's own DEX: not the main market, and not offered */
+const HIP3_ROW = { venue: "hyperliquid", symbol: "xyz:TSLA", maxLeverage: 10, sizeDecimals: 3, markPrice: "250", isHip3: true, marketSource: "xyz" };
+const ROWS = [BTC_ROW, ETH_ROW, HIP3_ROW];
+const perpMarkets = (args: string[]) => (args.includes("--symbol") ? ROWS.filter((r) => r.symbol === args[args.indexOf("--symbol") + 1]) : ROWS);
+const BTC_POS = { venue: "hyperliquid", symbol: "BTC", side: "long", size: "0.002", entryPrice: "59000.0", positionValue: "120.0", unrealizedPnl: "2.0", marginUsed: "24.0", leverage: 5, liquidationPrice: "48000.0" };
+const IN_IE = NOT_BLOCKED;
+const IN_US = { command: "geoblock", result: { blocked: true, ip: "198.51.100.23", country: "US", region: "PA" } };
+const PERPS = { "perps markets": perpMarkets, "perps positions": [[]] };
+const opened = (over: Record<string, unknown>) => ({ venue: "hyperliquid", symbol: "BTC", orderId: "777", status: "filled", averagePrice: "60010.0", filledSize: "0.001", ...over });
+const buy = (o: Partial<OrderRequest> = {}): OrderRequest => ({ symbol: "BTC-PERP", side: "buy", type: "market", qty: 0.001, worstPrice: 61_200, clientId: CLIENT, ...o });
+
+describe("perpetuals at Hyperliquid, through mm perps", () => {
+  it("a perpetual is <COIN>-PERP: the main market as mm lists it, its funding paid hourly, and the busiest few among the markets offered", async () => {
+    const x = await boot({ ...PERPS, "chains list": { chains: [{ chainId: 8453, features: ["swap"] }] } });
+    const m = ok(await x.t.market("BTC-PERP"));
+    expect(argvs(x.calls)).toEqual([["perps", "markets", "--venue", "hyperliquid", "--symbol", "BTC", "--json"]]);
+    expect(m).toEqual<Market>({ symbol: "BTC-PERP", name: "BTC perpetual on Hyperliquid", kind: "perp", base: "BTC", quote: "USDC", price: 60_000, minQty: 0.00001, qtyStep: 0.00001, priceStep: 0.1, minNotional: 10, open: true, note: expect.stringContaining("Hyperliquid perpetual through mm") as unknown as string, types: ["market", "limit"], maxLeverage: 40, fundingRate: 0.0000125, nextFundingAt: "2026-10-05T15:00:00.000Z", volumeUsd24h: 2_500_000_000 });
+    expect(inDollars(m.quote)).toBe(true);
+    // a coin Hyperliquid does not list on its main market (a builder's DEX's market among them) is not one
+    expect(refusal(await x.t.market("TSLA-PERP")).code).toBe("E_VENUE_REJECTED");
+    const list = ok(await x.t.markets(""));
+    expect(list.filter((y) => y.kind === "perp").map((y) => y.symbol)).toEqual(["BTC-PERP", "ETH-PERP"]);
+    expect(ok(await x.t.markets("eth")).some((y) => y.symbol === "ETH-PERP")).toBe(true);
+    expect(ok(await x.t.markets("ETH-PERP")).filter((y) => y.kind === "perp").map((y) => y.symbol)).toEqual(["ETH-PERP"]);
+  });
+
+  it("every order holds this machine's place to Hyperliquid's own line first: located in the United States, it is refused in Hyperliquid's words and nothing is sent", async () => {
+    const x = await boot({ ...PERPS, "predict geoblock": IN_US, "perps open": opened({}) });
+    const r = refusal(await x.t.place(buy()));
+    expect(r.code).toBe("E_VENUE_GEOBLOCKED");
+    expect(r.message).toBe("Hyperliquid does not serve this location (US-PA, where mm places this machine): its Terms of Use (§1.6) close it to anyone located in the United States, Ontario or a sanctioned territory. That is its own rule, and the account does not look for a way around it. Nothing was sent to buy 0.001 BTC");
+    // the place is kept, never the address mm reported
+    expect(r.native).toEqual({ command: "mm predict geoblock --json", country: "US", region: "PA", terms: expect.stringContaining("Terms of Use §1.6") });
+    expect(JSON.stringify(r)).not.toContain("198.51.100.23");
+    expect(argvs(x.calls).some((a) => a[1] === "open")).toBe(false);
+    // Ontario too; and a sanctioned territory
+    x.answers["predict geoblock"] = { command: "geoblock", result: { blocked: false, ip: "203.0.113.7", country: "CA", region: "ON" } };
+    expect(refusal(await x.t.place(buy({ clientId: "1".repeat(32) }))).code).toBe("E_VENUE_GEOBLOCKED");
+    x.answers["predict geoblock"] = { command: "geoblock", result: { blocked: true, country: "IR", region: "" } };
+    expect(refusal(await x.t.place(buy({ clientId: "2".repeat(32) }))).code).toBe("E_VENUE_GEOBLOCKED");
+    // mm's own region guard says the place in its words: that place is held to Hyperliquid's line the same way
+    x.answers["predict geoblock"] = fail("PREDICT_GEOBLOCKED", "Polymarket is not available in your region (PA, US). Predict features cannot be used from this location.");
+    expect(refusal(await x.t.place(buy({ clientId: "3".repeat(32) })))).toMatchObject({ code: "E_VENUE_GEOBLOCKED", native: { country: "US", region: "PA" } });
+    // a place mm cannot say is no place: nothing is sent
+    x.answers["predict geoblock"] = fail("NETWORK_UNREACHABLE", "fetch failed");
+    expect(refusal(await x.t.place(buy({ clientId: "4".repeat(32) })))).toMatchObject({ code: "E_VENUE_REJECTED", message: expect.stringContaining("mm could not say where this machine is") });
+    x.answers["predict geoblock"] = { command: "geoblock", result: { blocked: false } };
+    expect(refusal(await x.t.place(buy({ clientId: "5".repeat(32) })))).toMatchObject({ code: "E_VENUE_REJECTED", message: expect.stringContaining("mm did not say where this machine is") });
+    expect(argvs(x.calls).some((a) => a[1] === "open")).toBe(false);
+  });
+
+  it("Polymarket's own verdict is Polymarket's rule, not Hyperliquid's: blocked by Polymarket in Ireland, the order still goes to Hyperliquid", async () => {
+    const x = await boot({ ...PERPS, "predict geoblock": { command: "geoblock", result: { blocked: true, ip: "203.0.113.9", country: "IE", region: "L" } }, "perps open": opened({}) });
+    expect(ok(await x.t.place(buy())).status).toBe("filled");
+  });
+
+  it("with MetaMask's own switch off nothing is sent, not even the region check: the commands that would run are said", async () => {
+    const x = await boot({ ...PERPS, "predict geoblock": IN_IE, "perps open": opened({}) }, {});
+    const r = refusal(await x.t.place(buy()));
+    expect(r.code).toBe("E_WALLET_LIVE_WRITES_OFF");
+    expect((r.detail as { commands: string[] }).commands).toEqual(["mm predict geoblock --json", "mm perps open --venue hyperliquid --symbol BTC --side long --size 0.001 --leverage 1 --type market --max-slippage-bps 200 --wallet-timeout 600 --json"]);
+    expect(argvs(x.calls).some((a) => a[1] === "geoblock" || a[1] === "open")).toBe(false);
+  });
+
+  it("a market order is Hyperliquid's IOC within the worst price; filled, partly filled, resting and refused are said as Hyperliquid says them", async () => {
+    const x = await boot({ ...PERPS, "predict geoblock": IN_IE, "perps open": [opened({}), opened({ orderId: "778", filledSize: "0.0005" }), opened({ orderId: "779", status: "resting", averagePrice: undefined, filledSize: undefined }), opened({ status: "rejected", orderId: undefined, error: "Order must have minimum value of $10. asset=0" }), opened({ status: "rejected", orderId: undefined, error: "Insufficient margin to place order. asset=0" })] });
+    const s = ok(await x.t.place(buy()));
+    expect(x.calls.find((c) => c.args[1] === "open")).toEqual({ args: ["perps", "open", "--venue", "hyperliquid", "--symbol", "BTC", "--side", "long", "--size", "0.001", "--leverage", "1", "--type", "market", "--max-slippage-bps", "200", "--wallet-timeout", "600", "--json"], timeoutMs: 660_000 });
+    expect(argvs(x.calls).findIndex((a) => a[1] === "geoblock")).toBeLessThan(argvs(x.calls).findIndex((a) => a[1] === "open"));
+    expect([s.ref, s.status, s.filledQty, s.avgPrice]).toEqual(["777", "filled", 0.001, 60_010]);
+    // an IOC that filled in part is done: the rest was canceled
+    expect(ok(await x.t.place(buy({ clientId: "a".repeat(32) })))).toMatchObject({ ref: "778", status: "canceled", filledQty: 0.0005 });
+    expect(ok(await x.t.place(buy({ clientId: "b".repeat(32), type: "limit", limitPrice: 59_000, worstPrice: undefined, side: "sell" })))).toMatchObject({ ref: "779", status: "open", filledQty: 0 });
+    expect(x.calls.filter((c) => c.args[1] === "open").at(-1)!.args).toEqual(["perps", "open", "--venue", "hyperliquid", "--symbol", "BTC", "--side", "short", "--size", "0.001", "--leverage", "1", "--type", "limit", "--limit-px", "59000", "--wallet-timeout", "600", "--json"]);
+    const small = refusal(await x.t.place(buy({ clientId: "c".repeat(32) })));
+    expect([small.code, (small.native as { answer: { error: string } }).answer.error]).toEqual(["E_VENUE_ORDER_INVALID", "Order must have minimum value of $10. asset=0"]);
+    expect(refusal(await x.t.place(buy({ clientId: "d".repeat(32) }))).code).toBe("E_VENUE_INSUFFICIENT");
+  });
+
+  it("an order is held to what Hyperliquid takes before anything is sent: its sizes, its five-figure prices, no time in force, post-only, reduce-only or stop", async () => {
+    const x = await boot({ ...PERPS, "predict geoblock": IN_IE, "perps open": opened({}) });
+    const no = async (o: Partial<OrderRequest>) => refusal(await x.t.place(buy({ clientId: `${Math.random().toString(16).slice(2).padEnd(32, "0")}`.slice(0, 32), ...o }))).code;
+    expect(await no({ type: "limit", limitPrice: 60_000.5, worstPrice: undefined })).toBe("E_VENUE_ORDER_INVALID");
+    expect(await no({ qty: 0.000015 })).toBe("E_VENUE_ORDER_INVALID");
+    expect(await no({ tif: "ioc" })).toBe("E_VENUE_ORDER_INVALID");
+    expect(await no({ type: "limit", limitPrice: 59_000, worstPrice: undefined, postOnly: true })).toBe("E_VENUE_ORDER_INVALID");
+    expect(await no({ reduceOnly: true })).toBe("E_VENUE_ORDER_INVALID");
+    expect(await no({ type: "stop", stopPrice: 58_000 })).toBe("E_VENUE_ORDER_INVALID");
+    expect(argvs(x.calls).some((a) => a[1] === "open" || a[1] === "geoblock")).toBe(false);
+    // a whole number always passes Hyperliquid's price rule; ETH (four decimals of size) takes two decimals of price
+    expect(ok(await x.t.place(buy({ clientId: "e".repeat(32), type: "limit", limitPrice: 60_001, worstPrice: undefined }))).status).toBe("filled");
+    expect(await no({ symbol: "ETH-PERP", qty: 0.01, type: "limit", limitPrice: 3000.12, worstPrice: undefined })).toBe("E_VENUE_ORDER_INVALID");
+  });
+
+  it("a resting order: mm perps orders while it rests; mm perps cancel takes it off, with MetaMask's switch off and no region check (taking an order off moves nothing)", async () => {
+    const resting = { venue: "hyperliquid", orderId: "779", symbol: "BTC", side: "short", size: "0.0006", originalSize: "0.001", limitPrice: "59000", timestamp: 1791225581000 };
+    const x = await boot({ ...PERPS, "perps orders": [[resting], [resting], []], "perps cancel": { venue: "hyperliquid", orderId: "779", ok: true } }, {});
+    expect(ok(await x.t.status("779", "BTC-PERP"))).toMatchObject({ ref: "779", status: "partial", filledQty: 0.0004 });
+    const c = ok(await x.t.cancel("779", "BTC-PERP"));
+    expect(c.status).toBe("canceled");
+    expect(x.calls.find((y) => y.args[1] === "cancel")!.args).toEqual(["perps", "cancel", "--venue", "hyperliquid", "--order-id", "779", "--symbol", "BTC", "--json"]);
+    expect(argvs(x.calls).some((a) => a[1] === "geoblock")).toBe(false);
+    // gone from the resting orders: mm has no call that says what became of it
+    expect(refusal(await x.t.status("779", "BTC-PERP")).code).toBe("E_ACCOUNT_ORDER_UNKNOWN");
+  });
+
+  it("close: Hyperliquid's own reduce-only IOC (mm perps close) after the region check; part of it with --size, all of it without", async () => {
+    const x = await boot({ ...PERPS, "perps positions": [[BTC_POS]], "predict geoblock": IN_IE, "perps close": [[{ venue: "hyperliquid", symbol: "BTC", orderId: "880", status: "filled", averagePrice: "60000", filledSize: "0.001" }], [{ venue: "hyperliquid", symbol: "BTC", orderId: "881", status: "filled", averagePrice: "60000", filledSize: "0.002" }]] });
+    await x.t.market("BTC-PERP");
+    x.calls.splice(0);
+    expect(ok(await x.t.close!("BTC-PERP", 0.001, CLIENT))).toMatchObject({ ref: "880", status: "filled", filledQty: 0.001 });
+    expect(argvs(x.calls)).toEqual([["perps", "positions", "--venue", "hyperliquid", "--json"], ["predict", "geoblock", "--json"], ["perps", "close", "--venue", "hyperliquid", "--symbol", "BTC", "--size", "0.001", "--max-slippage-bps", "200", "--wallet-timeout", "600", "--json"]]);
+    expect(ok(await x.t.close!("BTC-PERP", 0.002, "f".repeat(32)))).toMatchObject({ ref: "881", status: "filled", filledQty: 0.002 });
+    expect(x.calls.at(-1)!.args).toEqual(["perps", "close", "--venue", "hyperliquid", "--symbol", "BTC", "--max-slippage-bps", "200", "--wallet-timeout", "600", "--json"]);
+    x.answers["predict geoblock"] = IN_US;
+    expect(refusal(await x.t.close!("BTC-PERP", 0.001, "9".repeat(32))).code).toBe("E_VENUE_GEOBLOCKED");
+    expect(refusal(await x.t.close!("ETH-PERP", 1, "8".repeat(32))).code).toBe("E_ACCOUNT_BAD_ACTION");
+  });
+
+  it("leverage: mm perps modify --leverage after the region check, and the next order opens at it; no margin mode, nothing past the market's most", async () => {
+    const x = await boot({ ...PERPS, "predict geoblock": IN_IE, "perps modify": [[{ venue: "hyperliquid", symbol: "BTC", status: "submitted" }]], "perps open": opened({}) });
+    expect(ok(await x.t.setLeverage!("BTC-PERP", 5))).toMatchObject({ leverage: 5 });
+    expect(x.calls.find((c) => c.args[1] === "modify")!.args).toEqual(["perps", "modify", "--venue", "hyperliquid", "--symbol", "BTC", "--leverage", "5", "--wallet-timeout", "600", "--json"]);
+    ok(await x.t.place(buy()));
+    expect(x.calls.find((c) => c.args[1] === "open")!.args).toContain("5");
+    expect(x.calls.find((c) => c.args[1] === "open")!.args.slice(10, 12)).toEqual(["--leverage", "5"]);
+    expect(refusal(await x.t.setLeverage!("BTC-PERP", 3, "isolated")).code).toBe("E_VENUE_ORDER_INVALID");
+    expect(refusal(await x.t.setLeverage!("BTC-PERP", 41)).code).toBe("E_VENUE_ORDER_INVALID");
+    x.answers["predict geoblock"] = IN_US;
+    expect(refusal(await x.t.setLeverage!("BTC-PERP", 2)).code).toBe("E_VENUE_GEOBLOCKED");
+    // an open position's leverage is what an order opens at when none was set here
+    const y = await boot({ ...PERPS, "perps positions": [[BTC_POS]], "predict geoblock": IN_IE, "perps open": opened({}) });
+    ok(await y.t.place(buy()));
+    expect(y.calls.find((c) => c.args[1] === "open")!.args.slice(10, 12)).toEqual(["--leverage", "5"]);
+  });
+
+  it("positions: Polymarket's shares and Hyperliquid's positions together, each as Hyperliquid reports it; either venue not answering is the answer", async () => {
+    const x = await boot({ "predict positions": { command: "positions", params: {}, result: { positions: [] } }, "perps positions": [[BTC_POS, { ...BTC_POS, symbol: "xyz:TSLA", isHip3: true }]] }, {});
+    const list = ok(await x.t.positions!());
+    expect(list).toEqual<Position[]>([{ symbol: "BTC-PERP", name: "BTC perpetual on Hyperliquid", kind: "perp", side: "long", qty: 0.002, entryPrice: 59_000, usd: 120, markPrice: 60_000, unrealizedUsd: 2, leverage: 5, liquidationPrice: 48_000, native: { coin: "BTC", side: "long", size: "0.002", entryPrice: "59000.0", positionValue: "120.0", unrealizedPnl: "2.0", marginUsed: "24.0", leverage: 5, liquidationPrice: "48000.0" } }]);
+    x.answers["perps positions"] = fail("RATE_LIMITED", "Hyperliquid HTTP 429");
+    expect(refusal(await x.t.positions!()).code).toBe("E_VENUE_UNREACHABLE");
   });
 });

@@ -179,8 +179,9 @@ export class LiveOrders {
     return this.e.host.liveMoney?.();
   }
 
-  /** Everything that does not depend on who signed: the switch, the venue, the market, the size, the price, the cap */
-  private async plan(raw: Fields): Promise<Plan | Refusal> {
+  /** Everything that does not depend on who signed: the switch, the venue, the market, the size, the price, the cap. `uncapped`: the cap is
+   * not judged here — only a close's quote asks so, to say what the close is worth and whether that is over the cap before it is signed */
+  private async plan(raw: Fields, uncapped = false): Promise<Plan | Refusal> {
     const f: Fields = { venue: text(raw.venue), symbol: text(raw.symbol), side: text(raw.side), orderType: text(raw.orderType), qty: text(raw.qty), usd: text(raw.usd), limitPrice: text(raw.limitPrice), stopPrice: text(raw.stopPrice), tif: text(raw.tif), postOnly: text(raw.postOnly), reduceOnly: text(raw.reduceOnly) };
     const m = this.money();
     if (!m) return no("E_ACCOUNT_BAD_ACTION", { message: "this account has no venues connected live" });
@@ -244,7 +245,7 @@ export class LiveOrders {
     const notional = notionalOf(mk, qty, price);
     if (mk.minNotional !== undefined && notional < mk.minNotional - 1e-9) return no("E_VENUE_ORDER_INVALID", { venue: v.id, message: `${v.name}: the smallest order in ${mk.name} is worth ${usd(mk.minNotional)}`, detail: { minNotional: mk.minNotional } });
     const maxUsd = side === "buy" && worstPrice !== undefined ? notionalOf(mk, qty, worstPrice) : notional;
-    if (maxUsd > w.capUsd + 1e-9) return no("E_ACCOUNT_LIMIT", { venue: v.id, message: `${usd(maxUsd)} is more than the most one order may be on this server (${usd(w.capUsd)}). It is set when the server starts: --live-cap`, detail: { capUsd: w.capUsd, orderUsd: maxUsd } });
+    if (!uncapped && maxUsd > w.capUsd + 1e-9) return no("E_ACCOUNT_LIMIT", { venue: v.id, message: `${usd(maxUsd)} is more than the most one order may be on this server (${usd(w.capUsd)}). It is set when the server starts: --live-cap`, detail: { capUsd: w.capUsd, orderUsd: maxUsd } });
     return { f, v: v as Plan["v"], m: mk, side, type, qty, limitPrice, price, notional, ...(worstPrice !== undefined ? { worstPrice } : {}), ...(stopPrice !== undefined ? { stopPrice } : {}), ...(tif ? { tif } : {}), ...(f.postOnly === "true" ? { postOnly: true } : {}), ...(f.reduceOnly === "true" ? { reduceOnly: true } : {}), maxUsd };
   }
 
@@ -747,7 +748,17 @@ export class LiveOrders {
       if (isRefusal(s)) return s;
       spend = s;
     }
-    const list = await safely(() => v.trader!.positions!(), v.id, v.name, STATUS_MS);
+    const c = await this.closing(v as LiveVenue & { trader: LiveTrader }, a);
+    if (isRefusal(c)) return c;
+    const { pos, qty, native, p } = c;
+    if (spend && who.card === undefined && !(this.e.host.policy().mode === "open" && micro(p.maxUsd.toFixed(6)) <= spend.perPaymentMicro)) return this.closeCard(a, p, qty, who);
+    return this.place(p, { signer: who.signer, authority: who.authority, ...(who.agent ? { agent: who.agent.address } : {}), action: who.hash, ...(who.envelope ? { envelope: who.envelope } : {}), ...(who.card ? { card: who.card } : {}) }, native ? (clientId) => native.call(v.trader, pos.symbol, qty, clientId) : undefined);
+  }
+
+  /** What a close at `v` would be: the position, how much of it, the venue's own close or a reduce-only market order (a plain sell where a
+   * sell can only sell what is held; nothing where neither holds), and the order's plan. `uncapped`: the plan does not judge the cap */
+  private async closing(v: LiveVenue & { trader: LiveTrader }, a: CloseFields | AgentLiveCloseAction, uncapped = false): Promise<{ pos: Position; qty: number; native: LiveTrader["close"]; p: Plan } | Refusal> {
+    const list = await safely(() => v.trader.positions!(), v.id, v.name, STATUS_MS);
     if (isRefusal(list)) return list;
     const pos = list.find((x) => x.symbol === text(a.symbol));
     if (!pos || !(pos.qty > 0)) return no("E_ACCOUNT_BAD_ACTION", { venue: v.id, message: `${v.name} shows no position in ${a.symbol}` });
@@ -755,14 +766,37 @@ export class LiveOrders {
     if ((text(a.qty).trim() !== "" && !DEC.test(text(a.qty).trim())) || !(qty > 0) || qty > pos.qty + 1e-12) return no("E_ACCOUNT_BAD_ACTION", { venue: v.id, message: `a close is more than zero and at most the ${qtyText(pos.qty)} held` });
     const native = v.trader.close;
     // without the venue's own close: reduce-only where the market takes it; a plain sell where a sell can only sell what is held; else nothing
-    const mk = native ? undefined : await safely(() => v.trader!.market(pos.symbol), v.id, v.name, STATUS_MS);
+    const mk = native ? undefined : await safely(() => v.trader.market(pos.symbol), v.id, v.name, STATUS_MS);
     if (mk && isRefusal(mk)) return mk;
     const plainSell = !!mk && !mk.reduceOnly && !!mk.sellsReduce && pos.side === "long";
     if (mk && !mk.reduceOnly && !plainSell) return no("E_VENUE_ORDER_INVALID", { venue: v.id, message: `${v.name} takes no reduce-only order in ${mk.name}, and has no close of its own: close it at the venue, so that nothing opens the other way` });
-    const p = await this.plan({ venue: v.id, symbol: pos.symbol, side: pos.side === "long" ? "sell" : "buy", orderType: "market", qty: plain(qty), usd: "", limitPrice: "", stopPrice: "", tif: "", postOnly: "", reduceOnly: native || plainSell ? "" : "true" });
+    const p = await this.plan({ venue: v.id, symbol: pos.symbol, side: pos.side === "long" ? "sell" : "buy", orderType: "market", qty: plain(qty), usd: "", limitPrice: "", stopPrice: "", tif: "", postOnly: "", reduceOnly: native || plainSell ? "" : "true" }, uncapped);
     if (isRefusal(p)) return p;
-    if (spend && who.card === undefined && !(this.e.host.policy().mode === "open" && micro(p.maxUsd.toFixed(6)) <= spend.perPaymentMicro)) return this.closeCard(a, p, qty, who);
-    return this.place(p, { signer: who.signer, authority: who.authority, ...(who.agent ? { agent: who.agent.address } : {}), action: who.hash, ...(who.envelope ? { envelope: who.envelope } : {}), ...(who.card ? { card: who.card } : {}) }, native ? (clientId) => native.call(v.trader, pos.symbol, qty, clientId) : undefined);
+    return { pos, qty, native, p };
+  }
+
+  /** What the owner is shown before signing a close: the side and size it closes, its worst price, what it is worth (a buy back: the most
+   * it may cost), the server's cap and whether the close is over it — so the page can say so BEFORE anything is signed. The door judges
+   * the close again, cap and all, when it runs */
+  async prepareClose(draft: Record<string, unknown>): Promise<{ action: Omit<Extract<OwnerAction, { type: "liveClose" }>, "nonce">; quote: CloseQuote } | Refusal> {
+    const f: CloseFields = { venue: String(draft.venue ?? ""), symbol: String(draft.symbol ?? ""), qty: String(draft.qty ?? "").trim() };
+    const m = this.money();
+    if (!m) return no("E_ACCOUNT_BAD_ACTION", { message: "this account has no venues connected live" });
+    if (!m.writes().on) return no("E_WALLET_LIVE_WRITES_OFF", { message: `this server places no orders: it was started read-only. To trade, stop it and start it again with: ${m.writes().turnOn}`, detail: { turnOn: m.writes().turnOn } });
+    const v = m.venue(f.venue);
+    if (!v) return no("E_WALLET_ACCOUNT_UNKNOWN", { venue: f.venue, message: `"${f.venue}" is not a venue connected live` });
+    if (!v.trader?.positions) return no("E_VENUE_RAIL_CLOSED", { venue: v.id, message: `${v.name} lists no positions to the account: sell what is held as an order` });
+    if (!f.symbol.trim()) return no("E_ACCOUNT_BAD_ACTION", { message: "a close names the position's market" });
+    const c = await this.closing(v as LiveVenue & { trader: LiveTrader }, f, true);
+    if (isRefusal(c)) return c;
+    const { p, qty } = c;
+    const capUsd = m.writes().capUsd;
+    const worthUsd = cents(p.maxUsd);
+    const overCap = p.maxUsd > capUsd + 1e-9;
+    return {
+      action: { type: "liveClose", venue: v.id, symbol: p.m.symbol, qty: f.qty === "" ? "" : plain(qty) },
+      quote: { words: `close ${qtyText(qty)} ${p.m.base} of ${p.m.name} at ${v.name}: ${this.words(p)}`, venue: v.id, venueName: v.name, symbol: p.m.symbol, name: p.m.name, side: p.side, qty, ...(p.worstPrice !== undefined ? { worstPrice: p.worstPrice } : {}), price: p.price, worthUsd, capUsd, overCap, ...(overCap ? { why: `${usd(worthUsd)} is more than the most one order may be on this server (${usd(capUsd)}): close part of it, or start the server with a higher --live-cap` } : {}) },
+    };
   }
 
   /** an agent's close the owner answers: what it closes and what that is worth, shown on a card. It counts against no limit, so the card holds
@@ -894,6 +928,27 @@ async function safely<T>(call: () => Promise<T | Refusal>, venue: string, name: 
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+/** what the owner is shown before signing a close: the order it is (a sell of a long, a buy back of a short) and whether the server's cap
+ * lets it go */
+export interface CloseQuote {
+  words: string;
+  venue: string;
+  venueName: string;
+  symbol: string;
+  name: string;
+  side: Side;
+  qty: number;
+  /** the worst price the market order may fill at */
+  worstPrice?: number;
+  price: number;
+  /** a sell: what it is worth now · a buy back: the most it may cost */
+  worthUsd: number;
+  capUsd: number;
+  /** worth more than the most one order may be on this server: the door refuses it as it stands */
+  overCap: boolean;
+  why?: string;
 }
 
 /** what the owner is shown before signing an order */

@@ -83,7 +83,8 @@ export interface LiveEngine {
 }
 
 const KINDS = ["withdraw", "send", "transfer", "swap", "bridge"] as const;
-/** real money moves in dollar stablecoins, so on the chains that carry one (Robinhood Chain is read, not paid on) */
+/** real money moves in dollar stablecoins, so on the chains that carry one. A bridge goes by its own chains (bridge.ts BRIDGE_CHAINS), which
+ * add Robinhood Chain in USDG: money crosses into it and out of it, but is not sent or withdrawn on it */
 const NETWORKS = [...new Set(STABLECOINS.map((s) => s.chain))] as ChainName[];
 const TTL_MS = 10 * 60_000;
 const POLL_MS = 20_000;
@@ -166,10 +167,10 @@ export class LiveMoves {
       }
       return { f, kind, src: from, dst: src, amount, fee: 0 };
     }
-    // money that leaves the venue: to the user's own place, on a network both ends know
+    // money that leaves the venue: to the user's own place, on a network both ends know (a bridge: one of the bridge's own chains)
+    if (kind === "bridge") return this.planBridge(f, from, f.network as ChainName, amount);
     if (!(NETWORKS as string[]).includes(f.network)) return no("E_ACCOUNT_BAD_ACTION", { message: `a network is one of ${NETWORKS.join(", ")}` });
     const network = f.network as ChainName;
-    if (kind === "bridge") return this.planBridge(f, from, network, amount);
     if (kind === "withdraw" && (!from.writer.withdraw || from.writer.can.withdraw === false)) return no("E_VENUE_RAIL_CLOSED", { venue: src.id, message: `${src.name}: this key may not withdraw. That is set on the key at the exchange` });
     if (kind === "send" && !from.writer.can.send) return no("E_VENUE_RAIL_CLOSED", { venue: src.id, message: `${src.name}: money leaves it at the venue, not from here` });
     // a pasted address is only watched: the account sends nothing from it, as it sends nothing to it
@@ -195,6 +196,7 @@ export class LiveMoves {
     const bridge = from.writer.bridge;
     if (!bridge || from.writer.can.send !== "wallet") return no("E_VENUE_RAIL_CLOSED", { venue: from.id, message: `${from.name}: money crosses chains here only from a wallet of yours, which sends it itself` });
     if (from.address === undefined || !from.proven) return no("E_VENUE_RAIL_CLOSED", { venue: from.id, message: `${from.name} is watched, not proven yours: nothing is sent from it here. Connect it again from the wallet itself` });
+    if (!(bridge.chains as string[]).includes(network)) return no("E_ACCOUNT_BAD_ACTION", { message: `a bridge leaves one of ${bridge.chains.join(", ")}` });
     if (!(bridge.chains as string[]).includes(f.toLedger) || f.toLedger === network) return no("E_ACCOUNT_BAD_ACTION", { message: `a bridge lands on another chain: one of ${bridge.chains.filter((c) => c !== network).join(", ")}` });
     const toNetwork = f.toLedger as ChainName;
     let dst: LiveVenue = from;

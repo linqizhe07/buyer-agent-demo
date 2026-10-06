@@ -76,7 +76,46 @@ export interface Market {
   sellsReduce?: boolean | undefined;
   /** the most leverage a perpetual takes here, when the venue says */
   maxLeverage?: number | undefined;
+  // ---- what the venue's own listing already says about it (filled only where it does; never estimated) ----
+  /** the last 24 hours: the change of the price in percent and in `quote` (an event contract: in dollars per contract, so 0.03 = 3¢), and
+   * the value traded, in dollars */
+  changePct24h?: number | undefined;
+  change24h?: number | undefined;
+  volumeUsd24h?: number | undefined;
+  /** the last 24 hours' volume where the venue counts it in contracts and not in dollars (Kalshi's `volume_24h_fp`: each pays $1 at
+   * settlement) — never turned into dollars */
+  contracts24h?: number | undefined;
+  /** when it stops trading — an event's close, a dated future's expiry — ISO 8601 */
+  closeTime?: string | undefined;
+  /** the venue's own category for it, in its own words ("Economics", "Sports", "Crypto") */
+  category?: string | undefined;
+  /** an event contract's question, which its outcomes share — the venue's id for it (Kalshi's market ticker, Polymarket's condition id) and
+   * the question in words — and which outcome this market is ("YES", "NO", a candidate's name) */
+  group?: { id: string; title: string } | undefined;
+  outcome?: string | undefined;
+  /** a perpetual's funding rate per interval (0.0001 = 0.01%) and when it is next paid, ISO 8601 */
+  fundingRate?: number | undefined;
+  nextFundingAt?: string | undefined;
+  /** a token an issuer stands behind (category RWA_CATEGORY, live/categories.ts): who issues it, and whom the issuer says it is not for, in
+   * the issuer's own words (dex.ts carries them; a venue that says nothing of it leaves them out) */
+  issuer?: string | undefined;
+  eligibility?: string | undefined;
 }
+
+/** a market's last 24 hours, as the venue reports it */
+export interface MarketStats {
+  price?: number | undefined;
+  changePct24h?: number | undefined;
+  change24h?: number | undefined;
+  volumeUsd24h?: number | undefined;
+  high24h?: number | undefined;
+  low24h?: number | undefined;
+}
+
+export type CandleInterval = "5m" | "1h" | "1d";
+export const CANDLE_INTERVALS: readonly CandleInterval[] = ["5m", "1h", "1d"];
+/** one bar of price history: its start (ms), open, high, low, close, and the volume when the venue says, in base units */
+export interface Candle { t: number; o: number; h: number; l: number; c: number; v?: number | undefined }
 
 export interface OrderRequest {
   symbol: string;
@@ -154,6 +193,9 @@ export interface LiveTrader {
   whyNot?: string | undefined;
   /** what is traded here, in a few words: "spot and perpetuals", "US stocks and ETFs", "event contracts" */
   what: string;
+  /** the kinds of market traded here, where the trader says them itself (the mm trader: tokens, event contracts, perpetuals); absent: the
+   * account reads them from the connector the owner signed (accounts.ts tradeKinds) */
+  kinds?: MarketKind[] | undefined;
   /** a few markets to start from (query empty), or the ones matching a query; at most 20 */
   markets(query: string): Promise<Market[] | Refusal>;
   /** one market, with a fresh price */
@@ -176,6 +218,14 @@ export interface LiveTrader {
   close?(symbol: string, qty: number, clientId: string): Promise<OrderState | Refusal>;
   /** a perpetual's leverage, and its margin mode where the venue lets it be set */
   setLeverage?(symbol: string, leverage: number, marginMode?: "cross" | "isolated"): Promise<{ leverage: number; marginMode?: "cross" | "isolated" | undefined; native: unknown } | Refusal>;
+  // ---- reading the market (no order, nothing signed) ----
+  /** the last 24 hours of many markets in one call where the venue has one: by symbol. `symbols` absent: the venue's well-known markets */
+  stats?(symbols?: string[]): Promise<Map<string, MarketStats> | Refusal>;
+  /** event contracts, each carrying its `group` (the question), `closeTime` and `category`: the open ones, in one category when asked,
+   * closing within `closingWithinMs` when asked, at most `limit`, most traded first */
+  events?(o: { category?: string | undefined; closingWithinMs?: number | undefined; limit: number }): Promise<Market[] | Refusal>;
+  /** price history since `sinceMs`, oldest first */
+  candles?(symbol: string, interval: CandleInterval, sinceMs: number): Promise<Candle[] | Refusal>;
 }
 
 // ---- sizes and prices ------------------------------------------------------------------------------

@@ -11,9 +11,13 @@
  *                             owners as they stood at that point — and applied again, at the time it was taken. A row that does not verify
  *                             is skipped and said
  *   what a limit has used     the last `spend` row of each limit
+ *   the owner's steering      the watchlist and the intents, replayed and verified again like the limits; on each intent, each
+ *                             agent's latest report (and how many it made), its signature checked again. What agents ASKED is not brought
+ *                             back: an ask lives a day in memory, and an agent that still wants something asks again
  *   the dial                  the last snapshot; Aggressive only if the owner's signature that opened it is in the chain and nothing has
  *                             closed it since
- *   orders and payments       the last state written of each; the ones not finished are followed again
+ *   orders and payments       the last state written of each; the ones not finished are followed again — and so is money put into
+ *                             or taken out of a venue's earn product (account/live-earn.ts) that the venue had not finished
  *   ids                       continued, so that ord-0007 means one order, whatever run placed it
  *
  * Venues are connected again from the same credential reference the owner signed (a key file in the home, an address, the mm session); a
@@ -29,11 +33,12 @@ import { verifyMessage, type Hex } from "viem";
 import { Ledger, type LedgerRow } from "../../agent/ledger.ts";
 import { isRefusal } from "../../core/errors.ts";
 import { DONE } from "../live/trade.ts";
+import type { LiveEarn } from "./live-earn.ts";
 import type { LiveOrder } from "./live-orders.ts";
 import type { KeptAuthorisation } from "./pay-real.ts";
 import type { Payment } from "./payments.ts";
-import { actionHash, isOwnerAction, isJwk, kidOf, signerOf, type Envelope, type OwnerAction } from "./sign.ts";
-import { applyOwner, deviceKeys, isOwner, type AccountState, type ApplyOptions, type SpendApproval } from "./state.ts";
+import { actionHash, isAgentAction, isOwnerAction, isJwk, kidOf, malformed, signerOf, type AgentAction, type Envelope, type OwnerAction } from "./sign.ts";
+import { applyOwner, applyReport, deviceKeys, isOwner, type AccountState, type ApplyOptions, type SpendApproval } from "./state.ts";
 
 /** the first row of every run that continues the account */
 export interface RunMark {
@@ -150,8 +155,10 @@ export interface Rebuilt {
   /** orders and payments not finished when the last run stopped */
   orders: LiveOrder[];
   payments: Array<Payment & { run: string }>;
+  /** money put into or taken out of earn products that the venue had not finished */
+  earns: LiveEarn[];
   /** the highest id of each kind the chain has used */
-  ids: { order: number; payment: number; card: number };
+  ids: { order: number; payment: number; card: number; earn: number };
   /** authorisations a payee still held, not yet used or lapsed (account/pay-real.ts) */
   authorisations: KeptAuthorisation[];
   /** what was not brought back, and why */
@@ -170,7 +177,7 @@ const namedIn = (signers: string): string[] => {
 };
 
 /** a standing instruction the owner signs, which the restore applies again */
-const STANDING = new Set(["approveAgent", "approveSpend", "setDestination", "convertToMultiSigUser", "createSubAccount"]);
+const STANDING = new Set(["approveAgent", "approveSpend", "setDestination", "convertToMultiSigUser", "createSubAccount", "setWatch", "setIntent"]);
 const num = (id: unknown, prefix: string): number => {
   const m = typeof id === "string" ? new RegExp(`^${prefix}-(\\d+)$`).exec(id) : null;
   return m ? Number(m[1]) : 0;
@@ -185,14 +192,15 @@ export async function rebuild(rows: readonly LedgerRow[], base: AccountState, op
   const used = new Map<string, Pick<SpendApproval, "spentMicro" | "last" | "payTo">>();
   const orders = new Map<string, LiveOrder>();
   const payments = new Map<string, Payment & { run: string }>();
-  const ids = { order: 0, payment: 0, card: 0 };
+  const earns = new Map<string, LiveEarn>();
+  const ids = { order: 0, payment: 0, card: 0, earn: 0 };
   let dial: DialSnapshot | undefined;
   // Aggressive needs the owner's signature: the row of the last verified `setPolicy mode open`, and of the last snapshot that said Conservative
   let openedAt = -1;
   let closedAt = -1;
   let owner = base.owners.length > 0;
   // devices that asked to sign, by their pairing rows: a key is taken from here only for a signed change of signers that names it
-  const asked = new Map<string, { kty: "EC"; crv: "P-256"; x: string; y: string }>();
+  const asked = new Map<string, { jwk: { kty: "EC"; crv: "P-256"; x: string; y: string }; label?: string | undefined }>();
   // authorisations a payee held, by nonce, until a later row says they were used or lapsed
   const kept = new Map<string, KeptAuthorisation>();
   // each signed instruction once: a row copied in again is not taken again
@@ -214,7 +222,7 @@ export async function rebuild(rows: readonly LedgerRow[], base: AccountState, op
     if (row.kind === "action" && row.tool === "account_pair") {
       const n = row.native as { jwk?: unknown; label?: unknown; pending?: unknown } | undefined;
       if (n?.pending === true) {
-        if (isJwk(n.jwk) && row.signer === `device:${kidOf(n.jwk)}`) asked.set(row.signer, { kty: "EC", crv: "P-256", x: n.jwk.x, y: n.jwk.y });
+        if (isJwk(n.jwk) && row.signer === `device:${kidOf(n.jwk)}`) asked.set(row.signer, { jwk: { kty: "EC", crv: "P-256", x: n.jwk.x, y: n.jwk.y }, ...(typeof n.label === "string" && n.label.trim() ? { label: n.label.trim().slice(0, 40) } : {}) });
         continue;
       }
       // an owner who paired without the code is not taken by a run that asks for one (a read-only run let the first browser in): it pairs again
@@ -231,6 +239,27 @@ export async function rebuild(rows: readonly LedgerRow[], base: AccountState, op
     if (row.kind === "action" && row.outcome === "ok" && row.envelope) {
       const env = row.envelope as Envelope;
       const a = env.action;
+      if (a && a.type === "agentReport" && isAgentAction(a)) {
+        // an agent's report on an intent: its own signature, the key standing then, the intent open then and addressed to it
+        const report = a as Extract<AgentAction, { type: "agentReport" }>;
+        const digest = `${row.signer ?? ""}:${actionHash(report)}`;
+        if (applied.has(digest)) {
+          skipped.push(`agentReport of ${row.ts}: the same signed report a second time, which is taken once`);
+          continue;
+        }
+        const who = malformed(report) ? null : await signerOf(report, env.signature).catch(() => null);
+        if (!who || who !== row.signer) {
+          skipped.push(`agentReport of ${row.ts}: its signature does not check out against the key the row names`);
+          continue;
+        }
+        const next = applyReport(s, report, who, at);
+        if (isRefusal(next)) skipped.push(`agentReport of ${row.ts}: ${next.message}`);
+        else {
+          applied.add(digest);
+          s = next;
+        }
+        continue;
+      }
       if (!a || typeof a.type !== "string" || !isOwnerAction(a)) continue;
       const digest = actionHash(a);
       if (applied.has(digest)) {
@@ -256,7 +285,7 @@ export async function rebuild(rows: readonly LedgerRow[], base: AccountState, op
         let from = s;
         if (action.type === "convertToMultiSigUser") {
           const waiting = namedIn(action.signers).filter((id) => asked.has(id) && !isOwner(s, id) && !s.pendingDevices.some((d) => `device:${d.kid}` === id));
-          if (waiting.length) from = { ...s, pendingDevices: [...s.pendingDevices, ...waiting.map((id) => ({ kid: id.slice("device:".length), jwk: asked.get(id)!, at: row.ts }))] };
+          if (waiting.length) from = { ...s, pendingDevices: [...s.pendingDevices, ...waiting.map((id) => ({ kid: id.slice("device:".length), jwk: asked.get(id)!.jwk, at: row.ts, ...(asked.get(id)!.label ? { label: asked.get(id)!.label } : {}) }))] };
         }
         const allow = (row.native as { allow?: unknown } | undefined)?.allow;
         const here = action.type === "approveSpend" ? (Array.isArray(allow) ? allow.map(String) : [...connections.keys()]) : [];
@@ -265,7 +294,7 @@ export async function rebuild(rows: readonly LedgerRow[], base: AccountState, op
           skipped.push(`${action.type} of ${row.ts}: ${next.message}`);
           // it took an id when it was first taken (its row says it went through): the ids after it stay the ones they were given, so the
           // limits, and what was spent and placed under them, keep their names
-          if (action.type === "approveSpend" || action.type === "createSubAccount") s = { ...s, seq: s.seq + 1 };
+          if (action.type === "approveSpend" || action.type === "createSubAccount" || (action.type === "setIntent" && action.id === "" && action.validUntil !== 0)) s = { ...s, seq: s.seq + 1 };
         } else s = next;
       } else if (action.type === "setPolicy") {
         if (action.change === "mode" && action.value === "open") openedAt = i;
@@ -295,7 +324,11 @@ export async function rebuild(rows: readonly LedgerRow[], base: AccountState, op
       continue;
     }
     if (row.kind === "statement") {
-      const n = row.native as { order?: LiveOrder; payment?: Payment; run?: string } | undefined;
+      const n = row.native as { order?: LiveOrder; payment?: Payment; run?: string; earn?: LiveEarn } | undefined;
+      if (n?.earn?.clientId && typeof n.earn.id === "string") {
+        earns.set(n.earn.clientId, n.earn);
+        ids.earn = Math.max(ids.earn, num(n.earn.id, "earn"));
+      }
       if (n?.order?.clientId) {
         orders.set(n.order.clientId, n.order);
         ids.order = Math.max(ids.order, num(n.order.id, "ord"));
@@ -322,7 +355,7 @@ export async function rebuild(rows: readonly LedgerRow[], base: AccountState, op
   }
   const unfinishedOrder = (o: LiveOrder) => !DONE.has(o.status) || (!!o.walletTxs && !o.ref && o.status === "pending");
   const unfinishedPayment = (p: Payment) => !!p.live && (p.status === "pending" || (p.status === "authorized" && !p.live.expired));
-  return { state: s, dial, authorisations: [...kept.values()], connections: [...connections.values()], orders: [...orders.values()].filter(unfinishedOrder), payments: [...payments.values()].filter(unfinishedPayment), ids, skipped, owner };
+  return { state: s, dial, authorisations: [...kept.values()], connections: [...connections.values()], orders: [...orders.values()].filter(unfinishedOrder), payments: [...payments.values()].filter(unfinishedPayment), earns: [...earns.values()].filter((e) => e.status === "pending"), ids, skipped, owner };
 }
 
 /** a wallet's proof kept on its connection row, checked again: the wallet's signature over the sentence, naming the address */

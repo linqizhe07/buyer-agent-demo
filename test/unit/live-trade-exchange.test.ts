@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { isRefusal, type Refusal } from "../../src/core/errors.ts";
 import { exchangeTrader } from "../../src/portfolio/live/exchange-trade.ts";
 import { exchangeSource, type ExchangeClient } from "../../src/portfolio/live/exchange.ts";
-import { DONE, type LiveTrader, type Market, type OrderState } from "../../src/portfolio/live/trade.ts";
+import { DONE, type Candle, type CandleInterval, type LiveTrader, type Market, type MarketStats, type OrderState } from "../../src/portfolio/live/trade.ts";
 import type { LiveSource } from "../../src/portfolio/live/types.ts";
 
 /** TRADING at an exchange through the unified exchange library. Each exchange here is the REAL installed library with its network call
@@ -328,16 +328,20 @@ describe("one market, with a fresh price", () => {
     answer(okxTicker);
     const m = ok(await t.market("btc/usdt"));
     // stops are OKX's trigger orders; the times in force and post-only the library lists for OKX spot, and the ones each type takes (a market
-    // order never gtc, a stop gtc only, and in spot the order a stop places rests until canceled); a cash account sells only what it holds
-    expect(m).toEqual({ symbol: "BTC/USDT", name: "BTC/USDT spot", kind: "spot", base: "BTC", quote: "USDT", price: 85573.7, bid: 85573.7, ask: 85573.8, minQty: 0.00001, qtyStep: 1e-8, priceStep: 0.1, open: true, types: ["market", "limit", "stop", "stop_limit"], tifs: ["gtc", "ioc", "fok"], tifsByType: { market: ["ioc", "fok"], stop: ["gtc"], stop_limit: ["gtc"] }, postOnly: true, sellsReduce: true } satisfies Market);
+    // order never gtc, a stop gtc only, and in spot the order a stop places rests until canceled); a cash account sells only what it holds.
+    // The same ticker's 24 hours: the change from open24h (85317) to last, and volCcy24h, which OKX counts in the quote in spot
+    expect(m).toEqual({ symbol: "BTC/USDT", name: "BTC/USDT spot", kind: "spot", base: "BTC", quote: "USDT", price: 85573.7, bid: 85573.7, ask: 85573.8, minQty: 0.00001, qtyStep: 1e-8, priceStep: 0.1, open: true, types: ["market", "limit", "stop", "stop_limit"], tifs: ["gtc", "ioc", "fok"], tifsByType: { market: ["ioc", "fok"], stop: ["gtc"], stop_limit: ["gtc"] }, postOnly: true, sellsReduce: true, change24h: 256.7, changePct24h: 0.3008779024110083, volumeUsd24h: 1 } satisfies Market);
     expect(seen.map((r) => `${r.method} ${r.url}`)).toEqual(["GET https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT"]);
   });
 
   it("an OKX perpetual is sized in contracts: the contract's size, its step and smallest size in contracts", async () => {
-    const { t, answer } = okx();
+    const { t, answer, seen } = okx();
     answer({ body: { code: "0", msg: "", data: [{ instType: "SWAP", instId: "BTC-USDT-SWAP", last: "85580.1", askPx: "85580.2", bidPx: "85580.1", ts: "1791225482263" }] } });
     const m = ok(await t.market("BTC/USDT:USDT"));
     expect([m.kind, m.name, m.contractSize, m.qtyStep, m.minQty, m.priceStep, m.price]).toEqual(["perp", "BTC/USDT perpetual", 0.01, 0.01, 0.01, 0.1, 85580.1]);
+    // its funding is asked next; a funding call that does not answer leaves the market without a rate, and the market still stands
+    expect(seen.map((r) => r.url)).toEqual(["https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT-SWAP", "https://www.okx.com/api/v5/public/funding-rate?instId=BTC-USDT-SWAP"]);
+    expect([m.fundingRate, m.nextFundingAt]).toEqual([undefined, undefined]);
   });
 
   it("Coinbase's own flags: limit-only takes limit orders, cancel-only takes none; a market buy there is said to go as a limit order", async () => {
@@ -1271,5 +1275,279 @@ describe("what is held, and a perpetual's leverage", () => {
     for (const t of [okx().t, binance().t, bybit(true).t, coinbase().t, kraken().t]) expect(t.close).toBeUndefined();
     for (const t of [coinbase().t, kraken().t]) expect([t.positions, t.setLeverage]).toEqual([undefined, undefined]);
     for (const t of [okx().t, binance().t, bybit(true).t, coinbase().t, kraken().t]) expect(typeof t.amend).toBe("function");
+  });
+});
+
+// ---- reading the market: 24 hours, funding, many markets at once, price history ------------------------------------------------------
+
+/** a ticker row as OKX lists it (GET /api/v5/market/ticker and /tickers) */
+const okxTick = (instType: string, instId: string, last: string, open24h: string, high24h: string, low24h: string, volCcy24h: string, vol24h: string): Dict => ({ instType, instId, last, lastSz: "0.1", askPx: last, askSz: "1", bidPx: last, bidSz: "1", open24h, high24h, low24h, volCcy24h, vol24h, ts: "1791230000000", sodUtc0: open24h, sodUtc8: open24h });
+const okxData = (rows: Dict[]) => ({ body: { code: "0", msg: "", data: rows } });
+/** Binance's 24-hour ticker (GET /api/v3/ticker/24hr, spot: it carries bidQty; GET /fapi/v1/ticker/24hr, futures: it does not) */
+const binSpotTick = (symbol: string, lastPrice: string, priceChange: string, priceChangePercent: string, quoteVolume: string): Dict => ({ symbol, priceChange, priceChangePercent, weightedAvgPrice: lastPrice, prevClosePrice: lastPrice, lastPrice, lastQty: "0.00731000", bidPrice: lastPrice, bidQty: "7.15931000", askPrice: lastPrice, askQty: "0.09592000", openPrice: String(Number(lastPrice) - Number(priceChange)), highPrice: "119273.36000000", lowPrice: "117427.50000000", volume: "14741.41491000", quoteVolume, openTime: 1791143600000, closeTime: 1791230000000, firstId: 5116031635, lastId: 5117964946, count: 1933312 });
+const binFutTick: Dict = { symbol: "BTCUSDT", priceChange: "-251.20", priceChangePercent: "-0.212", weightedAvgPrice: "118500.00", lastPrice: "118400.10", lastQty: "0.002", openPrice: "118651.30", highPrice: "119300.00", lowPrice: "117400.00", volume: "123456.789", quoteVolume: "14617283945.12", openTime: 1791143600000, closeTime: 1791230000000, firstId: 72234973, lastId: 72423677, count: 188700 };
+/** Kraken's ticker (GET /0/public/Ticker): v, p, h and l are [today, last 24 hours]; o is today's opening price */
+const krTick = (c: string, v24: string, p24: string, h24: string, l24: string, o: string): Dict => ({ a: [c, "1", "1.000"], b: [c, "2", "2.000"], c: [c, "0.1"], v: ["1", v24], p: [p24, p24], t: [10, 100], l: [l24, l24], h: [h24, h24], o });
+
+describe("reading the market: a market's last 24 hours and a perpetual's funding", () => {
+  it("an OKX perpetual: the change from open24h, no dollar volume (OKX counts a contract's in the coin), and the funding rate paid next with when", async () => {
+    const { t, seen, answer } = okxPerp();
+    // GET /api/v5/public/funding-rate, as OKX answers it (2026-10-05): the rate of the period being paid at fundingTime
+    answer(okxData([okxTick("SWAP", "BTC-USDT-SWAP", "86010", "80000", "86500", "79500", "69586.3809", "6958638.09")]), okxData([{ formulaType: "withRate", fundingRate: "0.0000209114644036", fundingTime: "1791273600000", impactValue: "20000", instId: "BTC-USDT-SWAP", instType: "SWAP", interestRate: "0.0001", maxFundingRate: "0.00375", method: "current_period", minFundingRate: "-0.00375", nextFundingRate: "", nextFundingTime: "1791302400000", premium: "-0.0005393655100273", prevFundingTime: "1791244800000", settFundingRate: "-0.0000015122422803", settState: "settled", ts: "1791253931973" }]));
+    const m = ok(await t.market("BTC/USDT:USDT"));
+    expect(seen.map((r) => r.url)).toEqual(["https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT-SWAP", "https://www.okx.com/api/v5/public/funding-rate?instId=BTC-USDT-SWAP"]);
+    expect([m.price, m.change24h, m.changePct24h, m.volumeUsd24h, m.fundingRate, m.nextFundingAt]).toEqual([86010, 6010, 7.5125, undefined, 0.0000209114644036, "2026-10-06T08:00:00.000Z"]);
+  });
+
+  it("an OKX dated future stops trading at its expiry: listed with it, and no funding is asked for it", async () => {
+    const { t, seen, answer } = okx();
+    const listed = ok(await t.markets("")).find((m) => m.kind === "future")!;
+    expect([listed.symbol, listed.closeTime]).toEqual(["BTC/USDT:USDT-261225", "2026-12-25T08:00:00.000Z"]);
+    answer(okxData([okxTick("FUTURES", "BTC-USDT-261225", "87000", "86000", "87500", "85500", "100", "10000")]));
+    const m = ok(await t.market("BTC/USDT:USDT-261225"));
+    expect([m.closeTime, m.fundingRate, m.change24h, seen.length]).toEqual(["2026-12-25T08:00:00.000Z", undefined, 1000, 1]);
+    expect(ok(await t.markets("")).filter((x) => x.closeTime !== undefined).map((x) => x.symbol)).toEqual(["BTC/USDT:USDT-261225"]);
+  });
+
+  it("Binance: priceChange, priceChangePercent and quoteVolume, a rolling 24 hours; a perpetual's funding from GET /fapi/v1/premiumIndex", async () => {
+    const { t, seen, answer } = binance();
+    answer({ body: binSpotTick("BTCUSDT", "118449.03000000", "-188.18000000", "-0.159", "1744744445.80640740") });
+    const s = ok(await t.market("BTC/USDT"));
+    expect([s.price, s.change24h, s.changePct24h, s.volumeUsd24h, s.fundingRate]).toEqual([118449.03, -188.18, -0.159, 1744744445.8064074, undefined]);
+    answer({ body: binFutTick }, { body: { symbol: "BTCUSDT", markPrice: "118401.00", indexPrice: "118390.00", estimatedSettlePrice: "118395.00", lastFundingRate: "0.00010000", interestRate: "0.00010000", nextFundingTime: 1791273600000, time: 1791253931973 } });
+    const p = ok(await t.market("BTC/USDT:USDT"));
+    expect(seen.slice(1).map((r) => r.url)).toEqual(["https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=BTCUSDT", "https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT"]);
+    expect([p.price, p.change24h, p.changePct24h, p.volumeUsd24h, p.fundingRate, p.nextFundingAt]).toEqual([118400.1, -251.2, -0.212, 14617283945.12, 0.0001, "2026-10-06T08:00:00.000Z"]);
+  });
+
+  it("Bybit: price24hPcnt, prevPrice24h and turnover24h; a perpetual's ticker carries its funding, so it is not asked for twice", async () => {
+    const { t, seen, answer } = bybitBoth();
+    answer(bybitLinearList([{ symbol: "BTCUSDT", lastPrice: "86000", indexPrice: "85990", markPrice: "86001", prevPrice24h: "85000", price24hPcnt: "0.011765", highPrice24h: "86500", lowPrice24h: "84500", prevPrice1h: "85900", openInterest: "50000", openInterestValue: "4300000000", turnover24h: "5123456789.5", volume24h: "60000", fundingRate: "-0.001034", nextFundingTime: "1791273600000", predictedDeliveryPrice: "", basisRate: "", deliveryFeeRate: "", deliveryTime: "0", ask1Size: "1", bid1Price: "85999.9", ask1Price: "86000", bid1Size: "1" }]));
+    const m = ok(await t.market("BTC/USDT:USDT"));
+    expect(seen.length).toBe(1);
+    expect(seen[0]!.url).toMatch(/^https:\/\/api\.bybit\.com\/v5\/market\/tickers\?/);
+    expect([m.price, m.change24h, m.changePct24h, m.volumeUsd24h, m.fundingRate, m.nextFundingAt]).toEqual([86000, 1000, 1.1765, 5123456789.5, -0.001034, "2026-10-06T08:00:00.000Z"]);
+  });
+
+  it("Kraken: its 24-hour volume in dollars (volume times VWAP), and no change — its open is today's, at midnight UTC, not 24 hours ago", async () => {
+    const { t, answer } = kraken();
+    answer({ body: { error: [], result: { XXBTZUSD: krTick("85600.0", "2000", "85100.5", "86500.0", "83500.0", "85500.0") } } });
+    const m = ok(await t.market("BTC/USD"));
+    expect([m.price, m.volumeUsd24h, m.change24h, m.changePct24h]).toEqual([85600, 170201000, undefined, undefined]);
+  });
+
+  it("Coinbase's one-product ticker says nothing of the 24 hours; an exchange the trader has not read says none either, whatever its ticker holds", async () => {
+    const { t, answer } = coinbase();
+    answer({ body: { trades: [{ trade_id: "1", product_id: "BTC-USD", price: "85573.7", size: "1", time: "2026-10-05T19:53:19Z", side: "SELL", bid: "", ask: "" }], best_bid: "85573.6", best_ask: "85573.8" } });
+    const m = ok(await t.market("BTC/USD"));
+    expect([m.price, m.change24h, m.changePct24h, m.volumeUsd24h]).toEqual([85573.7, undefined, undefined, undefined]);
+    const x = {
+      id: "someex",
+      markets: { "BTC/USDT": spot("BTCUSDT", "BTC", "USDT"), "BTC/USDT:USDT": linear("BTCUSDT", "BTC", "USDT") },
+      async loadMarkets() {},
+      async fetchBalance() {
+        return {};
+      },
+      async fetchTicker() {
+        return { last: 85000, percentage: 2.5, change: 2073.17, quoteVolume: 1e9, high: 86000, low: 84000 };
+      },
+      async fetchFundingRate() {
+        return { fundingRate: 0.0001, fundingTimestamp: 1791273600000 };
+      },
+    } satisfies ExchangeClient;
+    const other = exchangeTrader(x, "someex", "Someex", [], { can: [] });
+    const s = ok(await other.market("BTC/USDT"));
+    const p = ok(await other.market("BTC/USDT:USDT"));
+    expect([s.price, s.changePct24h, s.volumeUsd24h, p.fundingRate, p.nextFundingAt]).toEqual([85000, undefined, undefined, undefined, undefined]);
+  });
+});
+
+describe("reading the market: many markets at once (stats)", () => {
+  it("no symbols: the well-known coins' spot markets and perpetuals (no dated futures), one fetchTickers per kind, OKX told the kind", async () => {
+    const { t, seen, answer } = okx();
+    answer(
+      okxData([okxTick("SPOT", "BTC-USDT", "86000", "80000", "86500", "79500", "1234567.5", "14.5"), okxTick("SPOT", "ETH-USDT", "2400", "2500", "2550", "2350", "765432.25", "320"), okxTick("SPOT", "AAVE-USDC", "300", "290", "310", "280", "1000", "3"), okxTick("SPOT", "ETH-BTC", "0.028", "0.03", "0.031", "0.027", "10", "300")]),
+      okxData([okxTick("SWAP", "BTC-USDT-SWAP", "86010", "80000", "86520", "79490", "69586.3809", "6958638.09")]),
+    );
+    const s = ok(await t.stats!());
+    expect(seen.map((r) => r.url)).toEqual(["https://www.okx.com/api/v5/market/tickers?instType=SPOT", "https://www.okx.com/api/v5/market/tickers?instType=SWAP"]);
+    expect(Object.fromEntries(s)).toEqual({
+      "BTC/USDT": { price: 86000, change24h: 6000, changePct24h: 7.5, volumeUsd24h: 1234567.5, high24h: 86500, low24h: 79500 },
+      "ETH/USDT": { price: 2400, change24h: -100, changePct24h: -4, volumeUsd24h: 765432.25, high24h: 2550, low24h: 2350 },
+      // a contract's 24-hour volume is in the coin at OKX: no dollars are said
+      "BTC/USDT:USDT": { price: 86010, change24h: 6010, changePct24h: 7.5125, high24h: 86520, low24h: 79490 },
+    } satisfies Record<string, MarketStats>);
+  });
+
+  it("symbols: only the dollar markets the account offers there, by the library's own symbol, once each; a dated future in its own call", async () => {
+    const { t, seen, answer } = okx();
+    answer(okxData([okxTick("SPOT", "ETH-USDT", "2400", "2500", "2550", "2350", "765432.25", "320")]), okxData([okxTick("FUTURES", "BTC-USDT-261225", "87000", "86000", "87500", "85500", "100", "10000")]));
+    const s = ok(await t.stats!(["eth/usdt", "ETH/BTC", "NOPE/USDT", "btc/usdt:usdt-261225", "ETH/USDT", "ZZZ/USDT", "BTC/USD:BTC"]));
+    expect(seen.map((r) => r.url)).toEqual(["https://www.okx.com/api/v5/market/tickers?instType=SPOT", "https://www.okx.com/api/v5/market/tickers?instType=FUTURES"]);
+    expect([...s.keys()]).toEqual(["ETH/USDT", "BTC/USDT:USDT-261225"]);
+    expect(s.get("BTC/USDT:USDT-261225")).toEqual({ price: 87000, change24h: 1000, changePct24h: 1.1627906976744187, high24h: 87500, low24h: 85500 });
+    // nothing it offers among them: nothing is asked
+    const quiet = okx();
+    expect(ok(await quiet.t.stats!(["ETH/BTC", "NOPE/USDT"])).size).toBe(0);
+    expect(quiet.seen).toEqual([]);
+  });
+
+  it("Binance is never asked for its whole list: spot tickers by an explicit list of symbols, a perpetual's by its own symbol", async () => {
+    const { t, seen, answer } = binance();
+    answer({ body: [binSpotTick("BTCUSDT", "118449.03000000", "-188.18000000", "-0.159", "1744744445.80640740")] }, { body: binFutTick });
+    const s = ok(await t.stats!());
+    expect(seen.map((r) => r.url)).toEqual([`https://api.binance.com/api/v3/ticker/24hr?symbols=${encodeURIComponent('["BTCUSDT"]')}`, "https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=BTCUSDT"]);
+    expect(Object.fromEntries(s)).toEqual({
+      "BTC/USDT": { price: 118449.03, change24h: -188.18, changePct24h: -0.159, volumeUsd24h: 1744744445.8064074, high24h: 119273.36, low24h: 117427.5 },
+      "BTC/USDT:USDT": { price: 118400.1, change24h: -251.2, changePct24h: -0.212, volumeUsd24h: 14617283945.12, high24h: 119300, low24h: 117400 },
+    } satisfies Record<string, MarketStats>);
+  });
+
+  it("Binance spot goes twenty symbols a call (weight 2 each, against 40 for 21 to 100 and 80 for all); more than forty markets are refused before anything is asked", async () => {
+    const many = Array.from({ length: 25 }, (_, i) => spot(`C${String(i).padStart(2, "0")}USDT`, `C${String(i).padStart(2, "0")}`, "USDT", { info: { status: "TRADING", orderTypes: ["LIMIT", "MARKET"] } }));
+    const v = venue("binance", BINANCE, many);
+    const t = exchangeTrader(v.x, "binance", "Binance", Object.values(BINANCE), { can: ["read"] }, { now: () => NOW });
+    v.answer({ body: [binSpotTick("C00USDT", "1.5", "0.1", "7.1428", "1000")] }, { body: [] });
+    const s = ok(await t.stats!(many.map((m) => String(m.symbol))));
+    const asked = v.seen.map((r) => JSON.parse(new URL(r.url).searchParams.get("symbols")!) as string[]);
+    expect(asked.map((a) => a.length)).toEqual([20, 5]);
+    expect([asked[0]![0], asked[1]![4]]).toEqual(["C00USDT", "C24USDT"]);
+    expect(s.get("C00/USDT")).toMatchObject({ price: 1.5, changePct24h: 7.1428, volumeUsd24h: 1000 });
+    const r = said(await t.stats!(Array.from({ length: 41 }, (_, i) => `C${i}/USDT`)), ALL_SECRETS);
+    expect([r.code, r.message, v.seen.length]).toEqual(["E_VENUE_REJECTED", "Binance: at most 40 markets are read at once, not 41", 2]);
+  });
+
+  it("Bybit: one call per category (spot, then linear), its turnover24h the dollars traded", async () => {
+    const { t, seen, answer } = bybitBoth();
+    answer(bybitList([{ symbol: "BTCUSDT", bid1Price: "85999.9", bid1Size: "2", ask1Price: "86000", ask1Size: "1.8", lastPrice: "86000", prevPrice24h: "85000", price24hPcnt: "0.011765", highPrice24h: "86500", lowPrice24h: "84500", turnover24h: "243765620.65", volume24h: "2834.5", usdIndexPrice: "85990" }]), bybitLinearList([{ symbol: "BTCUSDT", lastPrice: "86010", indexPrice: "85990", markPrice: "86011", prevPrice24h: "85010", price24hPcnt: "0.011763", highPrice24h: "86520", lowPrice24h: "84490", openInterest: "50000", openInterestValue: "4300000000", turnover24h: "5123456789.5", volume24h: "60000", fundingRate: "0.0001", nextFundingTime: "1791273600000", bid1Price: "86010", ask1Price: "86010.1", bid1Size: "1", ask1Size: "1" }]));
+    const s = ok(await t.stats!());
+    expect(seen.map((r) => r.url)).toEqual(["https://api.bybit.com/v5/market/tickers?category=spot", "https://api.bybit.com/v5/market/tickers?category=linear"]);
+    expect(Object.fromEntries(s)).toEqual({
+      "BTC/USDT": { price: 86000, change24h: 1000, changePct24h: 1.1765, volumeUsd24h: 243765620.65, high24h: 86500, low24h: 84500 },
+      "BTC/USDT:USDT": { price: 86010, change24h: 1000, changePct24h: 1.1763, volumeUsd24h: 5123456789.5, high24h: 86520, low24h: 84490 },
+    } satisfies Record<string, MarketStats>);
+  });
+
+  it("a kind that does not answer leaves the others standing; when none answers, its refusal is the answer", async () => {
+    const restricted = { status: 451, body: { code: 0, msg: "Service unavailable from a restricted location according to 'b. Eligibility' in https://www.binance.com/en/terms." } };
+    const b = binance();
+    b.answer({ body: [binSpotTick("BTCUSDT", "118449.03000000", "-188.18000000", "-0.159", "1744744445.80640740")] }, restricted);
+    expect([...ok(await b.t.stats!()).keys()]).toEqual(["BTC/USDT"]);
+    const c = binance();
+    c.answer(restricted, restricted);
+    const r = said(await c.t.stats!(), ALL_SECRETS);
+    expect(r.code).toBe("E_VENUE_GEOBLOCKED");
+  });
+
+  it("Kraken: only the pairs the library counts as active go in the call; the 24-hour volume, high and low, and no change", async () => {
+    const { t, seen, answer } = kraken();
+    answer({ body: { error: [], result: { XXBTZUSD: krTick("85600.0", "2000", "85100.5", "86500.0", "83500.0", "85500.0"), CELRUSD: krTick("0.012345", "1000000", "0.0124", "0.013", "0.012", "0.0123") } } });
+    const s = ok(await t.stats!(["BTC/USD", "ETH/USD", "CELR/USD"]));
+    expect(seen.map((r) => decodeURIComponent(r.url))).toEqual(["https://api.kraken.com/0/public/Ticker?pair=XXBTZUSD,CELRUSD"]);
+    expect(Object.fromEntries(s)).toEqual({ "BTC/USD": { price: 85600, volumeUsd24h: 170201000, high24h: 86500, low24h: 83500 }, "CELR/USD": { price: 0.012345, volumeUsd24h: 12400, high24h: 0.013, low24h: 0.012 } } satisfies Record<string, MarketStats>);
+  });
+
+  it("Coinbase from its list of products: price_percentage_change_24h and approximate_quote_24h_volume", async () => {
+    const { t, seen, answer } = coinbase();
+    answer({ body: { products: [{ product_id: "BTC-USD", price: "85573.7", price_percentage_change_24h: "1.25", volume_24h: "1000", volume_percentage_change_24h: "-6", base_increment: "0.00000001", quote_increment: "0.01", status: "online", product_type: "SPOT", approximate_quote_24h_volume: "85573700" }], num_products: 1 } });
+    const s = ok(await t.stats!(["BTC/USD"]));
+    expect(seen.map((r) => r.url.split("?")[0])).toEqual(["https://api.coinbase.com/api/v3/brokerage/market/products"]);
+    expect(seen[0]!.url).toContain("product_ids=BTC-USD");
+    const btc = s.get("BTC/USD")!;
+    expect([btc.price, btc.changePct24h, btc.volumeUsd24h, btc.high24h]).toEqual([85573.7, 1.25, 85573700, undefined]);
+    // the library works the change out of the percentage and the price: 85573.7 - 85573.7 / 1.0125
+    expect(btc.change24h).toBeCloseTo(1056.4654, 3);
+  });
+
+  it("an exchange the trader has not read: prices only; one with no call for many tickers is read one at a time; one with neither has no stats", async () => {
+    const asked: string[] = [];
+    const x = {
+      id: "someex",
+      markets: { "BTC/USDT": spot("BTCUSDT", "BTC", "USDT"), "ETH/USDT": spot("ETHUSDT", "ETH", "USDT") },
+      async loadMarkets() {},
+      async fetchBalance() {
+        return {};
+      },
+      async fetchTicker(symbol: string) {
+        asked.push(symbol);
+        return { last: symbol.startsWith("BTC") ? 85000 : 2400, percentage: 2.5, quoteVolume: 1e9 };
+      },
+    } satisfies ExchangeClient;
+    const s = ok(await exchangeTrader(x, "someex", "Someex", [], { can: [] }).stats!());
+    expect([asked, Object.fromEntries(s)]).toEqual([["BTC/USDT", "ETH/USDT"], { "BTC/USDT": { price: 85000 }, "ETH/USDT": { price: 2400 } }]);
+    const bare = { id: "bareex", markets: {}, async loadMarkets() {}, async fetchBalance() { return {}; } } satisfies ExchangeClient;
+    expect([exchangeTrader(bare, "bareex", "Bareex", [], { can: [] }).stats, exchangeTrader(bare, "bareex", "Bareex", [], { can: [] }).candles]).toEqual([undefined, undefined]);
+  });
+});
+
+describe("reading the market: price history (candles)", () => {
+  /** OKX candles, newest first as OKX lists them: [ts, o, h, l, c, vol, volCcy, volCcyQuote, confirm] */
+  const okxBar = (ts: number, o: string, h: string, l: string, c: string, vol: string, volCcy: string): string[] => [String(ts), o, h, l, c, vol, volCcy, "0", "1"];
+  const H = 3_600_000;
+  const hour = (n: number) => Date.parse("2026-10-05T19:00:00.000Z") - n * H;
+
+  it("OKX spot, hourly bars since a time: GET /api/v5/market/candles, oldest first, a bar's volume in the coin", async () => {
+    const { t, seen, answer } = okx();
+    answer(okxData([okxBar(hour(0), "85500", "85700", "85400", "85573.7", "12.5", "1069671.25") as unknown as Dict, okxBar(hour(1), "85300", "85600", "85200", "85500", "10", "854000") as unknown as Dict, okxBar(hour(2), "85000", "85400", "84900", "85300", "8", "681600") as unknown as Dict]));
+    const since = NOW - 3 * H;
+    const bars = ok(await t.candles!("BTC/USDT", "1h", since));
+    const url = new URL(seen[0]!.url);
+    expect([url.origin + url.pathname, url.searchParams.get("instId"), url.searchParams.get("bar"), url.searchParams.get("limit"), url.searchParams.get("before")]).toEqual(["https://www.okx.com/api/v5/market/candles", "BTC-USDT", "1H", "300", String(since - 1)]);
+    expect(bars).toEqual([
+      { t: hour(2), o: 85000, h: 85400, l: 84900, c: 85300, v: 8 },
+      { t: hour(1), o: 85300, h: 85600, l: 85200, c: 85500, v: 10 },
+      { t: hour(0), o: 85500, h: 85700, l: 85400, c: 85573.7, v: 12.5 },
+    ] satisfies Candle[]);
+  });
+
+  it("an OKX perpetual's volume is in the coin, not in contracts; a history asked from long ago is the latest 300 bars", async () => {
+    const { t, seen, answer } = okxPerp();
+    answer(okxData([okxBar(hour(0), "85500", "85700", "85400", "85580.1", "1250", "12.5") as unknown as Dict]));
+    const bars = ok(await t.candles!("BTC/USDT:USDT", "1d", 0));
+    expect(new URL(seen[0]!.url).searchParams.get("before")).toBe(String(NOW - 300 * 86_400_000 - 1));
+    expect(bars).toEqual([{ t: hour(0), o: 85500, h: 85700, l: 85400, c: 85580.1, v: 12.5 }]);
+  });
+
+  it("Binance futures, five-minute bars (GET /fapi/v1/klines); a key that may not trade them still reads their history", async () => {
+    const { t, seen, answer } = binance(["read", "trade spot and margin"]);
+    const at = Date.parse("2026-10-05T19:50:00.000Z");
+    answer({ body: [[at - 300_000, "118400.0", "118450.0", "118350.0", "118420.0", "12.345", at - 1, "1461728.39", 120, "6.1", "722000.1", "0"], [at, "118420.0", "118460.0", "118400.0", "118400.1", "3.2", at + 299_999, "378880.3", 40, "1.6", "189440.1", "0"]] });
+    const bars = ok(await t.candles!("BTC/USDT:USDT", "5m", at - 600_000));
+    const url = new URL(seen[0]!.url);
+    expect([url.origin + url.pathname, url.searchParams.get("symbol"), url.searchParams.get("interval"), url.searchParams.get("startTime"), url.searchParams.get("limit")]).toEqual(["https://fapi.binance.com/fapi/v1/klines", "BTCUSDT", "5m", String(at - 600_000), "300"]);
+    expect(bars).toEqual([
+      { t: at - 300_000, o: 118400, h: 118450, l: 118350, c: 118420, v: 12.345 },
+      { t: at, o: 118420, h: 118460, l: 118400, c: 118400.1, v: 3.2 },
+    ] satisfies Candle[]);
+  });
+
+  it("refused before anything is asked: a bar size not offered, a start that is not a time, a market priced in a coin, a bar size the exchange does not keep", async () => {
+    const { t, seen } = okx();
+    const size = said(await t.candles!("BTC/USDT", "15m" as CandleInterval, NOW), ALL_SECRETS);
+    const start = said(await t.candles!("BTC/USDT", "1h", Number.NaN), ALL_SECRETS);
+    const coin = said(await t.candles!("ETH/BTC", "1h", NOW), ALL_SECRETS);
+    expect([size.message, start.message, coin.code, seen.length]).toEqual(["OKX: price history comes in bars of 5m, 1h and 1d, not 15m", "OKX: a price history starts at a time, in milliseconds", "E_ACCOUNT_UNPRICED", 0]);
+    const x = {
+      id: "someex",
+      timeframes: { "1h": "60", "1d": "1440" },
+      markets: { "BTC/USDT": spot("BTCUSDT", "BTC", "USDT"), "BTC/USDT:USDT": linear("BTCUSDT", "BTC", "USDT") },
+      async loadMarkets() {},
+      async fetchBalance() {
+        return {};
+      },
+      async fetchOHLCV() {
+        return [[hour(0), 85500, 85700, 85400, 85573.7, 1250]];
+      },
+    } satisfies ExchangeClient;
+    const other = exchangeTrader(x, "someex", "Someex", [], { can: [] });
+    const r = said(await other.candles!("BTC/USDT", "5m", NOW - H), ALL_SECRETS);
+    expect([r.code, r.message]).toEqual(["E_VENUE_RAIL_CLOSED", "Someex keeps no 5m bars"]);
+    // an exchange the trader has not read: a spot bar's volume is in the coin; a contract's may be in contracts, so none is said
+    expect(ok(await other.candles!("BTC/USDT", "1h", hour(1)))).toEqual([{ t: hour(0), o: 85500, h: 85700, l: 85400, c: 85573.7, v: 1250 }]);
+    expect(ok(await other.candles!("BTC/USDT:USDT", "1h", hour(1)))).toEqual([{ t: hour(0), o: 85500, h: 85700, l: 85400, c: 85573.7 }]);
+  });
+
+  it("each exchange here reads the market — stats and price history — and lists no events (it has no event contracts)", () => {
+    for (const t of [okx().t, binance().t, bybit(true).t, coinbase().t, kraken().t]) expect([typeof t.stats, typeof t.candles, t.events]).toEqual(["function", "function", undefined]);
   });
 });

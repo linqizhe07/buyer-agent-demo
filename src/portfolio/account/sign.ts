@@ -118,7 +118,21 @@ export type OwnerAction =
   /** close a position at a venue: all of it ("" ), or this much of it */
   | { type: "liveClose"; venue: string; symbol: string; qty: string; nonce: number }
   /** a perpetual's leverage, and its margin mode ("cross" · "isolated" · "" to keep it) */
-  | { type: "liveLeverage"; venue: string; symbol: string; leverage: string; marginMode: string; nonce: number };
+  | { type: "liveLeverage"; venue: string; symbol: string; leverage: string; marginMode: string; nonce: number }
+  /** a market the owner keeps an eye on — at a venue on the account or one that is not — which agents read: `on` "true" watches it, "" stops */
+  | { type: "setWatch"; venue: string; symbol: string; on: string; nonce: number }
+  /** The owner's words to an agent (`agent`: its address) or to every agent ("*"): what the owner would like done, where, which way and about
+   * how much. It grants nothing — the agent acts only inside its limits, and its cards are still the owner's to answer; `usd` guides it and
+   * limits nothing. `id` "" is a new intent, an intent's id changes that one, and a `validUntil` of 0 withdraws it */
+  | { type: "setIntent"; id: string; agent: string; venue: string; symbol: string; side: string; usd: string; text: string; validUntil: number; nonce: number }
+  /** EARN at a venue connected live, on the owner's signature: money into one of the venue's products (`kind` supply) or back out of it
+   * (withdraw), in the product's own asset, the exact amount; the most it may be worth in dollars when it runs (a price that has moved past
+   * it is a new signature), where money taken out lands (always the venue it came from), and the moment after which it is void */
+  | { type: "liveEarn"; venue: string; kind: string; product: string; asset: string; amount: string; maxUsd: string; lands: string; deadline: number; nonce: number }
+  /** the owner's answer to an agent's ask (`ask`: its id, `ask-0003`) that is not the thing asked for: `decision` "decline". Granting an
+   * ask is the owner's own action for it (a limit, a venue connected, a top-up …), which closes the ask; this closes it without one. It
+   * moves nothing and widens nothing */
+  | { type: "answerAsk"; ask: string; decision: string; nonce: number };
 
 export type AgentAction =
   | { type: "agentSendAsset"; destination: string; sourceDex: string; destinationDex: string; token: string; amount: string; fromSubAccount: string; maxFee: string; nonce: number }
@@ -143,14 +157,27 @@ export type AgentAction =
   /** an agent closes a position (all of it: qty "") at a venue inside its trading limit */
   | { type: "agentLiveClose"; venue: string; symbol: string; qty: string; nonce: number }
   /** an agent sets a perpetual's leverage, up to the most the owner allows agents */
-  | { type: "agentLiveLeverage"; venue: string; symbol: string; leverage: string; marginMode: string; nonce: number };
+  | { type: "agentLiveLeverage"; venue: string; symbol: string; leverage: string; marginMode: string; nonce: number }
+  /** an agent tells the owner how an intent addressed to it (or to every agent) stands: `status` taking · done · cannot · note, a note in its
+   * own words, and `refs` — what it did, by id (`ord-0003,pay-0001`, a transaction's hash), comma-separated */
+  | { type: "agentReport"; intent: string; status: string; note: string; refs: string; nonce: number }
+  /** An agent asks the owner for what only the owner signs: `kind` letIn (its key let in) · limit · venue (one connected) · topup (its wallet) ·
+   * session · leverage · mode. Asking grants nothing: the owner's own signed action is the answer, and it closes the ask */
+  | { type: "agentAsk"; kind: string; venue: string; usd: string; text: string; nonce: number }
+  /** an agent puts money into a venue's earn product (`kind` supply) or takes it back out (withdraw: `amount` "all" is all of it), inside
+   * the earn limit the owner signed for it. It names no destination: what comes out lands where it came from. Conservative: a card;
+   * Aggressive: inside its limit, at once */
+  | { type: "agentLiveEarn"; venue: string; kind: string; product: string; asset: string; amount: string; nonce: number };
 
 export type Action = OwnerAction | AgentAction;
 
-export const OWNER_TYPES = ["sendAsset", "swap", "approveAgent", "approveBuilderFee", "approveSpend", "createSubAccount", "userSetAbstraction", "convertToMultiSigUser", "setDestination", "approveCard", "setPolicy", "connectVenue", "disconnectVenue", "liveMove", "liveOrder", "liveCancel", "liveAmend", "liveClose", "liveLeverage"] as const;
-export const AGENT_TYPES = ["agentSendAsset", "agentSwap", "agentPay", "agentExecute", "agentOrder", "agentLiveMove", "agentLiveOrder", "agentLiveCancel", "agentLiveAmend", "agentLiveClose", "agentLiveLeverage"] as const;
+export const OWNER_TYPES = ["sendAsset", "swap", "approveAgent", "approveBuilderFee", "approveSpend", "createSubAccount", "userSetAbstraction", "convertToMultiSigUser", "setDestination", "approveCard", "setPolicy", "connectVenue", "disconnectVenue", "liveMove", "liveOrder", "liveCancel", "liveAmend", "liveClose", "liveLeverage", "setWatch", "setIntent", "liveEarn", "answerAsk"] as const;
+export const AGENT_TYPES = ["agentSendAsset", "agentSwap", "agentPay", "agentExecute", "agentOrder", "agentLiveMove", "agentLiveOrder", "agentLiveCancel", "agentLiveAmend", "agentLiveClose", "agentLiveLeverage", "agentReport", "agentAsk", "agentLiveEarn"] as const;
 /** an instruction that moves money is good for minutes after it is signed, not for the two days of the nonce window */
-export const MONEY_TYPES: ReadonlySet<string> = new Set(["sendAsset", "swap", "approveCard", "agentSendAsset", "agentSwap", "agentPay", "agentExecute", "agentOrder", "liveMove", "agentLiveMove", "liveOrder", "agentLiveOrder", "liveAmend", "agentLiveAmend", "liveClose", "agentLiveClose"]);
+export const MONEY_TYPES: ReadonlySet<string> = new Set(["sendAsset", "swap", "approveCard", "agentSendAsset", "agentSwap", "agentPay", "agentExecute", "agentOrder", "liveMove", "agentLiveMove", "liveOrder", "agentLiveOrder", "liveAmend", "agentLiveAmend", "liveClose", "agentLiveClose", "liveEarn", "agentLiveEarn"]);
+/** how the owner steers and the agents answer: a watchlist, intents, reports, asks. None moves money and none is read by a limit (state.ts
+ * covers, spendFor): they are words between the owner and the agents, and authority still comes only from limits, cards and the cap */
+export const STEER_TYPES: ReadonlySet<string> = new Set(["setWatch", "setIntent", "answerAsk", "agentReport", "agentAsk"]);
 export const MONEY_TTL_MS = 10 * 60_000;
 
 export function isOwnerAction(a: { type: string }): a is OwnerAction {
@@ -202,9 +229,14 @@ const OWNER_FIELDS: Record<OwnerAction["type"], { primary: string; fields: Field
   liveAmend: { primary: "AccountTransaction:LiveAmend", fields: [{ name: "venue", type: "string" }, { name: "order", type: "string" }, { name: "qty", type: "string" }, { name: "limitPrice", type: "string" }, { name: "stopPrice", type: "string" }, { name: "maxNotional", type: "string" }, { name: "deadline", type: "uint64" }, NONCE] },
   liveClose: { primary: "AccountTransaction:LiveClose", fields: [{ name: "venue", type: "string" }, { name: "symbol", type: "string" }, { name: "qty", type: "string" }, NONCE] },
   liveLeverage: { primary: "AccountTransaction:LiveLeverage", fields: [{ name: "venue", type: "string" }, { name: "symbol", type: "string" }, { name: "leverage", type: "string" }, { name: "marginMode", type: "string" }, NONCE] },
+  setWatch: { primary: "AccountTransaction:SetWatch", fields: [{ name: "venue", type: "string" }, { name: "symbol", type: "string" }, { name: "on", type: "string" }, NONCE] },
+  // `agent` is text, not an address: it may be "*", every agent
+  setIntent: { primary: "AccountTransaction:SetIntent", fields: [{ name: "id", type: "string" }, { name: "agent", type: "string" }, { name: "venue", type: "string" }, { name: "symbol", type: "string" }, { name: "side", type: "string" }, { name: "usd", type: "string" }, { name: "text", type: "string" }, { name: "validUntil", type: "uint64" }, NONCE] },
+  liveEarn: { primary: "AccountTransaction:LiveEarn", fields: [{ name: "venue", type: "string" }, { name: "kind", type: "string" }, { name: "product", type: "string" }, { name: "asset", type: "string" }, { name: "amount", type: "string" }, { name: "maxUsd", type: "string" }, { name: "lands", type: "string" }, { name: "deadline", type: "uint64" }, NONCE] },
+  answerAsk: { primary: "AccountTransaction:AnswerAsk", fields: [{ name: "ask", type: "string" }, { name: "decision", type: "string" }, NONCE] },
 };
 /** what reaches a real venue: its signed text says "real money" */
-const LIVE_TYPES: ReadonlySet<string> = new Set(["liveMove", "liveOrder", "liveCancel", "liveAmend", "liveClose", "liveLeverage"]);
+const LIVE_TYPES: ReadonlySet<string> = new Set(["liveMove", "liveOrder", "liveCancel", "liveAmend", "liveClose", "liveLeverage", "liveEarn"]);
 /** what the owner's signature says about the money: a live move is real money, and the signed text says so */
 export const LIVE_CHAIN = "Live · real money";
 
@@ -238,6 +270,9 @@ const AGENT_TEXT: Partial<Record<AgentAction["type"], string[]>> = {
   agentLiveAmend: ["venue", "order", "qty", "limitPrice", "stopPrice"],
   agentLiveClose: ["venue", "symbol", "qty"],
   agentLiveLeverage: ["venue", "symbol", "leverage", "marginMode"],
+  agentReport: ["intent", "status", "note", "refs"],
+  agentAsk: ["kind", "venue", "usd", "text"],
+  agentLiveEarn: ["venue", "kind", "product", "asset", "amount"],
 };
 /** text fields an agent request MAY carry (when it does, they are text too, and signed like the rest) */
 const AGENT_OPTIONAL: Partial<Record<AgentAction["type"], string[]>> = {

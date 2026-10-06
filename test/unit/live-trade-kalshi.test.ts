@@ -2,8 +2,9 @@ import { constants, createPrivateKey, generateKeyPairSync, verify } from "node:c
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
 import { isRefusal, type Refusal } from "../../src/core/errors.ts";
+import { liveAccount } from "../../src/portfolio/adapters/live.ts";
 import { kalshiDayEnd, kalshiSign, kalshiSource } from "../../src/portfolio/live/kalshi.ts";
-import type { LiveTrader, Market, OrderRequest, OrderState, Position } from "../../src/portfolio/live/trade.ts";
+import type { Candle, LiveTrader, Market, OrderRequest, OrderState, Position } from "../../src/portfolio/live/trade.ts";
 import type { Http, HttpReply, LiveSource } from "../../src/portfolio/live/types.ts";
 
 /** TRADING at Kalshi, against a stand-in for Kalshi's trade API v2 that checks every request's signature with a key pair made here and
@@ -96,6 +97,8 @@ function fakeKalshi(opts: { scopes?: string[]; keys?: unknown; routes?: (s: Sent
     if (s.path === "/exchange/status") return json({ exchange_active: true, trading_active: true, exchange_index_statuses: [0, 1, 2, 3].map((i) => ({ exchange_index: i, exchange_active: true, trading_active: true })) });
     const m = /^\/markets\/([^/]+)$/.exec(s.path);
     if (m) return markets[decodeURIComponent(m[1]!)] ? json({ market: markets[decodeURIComponent(m[1]!)] }) : notFound();
+    // the held markets, by ticker (GET /markets?tickers=): the ones it lists, and nothing for a ticker it does not
+    if (s.path === "/markets" && s.query.tickers) return json({ markets: s.query.tickers.split(",").flatMap((t) => (markets[t] ? [markets[t]] : [])), cursor: "" });
     return notFound();
   };
   return k;
@@ -182,9 +185,12 @@ describe("market(): one Kalshi market, for one of its outcomes", () => {
     const k = fakeKalshi();
     const { t } = await connect(k);
     const yes = market(await t.market("kxfed-27apr-t4.00:yes"));
-    expect(yes).toEqual({ symbol: "KXFED-27APR-T4.00:YES", name: "Will the upper bound of the federal funds rate be above 4.00% following the Fed's Apr 28, 2027 meeting? (Above 4.00%) · Yes", kind: "event", base: "KXFED-27APR-T4.00:YES", quote: "USD", price: 0.43, bid: 0.42, ask: 0.45, minQty: 0.01, qtyStep: 0.01, priceStep: 0.01, open: true, note: "closes 2027-04-28 17:55 UTC", types: ["market", "limit"], tifs: ["gtc", "ioc", "fok", "day"], tifsByType: { market: ["ioc", "fok"], limit: ["gtc", "ioc", "fok", "day"] }, postOnly: true, reduceOnly: true });
+    expect(yes).toEqual({ symbol: "KXFED-27APR-T4.00:YES", name: "Will the upper bound of the federal funds rate be above 4.00% following the Fed's Apr 28, 2027 meeting? (Above 4.00%) · Yes", kind: "event", base: "KXFED-27APR-T4.00:YES", quote: "USD", price: 0.43, bid: 0.42, ask: 0.45, minQty: 0.01, qtyStep: 0.01, priceStep: 0.01, open: true, note: "closes 2027-04-28 17:55 UTC", types: ["market", "limit"], tifs: ["gtc", "ioc", "fok", "day"], tifsByType: { market: ["ioc", "fok"], limit: ["gtc", "ioc", "fok", "day"] }, postOnly: true, reduceOnly: true, contracts24h: 5120, closeTime: "2027-04-28T17:55:00Z", group: { id: "KXFED-27APR-T4.00", title: "Will the upper bound of the federal funds rate be above 4.00% following the Fed's Apr 28, 2027 meeting? (Above 4.00%)" }, outcome: "YES" });
     const no = market(await t.market("KXFED-27APR-T4.00:NO"));
     expect([no.symbol, no.name.endsWith("· No"), no.price, no.bid, no.ask, no.open]).toEqual(["KXFED-27APR-T4.00:NO", true, 0.57, 0.55, 0.58, true]);
+    // both outcomes share the question, the market's ticker, and its 24 hours in contracts (never in dollars); no trade a day ago in this
+    // market, so no change is said
+    expect([no.group, no.outcome, no.closeTime, no.contracts24h, "change24h" in no, "volumeUsd24h" in no]).toEqual([yes.group, "NO", "2027-04-28T17:55:00Z", 5120, false, false]);
     // the tapered grid: its finest step, a tenth of a cent — so the account's worst price for a 0.048 ask is 0.048, not 0.04; the trader checks the full grid
     expect(market(await t.market("KXGREENLAND-29:YES")).priceStep).toBe(0.001);
     // an empty side of the book is no price; with no trade yet, no price at all
@@ -952,3 +958,214 @@ describe("positions(): what is held at Kalshi", () => {
   });
 });
 
+
+// ---- reading the market: what Kalshi's listing says, events to discover, price history, and what a position is worth ----------------
+
+const ok = <T>(r: T | Refusal): T => {
+  if (isRefusal(r)) throw new Error(`${r.code}: ${r.message}`);
+  return r;
+};
+
+describe("what Kalshi's own listing says of a market", () => {
+  it("the change since the last trade a day ago, the outcome's own (NO's is YES's turned over); none when there was no trade then (Kalshi's 0)", async () => {
+    const MOVED: Rec = { ...FED, ticker: "KXMOVED-26OCT", previous_price_dollars: "0.4000", previous_yes_bid_dollars: "0.3900", previous_yes_ask_dollars: "0.4100" };
+    const FRESH: Rec = { ...FED, ticker: "KXFRESH-26OCT", previous_price_dollars: "0.0000", previous_yes_bid_dollars: "0.0000", previous_yes_ask_dollars: "0.0000" };
+    const k = fakeKalshi({ routes: (s) => (s.path === "/markets/KXMOVED-26OCT" ? json({ market: MOVED }) : s.path === "/markets/KXFRESH-26OCT" ? json({ market: FRESH }) : undefined) });
+    const { t } = await connect(k);
+    const yes = market(await t.market("KXMOVED-26OCT:YES"));
+    const no = market(await t.market("KXMOVED-26OCT:NO"));
+    expect([yes.price, yes.change24h, yes.changePct24h, yes.outcome]).toEqual([0.43, 0.03, 7.5, "YES"]);
+    expect([no.price, no.change24h, no.changePct24h, no.outcome]).toEqual([0.57, -0.03, -5, "NO"]);
+    expect(no.group).toEqual(yes.group);
+    expect(yes.group!.id).toBe("KXMOVED-26OCT");
+    const fresh = market(await t.market("KXFRESH-26OCT:YES"));
+    expect(["change24h" in fresh, "changePct24h" in fresh, fresh.closeTime]).toEqual([false, false, "2027-04-28T17:55:00Z"]);
+    // Kalshi counts volume in contracts: no dollar volume is made of it, and a market by itself carries no category
+    expect(["volumeUsd24h" in yes, "category" in yes]).toEqual([false, false]);
+  });
+});
+
+describe("events(): event contracts to discover at Kalshi", () => {
+  const ev = (event_ticker: string, category: string): Rec => ({ event_ticker, series_ticker: event_ticker.split("-")[0], title: `Event ${event_ticker}`, sub_title: "", category, mutually_exclusive: false, collateral_return_type: "", settlement_sources: [], exchange_index: 0 });
+  const mk = (ticker: string, event_ticker: string, vol: number, over: Rec = {}): Rec => ({ ...FED, ticker, event_ticker, title: `Market ${ticker}`, yes_sub_title: "", volume_24h_fp: `${vol}.00`, ...over });
+  const BTC = mk("KXBTCD-26OCT0517-T94000", "KXBTCD-26OCT0517", 900, { close_time: "2026-10-05T21:00:00Z" });
+  const RAIN = mk("KXRAINNYC-26OCT05-T1", "KXRAINNYC-26OCT05", 700, { close_time: "2026-10-05T23:59:00Z" });
+  const SHUT = mk("KXSHUT-26OCT05", "KXSHUT-26OCT05", 9000, { status: "closed", close_time: "2026-10-05T15:00:00Z" });
+  const EVENTS: Record<string, Rec> = { "KXFED-27APR": ev("KXFED-27APR", "Economics"), "KXBTCD-26OCT0517": ev("KXBTCD-26OCT0517", "Crypto"), "KXRAINNYC-26OCT05": ev("KXRAINNYC-26OCT05", "Climate and Weather"), "KXSHUT-26OCT05": ev("KXSHUT-26OCT05", "Politics") };
+  const kalshi = (eventsDown = false) =>
+    fakeKalshi({
+      routes: (s) => {
+        if (s.path === "/events") return eventsDown ? json({ error: { code: "service_unavailable", message: "unavailable" } }, 503) : json({ events: s.query.tickers!.split(",").map((t) => EVENTS[t]).filter(Boolean), cursor: "", milestones: [] });
+        if (s.path !== "/markets") return undefined;
+        if (s.query.min_close_ts) return json({ markets: [RAIN, SHUT, BTC], cursor: "" });
+        if (s.query.series_ticker) return json({ markets: [], cursor: "" });
+        return json({ markets: [RAIN, FED, SHUT, BTC], cursor: "" });
+      },
+    });
+
+  it("the open markets, most traded in 24 hours first, both outcomes of each, at most `limit`; each with its question, close and its event's category", async () => {
+    const k = kalshi();
+    const { t } = await connect(k);
+    const n = k.sent.length;
+    const list = ok(await t.events!({ limit: 4 }));
+    expect(list.map((m) => m.symbol)).toEqual(["KXFED-27APR-T4.00:YES", "KXFED-27APR-T4.00:NO", "KXBTCD-26OCT0517-T94000:YES", "KXBTCD-26OCT0517-T94000:NO"]);
+    expect(list.map((m) => [m.category, m.group?.id, m.outcome, m.closeTime])).toEqual([
+      ["Economics", "KXFED-27APR-T4.00", "YES", "2027-04-28T17:55:00Z"],
+      ["Economics", "KXFED-27APR-T4.00", "NO", "2027-04-28T17:55:00Z"],
+      ["Crypto", "KXBTCD-26OCT0517-T94000", "YES", "2026-10-05T21:00:00Z"],
+      ["Crypto", "KXBTCD-26OCT0517-T94000", "NO", "2026-10-05T21:00:00Z"],
+    ]);
+    expect(list[2]!.group!.title).toBe("Market KXBTCD-26OCT0517-T94000");
+    // the markets a search runs over, then their events in one call; a closed market is not among them
+    const asked = k.sent.slice(n);
+    expect(asked.filter((s) => s.path === "/markets")[0]!.query).toEqual({ status: "open", mve_filter: "exclude", limit: "1000" });
+    const evs = asked.filter((s) => s.path === "/events");
+    expect(evs.map((s) => s.query)).toEqual([{ tickers: "KXFED-27APR,KXBTCD-26OCT0517,KXRAINNYC-26OCT05", limit: "3" }]);
+    // one category: the markets whose event says it, in Kalshi's words (compared without case or punctuation); the events are kept five minutes
+    const m = k.sent.length;
+    const rain = ok(await t.events!({ category: "climate-and-weather", limit: 10 }));
+    expect(rain.map((x) => [x.symbol, x.category])).toEqual([["KXRAINNYC-26OCT05-T1:YES", "Climate and Weather"], ["KXRAINNYC-26OCT05-T1:NO", "Climate and Weather"]]);
+    expect(k.sent.slice(m)).toEqual([]);
+    expect(ok(await t.events!({ category: "Sports", limit: 10 }))).toEqual([]);
+    expect(ok(await t.events!({ limit: 0 }))).toEqual([]);
+  });
+
+  it("closing within a window: GET /markets with min_close_ts and max_close_ts (no status: Kalshi takes none with them), the active ones kept", async () => {
+    const k = kalshi();
+    const { t } = await connect(k);
+    const n = k.sent.length;
+    const soon = ok(await t.events!({ closingWithinMs: 12 * 3_600_000, limit: 10 }));
+    const lists = k.sent.slice(n).filter((s) => s.path === "/markets");
+    expect(lists.map((s) => s.query)).toEqual([{ min_close_ts: String(START / 1000), max_close_ts: String(START / 1000 + 12 * 3600), mve_filter: "exclude", limit: "1000" }]);
+    expect(soon.map((m) => [m.symbol, m.closeTime, m.category])).toEqual([
+      ["KXBTCD-26OCT0517-T94000:YES", "2026-10-05T21:00:00Z", "Crypto"],
+      ["KXBTCD-26OCT0517-T94000:NO", "2026-10-05T21:00:00Z", "Crypto"],
+      ["KXRAINNYC-26OCT05-T1:YES", "2026-10-05T23:59:00Z", "Climate and Weather"],
+      ["KXRAINNYC-26OCT05-T1:NO", "2026-10-05T23:59:00Z", "Climate and Weather"],
+    ]);
+    expect(refusal(await t.events!({ closingWithinMs: -1, limit: 10 })).code).toBe("E_ACCOUNT_BAD_ACTION");
+  });
+
+  it("the events not answering: without a category the markets are still said, without one; a category asked cannot be told, which is Kalshi's no", async () => {
+    const { t } = await connect(kalshi(true));
+    const list = ok(await t.events!({ limit: 2 }));
+    expect(list.map((m) => [m.symbol, "category" in m])).toEqual([["KXFED-27APR-T4.00:YES", false], ["KXFED-27APR-T4.00:NO", false]]);
+    expect(refusal(await t.events!({ category: "Economics", limit: 2 })).code).toBe("E_VENUE_UNREACHABLE");
+  });
+});
+
+describe("candles(): a Kalshi market's price history", () => {
+  const S = START / 1000;
+  const stick = (end: number, price: Rec, volume: string): Rec => ({ end_period_ts: end, yes_bid: { open_dollars: "0.4100", high_dollars: "0.4200", low_dollars: "0.4000", close_dollars: "0.4100" }, yes_ask: { open_dollars: "0.4500", high_dollars: "0.4600", low_dollars: "0.4400", close_dollars: "0.4500" }, price, volume_fp: volume, open_interest_fp: "61.00" });
+  const traded = (o: string, h: string, l: string, c: string): Rec => ({ open_dollars: o, high_dollars: h, low_dollars: l, close_dollars: c, mean_dollars: o, previous_dollars: o });
+  const answering = (sticks: Rec[]) => fakeKalshi({ routes: (s) => (s.path === "/markets/candlesticks" ? json({ markets: [{ market_ticker: s.query.market_tickers, candlesticks: sticks }] }) : undefined) });
+
+  it("hourly: GET /markets/candlesticks for the market's ticker, its trades' prices and contracts; a period without a trade has no price and is left out; NO is YES turned over", async () => {
+    const k = answering([stick(S - 3600, traded("0.4000", "0.4500", "0.3900", "0.4300"), "120.00"), stick(S - 7200, traded("0.3800", "0.4100", "0.3700", "0.4000"), "80.00"), stick(S, { previous_dollars: "0.4300" }, "0.00")]);
+    const { t } = await connect(k);
+    const n = k.sent.length;
+    const yes = ok(await t.candles!(FED_YES, "1h", START - 3 * 3_600_000));
+    expect(k.sent.slice(n).map((s) => [s.path, s.query])).toEqual([["/markets/candlesticks", { market_tickers: "KXFED-27APR-T4.00", start_ts: String(S - 3 * 3600), end_ts: String(S), period_interval: "60" }]]);
+    expect(yes).toEqual<Candle[]>([
+      { t: (S - 3 * 3600) * 1000, o: 0.38, h: 0.41, l: 0.37, c: 0.4, v: 80 },
+      { t: (S - 2 * 3600) * 1000, o: 0.4, h: 0.45, l: 0.39, c: 0.43, v: 120 },
+    ]);
+    const no = ok(await t.candles!(FED_NO, "1h", START - 3 * 3_600_000));
+    expect(no[1]).toEqual({ t: (S - 2 * 3600) * 1000, o: 0.6, h: 0.61, l: 0.55, c: 0.57, v: 120 });
+  });
+
+  it("five minutes: Kalshi keeps one-minute, hourly and daily candles, so five one-minute candles are folded into one bar — first open, highest high, lowest low, last close, contracts added", async () => {
+    const base = S - 600;
+    const k = answering([
+      stick(base + 60, traded("0.4000", "0.4100", "0.4000", "0.4100"), "10.00"),
+      stick(base + 180, traded("0.4100", "0.4400", "0.4100", "0.4300"), "5.50"),
+      stick(base + 240, { previous_dollars: "0.4300" }, "0.00"),
+      stick(base + 300, traded("0.4300", "0.4300", "0.3800", "0.3900"), "2.00"),
+      stick(base + 420, traded("0.3900", "0.4000", "0.3900", "0.4000"), "1.00"),
+    ]);
+    const { t } = await connect(k);
+    const n = k.sent.length;
+    const bars = ok(await t.candles!(FED_YES, "5m", START - 600_000));
+    expect(k.sent[n]!.query.period_interval).toBe("1");
+    expect(bars).toEqual<Candle[]>([
+      { t: base * 1000, o: 0.4, h: 0.44, l: 0.38, c: 0.39, v: 17.5 },
+      { t: (base + 300) * 1000, o: 0.39, h: 0.4, l: 0.39, c: 0.4, v: 1 },
+    ]);
+  });
+
+  it("refused before anything is asked: an interval it does not have, a history that starts after now, a name that is not <ticker>:YES|NO; Kalshi's no is its own", async () => {
+    const k = fakeKalshi({ routes: (s) => (s.path === "/markets/candlesticks" ? json({ error: { code: "service_unavailable", message: "unavailable" } }, 503) : undefined) });
+    const { t } = await connect(k);
+    const n = k.sent.length;
+    expect(refusal(await t.candles!(FED_YES, "15m" as never, START - 3_600_000)).code).toBe("E_ACCOUNT_BAD_ACTION");
+    expect(refusal(await t.candles!(FED_YES, "1h", START + 1)).code).toBe("E_ACCOUNT_BAD_ACTION");
+    expect(refusal(await t.candles!("KXFED-27APR-T4.00", "1h", START - 3_600_000)).code).toBe("E_ACCOUNT_BAD_ACTION");
+    expect(k.sent.length).toBe(n);
+    expect(refusal(await t.candles!(FED_YES, "1d", START - 7 * 86_400_000)).code).toBe("E_VENUE_UNREACHABLE");
+  });
+});
+
+describe("what the account reads at Kalshi: a position is worth its market's price now, not what it cost", () => {
+  const DECIDED: Rec = { ...FED, ticker: "KXFED-26SEP-T4.00", status: "determined", result: "no", yes_bid_dollars: "0.0000", yes_ask_dollars: "1.0000", no_bid_dollars: "0.0000", no_ask_dollars: "1.0000", last_price_dollars: "0.0300" };
+  const HELD = [
+    { ticker: FED.ticker, position_fp: "25.00", market_exposure_dollars: "10.500000" },
+    { ticker: "KXFED-26SEP-T4.00", position_fp: "-40.00", market_exposure_dollars: "24.000000" },
+    { ticker: "KXGONE-26OCT", position_fp: "3.00", market_exposure_dollars: "1.200000" },
+    { ticker: EMPTY.ticker, position_fp: "2.00", market_exposure_dollars: "0.500000" },
+    { ticker: "KXFLAT-26OCT", position_fp: "0.00", market_exposure_dollars: "0.000000" },
+  ];
+  const holding = (marketsDown: boolean) =>
+    fakeKalshi({
+      routes: (s) => {
+        if (s.path === "/portfolio/positions") return json({ market_positions: HELD, cursor: "" });
+        if (s.path === "/markets" && s.query.tickers) return marketsDown ? json({ error: { code: "service_unavailable", message: "unavailable" } }, 503) : json({ markets: [FED, DECIDED, EMPTY].filter((m) => s.query.tickers!.split(",").includes(String(m.ticker))), cursor: "" });
+        return undefined;
+      },
+    });
+
+  it("each held market read in one call: worth its price (or $1 or $0 once decided), what it cost said beside; a market Kalshi does not list, or with no price, at cost, said as that", async () => {
+    const k = holding(false);
+    const opened = await kalshiSource({ venue: "kalshi", label: "Kalshi", reference: "credentials/kalshi/api-key.json", key: { keyId: KEY_ID, privateKey: k.pem }, home: tmpdir(), http: k.http, clock: () => k.now });
+    if (isRefusal(opened)) throw new Error(opened.message);
+    expect(k.sent.map((s) => [s.path, s.query])).toEqual([
+      ["/portfolio/balance", {}],
+      ["/portfolio/positions", { limit: "200" }],
+      ["/markets", { tickers: "KXFED-27APR-T4.00,KXFED-26SEP-T4.00,KXGONE-26OCT,KXEMPTY-26OCT", limit: "4" }],
+    ]);
+    expect(opened.first.map((b) => [b.asset, b.amount, b.usd, b.where])).toEqual([
+      ["USD", 100, 100, "cash"],
+      ["KXFED-27APR-T4.00:YES", 25, 10.75, "at market · cost $10.50"],
+      ["KXFED-26SEP-T4.00:NO", 40, 40, "decided NO · cost $24.00"],
+      ["KXGONE-26OCT:YES", 3, 1.2, "at cost: Kalshi did not list its market"],
+      ["KXEMPTY-26OCT:YES", 2, 0.5, "at cost: no price now"],
+    ]);
+    // the same as the trader's positions say they are worth
+    const held = ok(await opened.source.trader!.positions!());
+    expect(held.filter((p) => p.usd !== undefined).map((p) => [p.symbol, p.usd])).toEqual([["KXFED-27APR-T4.00:YES", 10.75], ["KXFED-26SEP-T4.00:NO", 40]]);
+  });
+
+  it("the markets not answering fails the read, in Kalshi's words: never every position at cost now and at market the next time (a swing that is no gain and no loss); connected, the account keeps the last good number and says the venue is stale", async () => {
+    let down = true;
+    const k = fakeKalshi({
+      routes: (s) => {
+        if (s.path === "/portfolio/positions") return json({ market_positions: HELD, cursor: "" });
+        if (s.path === "/markets" && s.query.tickers) return down ? json({ error: { code: "too_many_requests", message: "too many requests" } }, 429) : json({ markets: [FED, DECIDED, EMPTY].filter((m) => s.query.tickers!.split(",").includes(String(m.ticker))), cursor: "" });
+        return undefined;
+      },
+    });
+    const req = { venue: "kalshi", label: "Kalshi", reference: "credentials/kalshi/api-key.json", key: { keyId: KEY_ID, privateKey: k.pem }, home: tmpdir(), http: k.http, clock: () => k.now };
+    const refused = refusal(await kalshiSource(req));
+    expect([refused.code, refused.message]).toEqual(["E_VENUE_UNREACHABLE", "Kalshi is rate-limiting this machine: try again in a minute"]);
+    down = false;
+    const opened = await kalshiSource(req);
+    if (isRefusal(opened)) throw new Error(opened.message);
+    const total = (rows: Array<{ usd?: number | undefined }>) => rows.reduce((s, b) => s + (b.usd ?? 0), 0);
+    expect(total(opened.first)).toBe(100 + 10.75 + 40 + 1.2 + 0.5);
+    // a later read whose markets call fails throws, so the account keeps what it read last (adapters/live.ts marks the venue stale)
+    down = true;
+    await expect(opened.source.read()).rejects.toMatchObject({ code: "E_VENUE_UNREACHABLE", message: refused.message });
+    const adapter = await liveAccount("kalshi", opened.source, { connector: "live:kalshi", first: opened.first, clock: () => k.now, ttlMs: 0 });
+    const held = await adapter.read();
+    expect([total(held), adapter.account.stale]).toEqual([total(opened.first), refused.message]);
+  });
+});

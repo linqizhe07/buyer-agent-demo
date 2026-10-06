@@ -58,7 +58,9 @@ export async function liveAccount(id: string, source: LiveSource, opts: LiveAcco
     const note = [b.where, usd === undefined ? "no price" : undefined].filter(Boolean).join(" · ");
     return { account: id, asset: b.asset, amount: b.amount, usd: r2(usd ?? 0), class: b.class ?? (isStable(b.asset) ? (b.asset.toUpperCase() === "USD" ? "cash" : "stable") : "crypto"), ...(note ? { note } : {}) };
   };
-  const shape = async (rows: LiveBalance[]): Promise<Holding[]> => (await Promise.all(rows.filter((b) => b.amount > 0).map(toHolding))).sort((a, b) => b.usd - a.usd);
+  // what is held, and a short as the venue carries it (a negative amount, worth what buying it back costs): the venue's total is net of it,
+  // as the venue's own equity is; the holdings by asset (account/holdings.ts) list only what is held
+  const shape = async (rows: LiveBalance[]): Promise<Holding[]> => (await Promise.all(rows.filter((b) => b.amount > 0 || (b.amount < 0 && b.usd !== undefined && b.usd < 0)).map(toHolding))).sort((a, b) => b.usd - a.usd);
 
   let cached: Holding[] = [];
   let readAt = 0;

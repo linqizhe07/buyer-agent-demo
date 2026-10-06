@@ -37,12 +37,20 @@
  *     filled with the old order), what is held in perpetuals and futures (positions), and a perpetual's leverage (setLeverage);
  *   · no close of its own: OKX's closes the whole position at the market, with no size and no worst price, and Coinbase's is for its futures,
  *     whose positions are not listed here. The account closes a position with a reduce-only order, which goes inside a worst price.
+ *
+ * Reading the market (nothing signed, nothing placed), with nothing kept beyond the market list — the account's service keeps the answers:
+ *   · a market's last 24 hours — its change, the dollars traded, its high and low — as the exchange's own ticker says them, and only at the
+ *     five exchanges above, each ticker read against the exchange's docs (dayOf); many markets' at once (stats), one fetchTickers per kind
+ *     of market, Binance never for its whole list;
+ *   · a perpetual's funding rate and when it is next paid (fetchFundingRate; Bybit's ticker carries it already), at OKX, Binance and Bybit;
+ *     a dated future's expiry as when it stops trading;
+ *   · price history (fetchOHLCV), at most 300 bars of 5 minutes, an hour or a day.
  */
 import { isRefusal, type Refusal } from "../../core/errors.ts";
 import { no } from "../refuse.ts";
 import type { KeyFile } from "./credentials.ts";
 import { exchangeSaidNo, isBinance, isBybit, isOkx, type ExchangeClient } from "./exchange.ts";
-import { badOrder, ceilTo, floorTo, inDollars, notionalOf, onStep, pick, plain, DONE, type LiveTrader, type Market, type OrderChange, type OrderRequest, type OrderState, type OrderStatus, type OrderType, type Position, type TimeInForce } from "./trade.ts";
+import { badOrder, ceilTo, floorTo, inDollars, notionalOf, onStep, pick, plain, CANDLE_INTERVALS, DONE, type Candle, type CandleInterval, type LiveTrader, type Market, type MarketStats, type OrderChange, type OrderRequest, type OrderState, type OrderStatus, type OrderType, type Position, type TimeInForce } from "./trade.ts";
 import { num, redact, type LiveProbe } from "./types.ts";
 
 type Dict = Record<string, unknown>;
@@ -79,6 +87,16 @@ const LIST_MS = 5 * 60_000;
 const WELL_KNOWN = ["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "ADA", "LINK", "AVAX", "LTC"];
 const QUOTES = ["USDT", "USDC", "USD"];
 const WORDS: Record<OrderType, string> = { market: "market", limit: "limit", stop: "stop", stop_limit: "stop-limit" };
+/** the most markets one stats call reads: Binance's futures are read one ticker at a time (GET /fapi/v1/ticker/24hr?symbol=, weight 1), so
+ * forty of them never weigh more than its whole list does (40) */
+const STATS_MAX = 40;
+/** Binance spot tickers go twenty symbols a call: GET /api/v3/ticker/24hr weighs 2 for 1 to 20 symbols, 40 for 21 to 100, 80 for all */
+const BINANCE_SYMBOLS = 20;
+/** the kind of market as the library names it, where an exchange lists its tickers by kind */
+const LIBRARY_KIND: Record<Kind, string> = { spot: "spot", perp: "swap", future: "future" };
+/** the most bars one history reads, in one request: OKX's candles and Coinbase's take at most 300 a call */
+const BARS = 300;
+const BAR_MS: Record<CandleInterval, number> = { "5m": 300_000, "1h": 3_600_000, "1d": 86_400_000 };
 
 const obj = (v: unknown): Dict => (v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Dict) : {});
 const str = (v: unknown): string | undefined => (typeof v === "string" && v !== "" ? v : typeof v === "number" ? String(v) : undefined);
@@ -87,6 +105,11 @@ const finite = (v: unknown): number | undefined => (typeof v === "number" && Num
 const yes = (v: unknown): boolean => v === true || v === "true";
 const positive = (x: number | undefined): x is number => x !== undefined && Number.isFinite(x) && x > 0;
 const and = (xs: string[]): string => (xs.length < 2 ? xs.join("") : `${xs.slice(0, -1).join(", ")} and ${xs[xs.length - 1]}`);
+/** a time in milliseconds (a number, or digits in a string) as ISO 8601 */
+const isoAt = (v: unknown): string | undefined => {
+  const ms = finite(v);
+  return ms !== undefined && ms > 0 ? new Date(ms).toISOString() : undefined;
+};
 
 /** a precision as the step it stands for; `undefined` when the exchange counts significant digits, which have no fixed step */
 function stepOf(p: unknown, mode: number): number | undefined {
@@ -313,7 +336,9 @@ export function exchangeTrader(client: ExchangeClient, venue: string, name: stri
     const qtyStep = stepOf(precision.amount, mode);
     const minQty = pos(obj(limits.amount).min);
     const minNotional = pos(obj(limits.cost).min);
-    const expiry = str(r.expiryDatetime)?.slice(0, 10);
+    // a dated future stops trading at its expiry, which the library gives as expiryDatetime (and expiry, in milliseconds)
+    const expires = kind === "future" ? (str(r.expiryDatetime) ?? isoAt(r.expiry)) : undefined;
+    const expiry = expires?.slice(0, 10);
     const pair = `${base}/${quote}`;
     const label = kind === "spot" ? `${pair} spot` : `${pair} ${kind === "perp" ? "perpetual" : `future${expiry ? ` to ${expiry}` : ""}`}${settle && settle !== quote ? `, settled in ${settle}` : ""}`;
     const t = tradable(r, symbol);
@@ -331,6 +356,7 @@ export function exchangeTrader(client: ExchangeClient, venue: string, name: stri
       ...(priceStep !== undefined ? { priceStep } : {}),
       ...(minNotional !== undefined ? { minNotional } : {}),
       ...(kind !== "spot" ? { contractSize: pos(r.contractSize) ?? 1 } : {}),
+      ...(expires ? { closeTime: expires } : {}),
       open: t.open,
       ...(note ? { note } : {}),
       types: more.types,
@@ -343,8 +369,9 @@ export function exchangeTrader(client: ExchangeClient, venue: string, name: stri
     };
   }
 
-  /** one market by the library's symbol (any case), or the reason it is not one the account trades */
-  const find = async (symbol: string): Promise<{ m: Market; raw: Dict; kind: Kind } | Refusal> => {
+  /** one market by the library's symbol (any case), or the reason it is not one the account trades. `reading`: only its prices are read,
+   * which a key that may not trade it does not stop */
+  const find = async (symbol: string, reading = false): Promise<{ m: Market; raw: Dict; kind: Kind } | Refusal> => {
     const failed = await load();
     if (failed) return failed;
     const s = symbol.trim();
@@ -356,7 +383,7 @@ export function exchangeTrader(client: ExchangeClient, venue: string, name: stri
     if (!kind) return no("E_VENUE_REJECTED", { venue, message: `${sym} is ${r.option === true ? "an option" : `a ${String(r.type ?? "market")} market`} at ${name}: the account trades spot markets and linear perpetuals and futures` });
     if (!inDollars(String(r.quote ?? ""))) return no("E_ACCOUNT_UNPRICED", { venue, message: `${sym} is priced in ${String(r.quote)}: the account trades markets priced in dollars, so that every limit means dollars` });
     if (!dollars(r, kind)) return no("E_ACCOUNT_UNPRICED", { venue, message: `${sym} is settled in ${String(r.settle)}: the account trades contracts settled in dollars, so that every limit means dollars` });
-    if (allowed(kind) === false) return no("E_VENUE_PERMISSION", { venue, message: `${name}: this key may not trade ${kind === "spot" ? "spot markets" : "perpetuals and futures"} (the exchange says it can: ${probe.can.join(", ")}). That is set on the key at the exchange`, detail: { said: probe.can } });
+    if (!reading && allowed(kind) === false) return no("E_VENUE_PERMISSION", { venue, message: `${name}: this key may not trade ${kind === "spot" ? "spot markets" : "perpetuals and futures"} (the exchange says it can: ${probe.can.join(", ")}). That is set on the key at the exchange`, detail: { said: probe.can } });
     return { m: toMarket(r, kind), raw: r, kind };
   };
 
@@ -921,6 +948,142 @@ export function exchangeTrader(client: ExchangeClient, venue: string, name: stri
     return no("E_VENUE_RAIL_CLOSED", { venue, message: `${name} sets no leverage from the account` });
   };
 
+  // ---- reading the market ----
+
+  /** a ticker's price: its last trade, or the middle of its book */
+  const priceOf = (t: Dict): { price?: number; bid?: number; ask?: number } => {
+    const bid = pos(t.bid);
+    const ask = pos(t.ask);
+    const price = pos(t.last) ?? pos(t.close) ?? (bid !== undefined && ask !== undefined ? (bid + ask) / 2 : (bid ?? ask));
+    return { ...(price !== undefined ? { price } : {}), ...(bid !== undefined ? { bid } : {}), ...(ask !== undefined ? { ask } : {}) };
+  };
+
+  /** What a ticker says of the last 24 hours, at the five exchanges whose tickers the trader has read against their docs and the library's
+   * parsers: OKX (open24h, high24h, low24h, and volCcy24h — in the quote in spot; a contract's is in the coin, and the library leaves it out),
+   * Binance (priceChange, priceChangePercent, quoteVolume, highPrice, lowPrice: a rolling 24 hours, spot and futures), Bybit (price24hPcnt,
+   * prevPrice24h, turnover24h, highPrice24h, lowPrice24h), Coinbase (its list of products' price_percentage_change_24h and
+   * approximate_quote_24h_volume: one product's own ticker has neither) and Kraken (the last 24 hours of its volume, its VWAP, its high and
+   * its low — and no change: its `o` is today's opening price, at midnight UTC, not the price 24 hours ago). The library works out a change
+   * or a percentage from the exchange's own 24-hour open, or its percentage, and its last price, where the exchange gives those instead.
+   * Elsewhere nothing is said of the 24 hours: an exchange's "open" may be the day's, and its volume may be counted in contracts */
+  const dayOf = (t: Dict, quote: string): Omit<MarketStats, "price"> => {
+    if (fam === undefined) return {};
+    const changes = fam !== "kraken";
+    const pct = changes ? finite(t.percentage) : undefined;
+    const change = changes ? finite(t.change) : undefined;
+    const volume = inDollars(quote) ? finite(t.quoteVolume) : undefined;
+    const high = pos(t.high);
+    const low = pos(t.low);
+    return { ...(pct !== undefined ? { changePct24h: pct } : {}), ...(change !== undefined ? { change24h: change } : {}), ...(volume !== undefined && volume >= 0 ? { volumeUsd24h: volume } : {}), ...(high !== undefined ? { high24h: high } : {}), ...(low !== undefined ? { low24h: low } : {}) };
+  };
+
+  /** A perpetual's funding rate for the period being paid next, and when it is paid: OKX GET /api/v5/public/funding-rate (fundingRate,
+   * fundingTime), Binance GET /fapi/v1/premiumIndex (lastFundingRate, nextFundingTime), as the library reads them. Bybit's ticker for a
+   * perpetual carries both already (v5 Get Tickers: fundingRate, nextFundingTime), which is what the library's own call would ask again.
+   * Elsewhere none is said. A rate that does not come back leaves the market without one: it is not why a market cannot be seen */
+  const fundingOf = async (symbol: string, ticker: Dict): Promise<Pick<Market, "fundingRate" | "nextFundingAt">> => {
+    const said = (rate: unknown, at: unknown) => {
+      const fundingRate = finite(rate);
+      const nextFundingAt = isoAt(at);
+      return fundingRate === undefined ? {} : { fundingRate, ...(nextFundingAt ? { nextFundingAt } : {}) };
+    };
+    if (fam === "bybit") {
+      const info = obj(ticker.info);
+      if (finite(info.fundingRate) !== undefined) return said(info.fundingRate, info.nextFundingTime);
+    }
+    if (!(fam === "okx" || fam === "binance" || fam === "bybit") || !able("fetchFundingRate")) return {};
+    try {
+      const f = obj(await client.fetchFundingRate!(symbol));
+      return said(f.fundingRate, f.fundingTimestamp);
+    } catch {
+      return {};
+    }
+  };
+
+  /** The last 24 hours of many markets, by the library's own symbol for each: only markets the account offers here (dollar markets, open
+   * now), at most forty; with no symbols, the well-known coins' spot markets and perpetuals. One fetchTickers per kind of market, so that
+   * no call mixes them (OKX lists its tickers by instType, Bybit by category, and the library takes a call's kind from its first symbol),
+   * and OKX, Binance and Bybit are told the kind as well. Binance is never asked for its whole list: its spot markets go twenty at a time,
+   * and its futures one at a time, as GET /fapi/v1/ticker/24hr takes one symbol or none (the library asks it for all). Kraken is given only
+   * the pairs the library counts as active, the only ones it would ask for. A kind that does not answer leaves the others standing */
+  const stats = async (symbols?: string[]): Promise<Map<string, MarketStats> | Refusal> => {
+    const failed = await load();
+    if (failed) return failed;
+    const asked = symbols ? [...new Set(symbols.map((s) => s.trim().toUpperCase()).filter(Boolean))] : undefined;
+    if (asked && asked.length > STATS_MAX) return no("E_VENUE_REJECTED", { venue, message: `${name}: at most ${STATS_MAX} markets are read at once, not ${asked.length}`, detail: { max: STATS_MAX } });
+    const offered = new Map(list.map((m) => [m.symbol.toUpperCase(), m]));
+    const wanted = asked ? asked.map((s) => offered.get(s)).filter((m): m is Market => m !== undefined) : list.filter((m) => WELL_KNOWN.includes(m.base) && m.kind !== "future").slice(0, STATS_MAX);
+    const out = new Map<string, MarketStats>();
+    let refused: Refusal | undefined;
+    for (const kind of ["spot", "perp", "future"] as const) {
+      let group = wanted.filter((m) => m.kind === kind);
+      if (id === "kraken") group = group.filter((m) => all.get(m.symbol)?.active === true);
+      if (!group.length) continue;
+      const rows: Record<string, unknown> = {};
+      const oneByOne = (fam === "binance" && kind !== "spot") || !able("fetchTickers");
+      if (oneByOne) {
+        if (!client.fetchTicker) continue;
+        for (const m of group) {
+          try {
+            rows[m.symbol] = await client.fetchTicker(m.symbol);
+          } catch (err) {
+            const r = fail(err);
+            refused ??= r;
+            if (final(r)) break;
+          }
+        }
+      } else {
+        const size = fam === "binance" ? BINANCE_SYMBOLS : group.length;
+        const params = fam === "okx" || fam === "binance" || fam === "bybit" ? { type: LIBRARY_KIND[kind] } : undefined;
+        for (let i = 0; i < group.length; i += size) {
+          const chunk = group.slice(i, i + size).map((m) => m.symbol);
+          try {
+            Object.assign(rows, await (params ? client.fetchTickers!(chunk, params) : client.fetchTickers!(chunk)));
+          } catch (err) {
+            const r = fail(err);
+            refused ??= r;
+            if (final(r)) break;
+          }
+        }
+      }
+      for (const m of group) {
+        const t = rows[m.symbol];
+        if (t === undefined || t === null) continue;
+        const { price } = priceOf(obj(t));
+        out.set(m.symbol, { ...(price !== undefined ? { price } : {}), ...dayOf(obj(t), m.quote) });
+      }
+    }
+    return !out.size && refused ? refused : out;
+  };
+
+  /** Price history (fetchOHLCV): the latest bars since `sinceMs`, at most 300, oldest first, in one request. A bar's volume is in the coin,
+   * where the library counts it so: any spot market's, and OKX's, Binance's and Bybit's linear contracts' (OKX's from its volume in the coin,
+   * not in contracts; Bybit's linear contract is one coin). Elsewhere a contract's volume may be counted in contracts, and none is said */
+  const candles = async (symbol: string, interval: CandleInterval, sinceMs: number): Promise<Candle[] | Refusal> => {
+    if (!CANDLE_INTERVALS.includes(interval)) return no("E_VENUE_REJECTED", { venue, message: `${name}: price history comes in bars of ${and([...CANDLE_INTERVALS])}, not ${String(interval)}` });
+    if (!(Number.isFinite(sinceMs) && sinceMs >= 0)) return no("E_VENUE_REJECTED", { venue, message: `${name}: a price history starts at a time, in milliseconds` });
+    const f = await find(symbol, true);
+    if (isRefusal(f)) return f;
+    if (!able("fetchOHLCV")) return no("E_VENUE_RAIL_CLOSED", { venue, message: `${name} has no price history the library can read` });
+    if (client.timeframes !== undefined && obj(client.timeframes)[interval] === undefined) return no("E_VENUE_RAIL_CLOSED", { venue, message: `${name} keeps no ${interval} bars` });
+    const from = Math.max(Math.floor(sinceMs), now() - BARS * BAR_MS[interval]);
+    let rows: unknown[];
+    try {
+      rows = await client.fetchOHLCV!(f.m.symbol, interval, from, BARS);
+    } catch (err) {
+      return fail(err);
+    }
+    const inCoin = f.kind === "spot" || fam === "okx" || fam === "binance" || fam === "bybit";
+    const bars = new Map<number, Candle>();
+    for (const r of Array.isArray(rows) ? rows : []) {
+      if (!Array.isArray(r)) continue;
+      const [t, o, h, l, c, v] = [finite(r[0]), pos(r[1]), pos(r[2]), pos(r[3]), pos(r[4]), finite(r[5])];
+      if (t === undefined || t < from || o === undefined || h === undefined || l === undefined || c === undefined) continue;
+      bars.set(t, { t, o, h, l, c, ...(inCoin && v !== undefined && v >= 0 ? { v } : {}) });
+    }
+    return [...bars.values()].sort((a, b) => a.t - b.t);
+  };
+
   const trader: LiveTrader = {
     can: (() => {
       const kinds = [allowed("spot"), ...(contractsHere ? [allowed("perp")] : [])];
@@ -941,17 +1104,17 @@ export function exchangeTrader(client: ExchangeClient, venue: string, name: stri
       const f = await find(symbol);
       if (isRefusal(f)) return f;
       if (!client.fetchTicker) return f.m;
+      let t: Dict;
       try {
         // the fresh price: the exchange's ticker (OKX GET /api/v5/market/ticker, Binance GET /api/v3/ticker/24hr, Bybit GET /v5/market/tickers…)
-        const t = obj(await client.fetchTicker(f.m.symbol));
-        const bid = pos(t.bid);
-        const ask = pos(t.ask);
-        const last = pos(t.last) ?? pos(t.close);
-        const price = last ?? (bid !== undefined && ask !== undefined ? (bid + ask) / 2 : (bid ?? ask));
-        return { ...f.m, ...(price !== undefined ? { price } : {}), ...(bid !== undefined ? { bid } : {}), ...(ask !== undefined ? { ask } : {}) };
+        t = obj(await client.fetchTicker(f.m.symbol));
       } catch (err) {
         return fail(err);
       }
+      // the same ticker's last 24 hours, where the trader has read it (a Market carries no high or low); a perpetual's funding
+      const { changePct24h, change24h, volumeUsd24h } = dayOf(t, f.m.quote);
+      const funding = f.kind === "perp" ? await fundingOf(f.m.symbol, t) : {};
+      return { ...f.m, ...priceOf(t), ...(changePct24h !== undefined ? { changePct24h } : {}), ...(change24h !== undefined ? { change24h } : {}), ...(volumeUsd24h !== undefined ? { volumeUsd24h } : {}), ...funding };
     },
 
     async place(o: OrderRequest) {
@@ -1088,5 +1251,22 @@ export function exchangeTrader(client: ExchangeClient, venue: string, name: stri
     if (client.has?.fetchPositions === true && typeof lib.fetchPositions === "function") trader.positions = positions;
     if (client.has?.setLeverage === true && typeof lib.setLeverage === "function") trader.setLeverage = setLeverage;
   }
+  // reading the market: many tickers where the library reads them (one at a time where it reads only one), price history where it has it
+  if (able("fetchTickers") || typeof client.fetchTicker === "function") trader.stats = stats;
+  if (able("fetchOHLCV")) trader.candles = candles;
+  earnHooks.set(trader, { client, venue, name, key, can: [...probe.can] });
   return trader;
 }
+
+/** What the account's earn door (live/earn.ts) is handed of an exchange connected live: the trader's own client, under the same key, and
+ * what the exchange said the key may do. Earn speaks to the exchange through the client the orders go through, never a second one */
+export interface ExchangeEarnHook {
+  client: ExchangeClient;
+  venue: string;
+  name: string;
+  key: KeyFile;
+  can: string[];
+}
+const earnHooks = new WeakMap<LiveTrader, ExchangeEarnHook>();
+/** the earn hook of an exchange's trader, or nothing for any other trader */
+export const exchangeEarnHook = (t: LiveTrader | undefined): ExchangeEarnHook | undefined => (t ? earnHooks.get(t) : undefined);

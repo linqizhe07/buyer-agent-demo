@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { isRefusal, type Refusal } from "../../src/core/errors.ts";
+import { byAsset } from "../../src/portfolio/account/holdings.ts";
+import { liveAccount } from "../../src/portfolio/adapters/live.ts";
 import { alpacaSource } from "../../src/portfolio/live/alpaca.ts";
-import type { LiveTrader, Market, OrderRequest, OrderState } from "../../src/portfolio/live/trade.ts";
+import type { Candle, CandleInterval, LiveTrader, Market, MarketStats, OrderRequest, OrderState } from "../../src/portfolio/live/trade.ts";
 import type { Http, HttpReply, LiveSource } from "../../src/portfolio/live/types.ts";
 
 /** TRADING at Alpaca, against a stand-in for its Trading and Market Data APIs that records every request and answers what each test says.
@@ -25,7 +27,7 @@ const json = (body: unknown, status = 200): HttpReply => ({ status, body, text: 
 
 /** Alpaca as a stand-in: an answer by "METHOD url" (a list is answered in turn, its last one from then on); anything not set up is a 404.
  * The two reads made while connecting are answered here; once connected, a test may answer GET /v2/positions itself */
-async function alpaca(answers: Record<string, Answer | Answer[]> = {}, opts: { paper?: boolean } = {}): Promise<{ t: LiveTrader; seen: Req[]; reads: Req[]; source: LiveSource }> {
+async function alpaca(answers: Record<string, Answer | Answer[]> = {}, opts: { paper?: boolean; clock?: number } = {}): Promise<{ t: LiveTrader; seen: Req[]; reads: Req[]; source: LiveSource }> {
   const seen: Req[] = [];
   const host = opts.paper ? PAPER : LIVE;
   let connected = false;
@@ -42,7 +44,9 @@ async function alpaca(answers: Record<string, Answer | Answer[]> = {}, opts: { p
     if (next instanceof Error) throw next;
     return typeof next === "function" ? next(req) : next;
   };
-  const opened = await alpacaSource({ venue: "alpaca", label: "", reference: "credentials/alpaca/api-key.json", key: { keyId: KEY_ID, secret: SECRET, ...(opts.paper ? { paper: "true" } : {}) }, http });
+  // a Monday afternoon in New York, the day of the snapshots below, unless a test says another moment
+  const now = opts.clock ?? Date.parse("2026-10-05T19:53:20.000Z");
+  const opened = await alpacaSource({ venue: "alpaca", label: "", reference: "credentials/alpaca/api-key.json", key: { keyId: KEY_ID, secret: SECRET, ...(opts.paper ? { paper: "true" } : {}) }, http, clock: () => now });
   if (isRefusal(opened)) throw new Error(opened.message);
   connected = true;
   const reads = seen.splice(0);
@@ -108,6 +112,8 @@ describe("Alpaca's connection carries a trader", () => {
   it("with Alpaca's replace, its positions and its close; no leverage call, since Alpaca sets none per position", async () => {
     const { t, seen } = await alpaca();
     expect([typeof t.amend, typeof t.positions, typeof t.close, t.setLeverage, t.sent, t.requote]).toEqual(["function", "function", "function", undefined, undefined, undefined]);
+    // it reads the market — many at once, and price history — and lists no events: Alpaca has no event contracts
+    expect([typeof t.stats, typeof t.candles, t.events]).toEqual(["function", "function", undefined]);
     expect(seen).toEqual([]);
   });
 });
@@ -729,6 +735,23 @@ describe("what is held, and closing it", () => {
     expect(ps[2]!.native).toMatchObject({ symbol: "BTCUSD", asset_class: "crypto", qty_available: "0.0005", cost_basis: "42" });
   });
 
+  it("the balances: a coin by its base (BTCUSD is BTC, one row with BTC held elsewhere), a short as what it is — a negative amount worth what buying it back costs — never a positive holding", async () => {
+    const { source } = await alpaca({ [`GET ${LIVE}/v2/positions`]: json(POSITIONS.slice(0, 3)) });
+    const read = await source.read();
+    expect(read.map((b) => [b.asset, b.amount, b.usd, b.where, b.class])).toEqual([
+      ["USD", 2500.5, 2500.5, "cash", "cash"],
+      ["AAPL", 2, 348.58, "stocks", "equity"],
+      ["TSLA", -5, -1250, "stocks · short", "equity"],
+      ["BTC", 0.0005, 42.799, "crypto", "crypto"],
+    ]);
+    // as the account holds them: the short counts against the venue's total (Alpaca's equity is net of it), and is no row of what is held
+    const adapter = await liveAccount("alpaca", source, { connector: "live:alpaca", first: read });
+    const holdings = await adapter.read();
+    expect(holdings.reduce((sum, h) => sum + h.usd, 0)).toBeCloseTo(2500.5 + 348.58 - 1250 + 42.8, 2);
+    const rows = byAsset([{ id: "kraken", name: "Kraken", holdings: [{ asset: "XBT", amount: 1, usd: 85_000, class: "crypto", inTransit: false }] }, { id: "alpaca", name: "Alpaca", holdings: holdings.map((h) => ({ ...h, inTransit: false })) }]).rows;
+    expect(rows.map((r) => [r.key, r.amount])).toEqual([["crypto:BTC", 1.0005], ["cash:USD", 2500.5], ["equity:AAPL", 2]]);
+  });
+
   it("a position is named in words once the markets were read; a local-currency account's dollars come from its usd block", async () => {
     const lct = { ...POSITIONS[0]!, market_value: "5200", unrealized_pl: "866.71", usd: { avg_entry_price: "71.43", cost_basis: "333.33", current_price: "80.0", market_value: "400.00", unrealized_pl: "66.67" } };
     const { t } = await alpaca({
@@ -847,5 +870,122 @@ describe("Alpaca's refusals, in its own words", () => {
     // a body that repeats the key back is redacted before it is kept
     const echoed = await placing(json({ code: 40010001, message: `invalid key ${KEY_ID} with secret ${SECRET}` }, 422));
     expect(echoed.message).toBe("Alpaca: invalid key ••• with secret •••");
+  });
+});
+
+// ---- reading the market: snapshots and bars (Market Data API) ----------------------------------------------------------------------
+
+/** a bar as the Market Data API gives it: start, open, high, low, close, volume, trade count, VWAP */
+const bar = (t: string, o: number, h: number, l: number, c: number, v: number) => ({ t, o, h, l, c, v, n: 120, vw: (o + c) / 2 });
+/** a stock's snapshot (GET /v2/stocks/snapshots: keyed by symbol at the top) */
+const stockSnap = (p: number, day: ReturnType<typeof bar> | undefined, prev: ReturnType<typeof bar> | undefined) => ({ latestTrade: { t: "2026-10-05T19:53:19.123Z", x: "V", p, s: 100, c: ["@"], i: 52983525029461, z: "C" }, latestQuote: { t: "2026-10-05T19:53:19.5Z", ax: "V", ap: p + 0.02, as: 1, bx: "V", bp: p - 0.02, bs: 2, c: ["R"], z: "C" }, minuteBar: bar("2026-10-05T19:52:00Z", p, p, p, p, 300), ...(day ? { dailyBar: day } : {}), ...(prev ? { prevDailyBar: prev } : {}) });
+/** a pair's snapshot (GET /v1beta3/crypto/us/snapshots: under `snapshots`) */
+const coinSnap = (p: number) => ({ latestTrade: { t: "2026-10-05T19:53:19.1Z", p, s: 0.01, i: 1, tks: "B" }, latestQuote: { t: "2026-10-05T19:53:19.2Z", bp: p - 5, bs: 1, ap: p + 5, as: 1 }, minuteBar: bar("2026-10-05T19:52:00Z", p, p, p, p, 0.5), dailyBar: bar("2026-10-05T00:00:00Z", p - 500, p + 100, p - 600, p, 12), prevDailyBar: bar("2026-10-04T00:00:00Z", p - 900, p - 300, p - 1000, p - 500, 40) });
+const STOCK_SNAPS = `${DATA}/v2/stocks/snapshots?symbols=SPY,QQQ,AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA`;
+const COIN_SNAPS = `${DATA}/v1beta3/crypto/us/snapshots?symbols=BTC/USD,ETH/USD,SOL/USD`;
+
+describe("reading the market: many markets at once (snapshots)", () => {
+  it("no symbols: the well-known stocks and pairs, one snapshots request each; a stock's latest session against the one before, a coin's price only", async () => {
+    const { t, seen } = await alpaca({
+      [`GET ${STOCK_SNAPS}`]: json({ AAPL: stockSnap(201.62, bar("2026-10-05T04:00:00Z", 200.1, 202.3, 199.8, 201.5, 41234567), bar("2026-10-02T04:00:00Z", 198, 200.5, 197.2, 200, 52345678)), SPY: stockSnap(571.3, bar("2026-10-05T04:00:00Z", 569, 572, 568.5, 571.25, 30000000), bar("2026-10-02T04:00:00Z", 572, 574, 570, 573.75, 35000000)) }),
+      [`GET ${COIN_SNAPS}`]: json({ snapshots: { "BTC/USD": coinSnap(85573.7) } }),
+    });
+    const s = ok(await t.stats!());
+    expect(calls(seen)).toEqual([`GET ${STOCK_SNAPS}`, `GET ${COIN_SNAPS}`]);
+    // the key's two headers go to the market-data host too, so its own feed is used, as for a quote
+    expect(seen.every((r) => r.headers["APCA-API-KEY-ID"] === KEY_ID && r.headers["APCA-API-SECRET-KEY"] === SECRET)).toBe(true);
+    expect(Object.fromEntries(s)).toEqual({
+      // no volume for a stock: on a key without a subscription the feed is IEX's alone, and the answer does not say which
+      AAPL: { price: 201.62, change24h: 1.5, changePct24h: 0.75, high24h: 202.3, low24h: 199.8 },
+      SPY: { price: 571.3, change24h: -2.5, changePct24h: -0.4357298475, high24h: 572, low24h: 568.5 },
+      // a coin's daily bar is the calendar day so far, not the last 24 hours: its price only
+      "BTC/USD": { price: 85573.7 },
+    } satisfies Record<string, MarketStats>);
+  });
+
+  it("symbols: stocks by ticker and dollar pairs, upper-cased and once each; a pair priced in a coin, or no symbol at all, is not asked for", async () => {
+    const { t, seen } = await alpaca({
+      [`GET ${DATA}/v2/stocks/snapshots?symbols=AAPL,BRK.B`]: json({ AAPL: stockSnap(201.62, bar("2026-10-05T04:00:00Z", 200.1, 202.3, 199.8, 201.5, 1), undefined) }),
+      [`GET ${DATA}/v1beta3/crypto/us/snapshots?symbols=BTC/USD,ETH/USDT`]: json({ snapshots: { "ETH/USDT": coinSnap(2400) } }),
+    });
+    const s = ok(await t.stats!(["aapl", "ETH/BTC", "btc/usd", "not a symbol", "AAPL", "brk.b", "eth/usdt"]));
+    expect(calls(seen)).toEqual([`GET ${DATA}/v2/stocks/snapshots?symbols=AAPL,BRK.B`, `GET ${DATA}/v1beta3/crypto/us/snapshots?symbols=BTC/USD,ETH/USDT`]);
+    // no session before it: a price, and no change; the high and low of its session
+    expect(Object.fromEntries(s)).toEqual({ AAPL: { price: 201.62, high24h: 202.3, low24h: 199.8 }, "ETH/USDT": { price: 2400 } });
+    const stocksOnly = await alpaca({ [`GET ${DATA}/v2/stocks/snapshots?symbols=TSLA`]: json({}) });
+    expect(ok(await stocksOnly.t.stats!(["TSLA"])).size).toBe(0);
+    expect(calls(stocksOnly.seen)).toEqual([`GET ${DATA}/v2/stocks/snapshots?symbols=TSLA`]);
+  });
+
+  it("a change is said only when both sessions are there and the latest is the later one; a stock with no trade is priced at its session's close", async () => {
+    const { t } = await alpaca({
+      [`GET ${DATA}/v2/stocks/snapshots?symbols=AAA,BBB`]: json({
+        AAA: { ...stockSnap(10, bar("2026-10-02T04:00:00Z", 10, 10, 10, 10, 1), bar("2026-10-05T04:00:00Z", 9, 9, 9, 9, 1)) },
+        BBB: { dailyBar: bar("2026-10-05T04:00:00Z", 20, 21, 19.5, 20.5, 1), prevDailyBar: bar("2026-10-02T04:00:00Z", 19, 20, 18, 20, 1) },
+      }),
+    });
+    const s = ok(await t.stats!(["AAA", "BBB"]));
+    // AAA's latest bar is Friday's (the one after it is not the later one): no session of today, so its price only
+    expect(s.get("AAA")).toEqual({ price: 10 });
+    expect(s.get("BBB")).toEqual({ price: 20.5, change24h: 0.5, changePct24h: 2.5, high24h: 21, low24h: 19.5 });
+  });
+
+  it("a session that is not today's in New York is not the last 24 hours: on Sunday, Friday's 8% is no change at all; Monday, once its session has a bar, it is", async () => {
+    const FRIDAY = { FRI: stockSnap(108, bar("2026-10-02T04:00:00Z", 100, 109, 99, 108, 1), bar("2026-10-01T04:00:00Z", 99, 101, 98, 100, 1)) };
+    const sunday = await alpaca({ [`GET ${DATA}/v2/stocks/snapshots?symbols=FRI`]: json(FRIDAY) }, { clock: Date.parse("2026-10-04T18:00:00.000Z") });
+    expect(ok(await sunday.t.stats!(["FRI"])).get("FRI")).toEqual({ price: 108 });
+    // a minute before midnight in New York on Friday (04:00Z on Saturday) it is still Friday's session
+    const late = await alpaca({ [`GET ${DATA}/v2/stocks/snapshots?symbols=FRI`]: json(FRIDAY) }, { clock: Date.parse("2026-10-03T03:59:00.000Z") });
+    expect(ok(await late.t.stats!(["FRI"])).get("FRI")).toEqual({ price: 108, change24h: 8, changePct24h: 8, high24h: 109, low24h: 99 });
+  });
+
+  it("one request that does not answer leaves the other standing; when none answers, Alpaca's own no is the answer; more than a hundred are refused before anything is asked", async () => {
+    const sip = json({ code: 40310000, message: "subscription does not permit querying recent SIP data" }, 403);
+    const half = await alpaca({ [`GET ${STOCK_SNAPS}`]: sip, [`GET ${COIN_SNAPS}`]: json({ snapshots: { "ETH/USD": coinSnap(2400) } }) });
+    expect(Object.fromEntries(ok(await half.t.stats!()))).toEqual({ "ETH/USD": { price: 2400 } });
+    const none = await alpaca({ [`GET ${STOCK_SNAPS}`]: sip, [`GET ${COIN_SNAPS}`]: json({ message: "internal server error" }, 500) });
+    const r = refusal(await none.t.stats!());
+    expect([r.code, r.message]).toEqual(["E_VENUE_PERMISSION", "Alpaca: subscription does not permit querying recent SIP data"]);
+    const many = await alpaca();
+    const big = refusal(await many.t.stats!(Array.from({ length: 101 }, (_, i) => `S${i}`)));
+    expect([big.code, big.message, many.seen.length]).toEqual(["E_VENUE_REJECTED", "Alpaca: at most 100 markets are read at once, not 101", 0]);
+  });
+});
+
+describe("reading the market: price history (bars)", () => {
+  const SINCE = Date.parse("2026-10-05T16:53:20.000Z");
+  const START = encodeURIComponent("2026-10-05T16:53:20Z");
+
+  it("a stock's hourly bars: GET /v2/stocks/bars, the latest 300 since the start (sort desc, no end and no feed: Alpaca's own for the key), oldest first, volume in shares", async () => {
+    const url = `${DATA}/v2/stocks/bars?symbols=AAPL&timeframe=1Hour&start=${START}&limit=300&sort=desc`;
+    const { t, seen } = await alpaca({ [`GET ${url}`]: json({ bars: { AAPL: [bar("2026-10-05T19:00:00Z", 201.2, 201.8, 201.1, 201.62, 1500000), bar("2026-10-05T18:00:00Z", 200.9, 201.4, 200.7, 201.2, 1800000), bar("2026-10-05T17:00:00Z", 200.5, 201, 200.4, 200.9, 2100000)] }, next_page_token: null, currency: "USD" }) });
+    const bars = ok(await t.candles!("aapl", "1h", SINCE));
+    expect(calls(seen)).toEqual([`GET ${url}`]);
+    expect(seen[0]!.headers).toMatchObject(AUTH);
+    expect(bars).toEqual([
+      { t: Date.parse("2026-10-05T17:00:00Z"), o: 200.5, h: 201, l: 200.4, c: 200.9, v: 2100000 },
+      { t: Date.parse("2026-10-05T18:00:00Z"), o: 200.9, h: 201.4, l: 200.7, c: 201.2, v: 1800000 },
+      { t: Date.parse("2026-10-05T19:00:00Z"), o: 201.2, h: 201.8, l: 201.1, c: 201.62, v: 1500000 },
+    ] satisfies Candle[]);
+  });
+
+  it("a pair's five-minute and daily bars: GET /v1beta3/crypto/us/bars, the pair keeping its slash, volume in coins", async () => {
+    const five = `${DATA}/v1beta3/crypto/us/bars?symbols=BTC/USD&timeframe=5Min&start=${START}&limit=300&sort=desc`;
+    const day = `${DATA}/v1beta3/crypto/us/bars?symbols=BTC/USD&timeframe=1Day&start=${START}&limit=300&sort=desc`;
+    const { t, seen } = await alpaca({ [`GET ${five}`]: json({ bars: { "BTC/USD": [bar("2026-10-05T19:50:00Z", 85560, 85580, 85550, 85573.7, 0.42)] }, next_page_token: null }), [`GET ${day}`]: json({ bars: {}, next_page_token: null }) });
+    expect(ok(await t.candles!("BTC/USD", "5m", SINCE))).toEqual([{ t: Date.parse("2026-10-05T19:50:00Z"), o: 85560, h: 85580, l: 85550, c: 85573.7, v: 0.42 }]);
+    expect(ok(await t.candles!("BTC/USD", "1d", SINCE))).toEqual([]);
+    expect(calls(seen)).toEqual([`GET ${five}`, `GET ${day}`]);
+  });
+
+  it("refused before anything is asked: a bar size not offered, a start that is not a time, a pair priced in a coin, a symbol that is none; Alpaca's own no in its words", async () => {
+    const { t, seen } = await alpaca({ [`GET ${DATA}/v2/stocks/bars?symbols=AAPL&timeframe=1Day&start=${START}&limit=300&sort=desc`]: json({ code: 40310000, message: "subscription does not permit querying recent SIP data" }, 403) });
+    const size = refusal(await t.candles!("AAPL", "1w" as CandleInterval, SINCE));
+    const start = refusal(await t.candles!("AAPL", "1h", -1));
+    const coin = refusal(await t.candles!("ETH/BTC", "1h", SINCE));
+    const none = refusal(await t.candles!("not a symbol", "1h", SINCE));
+    expect([size.message, start.message, coin.code, none.message, seen.length]).toEqual(["Alpaca: price history comes in bars of 5m, 1h, 1d, not 1w", "Alpaca: a price history starts at a time, in milliseconds", "E_ACCOUNT_UNPRICED", 'Alpaca lists no market "not a symbol": a stock is its ticker (AAPL), a coin a pair (BTC/USD)', 0]);
+    const theirs = refusal(await t.candles!("AAPL", "1d", SINCE));
+    expect([theirs.code, theirs.message]).toEqual(["E_VENUE_PERMISSION", "Alpaca: subscription does not permit querying recent SIP data"]);
   });
 });

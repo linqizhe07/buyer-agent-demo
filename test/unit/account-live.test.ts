@@ -405,7 +405,7 @@ const ADDRESS = "0x00000000000000000000000000000000000000a1";
 const json = (body: unknown, status = 200) => ({ status, body, text: JSON.stringify(body) });
 
 describe("a brokerage account at Alpaca", () => {
-  it("is read with two GETs and the two key headers; cash and positions come back as the broker reports them", async () => {
+  it("is read with two GETs and the two key headers; cash and positions come back as the broker reports them, a coin by its base (BTCUSD is BTC)", async () => {
     const seen: Array<{ url: string; headers: Record<string, string> }> = [];
     const http: Http = async (url, init = {}) => {
       seen.push({ url, headers: init.headers ?? {} });
@@ -421,7 +421,7 @@ describe("a brokerage account at Alpaca", () => {
     expect(seen[0]!.headers).toMatchObject({ "APCA-API-KEY-ID": "made-up-id", "APCA-API-SECRET-KEY": "made-up-secret-0002" });
     const v = (await x.venue("alpaca"))!;
     expect([v.frontLine, v.live, v.watchOnly]).toEqual(["Stocks", true, "Live · read-only"]);
-    expect(v.holdings.map((h) => [h.asset, h.amount, h.usd, h.note])).toEqual([["USD", 5500.25, 5500.25, "cash"], ["NVDA", 20, 3000, "stocks"], ["BTCUSD", 0.01, 620, "crypto"]]);
+    expect(v.holdings.map((h) => [h.asset, h.amount, h.usd, h.note])).toEqual([["USD", 5500.25, 5500.25, "cash"], ["NVDA", 20, 3000, "stocks"], ["BTC", 0.01, 620, "crypto"]]);
 
     // a paper account is a different host; a key the broker does not know is the broker's no
     const y = await boot({ http });
@@ -450,6 +450,8 @@ describe("a Kalshi account", () => {
         checked.push(`${path}${new URL(url).search}:${ok}`);
         if (!ok || h["KALSHI-ACCESS-KEY"] !== "made-up-key-id") return json({ error: "unauthorized" }, 401);
         if (path.endsWith("/portfolio/balance")) return json({ balance: 61025, portfolio_value: 9000 });
+        // the held markets, for what the positions are worth now: Kalshi reports only what they cost
+        if (path.endsWith("/markets")) return json({ markets: [{ ticker: "KXBTC-26DEC", status: "active", yes_bid_dollars: "0.6900", yes_ask_dollars: "0.7100", last_price_dollars: "0.7000", result: "" }, { ticker: "FED-DEC-HIKE25", status: "active", yes_bid_dollars: "0.2400", yes_ask_dollars: "0.2600", last_price_dollars: "0.2500", result: "" }], cursor: "" });
         if (new URL(url).searchParams.get("cursor") === "next") return json({ market_positions: [{ ticker: "FED-DEC-HIKE25", position_fp: "-40.00", market_exposure_dollars: "12.40" }], cursor: "" });
         return json({ market_positions: [{ ticker: "KXBTC-26DEC", position_fp: "150.00", market_exposure_dollars: "97.50" }, { ticker: "FLAT", position_fp: "0.00", market_exposure_dollars: "0" }], cursor: "next" });
       };
@@ -457,11 +459,12 @@ describe("a Kalshi account", () => {
       x.keyFile("credentials/kalshi/api-key.json", { keyId: "made-up-key-id" });
       x.keyFile("credentials/kalshi/private-key.pem", pair.privateKey.export({ type: "pkcs8", format: "pem" }).toString());
       const said = summary(await x.connect("kalshi", "live:kalshi"));
-      expect(said).toContain("Kalshi connected live · $720.15 there now");
-      expect(checked).toEqual(["/trade-api/v2/portfolio/balance:true", "/trade-api/v2/portfolio/positions?limit=200:true", "/trade-api/v2/portfolio/positions?limit=200&cursor=next:true"]);
+      expect(said).toContain("Kalshi connected live · $745.25 there now");
+      expect(checked).toEqual(["/trade-api/v2/portfolio/balance:true", "/trade-api/v2/portfolio/positions?limit=200:true", "/trade-api/v2/portfolio/positions?limit=200&cursor=next:true", "/trade-api/v2/markets?tickers=KXBTC-26DEC,FED-DEC-HIKE25&limit=2:true"]);
       const v = (await x.venue("kalshi"))!;
-      // cash in dollars from cents; a negative position is a NO; a position is shown at what it cost, because that is what Kalshi reports
-      expect(v.holdings.map((h) => [h.asset, h.amount, h.usd, h.note])).toEqual([["USD", 610.25, 610.25, "cash"], ["KXBTC-26DEC:YES", 150, 97.5, "at cost"], ["FED-DEC-HIKE25:NO", 40, 12.4, "at cost"]]);
+      // cash in dollars from cents; a negative position is a NO; a position is worth its market's price now (NO's is 1 − YES's), and what it
+      // cost — all Kalshi reports for it — is said beside
+      expect(v.holdings.map((h) => [h.asset, h.amount, h.usd, h.note])).toEqual([["USD", 610.25, 610.25, "cash"], ["KXBTC-26DEC:YES", 150, 105, "at market · cost $97.50"], ["FED-DEC-HIKE25:NO", 40, 30, "at market · cost $12.40"]]);
     }
   });
 
@@ -481,7 +484,7 @@ describe("venues read by address", () => {
     const chain = fakeChain({ "Base:USDC": 210, "Arbitrum:USDC": 640, Ethereum: 0.25, "BNB Chain": 2 }, { down: ["Polygon"] });
     const x = await boot({ chain });
     const said = summary(await x.connect("wallet-0000a1", "live:wallet", ADDRESS, "OKX Wallet"));
-    expect(said).toBe("OKX Wallet connected live · $2,550.00 there now · watched, not proven yours: nobody signed for it · dollar stablecoins and each chain's own coin on Ethereum, Optimism, BNB Chain, Polygon, Base, Arbitrum, Robinhood Chain, and Robinhood's Stock Tokens (no answer this time: Polygon; Robinhood's Stock Token list did not answer) · read only: this server was started without real-money writes");
+    expect(said).toBe("OKX Wallet connected live · $2,550.00 there now · watched, not proven yours: nobody signed for it · dollar stablecoins and each chain's own coin on Ethereum, Optimism, BNB Chain, Polygon, Base, Arbitrum, Robinhood Chain, and Robinhood's Stock Tokens and the best-known Ondo Stocks and xStocks (no answer this time: Polygon; Robinhood's Stock Token list did not answer) · read only: this server was started without real-money writes");
     const v = (await x.venue("wallet-0000a1"))!;
     expect([v.frontLine, v.live, v.watchOnly, v.in.access, v.out.access]).toEqual(["On-chain", true, "Live · read-only", "closed", "closed"]);
     expect(v.holdings.map((h) => [h.asset, h.amount, h.usd, h.note])).toEqual([["BNB", 2, 1200, "BNB Chain"], ["USDC", 640, 640, "Arbitrum"], ["ETH", 0.25, 500, "Ethereum"], ["USDC", 210, 210, "Base"]]);
@@ -526,17 +529,17 @@ describe("venues read by address", () => {
     expect([no.code, no.message]).toEqual(["E_VENUE_GEOBLOCKED", "Hyperliquid does not serve this location: that is its own rule, and the account does not look for a way around it"]);
   });
 
-  it("Polymarket: positions from its data API page by page, cash from the token at the same address", async () => {
+  it("Polymarket: positions from its data API page by page, each named as an order there names it (<slug>:<outcome>, its question beside it) where the row gives its slug; cash from the token at the same address", async () => {
     const urls: string[] = [];
     const http: Http = async (url) => {
       urls.push(url);
-      return new URL(url).searchParams.get("cursor") ? json({ data: [{ title: "Government shutdown by year end", outcome: "No", current_size: 80, current_price: 1, current_value: 80, redeemable: true }], pagination: { next_cursor: null } }) : json({ data: [{ title: "Fed hikes 25 bps in December", outcome: "Yes", current_size: 600, current_price: 0.74, current_value: 444, status: "OPEN" }, { title: "Closed out", outcome: "Yes", current_size: 0, current_value: 0 }], pagination: { next_cursor: "p2" } });
+      return new URL(url).searchParams.get("cursor") ? json({ data: [{ title: "Government shutdown by year end", outcome: "No", current_size: 80, current_price: 1, current_value: 80, redeemable: true }], pagination: { next_cursor: null } }) : json({ data: [{ title: "Fed hikes 25 bps in December", slug: "fed-hikes-25-bps-in-december", outcome: "Yes", current_size: 600, current_price: 0.74, current_value: 444, status: "OPEN" }, { title: "Closed out", outcome: "Yes", current_size: 0, current_value: 0 }], pagination: { next_cursor: "p2" } });
     };
     const chain = fakeChain({ "Polygon:pUSD": 150.5 });
     const x = await boot({ http, chain });
     expect(summary(await x.connect("polymarket", "live:polymarket", ADDRESS))).toContain("Polymarket connected live · $674.50 there now");
     expect(urls).toEqual(["https://data-api.polymarket.com/v2/positions?user=0x00000000000000000000000000000000000000A1&limit=200", "https://data-api.polymarket.com/v2/positions?user=0x00000000000000000000000000000000000000A1&limit=200&cursor=p2"]);
-    expect((await x.venue("polymarket"))!.holdings.map((h) => [h.asset, h.amount, h.usd, h.note])).toEqual([["Fed hikes 25 bps in December · Yes", 600, 444, "open"], ["pUSD", 150.5, 150.5, "cash · Polygon"], ["Government shutdown by year end · No", 80, 80, "redeemable"]]);
+    expect((await x.venue("polymarket"))!.holdings.map((h) => [h.asset, h.amount, h.usd, h.note])).toEqual([["fed-hikes-25-bps-in-december:Yes", 600, 444, "Fed hikes 25 bps in December · open"], ["pUSD", 150.5, 150.5, "cash · Polygon"], ["Government shutdown by year end · No", 80, 80, "redeemable"]]);
     expect(chain.asked).toContain("tokens:0x00000000000000000000000000000000000000A1:Polygon:pUSD");
   });
 

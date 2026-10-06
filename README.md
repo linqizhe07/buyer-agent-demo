@@ -18,12 +18,14 @@ npm run account                 # Account（英文界面）：http://127.0.0.1:4
 npm run account -- --classic    # 原来的模拟对账单：组合钱包、关键词 agent、拆单（再加 --mm 读真 MetaMask / Polymarket）
 npm run portfolio:demo          # 组合钱包十个 beat，无头，exit 0 当且仅当没有断言失败
 npm run account:demo            # Account（资金的机场）十四个 beat，无头，exit 0 当且仅当没有断言失败
+#   两个终端 demo 默认各用一个新的临时 home（`--home` 或 `$BUYER_HOME` 可指定），不碰正在跑的 Account 的 home
+npx tsx test/standin/ui-standin.ts --port 4821   # 替身账户：真的 Account 页面、服务和门，场所全是替身，不联网、不动钱（终端打印配对码；拒绝 4820）
 npm run demo -- --fresh         # 擦掉默认 home 重新种子
 npm run control-room -- --replay ~/.buyer-agent-demo/runs/last.jsonl   # 不开 runner，回放上一次
 npm test                        # 单测 + e2e（spawn 一次完整 demo，断言 exit 0 与关键行）
 ```
 
-Node ≥ 22。端口：场所 4701–4704、签名器 4705、钱包 4706、控制台 4800、Account 4820。`$BUYER_HOME`（默认 `~/.buyer-agent-demo/`）是 home：凭据、授权书、账本、签名器策略、钱包状态都在那里，不在仓库里；授权书、账本、钱包余额每次运行从 `fixtures/home` 重新种子。
+Node ≥ 22。端口：场所 4701–4704、签名器 4705、钱包 4706、控制台 4800、Account 4820（替身账户另选一个空闲端口，从不用 4820）。`$BUYER_HOME`（默认 `~/.buyer-agent-demo/`）是 home：凭据、授权书、账本、签名器策略、钱包状态都在那里，不在仓库里；授权书、账本、钱包余额每次运行从 `fixtures/home` 重新种子。
 
 终端行的意思：`✓ [层] …` 通过的检查；`✗ E_<层>_<原因> · …` 一次**拒绝**（设计，不是故障）；`FAIL …` 断言失败。错误码前缀就是拒绝的层：`E_MOUNT_` 清单审计、`E_MANDATE_` 授权书、`E_CARD_` 人、`E_WALLET_` 主钱包、`E_SIGNER_` 策略签名器、`E_VENUE_` 场所自己。
 
@@ -121,7 +123,7 @@ npm run portfolio:mcp                           # stdio MCP：agent 面（portfo
 ## Account：资金的机场（账户与收付款）
 
 ```bash
-npm run account                           # http://127.0.0.1:4820：一个页面，只认你真实的账户；能下单、能动钱（配对码在终端）
+npm run account                           # http://127.0.0.1:4820：一个桌面钱包页面，只认你真实的账户；能下单、能动钱（配对码在终端）
 npm run account -- --live-cap 50          # 每一单、每一笔最多 $50（默认 $100）
 npm run account -- --read-only            # 只读：不下单、不动钱
 npm run account -- --fresh                # 从零开始：不接着以前的运行（默认会接着，见下）
@@ -130,17 +132,20 @@ npm run account:demo                      # 无头：十四个 beat，每个 bea
 npm run portfolio:mcp                     # agent 的席位持一把 agent 钥匙，每次写都签名
 npx tsx examples/account/headless.ts      # 一个脚本从头走到尾：owner 签、agent 签、时间流逝，不起服务不开浏览器
 npx tsx examples/account/agent-seat.ts whoami   # 扮演一个 agent，对跑着的服务发签名指令
+npx tsx test/standin/ui-standin.ts --port 4821   # 替身账户：同一个页面和门，替身场所，种好了数据，能点到底（下面「替身账户」）
 ```
 
-做法手册在 [COOKBOOK.md](COOKBOOK.md)：每件事怎么做、会看到什么、什么会被拒，配两个能直接跑的示例（`examples/account/`）。
+做法手册在 [COOKBOOK.md](COOKBOOK.md)：每件事怎么做、会看到什么、什么会被拒，配两个能直接跑的示例（`examples/account/`）；给做 Agent 模块的团队的接口在它的「Agent 模块接口」一节。
 
 对账单和 Account 原来是两个页面，功能重叠，现在合成一个，就叫 Account。它回答两件事：你有多少钱、在哪里；**钱怎么进出每个场所，以及谁有权让它动**。它是 trading agent 和资金之间的机场：功能照 Hyperliquid 自己的账户页一项一项移过来，但门开在八个场所上（比原来多一个股票券商 Alpaca 和 Hyperliquid 自己），再加上买方账户需要、单个场所不需要的三样：支出授权，替 agent 回答对外付款协议，以及把用户已有的交易所钱包**即插即用**地接进来。界面是英文。
 
 **随时能被 agent 调用，动作空间开到最大。** 这一版补的是两件事：
 - **随时**：账户重启不丢。每次运行的账本第一行写明接着哪个文件，启动时顺着这条链重建：owner 的浏览器（不用再配对）、每一条你签过的长期指令（逐条重新验签后按原时间重放）、每份额度的用量、接过的账户（用当初签的同一个凭据引用重新接上）、没完成的单和在途的钱（只问不重发）、编号接着排。可以装成 launchd 后台服务。agent 的席位用自己生成、存在本机的钥匙，不再从名字推出来。`portfolio_wait` 等一张卡、一单、一笔钱变化，不用反复问。
-- **最大**：各场所接口支持的动作都开给 agent：市价、限价、止损、止损限价，有效期（GTC / IOC / FOK / DAY），只做 maker、只减仓，原地改单，持仓与平仓，永续杠杆（agent 不超过你签的倍数）；**付钱给别人**：agent 钱包（账户替它生成、钥匙在本机、agent 拿不到），按 x402 V1/V2 和 MPP charge 用 USDC 付，付没付成以链上为准；一个 agent 可以同时拿交易、挪钱、付款三份额度，页面上 "Everything" 一键勾满。守住的线不变：额度是你签的、`--live-cap`、随时撤销、钱只去你自己的地方（付款只付额度里的收款方）、各场所自己的地区规则不绕。
+- **最大**：各场所接口支持的动作都开给 agent：市价、限价、止损、止损限价，有效期（GTC / IOC / FOK / DAY），只做 maker、只减仓，原地改单，持仓与平仓，永续杠杆（agent 不超过你签的倍数）；**付钱给别人**：agent 钱包（账户替它生成、钥匙在本机、agent 拿不到），按 x402 V1/V2 和 MPP charge 用 USDC 付，付没付成以链上为准；一个 agent 可以同时拿交易、挪钱、付款三份额度（钱包这一轮又加了第四份 earn），页面上 "Everything" 一键勾满前三份。守住的线不变：额度是你签的、`--live-cap`、随时撤销、钱只去你自己的地方（付款只付额度里的收款方）、各场所自己的地区规则不绕。
 
-**页面上只有真的。** `npm run account` 起的服务里只有你经各家自己的接口接进来的账户：没有一个模拟场所，也没有模拟的插件、收款方和时钟。一开始账户是空的，页面就是一排可以接的场所（交易所、券商、钱包、预测市场与代币），点哪个就是哪个的接法。只动模拟钱的指令（场所间的模拟路由、swap、float、地址簿、对外付款、Unified、应用抽成）在门口就拒，回答里写明真钱走 `liveMove`（owner）或 `agentLiveMove`（agent）。银行和卡删掉了：银行要聚合商的生产资格，卡没有给个人的接口，没有接口的就不放进来。下面讲的路由、在途、float、收款方和十四个 beat，是终端 demo 与测试里那套模拟账户上的规则。
+**页面上只有真的。** `npm run account` 起的服务里只有你经各家自己的接口接进来的账户：没有一个模拟场所，也没有模拟的插件、收款方和时钟。一开始账户是空的：Portfolio 是三步清单（Connect an account → Connect an agent → Give it a limit），连接的目录是一排可以接的场所（交易所、券商、钱包、预测市场与代币），点哪个就是哪个的接法；Markets 里已经有不带钥匙读来的公开行情。只动模拟钱的指令（场所间的模拟路由、swap、float、地址簿、对外付款、Unified、应用抽成）在门口就拒，回答里写明真钱走 `liveMove`（owner）或 `agentLiveMove`（agent）。银行和卡删掉了：银行要聚合商的生产资格，卡没有给个人的接口，没有接口的就不放进来。下面讲的路由、在途、float、收款方和十四个 beat，是终端 demo 与测试里那套模拟账户上的规则。
+
+**一个桌面钱包：Portfolio · Markets · Trade，agent-native。** 页面从一条长滚动改成三根并列的支柱，蓝本是 MetaMask 移动端的 Home / Explore / Trade，区别是这里的主要行动者是 agent：人看、引导（意图、关注、额度、模式）、批。**Portfolio** 是你有什么（跨场所按资产汇总、净值曲线、成本价、等你批的事）；**Markets** 是有什么可以交易（接上的场所，加上没接的场所不带钥匙读来的真实公开行情，标 "Connect to trade"）；**Trade** 是交易本身（先选市场的下单票，按比价挑场所；预测、永续、两腿 Swap、Sell many、Earn、Move）。agent 的管理归另一个团队的 Agent 模块，它从 `ui/agents-mount.js` 的 `openAgents()` 挂进来；在那之前原来的 Agents、Agent wallets、Devices 三段原样放在 Agents 弹层里。规矩照旧：每个控件都经真的门做真的事，没有占位、没有样例数据；没有接口的就不画。先做了桌面版，窄屏的手机式布局（底栏、底部弹层）放在后面一期。
 
 ### 从 Hyperliquid 移过来的功能
 
@@ -158,7 +163,7 @@ npx tsx examples/account/agent-seat.ts whoami   # 扮演一个 agent，对跑着
 | Multi-Sig | **Signers**：设备钥匙、共同签名人、门槛 | owner |
 | Deposits and Withdrawals 页签 | **Payments**：每一笔的每一腿、状态、到账时间 | |
 
-没有移的：Link Staking、Earn、Vaults、Staking、Referrals、Outcomes、Portfolio Margin、法币入金小部件。**故意没抄的**：到期时间塞在 agent 名字里（这里是显式字段）；撤销后清掉 nonce 记录（这里不清，所以撤销过的钥匙不能复活）；Send 发往任何地址且没有地址簿；多签只验领签人的 nonce；低于最低额的入金直接丢失（这里在钱离开之前就拒绝）。
+没有移的：Link Staking、Earn、Vaults、Staking、Referrals、Outcomes、Portfolio Margin、法币入金小部件。（这里另有一个 Earn，但不是 Hyperliquid 的：它走 MetaMask Agent Wallet 的 `mm earn`、OKX Simple Earn 和 Kraken Earn，见 B 层的「Earn」。）**故意没抄的**：到期时间塞在 agent 名字里（这里是显式字段）；撤销后清掉 nonce 记录（这里不清，所以撤销过的钥匙不能复活）；Send 发往任何地址且没有地址簿；多签只验领签人的 nonce；低于最低额的入金直接丢失（这里在钱离开之前就拒绝）。
 
 ### 三层协议
 
@@ -191,25 +196,25 @@ owner 签的不只是意图：一笔划转的签名里带着**路线的哈希、
 
 终端 demo 里可插的四个（模拟的，只在 demo 和测试里；只认真实账户的服务器拒绝模拟连接器）：Bybit（`unified`，读和交易）、Kraken（`unified`，读、交易、提币，白名单里只有自己的链上钱包）、OKX 的第二个账户（`okx`，只读）、OKX Wallet（`wallet`，按地址）。
 
-**真实连接：你真的场所**（`src/portfolio/live/`、`account/live-moves.ts`、`account/live-orders.ts`、`adapters/live.ts`）。上面那四个是演示用的；这里接的是用户真实的账户。每个有接口的场所一种连接，页面 Accounts 里一行：
+**真实连接：你真的场所**（`src/portfolio/live/`、`account/live-moves.ts`、`account/live-orders.ts`、`adapters/live.ts`）。上面那四个是演示用的；这里接的是用户真实的账户。每个有接口的场所一种连接，Portfolio › Accounts 里一行：
 
 | 场所 | 怎么接 | 读 | 下单 | 动钱 |
 |---|---|---|---|---|
-| 交易所：OKX、Kraken、Coinbase、Binance、Bybit 等，统一接口库覆盖的一百来家 | 本机 home 目录里的钥匙文件（能交易、不能提币的 key） | 余额（交易与资金两个账本）、钥匙权限（OKX、Binance、Bybit、Coinbase 有接口说） | 现货和 U 本位永续；市价单按最差价格发成成交不了立即撤的限价单 | 提到你自己的地方、账本之间划转、稳定币互换 |
+| 交易所：OKX、Kraken、Coinbase、Binance、Bybit 等，统一接口库覆盖的一百来家 | 本机 home 目录里的钥匙文件（能交易、不能提币的 key） | 余额（交易与资金两个账本）、钥匙权限（OKX、Binance、Bybit、Coinbase 有接口说）、24 小时涨跌与成交额、K 线、资金费率；OKX Simple Earn 与 Kraken Earn 里的钱 | 现货和 U 本位永续；市价单按最差价格发成成交不了立即撤的限价单 | 提到你自己的地方、账本之间划转、稳定币互换；放进 / 取出 OKX Simple Earn Flexible、Kraken Earn（下面「Earn」） |
 | Alpaca | 钥匙文件（key 没有权限可选；先用 Paper） | 现金、持仓 | 美股、ETF、加密；市价单按最差价格发成限价单，收盘时只接限价单 | 无：它的 API 不动现金 |
 | Robinhood 投资账户 | Robinhood 自己的登录页（它的 Trading MCP 服务器，OAuth：动态注册、PKCE），令牌只在内存里 | 各账户的现金和股票持仓 | 只在 Agentic 账户里、整股；市价单按最差价格发成限价单 | 无：钱只在 Robinhood 自己的 app 里进出 |
 | Robinhood Crypto | 钥匙文件：API key 加你自己生成的 Ed25519 私钥 | 购买力、持仓，按 Robinhood 自己的中间价 | 加密；市价单按最差价格发成限价单 | 无：它的 API 不动钱 |
-| Kalshi | 钥匙 id 加私钥文件（RSA-PSS 或 Ed25519 签名；权限 `read` + `write::trade`） | 现金、持仓（按成本） | 事件合约，走 2026 年的 V2 下单接口（YES 腿上的买卖；它已经没有市价单，账户的"市价"是成交不了立即撤的限价单） | 无：它的 API 不动钱 |
+| Kalshi | 钥匙 id 加私钥文件（RSA-PSS 或 Ed25519 签名；权限 `read` + `write::trade`） | 现金、持仓（按它市场此刻的价格，已裁决的按 $1 或 $0；Kalshi 只报成本，成本写在旁边） | 事件合约，走 2026 年的 V2 下单接口（YES 腿上的买卖；它已经没有市价单，账户的"市价"是成交不了立即撤的限价单） | 无：它的 API 不动钱 |
 | Polymarket | 账户钱包的钥匙文件（Polymarket 钱包的还要 `funderAddress` 和 `signatureType`），或者只填地址看 | 持仓与 pUSD | 事件合约，CLOB V2 的签名订单；每接一次、每下一单之前先问 Polymarket 自己的地区检查，不服务就拒，不找别的路 | 无 |
-| 浏览器钱包：OKX Wallet、Binance Wallet、MetaMask 等 | EIP-6963 发现，钱包签一句话证明地址是你的 | 六条 EVM 链上的 USDC、USDT 和链上原生币；Robinhood Chain 上的 Stock Tokens | 链上换币：LI.FI 找路线，钱包自己签、自己发；买入时先授权到这一单最多花的钱 | 同链发送；**跨链**（下面） |
-| MetaMask Agent Wallet | 本机已登录的 `mm` 命令行 | 余额、Guard 策略 | `mm swap` 和 `mm predict`，还要 MetaMask 自己的开关 `PORTFOLIO_MM_WRITES=1`；从不传 `--yes` | `mm transfer`，同样要那个开关 |
+| 浏览器钱包：OKX Wallet、Binance Wallet、MetaMask 等 | EIP-6963 发现，钱包签一句话证明地址是你的 | 六条 EVM 链上的 USDC、USDT 和链上原生币；Robinhood Chain 上的 USDG 和 Stock Tokens；最常见的 Ondo Stocks 与 xStocks | 七条链上换币（六条对 USDC，Robinhood Chain 对 USDG）：LI.FI 找路线，钱包自己签、自己发；买入时先授权到这一单最多花的钱；**代币化股票**也在这里买卖（下面「RWA」） | 同链发送；**跨链**（下面） |
+| MetaMask Agent Wallet | 本机已登录的 `mm` 命令行 | 余额、Guard 策略、`mm earn` 金库里的钱 | `mm swap`、`mm predict`，和 Hyperliquid 永续 `mm perps`（先过它自己的地区线，下面「永续」），都还要 MetaMask 自己的开关 `PORTFOLIO_MM_WRITES=1`；从不传 `--yes` | `mm transfer`、`mm earn supply / withdraw`，同样要那个开关 |
 | Robinhood Wallet（自托管） | 地址（手机钱包，没有浏览器扩展，所以只能看，不能证明） | 同浏览器钱包，含 Stock Tokens | 无 | 无 |
-| Hyperliquid | 地址 | 永续与现货账本 | 无：它不服务这台机器所在的地区，也没有可以事先问的检查，不从这里下单，不找别的路 | 无 |
+| Hyperliquid | 地址 | 永续与现货账本 | 无：按地址接的这条只读。永续经 MetaMask Agent Wallet 的 `mm perps` 下（下面「永续」），每一单先按它自己的使用条款 §1.6 查这台机器在哪，不服务的地区就停下，不找别的路 | 无 |
 | Ondo（OUSG、rOUSG、USDY） | 地址 | 代币数量，按 Ondo 自己链上预言机的价格 | 无：申购赎回在 Ondo 那边 | 无：只能在 Ondo 白名单地址之间转 |
 
-**跨链**（`live/bridge.ts`、`live/wallet-bridge.ts`）：从你证明过的钱包，把美元稳定币挪到另一条链上：同一个钱包在那条链上、另一个证明过的钱包，或者你交易所在那条链上的充值地址。LI.FI 找路线（Across、Stargate、Circle 的 CCTP），每条路线在给钱包看之前，都对着它自己的 calldata 查一遍：付给的就是那个地址（LI.FI 的记录和桥合约自己的收款字段都要对上）、在链上合约算出的最少到账不低于 97%、不带目的链上的调用、带的原生币只是桥费。账户签的是最便宜的那条，执行前再问一次，手续费涨过签的就不发；钱包发出后，交易哈希对着构造的那笔核对（发送人、合约、调用、币、链），对不上不跟；到账以 LI.FI 和链说的为准（到了、换成另一种稳定币到了、退回、还在路上）。"Move…" 里的 "Across chains" 列出各条路线的费用、最少到账和大约多久；交易所提币时 "Fees on every network" 把每条链的手续费并排列出，点哪个就用哪条链。
+**跨链**（`live/bridge.ts`、`live/wallet-bridge.ts`）：从你证明过的钱包，把美元稳定币挪到另一条链上：同一个钱包在那条链上、另一个证明过的钱包，或者你交易所在那条链上的充值地址。LI.FI 找路线（Across、Stargate、Circle 的 CCTP），每条路线在给钱包看之前，都对着它自己的 calldata 查一遍：付给的就是那个地址（LI.FI 的记录和桥合约自己的收款字段都要对上）、在链上合约算出的最少到账不低于 97%、不带目的链上的调用、带的原生币只是桥费。账户签的是最便宜的那条，执行前再问一次，手续费涨过签的就不发；钱包发出后，交易哈希对着构造的那笔核对（发送人、合约、调用、币、链），对不上不跟；到账以 LI.FI 和链说的为准（到了、换成另一种稳定币到了、退回、还在路上）。"Move…" 里的 "Across chains" 列出各条路线的费用、最少到账和大约多久；交易所提币时 "Fees on every network" 把每条链的手续费并排列出，点哪个就用哪条链。Robinhood Chain（4663）上的美元是 Paxos 的 USDG，不是 USDC：往那里桥的是 USDG，走 Across（LI.FI 在这条链上只给这一座桥），而且 LI.FI 在那条链上的合约和别的链不是同一个地址，每一项检查都认钱离开的那条链的合约；没有桥能送的，LI.FI 自己的理由就是拒绝。桥进、桥出 Robinhood Chain 都走同一扇门：桥按它自己的链表（`BRIDGE_CHAINS`，含 Robinhood Chain）放行，直接发送和提币仍只在付美元的那六条链上。
 
-**比价**（`live/compare.ts`）：同一个币或同一只股票，在你接上的每个场所按这一单会成交的价格排（买看卖一，卖看买一）：BTC、XBT、WBTC、cbBTC 都算 BTC。四秒内没答的场所列在后面，离其他场所价格太远（超过 10%）的标出来让你核对，可能是同名的另一种代币。下单弹窗里市场一选好就显示别处的价格和 "Trade there"；agent 用 `portfolio_live_compare`。手续费不猜。
+**比价**（`live/compare.ts`）：同一个币或同一只股票，在你接上的每个场所按这一单会成交的价格排（买看卖一，卖看买一）：BTC、XBT、WBTC、cbBTC 都算 BTC。四秒内没答的场所列在后面，离其他场所价格太远（超过 10%）的标出来让你核对，可能是同名的另一种代币。下单票的 Where 就按它排：你接上的场所按这一单的成交价排，最好的在前、默认选它；agent 用 `portfolio_live_compare`。手续费不猜。
 
 钥匙文件放在 home 目录里（默认 `~/.buyer-agent-demo/credentials/<场所>/api-key.json`），必须只有本人可读（`chmod 600`），页面只传文件在哪，值不进页面、账本和任何返回。接入时先问场所的公开时钟（不带钥匙），场所不服务这个地区就在这一步停下，钥匙不发出去。对账单页上，真实场所顶替同名的模拟场所，拔掉后模拟的回来；读数缓存半分钟，读失败时保留上一次的数并写明时间和原因。
 
@@ -236,6 +241,34 @@ owner 签的不只是意图：一笔划转的签名里带着**路线的哈希、
 
 Robinhood 的三条线都是它自己发布的接口（2026-10-05 读）：股票走 5 月 27 日开放的 Trading MCP（`agent.robinhood.com/mcp/trading`，它的授权元数据写明支持动态注册、PKCE、刷新令牌，所以账户层能像 Claude Code 一样自己接上去）；加密走 Crypto Trading API（签名与官方文档的示例逐字节一致，见测试）；Stock Tokens 的清单和报价在 `api.robinhood.com/rhj/` 下，不要钥匙。Robinhood 的 MCP 工具返回什么格式没有公开，股票这条线按它自家 API 常用的字段名读，读不出来时直说读不出来，不当作零。
 
+**Earn（真钱）**（`live/earn.ts`、`account/live-earn.ts`）。三家有接口，每家说自己的话；交易所的理财没有统一接口，别家不做：
+
+| 场所 | 产品 | 它自己的规矩 |
+|---|---|---|
+| MetaMask Agent Wallet | DeFi 金库，经 `mm earn`（LI.FI 的 earn 接口），id 是 `<链 id>:<金库地址>` | 从钱包出、回到钱包、在金库自己的链上；锁仓不到 $1,000,000（或说不出）的金库只能取、不能放 |
+| OKX | Simple Earn Flexible，id 是 `savings:<币>` | 只有资金账户的钱放得进去，取出也回资金账户；读要 Read，放、取要 Trade |
+| Kraken | Kraken Earn 的策略（Kraken 自己的 id） | 放、取要 Earn Funds，是异步的，它的状态接口说做完了才算；要 Intermediate 认证；全账户自动的策略（Kraken Rewards）不能分配；只有它自己的 `EEarnings:` 才算拒绝，忙、nonce 这类答复让请求留在途中、额度照占着 |
+
+- owner 签 `liveEarn {venue, kind, product, asset, amount, maxUsd, lands, deadline}`：放入（`supply`）或取出（`withdraw`）、确切数量、这一笔最多值多少美元、取出落在哪（永远是它来的那个场所，没有一个调用带目的地）、十分钟有效。签名里的链名是 "Live · real money"。
+- agent 签 `agentLiveEarn {venue, kind, product, asset, amount}`（取出可以写 `"all"`），要在 owner 给它签的 **earn 额度**里：`approveSpend` 的 `earn` 范围，点名场所（`okx`）或一个场所的一个产品（`okx:savings:USDT`），从不是「所有账户」（`*` 在 prepare 和门口都拒）。Conservative 下每一次是一张卡；Aggressive 下额度内的放入直接走，取出在每笔上限以内直接走，超了出卡。放入算额度，取出不算（钱只是回来）。
+- 两样都过：服务的写开关和 `--live-cap`；产品此刻开着、收这个币、够最小额；取出不超过持有的；场所自己的钥匙权限、等级、地区。MetaMask Agent Wallet 还要它自己的开关 `PORTFOLIO_MM_WRITES=1`，和它的换币、下单一样。
+- 每一笔是一条 earn 记录（`earn-0001`）、Statement 里一行（类型 Earn）、账本一行；重启后没做完的接着问，不重发。
+- **只算一次**：持有里多一类 `earn`（`earn:<场所>:<产品>`，"earning 5.2% at OKX"），算在总数里，不算现成可用的钱。同一笔钱在场所余额里另有一行的，那一行去掉：Kraken 把分配出去的钱在余额里记成 `<币>.B/.F/.S/.M/.P`；钱包里金库的份额代币（按链上读来的符号认，认不出时按名字加价值）；OKX 的 Simple Earn 本来就不在资金余额里，什么都不去。earn 和余额一起重读，读失败时保留上一次的数、标 stale，不会掉成零。
+- 页面上：Trade 的 Earn 宫格（Put in / Take out，APY 或 APR、锁定天数、取出落在哪、持有多少、上限）；Portfolio 的 Assets 里 earn 行下面 "Withdraw…"；Statement 的 Earn 类型和 "into earn / out of earn" 合计。agent 用 `portfolio_earn`（读）和 `portfolio_live_earn`（写）。
+
+**RWA：发行方站在背后的代币**（`live/dex.ts`、`live/address.ts`、`live/explore.ts`）。代币化股票是钱包 DEX 交易者里真的市场：下单门把一单建成钱包的两笔交易（授权、swap），每一单建之前先问发行方一次（答案留一分钟）。符号证明不了什么（LI.FI 在 Robinhood Chain 上的清单里就有不是 Robinhood 的 "NET" 和 "BULL"），所以每一种按地址认，按发行方自己公布的认：
+
+| 发行方 | 在哪 | 怎么认、下单前怎么再确认 |
+|---|---|---|
+| Robinhood Stock Tokens | Robinhood Chain，对 USDG（`NVDA/USDG@Robinhood Chain`） | 地址在 Robinhood 自己的清单上（`/rhj/assets`），LI.FI 的清单有没有都行；清单没应答就拒 |
+| Ondo Stocks | Ethereum、BNB Chain，对 USDC | Ondo 清单上最常见的，加上 LI.FI 认证过的 `<TICKER>on`；读链上 Ondo 的 `gmTokenAccepted` 和这个代币的 `isTokenPaused`：暂停了是 `E_VENUE_MARKET_CLOSED`，不认是 `E_VENUE_REJECTED` |
+| xStocks | Ethereum、BNB Chain、Arbitrum、Optimism，对 USDC | xStocks 清单上最常见的，加上 LI.FI 认证过的；问 xStocks 不带钥匙的公开接口 |
+| OUSG、BUIDL | 显示，从不 swap | 合约只在发行方批准过的钱包之间转，swap 送不到：`E_VENUE_TRANSFER_RESTRICTED`，带发行方的原话 |
+
+每个市场带着 `issuer` 和发行方自己的资格原话（`eligibility`：Ondo 说美国人和它禁止的辖区里的人不能申购、取得、赎回；xStocks 说不面向美国和美国人）。这些发行方都排除美国人和别的一些地方；账户不知道它的主人住在哪，所以原话跟着每个市场走：Markets 的行下面一行小字、Market 抽屉里的 Issuer 一栏、下单票在 Where 上面说一次；发行方关了或限制的，原话写在签名按钮上方，按钮不让按。发行方合约的拒绝（制裁名单、黑名单、暂停）按发行方自己的规矩报。Solana 上的 Ondo 和 xStocks 不提供：这里的钱包是 EVM 地址。钱包还不认识 Robinhood Chain（回 4902）时，页面提出替你加上链 `0x1237`。钱包接上以后也读 Robinhood Chain 上的 USDG（算美元）和上面这些代币（算 RWA，按 LI.FI 的价）。
+
+**永续：Hyperliquid，经 mm，先过它自己的地区线**（`live/metamask.ts`）。市场写成 `<COIN>-PERP`（`BTC-PERP`），经 `mm perps`：`markets` 读标记价、资金费率、最大杠杆；`open --type market|limit --leverage`（市价单是 Hyperliquid 的 IOC，限在最差价以内；限价单 GTC 挂着）、`orders`、`cancel`、`positions`、`close`（它自己的 reduce-only IOC）、`modify --leverage`。mm 7.0.0 没有永续的地区检查，所以每一单、每次平仓、每次改杠杆之前，账户先用 `mm predict geoblock` 问这台机器在哪（只留国家和地区），按 Hyperliquid 使用条款 §1.6 判：美国、安大略和受制裁地区它不服务。条款没写受制裁地区是哪些，这里按古巴、伊朗、朝鲜、叙利亚和乌克兰被占领地区算，是这边的读法。在里面就是 `E_VENUE_GEOBLOCKED`，mm 说不出在哪就是 `E_VENUE_REJECTED`，两种都什么都不发，也不提供任何绕过的办法。写操作同样要 `PORTFOLIO_MM_WRITES=1`。页面上是 Trade 的 Perps 宫格：Long / Short、资金费率和下次支付、最大杠杆、你持仓的强平价；杠杆是单独一次签名（`liveLeverage`），agent 不超过你签的倍数。
+
 **C · agent 对外付款：agent 不付钱，账户替它付**（`account/protocols.ts`、`payees.ts`）。agent 只签一句"为这个 URL 付钱，最多这么多，从这个 float 出"（`agentPay`）；账户自己去问收款方，从收款方自己的质询里读出价格和收款地址，说收款方说的那种协议，用 agent 从来拿不到的钥匙签付款。检查顺序：
 
 1. 授权：这个 agent、这个 host。在给这个 host 发出第一个字节之前。
@@ -252,22 +285,110 @@ Robinhood 的三条线都是它自己发布的接口（2026-10-05 读）：股�
 | MPP `session` | 托管合约：签一笔 EIP-1559 的 `open` 交易存一次押金，之后每次调用签一张累计凭单（EIP-712 `Voucher`），关闭时收款方按最后一张凭单取走、其余退回；收款方不理时向托管合约申请退出，宽限期后取回 | `infer.sim`，每次 $0.01 |
 | AP2 v0.2 | 商户签结账 JWT；账户把 owner 的支出授权写成两份**开放式** mandate（SD-JWT，`cnf` 绑定 agent 的钥匙）；agent 用自己的钥匙签两份**封闭式** mandate（绑定开放式 mandate、校验方和这一次交换）；商户和账户（作为凭据提供方）各自验链；商户和它的处理方各签一张回执 | `shop.sim`，从 float 付 |
 
-一个协议配一个模拟收款方是这个 demo 的安排（每个协议演一次），协议本身没有这个要求。卡支付（ACP、Visa 的 Trusted Agent Protocol）没搭：卡没有给个人的接口。只认真实账户的服务器上没有收款方，`agentPay` 一律拒绝；真实收款方还没接。
+一个协议配一个模拟收款方是这个 demo 的安排（每个协议演一次），协议本身没有这个要求。卡支付（ACP、Visa 的 Trusted Agent Protocol）没搭：卡没有给个人的接口。只认真实账户的服务器上没有这些模拟收款方：`agentPay` 只从 agent 钱包付真钱（x402 V1/V2、MPP charge，USDC，见上面「随时能被 agent 调用」），MPP session 和 AP2 在真钱上不做。
 
 ### 页面和 agent 面
 
-`/`（`/account` 也跳到这里）就是 Account，一个页面，从上到下：
+`/`（`/account` 也跳到这里）就是 Account：一个桌面钱包，左边一条 rail，右边是当前的那一屏。
 
-- 头部：保守 / 激进两档模式（Conservative：agent 的每一单都等你签；Aggressive：agent 在额度内直接下单。放宽要 owner 签名，收紧不用；真实账户启动时是 Conservative），和 "Trading on · up to $100 an order" 或 "Read-only"。
-- 净值、按资产类别的配置条；下面一行是**流动性**：多少美元现成可用（现金和美元稳定币），其中多少能在原地交易、多少能在你的账户之间挪、多少只能在场所自己那里取出（Alpaca、Kalshi、Robinhood 的现金就是这样），展开是每个账户、每个账本或每条链上各有多少。等你批的卡（浏览器标签页的标题带着张数）。
-- Accounts：接上的账户（余额、它交易什么、`Trade…`、`Move…`、Details 里的持仓）；一个都没接时就是一排可以接的场所，点哪个就是哪个的接法：钥匙文件（第一步写着这家要勾哪些权限：能交易、不能提币；路径、一条建文件的命令、每两秒检查一次，只看字段名不看值）、场所自己的登录页（Robinhood）、钱包签一句话或只看地址。可以下载 CSV。
-- Statement：像银行流水，一行一笔交易：成交、提现、划转、跨链、换币，日期、说明、账户、金额（买入是钱出、卖出是钱进）、手续费、状态、谁做的（你，或者哪个 agent，是你批的还是在额度内）。按月份、账户、类型筛选，下载 CSV，打印。最上面是还在进行的：挂着的单（`Cancel`，两单以上有 "Cancel all"）和等你钱包发出的交易。流水从账本文件读回来：每一笔交易每变一次，账本里记一行 `statement`，重启之后以前的流水还在。
-- Positions：能列持仓的场所（永续、股票、事件合约）每个持仓一行，"Close" 平掉（不占额度，只发 reduce-only 或场所自己的平仓；你点是直接执行，agent 平仓和下单一样：保守模式出卡，激进模式每单上限以内直接平）。挂着的单能 "Change…"（场所支持改单的）。
-- Agents：一张表一份表单。敲门的 agent 一点 "Let in…" 就进了表单，填名字和交易额度（在哪些账户下单、每单多少、一共多少、期限，可另勾"也能在我的账户之间挪钱"，"Payments from an agent wallet" 给付款额度：哪些域名或任何收款方、每笔多少、一共多少），"Everything" 一键勾满；也在这里改额度、撤销。
-- Agent wallets：账户替 agent 生成的钱包，余额从链上读，"Top up…" 从你的账户充值，"Take back…" 取回（这一笔它自己付 gas）。
-- Devices：哪些浏览器能签。
+**外壳**（`public/account.html`、`ui/shell.js`、`ui/core.js`）
 
-下单的 MCP 工具：`portfolio_live_markets`（一个场所交易哪些市场，或者一个市场此刻的价格、规矩、它接受的单型和有效期）、`portfolio_live_order`（市价、限价、止损、止损限价，tif、postOnly、reduceOnly）、`portfolio_live_cancel`、`portfolio_live_amend`、`portfolio_live_positions`、`portfolio_live_close`、`portfolio_live_leverage`；等结果的 `portfolio_wait`、流水 `portfolio_statement`；真钱付款的 `portfolio_pay`（从 agent 钱包，x402 / MPP charge，可带 `method`、`body`）；`portfolio_account` 里有这个席位的交易额度、每个场所它能交易什么、账户上的单（自己的标着 `mine`）。此前加的三个工具：`portfolio_account`（这个席位的钥匙有没有被授权、还能花多少）、`portfolio_transfer`（自家场所之间）、`portfolio_pay`（为一个 URL 付钱；AP2 的两份封闭式 mandate 由席位读过商户签的总价之后自己签）。原来的 `portfolio_execute` / `portfolio_order` 也改成签名后从同一个入口进；挂了这一层之后，HTTP 上未签名的写一律被拒绝。只认真实账户的服务器上，`portfolio_transfer` 和 `portfolio_pay` 被拒，真钱走 `portfolio_live_move`：Conservative 下它回一张卡，Aggressive 下额度内直接回付款单。
+- **Rail**：顶上 "Trade" 按钮（打开下单票）；三个屏 Portfolio · Markets · Trade（Portfolio 旁边的数是等你批的卡加 agent 的请求，浏览器标签页的标题也带着，比如 "(2) Account"）；底下是 Background（**Cream / Black**，米白或黑，记在这个浏览器里，第一次绘制之前就生效）、Mode（Conservative：agent 的每一单都等你签；Aggressive：agent 在额度内直接下。放宽要 owner 签名，收紧不用；真实账户启动时是 Conservative）、"Agents"（数是敲门等放行的 agent）、"Settings"，最下面是 "Trading on · up to $100 an order" 或 "Read-only"。
+- **顶栏**：**Lens**（All accounts / 一个场所 / 一个 agent：三屏的每张表都按它筛；它指的场所或 agent 不在了就回到 All）· 搜索（`/` 聚焦，打字就去 Markets 搜；20 秒一次的刷新既不冻住也不清掉它）· 时钟图标打开 **Statement** · "Copy agent setup command"（复制 `/api/account` 给的 `agentSetup.command`：`claude mcp add portfolio -e PORTFOLIO_URL=<这个服务> -- npx tsx <仓库的绝对路径>/src/portfolio/mcp.ts`，在哪个目录跑都行）· Menu（Connect an account、Agents、Settings、Statement、复制 agent 命令、余额 CSV、背景和模式）。键盘 `t` 打开下单票，Esc 关掉 lens 菜单或抽屉。
+- **弹层**：一个 sheet（`dialog#modal`）、右边一个不挡页面的抽屉（Asset、Market、账户的 Details）、一个叠在上面的小问话框（`confirmSheet` / `pickSheet`：页面上没有一个 `prompt()` 或 `confirm()`）；结果是 toast，拒绝用场所或账户自己的话。**"What you sign"** 照旧：签之前把要签的每个字段原样摆出来，它是信任的核心。
+- **Statement 弹层**：最上面是 Under way（挂着的单、等钱包发出的交易，"Cancel"、"Cancel all"），下面一行一笔：成交、提现、划转、跨链、换币、Earn。按月份、账户、类型、Who（你，或哪个 agent，按钥匙认）筛；最后一行是这一屏的合计（买、卖、挪、into earn / out of earn、手续费；被拒的不算）；CSV 带 agent 一列；"Print" 只打印流水。流水从账本文件读，重启以后还在。
+- **Settings 弹层**：Mode、Trading（开着、单笔上限多少，或只读）、agent 的会话（"Start a new one" 或 "Renew for 30 days"，一次签名）、agent 能设的最大杠杆（一次签名）、Background、Devices。
+- **Agents 弹层**（`ui/agents-mount.js` 的 `openAgents()`：另一个团队的 Agent 模块从这里挂进来）：放 agent 进来、交易 / 挪钱 / 付款三种额度和 earn 额度（"End earn limit" 只收回 earn 那一份）、"Everything"、撤销；Agent wallets（"Make it"、"Top up…"、"Take back…"）；Devices（"Let it sign"、"Require both"）。行为和原来一样，等对方的模块来替换。
+- 每 20 秒读一次，只重画看得见的那一屏；有弹层开着、正在签名、或者正在表单里打字时不刷新；标签页藏起来时停；账户不应答时说一次。
+
+**Portfolio：你有什么**（`ui/portfolio.js`、`ui/asset.js`、`ui/money.js`；读 `/holdings?cost=1`、`/history`、`/positions`、`/agents`、`/earn`）
+
+- **Waiting for you**：卡按 agent 分组，"Approve" / "Reject" / "Approve all"（先确认一次，再每张卡一次 `approveCard` 签名，一张被拒就停）。agent 的请求每条有 "Grant…"（打开 owner 自己的那张表：额度是 `approveSpend`，钱包是 `createSubAccount` 或一笔充值，场所是它的连接，会话、杠杆、模式是 `setPolicy`，放进来是 `approveAgent`）和 "Decline…"（一次 `answerAsk` 签名）；敲门的 agent 也在这里。
+- **净值**和今天的涨跌：涨跌按每个持仓自己市场报的 24 小时涨跌算，覆盖不到的写明覆盖了多少，不估。**曲线**（1D / 1W / 1M / All）从第一个快照开始，不到两个点不画，短的时候写 "since <日期>"；lens 是一个场所或一个 agent 时换成 "Show all accounts"（曲线是整个账户的）。
+- 快捷操作 Trade · Move · Receive · Hand to agent，只在有账户（或 agent）做得了时出现。侧栏：**Cash ready**（现金和稳定币，分成在原地交易的、能在你的账户之间挪的、只能留在场所的）、配置条、Agent activity（✓ 做了、▣ 等你、✗ 被拒、› 回报）。
+- 三段：**Assets**（跨场所按资产汇总：交易所的 BTC、Arbitrum 钱包里的 WBTC、券商的 BTC 是一行，下面每个场所一行；价格、24h、价值、"Since bought"，和 "Cost known for x of y"）· **Positions**（所有场所的持仓和 "Close"，有 earn 的场所多一张 Earning 和 "Withdraw…"）· **Accounts**（每个账户的状态标签、"Trade…"、"Move…"、Details 抽屉、"Disconnect"、"Connect an account"）。
+- **Asset 抽屉**（`/api/account/asset`）：持有的那一行、每个场所的价格、K 线（5m / 1h / 1d）、持仓和 "Close"、挂单和 "Cancel"、成本价、流水里相关的行；"Buy" / "Sell" / "Hand to agent"。
+- **Receive**（`/api/account/receive`）：选账户、币、网络，给出交易所自己的充值地址（要 memo 的带上 memo），或证明过的钱包、agent 钱包自己的地址；只看的地址、不收钱的场所不给。它只说往哪打，打钱仍是一次签名。
+- 一个账户都没接时是三步清单：Connect an account → Connect an agent → Give it a limit。
+- **净值历史**（`account/networth.ts`）：每五分钟一个点，接上或拔掉一个场所时一个点，重启接回场所后一个点，写在 `<home>/portfolio/networth.jsonl`（0600）；值没变、上一个点又不到一小时就不写；有场所的数是上一次的，这个点标 partial。它是派生数据：不进哈希链账本，什么都不从它恢复、不由它决定，丢了只丢一条曲线。接上不是赚、拔掉不是亏：变化按两点之间都在的场所算，接拔另记成事件标在曲线上；账户自己付给收款方的钱加回来，并写明；你在场所自己网站上的充值和提现，账户看不见，算在变化里，所以它是"变化"，不是"收益"。第一个快照之前的不知道，也不补。
+- **成本价**（`account/costbasis.ts`）：只用两样，账户自己下过的单（每一次运行的账本里，一单每变一次记一整行，按一笔一笔的成交算）和场所自己报的入场价（券商、预测市场、永续）；场所报了的，以场所的为准。币跨场所是一堆（在一家买、在另一家卖的是同一个 BTC）。不知道的就写不知道：没价格的成交不算、场所没报的手续费不猜，账户之前就有的、从别处转进来的币，成本账户没见过，所以每一行写着覆盖了多少。
+
+**Markets：有什么可以交易**（`ui/markets.js`；读 `/explore`、`/quotes`、`/candles`、`/compare`）
+
+- 一张表把**接上的场所**和**没接的场所的公开行情**合在一起（`live/explore.ts`、`live/public-markets.ts`）。公开源不带钥匙、只读：Kraken、Coinbase、OKX、Binance（Bybit 问到才问）的公开 ticker，Kalshi 的 `/markets` 与 `/events`，Polymarket Gamma 的 `/events`，Robinhood Stock Tokens 的 `/rhj/`。每个源一共四秒，没答完的写进 missing，用场所自己的话（Binance 对这台机器回 451、Bybit 回 403，就写成那样）。没接的那一家的行标 **"Connect to trade"**，点了就是那家的连接表单，接上以后下单票自动挑它。同一个东西是一行：币按统一名（BTC/USDT、BTC-USD、WBTC 是一个 BTC），事件按问题（YES、NO 收进一行），离其他场所中位价超过 10% 的当作同名的另一种东西排除。数字只用场所自己报的：Kraken 不给 24 小时涨跌就不显示，Kalshi 的成交量是合约数（`contracts24h`），不换成美元。
+- 分类 tab 只显示有东西的：Now · Crypto · Stocks · RWAs · Predictions · Perps，加上从场所自己的分类词来的 Macro · Sports（只在 `live/categories.ts` 一张表里读这些词）；搜索时多一个 "All results"；另有 "Watching" 和 "Venues"。
+- **Now**：**Closing soon**（一天内收盘的事件，Yes / No 合成一张卡，价格用 ¢，倒计时每秒走；收盘了就重读，十五分钟一轮的市场接到下一轮），只给看得见的卡、只在接上的场所、一次最多 12 个、页面看得见时每 5 秒问一次价；**Movers**（24 小时涨跌，成交额至少 $1M，一个资产一枚，现货优先于同名的永续）；**Most traded**（★、"Trade"、"Hand to agent"、"Connect to trade"）。
+- ★ 是一次 `setWatch` 签名；只在公开行情里看到的市场，按接上以后会是的那个场所记。
+- **Market 抽屉**：价格、买卖价、24h、成交量；永续的资金费率和杠杆；事件的倒计时和每个结果（各有 "Buy"）；K 线（`/api/account/candles`：接上的场所用它自己的，没接的用公开数据，5m / 1h / 1d）；每个场所的价格（`/compare`）；你持有的和成本；agent 在这个市场上的卡、挂单和你的意图；RWA 的 Issuer；"Buy" / "Sell" / "Hand to agent" / ★。读不到图时一行安静的字，用场所的话。
+- **Venues 板**：每个接上的场所的健康（最近一次答了、最近一次失败和它的话、读了多久）和地区规矩（用场所的原话，不提任何绕过的办法）；**"Open to agents"**：关掉免签（`POST /api/revoke`），重新打开是签名的 `setPolicy restore`；"Trade"、"Move"、"Disconnect"（确认后签 `disconnectVenue`）；钥匙不能交易的有 "Connect a new key"（按这家自己的连接、用同一个名字重新接）；"Your agents asked" 列出 agent 请求接的场所（"Connect" / "Decline…"）；这里够不着的场所；可以接的目录。
+
+**Trade：交易**（`ui/trade.js`、`ui/intent.js`）
+
+- **宫格**：Buy & sell · Swap · Perps · Predictions · Sell many · Move · Earn，按 `venues[].trade.kinds`（交易者自己说，或按连接器查表）、能不能交易、能不能挪、有没有 earn 画出来；没有一家做得了的不画，只读的服务上都不画；做得了的场所都拒绝时画成虚线，写场所的话和怎么修。顶上 "Do it myself | Hand to agent"。
+- **下单票先选市场**（`openTicket({venue?, symbol?, side?, kind?, …})`，在右边那块不随刷新重画的面板里）：在 `/explore` 里搜市场；**Where** 是你的场所按 `/compare` 的成交价排，最好的在前，默认用它，可以换；不能交易的场所写它的话和怎么修，没接的写 "Connect to trade"。单型、有效期、post-only、reduce-only、止损和 "What you sign" 都照旧。没签完的票存在这个浏览器里 24 小时，重开时场所还接着、还能交易、市场还在才放回来，否则默默丢掉。
+  - **Predictions**：Yes / No，价格用 ¢ 和概率，写到期最多赔多少；限价按 ¢ 填。
+  - **Perps**：Long / Short，资金费率和下次支付，最大杠杆，你持仓的强平价；杠杆单独一次签名（`liveLeverage`）。
+  - **Swap**：稳定币换稳定币是一笔 `liveMove swap`；美元和币之间是一笔 `liveOrder`；币换币是**两腿**，经过两个市场共有的美元（钱包的话在同一条链上），第二腿按第一腿实际到手的钱再准备一次，是第二次签名。
+  - **Sell many**：`/sellable` 列出不是美元的持有，最多勾 10 个、各填数量，先看每条要签什么，再逐条签名（永续是 `liveClose`），每条各有各的结果；不新增签名类型，每条照样过上限和额度。
+  - **Earn**：见 B 层的「Earn」。**Move**：提到你自己的地方、划转、换稳定币、跨链，同 "Move…"。
+- 下面：**Under way**（agent 的卡 "Approve" / "Reject"、挂着的单 "Change…" / "Cancel"、在途的钱和 earn、"Cancel all"）· **Positions**（"Close" 到处是同一个对话框 `openClose`：`quote.close` 给出值多少、最差价；超过服务的单笔上限时，后端自己的拒绝写在签名按钮上方、按钮不让按，再给一个按市场步长取整、刚好在上限以内的数量）· **Recent fills**。都按 lens 筛。
+- **Hand to agent**（`openHandToAgent`）：给哪个 agent（或所有 agent）、在哪、什么市场、哪个方向、大约多少、你的话（最多 200 字）、到什么时候；可以附一份额度（`approveSpend` 的 `trade`，交的是 earn 时是 `earn`），并写明它会**替换**这个 agent 现在那一份（后端每个 agent 每种范围只留一份）。话和额度是两段 "What you sign"。开着的意图列在下面，带每个 agent 最新的回报，可以 "Change words"，可以 "Withdraw"：收回话的同时收回随它给的额度（两者按同一个结束时间认作一对，这是页面判断的）。
+
+**引导 agent，不授权**（`account/sign.ts` 的 `STEER_TYPES`、`state.ts`、`exchange.ts`）。五种签了名的话，都不在 `MONEY_TYPES` 里，额度（`covers`、`spendFor`）一样都不读：
+
+- `setWatch {venue, symbol, on}`（owner）：关注一个市场，接没接的场所都行；最多 50 个。
+- `setIntent {id, agent | "*", venue, symbol, side, usd, text, validUntil}`（owner）：给一个 agent 或所有 agent 的话；`usd` 只是引导，什么都不限；最多同时开 20 个，话最多 200 字，最长 180 天，`validUntil` 为 0 是收回。
+- `agentReport {intent, status, note, refs}`（agent）：`taking` / `done` / `cannot` / `note`；`refs` 只能是它自己的单和付款；一个 agent 在一个意图上最多 50 条，不会盖掉别的 agent 的。
+- `agentAsk {kind, venue, usd, text}`（agent）：`letIn` · `limit` · `venue` · `topup` · `session` · `leverage` · `mode`。只在内存里、一天过期；同类同场所的再问替换旧的；一共最多 20 条、每个 agent 最多 5 条、每把钥匙一小时 5 条。陌生钥匙的 `letIn` 把它报的名字带进敲门列表（不能是、也不能像账户上某把钥匙的名字）。owner 做了对应的签名动作（`approveAgent`、`approveSpend`、`createSubAccount` 或一笔充值、`connectVenue`、`setPolicy`），那条请求自己关掉。
+- `answerAsk {ask, decision: "decline"}`（owner）：不给，只关掉；拒掉的在 `declinedAsks` 里留一天（内存里），agent 的 `portfolio_watchlist` 看得见 `declined: true`。
+- 重启后关注和意图接回来（逐条重新验签），请求和拒掉的请求不接。agent 写的字一律转义、限长、去掉看不见的字符；工具描述里写明意图什么都不授予：权限仍然只来自额度、卡和 `--live-cap`。
+
+**新的读接口**（都只读，`server.ts`；同一个 Origin / Host 守卫）：
+
+| 路由 | 一句话 |
+|---|---|
+| `GET /api/account` | 原来那份，加上 `agentSetup`（加这个 MCP 席位的那一行命令）、`health`（每个场所最近怎么答的）、`dial`（会话、关给 agent 的场所、最大杠杆）、`watch`、`intents`、`asks`、`declinedAsks`、`earns`；卡和流水行带 `agent` / `agentName`；`venues[]` 带 `connector`、`trade.kinds`、`earn` |
+| `GET /api/account/explore?tab=&q=&sort=&limit=` | Markets：接上的和没接的场所合成一张表，加 tab 计数、movers、closing、mostTraded、missing；留 30 秒 |
+| `GET /api/account/holdings?cost=1` | Portfolio：按资产跨场所汇总、现成可用的钱、24 小时变化和它的覆盖；`cost=1` 加成本价和持仓 |
+| `GET /api/account/history?range=1d\|1w\|1m\|all` | 净值曲线：点、接拔事件、`changeUsd`、`paidOutUsd` |
+| `GET /api/account/receive?venue=&asset=&network=` | 往哪里打钱能落到这个场所 |
+| `GET /api/account/asset?key=&interval=` | 一个资产：它那一行、各场所价格、K 线、持仓、挂单、流水、成本 |
+| `GET /api/account/quotes?pairs=venue\|symbol,…` | 最多 12 个市场的新价格 |
+| `GET /api/account/sellable` | 不是美元的持有，各自卖掉要签什么 |
+| `GET /api/account/agents` | 一个 agent 一项：钥匙、额度（用了、占着、剩下）、卡、单、付款、earn、钱包、意图、请求、航班 |
+| `GET /api/account/candles?venue=&symbol=&interval=` | 一个市场的 K 线（5m · 1h · 1d）：接上的用它自己的，没接的不带钥匙读公开数据；venue 只能是账户认识的 id，symbol 只是文字，碰不到固定以外的 host；留一分钟 |
+| `GET /api/account/earn?venue=&asset=` | Earn：各场所的产品、里面有什么、读不到的场所 |
+| `GET /api/account/positions` | 不带 venue：所有能列持仓的场所，读不到的在 missing |
+| `GET /ui/<name>.js\|css` | 页面自己的脚本和样式：只认 `ui/` 下一个简单的名字，带目录、多一个点或百分号编码的一律 404 |
+
+**MCP 工具**（`src/portfolio/mcp.ts`，stdio；席位持一把自己的 agent 钥匙，每次写都签名）。真实账户上：
+
+| 工具 | 一句话 |
+|---|---|
+| `portfolio_account` | 这个席位看到的账户：钥匙放进来没有、四种额度（`trade` · `venues` · `payees` · `earn`）和各剩多少、每个场所它能交易什么、账户上的单（自己的标 `mine`）、付款（`mine`）、按资产的持有（`assets`）、现成可用的钱（`readyCashUsd`）、**自己的**卡（`waitingForOwner`；别人的只给个数 `othersWaiting`）、可以接的场所（`connectable`）。钥匙没被放进来时，以客户端的名字敲一次门 |
+| `portfolio_explore` | Markets 那张表 |
+| `portfolio_holdings` | Portfolio 的持有；`cost: true` 加成本价和持仓 |
+| `portfolio_history` | 净值曲线 |
+| `portfolio_asset` | 一个资产的全部 |
+| `portfolio_candles` | 一个市场的 K 线，接没接的场所都行 |
+| `portfolio_receive` | 往哪里打钱 |
+| `portfolio_watchlist` | owner 的关注、给这个席位（或所有 agent）的意图和每个 agent 最新的回报、自己的请求（含一天内被拒的，`declined: true`） |
+| `portfolio_earn` | Earn 的产品和持有 |
+| `portfolio_live_markets` · `portfolio_live_compare` · `portfolio_live_positions` | 一个场所的市场、跨场所比价、持仓 |
+| `portfolio_live_preview` | 一单或一笔挪钱现在会是什么、额度还剩多少、会出卡还是直接下还是被拒；什么都不下 |
+| `portfolio_live_order` · `portfolio_live_amend` · `portfolio_live_cancel` · `portfolio_live_close` · `portfolio_live_leverage` | 下单、改单、撤单、平仓、设杠杆 |
+| `portfolio_live_batch` | 最多 10 腿，每腿就是一个 `portfolio_live_order`：各签各的、各判各的、各答各的 |
+| `portfolio_live_move` | 请求挪真钱（在 `venues` 额度里） |
+| `portfolio_live_earn` | 放进或取出 earn 产品（在 `earn` 额度里） |
+| `portfolio_pay` | 从 agent 钱包付钱（x402 / MPP charge） |
+| `portfolio_report` · `portfolio_ask` | 给 owner 的话：回报一个意图、请求只有 owner 能签的东西；什么都不授予 |
+| `portfolio_approval` · `portfolio_wait` · `portfolio_statement` | 卡的结果、等一张卡 / 一单 / 一笔钱变化（最多 55 秒）、流水（`mine: true` 按这把钥匙认，不按名字） |
+
+模拟对账单（`--classic`）上另有 `portfolio_overview`、`portfolio_read`、`portfolio_markets`、`portfolio_quote`、`portfolio_execute`、`portfolio_order`、`portfolio_transfer`、`portfolio_openness`。原来的 `portfolio_execute` / `portfolio_order` 也改成签名后从同一个入口进；挂了这一层之后，HTTP 上未签名的写一律被拒绝。只认真实账户的服务器上，`portfolio_transfer` 被拒，真钱走 `portfolio_live_move`：Conservative 下它回一张卡，Aggressive 下额度内直接回付款单。
+
+**一个席位看到的是它自己的，但席位之间不隔离。** 卡、卡放行了什么、可等的单和付款，工具只给这个席位自己的：这是 MCP 进程选择给它看什么，不是墙。服务只听 127.0.0.1，`/api/account`、`/api/account/agents` 这些读接口对这台机器上的任何进程都答；所有席位以同一个系统用户运行，读得到彼此的钥匙文件。席位能**做**什么从不靠它看到什么：每次写都用它自己的钥匙签名，过它自己的额度和 owner 的卡。
+
+**替身账户**（`test/standin/`）：`npx tsx test/standin/ui-standin.ts --port 4821`（或 `.claude/launch.json` 里的 `ui-standin`；`--cap 250` 改单笔上限，`--tick 3000` 改价格多久动一次）。它和 `npm run account` 起的是同一个服务、同一个页面、同一扇门，只是每个真实连接够得着的东西都换成了替身：场所、公开行情、网络（每个请求都答"没有网络"）、链、收款方、`mm`，什么都不出进程。它在一个新的临时 home 里经门种好数据：三个场所（Stand-in Exchange：现货、永续、一个已有的 BTC 多头、两个 earn 产品；Stand-in Predictions：几分钟到几天后收盘的事件，加一个十五分钟一轮的 "Bitcoin up or down"；Stand-in Wallet：代币，其中一个 RWA），owner 自己的单和挪钱，一个叫 "Claude Code" 的 agent（放进来、额度、agent 钱包、额度内的一单、一张等你批的卡），两个意图、一条回报、两个请求、三个关注，以及七天的净值点。跑着的时候价格在动、挂单会成交、止损会触发，agent 的卡没人答过期了会再问一次。终端打印页面地址、配对码和临时 home（停了也留着）；浏览器输入配对码后，替身的种子钥匙签一条 `convertToMultiSigUser` 把这个浏览器加成 owner。拒绝 4820。测试是 `test/unit/ui-standin.test.ts`。
 
 ### 十四个 beat
 
@@ -275,7 +396,7 @@ Robinhood 的三条线都是它自己发布的接口（2026-10-05 读）：股�
 
 ### 对抗审阅之后改掉的
 
-写完之后请了两路独立审阅：一路对着跑起来的服务找洞，一路逐条核对协议原文。找到的问题都修了，每条留了测试；攻击那一路的二十个复现原样留在 `test/attack/`，每个都写成"这次攻击必须失败"。主要的几条：
+写完之后请了两路独立审阅：一路对着跑起来的服务找洞，一路逐条核对协议原文。找到的问题都修了，每条留了测试；攻击那一路的复现原样留在 `test/attack/`，每个都写成"这次攻击必须失败"（现在一共二十六个文件，后来几轮加的在本节最后）。主要的几条：
 
 - 两条指令同时到，各自都通过了同一份预算（两笔 $600 过了 $1,000 的预算）。现在指令逐条进门。
 - 两位 owner 的签名换个位置，被当成一条新指令又执行一次；重启之后旧信封可以重放。现在一条 owner 指令按内容认，账本里收过的不再收。
@@ -286,6 +407,18 @@ Robinhood 的三条线都是它自己发布的接口（2026-10-05 读）：股�
 - 授权里写"所有场所"，以后插上的场所自动进了授权。现在冻结在签字那一刻。
 - agent 的钥匙被撤销后，它的 float 和它开着的 session 没人能收回。现在 owner 能关 session、能把 float 收回钱包。
 - 协议核对那一路：OKX 提币的手续费是在金额之外另收的；CCTP 的 burn 是真的 calldata（带 `maxFee` 上限和转入 Hyperliquid 的 hook）；Hyperliquid 自己的动作只构造、不签（账户没有那把钥匙）；x402 的校验顺序、MPP 开户必须从零累计开始、AP2 遇到不认识的约束类型一律拒绝；股票卖出的结算日按交易日算（晚上八点以后的成交算下一个交易日）。
+
+钱包这一轮（三支柱、引导、Earn、RWA、永续）的攻击是四个新文件，每个测试直接断言攻击不成：`steer-holes`（agent 冒签 owner 的意图或关注、收回的意图被重放回来、请求刷屏、冒用账户上钥匙的名字敲门、意图的美元或要额度的请求放宽了额度、回报互相覆盖或认领别人的单、人看不见而模型读得到的字符）、`earn-holes`（上限、earn 额度、取出夹带目的地、重放、Conservative 出卡、mm 写开关、地区线挡住永续）、`seat-reads`（一个席位读另一个席位的卡和它放行的结果；最后一个测试钉住"读接口对本机任何进程都开着"这条边界）、`ask-candles-earn-holes`（只有 owner 能拒请求、K 线的参数碰不到固定以外的 host、earn 的钱只算一次）。代码地图和审阅查出来、已经修掉的：
+
+- Kalshi 的持仓按成本算进净值。现在按市场此刻的价格，成本写在旁边。
+- 不同席位能看到彼此等批的卡；`portfolio_statement {mine}` 在 owner 起的名字和席位的名字不一样时返回空。现在卡只给自己的，流水按钥匙认。
+- Hand to agent 收回了话，随话给的额度还在。现在 "Withdraw" 一起收回，改话时话和额度的结束时间保持一致。
+- Kraken 状态接口的一次抖动把 earn 请求标成被拒、放掉了额度。现在只有 Kraken Earn 自己的 `EEarnings:` 才算拒。
+- mm 金库的锁仓下限只筛了列表，按 id 点名一个很薄的金库照样能放。现在产品本身标成不能放，取出不受影响。
+- earn 额度写"所有账户"，会把不做 earn 的账户和 agent 钱包也算进去。现在 `*` 在 prepare 和门口都拒。
+- 币的抽屉里点 "Sell" 会开出一个永续空单。现在币、股票、代币只从现货持有卖，永续只从它的持仓卖。
+- USDG 不算美元，Robinhood Chain 上的单在门口被拒。现在它是美元稳定币。
+- Agents 弹层看不见 earn 额度；"Grant…" 对一个做不了这件事的场所也默认全勾；Markets 的倒计时把 Trade 的按钮改成了 "Closed"；下单票自动聚焦让 20 秒刷新停了；"Connect to trade" 接上以后票上不出现新场所。都修了，各有一条测试。
 
 ### 这一层的诚实边界
 
@@ -299,12 +432,20 @@ Robinhood 的三条线都是它自己发布的接口（2026-10-05 读）：股�
 - 资金指令的有效期以它自己标注的时刻为准、前后各十分钟：签名人把时刻往后标，最多换来二十分钟。
 - 真实连接和真钱写入只对着替身测过：替身交易所、替身链、本地生成又丢掉的测试钱包，外加一次不带钥匙的公开时钟请求。**没有一把真钥匙、一个真钱包在这里用过**。接上你自己的账户之前，先用只读钥匙；要写，先用一个小上限和一个小金额。
 - 钱包证明用的是 `personal_sign`。Binance Wallet 和 OKX Wallet 的文档没写它的行为；不支持的钱包只能按地址"看"，不能收钱。合约钱包（Safe 之类）的签名这里验不了，也只能看。
-- Kalshi 的持仓按它报的成本显示，不是市值；Hyperliquid 的永续账本是一个账户价值，不拆开持仓。
+- Kalshi 的持仓按它市场此刻的价格算（Kalshi 只报成本，市场读不到价格时退回成本并写明）；按地址接的 Hyperliquid 永续账本是一个账户价值，不拆开持仓。
+- **钱包这一轮里没有一笔是真的。** Earn、RWA、永续、Swap 两腿、Sell many、净值历史、成本价、K 线、公开行情的合并，都只对着替身跑过：替身场所、替身链、记录下来的公开答复。真的只有不带钥匙的公开读（交易所的公开 ticker、Kalshi、Polymarket Gamma 和 CLOB 的价格历史、Robinhood 的 Stock Token 清单、xStocks 的公开接口、LI.FI 的报价）。没有一次真的 `mm earn`、`mm perps`、OKX 或 Kraken 的 earn 调用，没有一笔钱包在 Robinhood Chain 上发出的交易。
+- Earn 只算一次靠的是去重规则：Kraken 余额里的 `<币>.B` 这类行、钱包里金库的份额代币，是按它们的文档和代码写的，真的余额里是不是这样出现没有亲眼见过。Kraken Earn 要它的 Intermediate 认证，OKX Simple Earn 只收资金账户的钱：场所的拒绝就是答复。
+- 永续的地区线用的是 `mm predict geoblock` 说的位置（那是 Polymarket 的查询，mm 7.0.0 没有永续自己的），套 Hyperliquid 使用条款 §1.6；"受制裁地区"列了哪几个是这边的读法。说不出位置就不下。
+- RWA 的资格是发行方的原话，账户不知道它的主人住在哪、是不是美国人：原话摆在签名之前，判断是人的。Ondo 对每个钱包的制裁名单和黑名单事先读不到（链上读不了会 revert 的查询），只在转账时由代币自己拒绝，表现为 swap 被 revert。BUIDL 在 Ethereum 上的地址出自记忆，名字、符号、精度和合约自己说的一致，而且只显示、从不交易。钱包有没有内置 Robinhood Chain 没有核对过。
+- 净值历史从第一个快照开始，之前的不知道；你在场所网站上自己的充值提现算在"变化"里，因为没有一个场所说它的哪一笔是钱进钱出。成本价只覆盖账户自己下过的单和场所报了入场价的持有，每一行写着覆盖了多少。
+- Hand to agent 里话和额度是一对，是页面按"同一个结束时间"认的，后端没有记哪份额度属于哪个意图；后端每个 agent 每种范围只留一份额度，所以随意图给的额度会替换原来那份（页面签之前说明）。收回时第二个签名被拒，话没了、额度还在，页面把拒绝摆出来。
+- 页面只在替身上点过，用的是桌面宽度，Cream 和 Black 都看过但不是每一处都亲眼看；窄屏、打印没看。手机式的布局还没做。
+- 席位之间不隔离（见上面「页面和 agent 面」）：同一个系统用户下的进程能读所有席位的钥匙文件和账户的读接口；一个席位只看到自己的，是显示上的选择。
 - 卡上那个收款地址之所以可信，只因为 owner 看了一眼；没有任何东西说明它是谁的地址。没有制裁筛查、Travel Rule、对收款方的 KYC。
 - 一个人同时持有这八个账户、都在同一个地区可用，是假设。场所自己的地区规则是场所的，这里只表现为一扇关着的门，不提供任何绕过它的办法。
 - 托管、牌照、出了错谁赔，不是软件，这里没有。
 
-代码在 `src/portfolio/account/`（`sign.ts` 钥匙、类型化数据、签名恢复、nonce · `state.ts` agent 钥匙、授权、子账户、签名人、地址簿 · `calendar.ts` 银行日与交易时段 · `doors.ts` 每个场所的跑道与原生请求 · `payments.ts` 在途与到账 · `exchange.ts` 入口与页面视图 · `protocols.ts` 三套协议的编解码 · `payees.ts` 模拟收款方与账户这一侧的付款流程），两个新适配器 `adapters/alpaca.ts`、`adapters/hyperliquid.ts`，即插即用的 `adapters/exchange.ts`，种子 `fixtures/home/portfolio/frontline.json` 与可插场所的目录 `connectable.json`，页面 `public/account.{html,js,css}` 与 `owner.js`，终端 demo `account-demo.ts`。测试：`test/unit/account-{sign,calendar,doors,exchange,protocols,payees,connect}.test.ts`、`test/account-demo.test.ts`、`test/portfolio-mcp.test.ts`、`test/attack/`。
+代码在 `src/portfolio/account/`（`sign.ts` 钥匙、类型化数据、签名恢复、nonce · `state.ts` agent 钥匙、授权、子账户、签名人、地址簿 · `calendar.ts` 银行日与交易时段 · `doors.ts` 每个场所的跑道与原生请求 · `payments.ts` 在途与到账 · `exchange.ts` 入口与页面视图 · `protocols.ts` 三套协议的编解码 · `payees.ts` 模拟收款方与账户这一侧的付款流程 · `live-orders.ts` / `live-moves.ts` / `live-earn.ts` 真钱的下单、动钱、Earn 三扇门 · `holdings.ts` 按资产汇总（和 earn 去重）· `networth.ts` 净值快照 · `costbasis.ts` 成本价 · `restore.ts` 重启时从账本重建 · `statement.ts` 流水），两个新适配器 `adapters/alpaca.ts`、`adapters/hyperliquid.ts`，即插即用的 `adapters/exchange.ts`，真实连接 `live/`（各场所的交易者，加 `explore.ts` 市场合并、`public-markets.ts` 不带钥匙的公开行情、`categories.ts` 分类表、`earn.ts` 三家的 earn、`dex.ts` 里的 RWA、`bridge.ts` 跨链），种子 `fixtures/home/portfolio/frontline.json` 与可插场所的目录 `connectable.json`，页面 `public/account.html`、`account.css`、`owner.js` 和 `public/ui/`（一个全局作用域里按顺序跑的几个普通脚本：`core` 合约与工具 · `connect` · `money` · `asset` · `intent` · `portfolio` · `markets` · `trade` · `statement` · `agents-mount` · `shell`，加 `tokens.css` 与各屏的样式；没有构建步骤），终端 demo `account-demo.ts`，替身账户 `test/standin/`。测试：`test/unit/account-*.test.ts`、`test/unit/live-*.test.ts`、`test/unit/ui-*.test.ts`（页面脚本在一个作用域里跑，签出来的草稿交给后端的校验，再到替身的门上签一遍）、`test/unit/page-scripts.test.ts`（按 HTML 的顺序拼起全部脚本编译一遍、名字不重复、每个资源 200、`/ui/..%2F` 是 404、没有 `prompt` / `confirm`）、`test/account-demo.test.ts`、`test/portfolio-mcp.test.ts`、`test/portfolio-mcp-real.test.ts`、`test/attack/`。
 
 ## 诚实边界
 
@@ -347,6 +488,6 @@ src/plugins/      五个 stdio MCP 席位；_shared/identity.ts 只有席位能 
 src/runner/       run-demo · beats/ · operator（操作员动作：签发 agent key、旁路、提回）· setup
 src/control-room/ express + SSE 的单页控制台（纸色/墨色/橙/鼠尾草绿）
 src/wallet/       智能 agent 钱包骨架：连接器目录 · 策略编译 · 注资/提回判定 · 一页 UI（:4810）
-src/portfolio/    Account（英文界面，:4820）与原来的组合钱包：账户模型 · 八个模拟 adapter（原来的六个：CEX · 链上 · 预测市场 · RWA；Account 层加的两个：券商 · perp DEX）与真实连接器（`live/`）· 开放度三层 · 聚合 · 流动性阶梯与轨道报价 · CEX 订单簿 + DEX 池子 + 预测市场盘口的报价与拆单路由 · 航班、一单一卡与账本 · 关键词 agent + 路由器 · API、Account 页面与 `--classic` 的模拟对账单 · stdio MCP · 十个 beat · account/（Account 层：签名指令、每个场所的跑道、在途与到账、三套对外付款协议、真钱的一步）与它的十四个 beat
-test/             unit（audit · gate · mandates · constraints · ledger · env-scrub · wallet · portfolio · account-*）· attack（独立审阅留下的攻击复现，全部必须失败）· e2e · portfolio-demo · account-demo · portfolio-mcp
+src/portfolio/    Account（英文界面，:4820）与原来的组合钱包：账户模型 · 八个模拟 adapter（原来的六个：CEX · 链上 · 预测市场 · RWA；Account 层加的两个：券商 · perp DEX）与真实连接器（`live/`）· 开放度三层 · 聚合 · 流动性阶梯与轨道报价 · CEX 订单簿 + DEX 池子 + 预测市场盘口的报价与拆单路由 · 航班、一单一卡与账本 · 关键词 agent + 路由器 · API、Account 页面与 `--classic` 的模拟对账单 · stdio MCP · 十个 beat · account/（Account 层：签名指令、每个场所的跑道、在途与到账、三套对外付款协议、真钱的下单 / 动钱 / Earn、持有、净值、成本价）与它的十四个 beat · public/ui/（桌面钱包：Portfolio · Markets · Trade 三屏）
+test/             unit（audit · gate · mandates · constraints · ledger · env-scrub · wallet · portfolio · account-* · live-* · ui-*）· attack（独立审阅留下的攻击复现，全部必须失败）· standin（替身账户：真页面、替身场所）· e2e · portfolio-demo · account-demo · portfolio-mcp
 ```

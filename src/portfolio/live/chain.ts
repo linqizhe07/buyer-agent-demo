@@ -43,6 +43,9 @@ export interface ChainReader {
   uint(chain: ChainName, address: Hex, signature: string, args?: unknown[]): Promise<bigint | undefined>;
   /** a token's own decimals; `undefined` when the chain does not answer */
   decimals(chain: ChainName, token: Hex): Promise<number | undefined>;
+  /** a token's own symbol (an earn vault's shares: account/holdings.ts withEarn); `undefined` when the chain does not answer. Optional: a
+   * reader without it leaves the vault's shares to be told apart by what they are worth */
+  symbol?(chain: ChainName, token: Hex): Promise<string | undefined>;
   /** a transaction once it is mined; `undefined` while it is not (or the chain does not answer) */
   receipt(chain: ChainName, hash: Hex): Promise<Mined | undefined>;
   /** a transaction by its hash, mined or still waiting to be: who sent it, where, the call and the coin it carries; `undefined` when the
@@ -93,7 +96,8 @@ export const CHAINS: Record<ChainName, { chain: Chain; coin: string; env: string
   Polygon: { chain: polygon, coin: "POL", env: "PORTFOLIO_RPC_POLYGON" },
   Base: { chain: base, coin: "ETH", env: "PORTFOLIO_RPC_BASE" },
   Arbitrum: { chain: arbitrum, coin: "ETH", env: "PORTFOLIO_RPC_ARBITRUM" },
-  // Robinhood's own Arbitrum-stack chain (4663): no dollar stablecoin in the table above, so no real money moves on it here; it is read
+  // Robinhood's own Arbitrum-stack chain (4663), where its Stock Tokens live: they are read here, and traded from the wallet against USDG
+  // through LI.FI (dex.ts). No dollar in the table above runs on it, so the account's own payments do not
   "Robinhood Chain": { chain: robinhood, coin: "ETH", env: "PORTFOLIO_RPC_ROBINHOOD" },
 };
 export const CHAIN_BY_ID = new Map<number, ChainName>(Object.entries(CHAINS).map(([name, c]) => [c.chain.id, name as ChainName]));
@@ -136,6 +140,14 @@ export function publicChain(env: Record<string, string | undefined> = process.en
     async decimals(chain, token) {
       try {
         return Number(await client(chain).readContract({ address: token, abi: erc20Abi, functionName: "decimals" }));
+      } catch {
+        return undefined;
+      }
+    },
+    async symbol(chain, token) {
+      try {
+        const out = await client(chain).readContract({ address: token, abi: erc20Abi, functionName: "symbol" });
+        return typeof out === "string" && out.length <= 40 ? out : undefined;
       } catch {
         return undefined;
       }

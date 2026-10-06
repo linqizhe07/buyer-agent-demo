@@ -18,6 +18,10 @@
  *   GET  /data/order/{id}              what became of it; GET /data/trades?market= for the prices it filled at
  *   DELETE /order                      cancel it
  *   GET  data-api /v2/positions?user=  what the wallet holds, outcome by outcome
+ *   GET  gamma /events                 event contracts to discover: the open events, busiest first, with their markets and tags
+ *   GET  /prices-history?market=       an outcome's price history, by its token id
+ *
+ * The last two only read: like Gamma and the book, they need no credentials, and the location check stays where it is, before every order.
  *
  * What the CLOB does not have is not offered: no stop or trigger order, no reduce-only flag, no leverage, and no change to an open order in
  * place (/order takes POST and DELETE only: an order is signed, so another price or size is another order). Its GTD order, good until a
@@ -39,7 +43,7 @@ import { no } from "../refuse.ts";
 import { polymarketSource } from "./address.ts";
 import type { ChainReader } from "./chain.ts";
 import type { KeyFile, KeyShape } from "./credentials.ts";
-import { badOrder, ceilTo, floorTo, inDollars, pick, plain, type LiveTrader, type Market, type OrderRequest, type OrderState, type OrderStatus, type Position, type TimeInForce } from "./trade.ts";
+import { badOrder, ceilTo, floorTo, inDollars, pick, plain, type Candle, type CandleInterval, type LiveTrader, type Market, type OrderRequest, type OrderState, type OrderStatus, type Position, type TimeInForce } from "./trade.ts";
 import { asRefusal, num, REGION, redact, unreachable, type Http, type HttpReply, type LiveBalance, type LiveSource } from "./types.ts";
 
 export const POLYMARKET_TRADE_KEY: KeyShape = {
@@ -118,6 +122,20 @@ const LIST_MS = 5 * 60_000;
 const KNOWN_MS = 60_000;
 const TOKEN = /^\d{10,90}$/;
 const SLUG = /^[a-z0-9][a-z0-9-]*$/i;
+/** The prices a bar is folded from: one-minute prices make five-minute bars, five-minute prices hourly ones, hourly prices daily ones
+ * (`fidelity` is in minutes). Polymarket refuses a range too long for its fidelity ("'startTs' and 'endTs' interval is too long", OBSERVED
+ * for forty days of one-minute prices) */
+const FIDELITY_MIN: Record<CandleInterval, number> = { "5m": 1, "1h": 5, "1d": 60 };
+const BAR_MS: Record<CandleInterval, number> = { "5m": 5 * 60_000, "1h": 3_600_000, "1d": 86_400_000 };
+/** the longest startTs-to-endTs range /prices-history takes: fourteen days, under the fifteen or so it answers (OBSERVED 2026-10-05) */
+const HISTORY_RANGE_MS = 14 * 86_400_000;
+/** a category as Gamma's tag slug: "Climate & Science" → climate-science */
+const tagSlug = (category: string): string =>
+  category
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
 const ORDER_ID = /^0x[0-9a-fA-F]{64}$/;
 
 type Json = Record<string, unknown>;
@@ -222,12 +240,20 @@ interface Outcome {
   minSize?: number | undefined;
   price?: number | undefined;
   notes: string[];
+  /** what Gamma's market says beyond the order rules: its end (`endDate`), the pUSD traded in it in 24 hours (`volume24hr`, the
+   * market's, which all its outcomes share), the change of its price in 24 hours (`oneDayPriceChange`, absolute: the first outcome's,
+   * whose price Gamma's market price is), and its event's category when the caller knows it */
+  closeTime?: string | undefined;
+  volume24h?: number | undefined;
+  change24h?: number | undefined;
+  category?: string | undefined;
 }
 
 /** Every outcome of a Gamma market. The trading id follows the market's `version`, even where both id fields are present: a v1 (CTF)
  * market trades its `clobTokenIds` (a JSON-encoded string), a v2 market its `positionIds` (Polymarket says a v1 market's positionIds have
- * no book). Index i of `outcomes` is index i of the ids. Any other version is left out */
-function outcomesOf(m: Json): Outcome[] {
+ * no book). Index i of `outcomes` is index i of the ids. Any other version is left out. `oneDayPriceChange` is said for the first outcome
+ * only: Gamma's market price, last trade, best bid and best ask are all that outcome's (OBSERVED), and the others' change is not given */
+function outcomesOf(m: Json, category?: string): Outcome[] {
   const version = m.version === "v1" || m.version === "v2" ? m.version : undefined;
   const slug = typeof m.slug === "string" ? m.slug : "";
   if (!version || !slug) return [];
@@ -242,6 +268,9 @@ function outcomesOf(m: Json): Outcome[] {
   if (num(m.secondsDelay) > 0) notes.push(`Polymarket holds an order that would match for ${plain(num(m.secondsDelay))} s before matching it, and it cannot be canceled meanwhile`);
   if (m.restricted === true) notes.push("Polymarket restricts this market in some places");
   const question = String(m.question ?? slug);
+  const closeTime = typeof m.endDate === "string" && m.endDate ? m.endDate : undefined;
+  const volume24h = given(m.volume24hr);
+  const dayChange = given(m.oneDayPriceChange);
   return names.map((outcome, i) => ({
     symbol: `${slug}:${outcome}`,
     slug,
@@ -257,6 +286,10 @@ function outcomesOf(m: Json): Outcome[] {
     minSize: positive(m.orderMinSize),
     price: positive(prices[i]),
     notes,
+    ...(closeTime ? { closeTime } : {}),
+    ...(volume24h !== undefined && volume24h >= 0 ? { volume24h } : {}),
+    ...(i === 0 && dayChange !== undefined ? { change24h: dayChange } : {}),
+    ...(category ? { category } : {}),
   }));
 }
 
@@ -572,6 +605,13 @@ function polymarketTrader(c: { venue: string; name: string; wallet: Wallet; http
       postOnly: true,
       // a sell can only sell shares held — open sells reserve them, and a sell beyond them is refused: it never opens a position the other way
       sellsReduce: true,
+      ...(o.change24h !== undefined ? { change24h: o.change24h } : {}),
+      ...(o.volume24h !== undefined ? { volumeUsd24h: o.volume24h } : {}),
+      ...(o.closeTime ? { closeTime: o.closeTime } : {}),
+      ...(o.category ? { category: o.category } : {}),
+      // the question all its outcomes share: Polymarket's condition id
+      ...(o.conditionId ? { group: { id: o.conditionId, title: o.question } } : {}),
+      outcome: o.outcome,
     };
   };
 
@@ -585,7 +625,7 @@ function polymarketTrader(c: { venue: string; name: string; wallet: Wallet; http
       if (!b?.conditionId) throw no("E_VENUE_REJECTED", { venue: c.venue, message: `${c.name} has no order book for the token ${s.slice(0, 12)}…: it is not one Polymarket trades, or its market is closed` });
       const found = await getJson(`${GAMMA}/markets/keyset?condition_ids=${encodeURIComponent(b.conditionId)}&limit=5`);
       const ms = isObj(found) && Array.isArray(found.markets) ? found.markets.filter(isObj) : [];
-      o = ms.flatMap(outcomesOf).find((x) => x.tokenId === s);
+      o = ms.flatMap((m) => outcomesOf(m)).find((x) => x.tokenId === s);
       if (!o) throw no("E_VENUE_REJECTED", { venue: c.venue, message: `${c.name} lists no open market for the token ${s.slice(0, 12)}…` });
       // the token is the name the owner gave: it stays the symbol
       o = { ...o, symbol: s };
@@ -934,6 +974,90 @@ function polymarketTrader(c: { venue: string; name: string; wallet: Wallet; http
           if (!cursor) break;
         }
         return out;
+      } catch (err) {
+        return asRefusal(c.venue, c.name, err, secrets());
+      }
+    },
+
+    /** Event contracts to discover, from Gamma's events (GET /events, list-events): the open ones (closed=false), the busiest first
+     * (order=volume24hr), in one tag when a category is asked (tag_slug), ending within the window when one is asked (end_date_min and
+     * end_date_max on the event, and each market's own endDate held to it too). Every outcome of every open order-book market among them is a
+     * market, the markets most traded in 24 hours first. Gamma's events carry tags and no category of their own (OBSERVED: `category` is in
+     * its schema and absent from its answers), so a market's category is the tag that was asked for, in Gamma's words (its label), or the
+     * event's `category` should Gamma send one; with neither, none is said. A read: no location check and no credentials */
+    async events({ category, closingWithinMs, limit }) {
+      try {
+        const n = Math.min(200, Math.floor(limit));
+        if (!(n > 0)) return [];
+        if (closingWithinMs !== undefined && !(Number.isFinite(closingWithinMs) && closingWithinMs > 0)) return no("E_ACCOUNT_BAD_ACTION", { venue: c.venue, message: "a window for markets closing soon is a number of milliseconds, more than 0" });
+        const tag = category !== undefined ? tagSlug(category) : undefined;
+        if (tag === "") return no("E_ACCOUNT_BAD_ACTION", { venue: c.venue, message: `a category at ${c.name} is one of its tags, in words ("Sports", "Crypto"), not "${String(category).slice(0, 40)}"` });
+        const now = c.clock();
+        const until = closingWithinMs !== undefined ? now + closingWithinMs : undefined;
+        // an event holds one market or hundreds (a game's every prop): a few events are plenty to choose the busiest markets from
+        const many = Math.min(20, Math.max(5, Math.ceil(n / 2)));
+        const window = until !== undefined ? `&end_date_min=${encodeURIComponent(new Date(now).toISOString())}&end_date_max=${encodeURIComponent(new Date(until).toISOString())}` : "";
+        const body = await getJson(`${GAMMA}/events?closed=false&order=volume24hr&ascending=false&limit=${many}${tag ? `&tag_slug=${encodeURIComponent(tag)}` : ""}${window}`);
+        const rows: Outcome[] = [];
+        const seen = new Set<string>();
+        for (const e of (Array.isArray(body) ? body : []).filter(isObj)) {
+          const asked = tag ? (Array.isArray(e.tags) ? e.tags : []).filter(isObj).find((t) => t.slug === tag) : undefined;
+          // an event that lists its tags without the one asked for is not in that category, whatever came back
+          if (tag && Array.isArray(e.tags) && !asked) continue;
+          const cat = typeof asked?.label === "string" && asked.label ? asked.label : typeof e.category === "string" && e.category ? e.category : undefined;
+          for (const m of (Array.isArray(e.markets) ? e.markets : []).filter(isObj)) {
+            for (const o of outcomesOf(m, cat)) {
+              if (!o.open || seen.has(o.symbol)) continue;
+              if (until !== undefined && !(o.closeTime && Date.parse(o.closeTime) > now && Date.parse(o.closeTime) <= until)) continue;
+              seen.add(o.symbol);
+              rows.push(o);
+            }
+          }
+        }
+        // the busiest markets first; a market's outcomes stay together, in Gamma's order (the sort is stable)
+        rows.sort((a, b) => (b.volume24h ?? 0) - (a.volume24h ?? 0));
+        return rows
+          .map((o) => marketOf(o, undefined))
+          .filter((m) => inDollars(m.quote))
+          .slice(0, n);
+      } catch (err) {
+        return asRefusal(c.venue, c.name, err, secrets());
+      }
+    },
+
+    /** An outcome's price history, from the CLOB's GET /prices-history (get-prices-history: `market` is the outcome's token id, `startTs` and
+     * `endTs` Unix seconds, `fidelity` minutes): Polymarket's price at moments `fidelity` apart, folded into bars. A bar's open and close are
+     * its first and last price, its high and low the highest and lowest of them — Polymarket's prices at those moments, not the trades'
+     * own extremes between them — and Polymarket gives no volume with them, so none is said. A bar starts on a whole step of its length.
+     * Polymarket refuses a startTs-to-endTs range longer than about fifteen days, whatever the fidelity ("invalid filters: 'startTs' and
+     * 'endTs' interval is too long"), and answers a startTs alone — the endTs is optional — up to now, three hundred days included
+     * (OBSERVED 2026-10-05, keyless GETs). So a longer history (the daily bars) is asked from its start with no end */
+    async candles(symbol, interval, sinceMs) {
+      try {
+        if (!Object.hasOwn(FIDELITY_MIN, interval)) return no("E_ACCOUNT_BAD_ACTION", { venue: c.venue, message: `price history comes in bars of 5m, 1h or 1d, not "${String(interval).slice(0, 12)}"` });
+        const now = c.clock();
+        if (!(Number.isFinite(sinceMs) && sinceMs < now)) return no("E_ACCOUNT_BAD_ACTION", { venue: c.venue, message: "price history starts before now" });
+        const k = await resolve(symbol);
+        const range = now - sinceMs > HISTORY_RANGE_MS ? "" : `&endTs=${Math.floor(now / 1000)}`;
+        const body = await getJson(`${CLOB}/prices-history?market=${k.tokenId}&startTs=${Math.floor(sinceMs / 1000)}${range}&fidelity=${FIDELITY_MIN[interval]}`);
+        const points = (isObj(body) && Array.isArray(body.history) ? body.history : [])
+          .filter(isObj)
+          .map((x) => ({ t: given(x.t), p: given(x.p) }))
+          .filter((x): x is { t: number; p: number } => x.t !== undefined && x.t > 0 && x.p !== undefined && x.p >= 0 && x.p <= 1)
+          .sort((a, b) => a.t - b.t);
+        const step = BAR_MS[interval];
+        const bars = new Map<number, Candle>();
+        for (const { t, p } of points) {
+          const at = Math.floor((t * 1000) / step) * step;
+          const b = bars.get(at);
+          if (!b) bars.set(at, { t: at, o: p, h: p, l: p, c: p });
+          else {
+            b.h = Math.max(b.h, p);
+            b.l = Math.min(b.l, p);
+            b.c = p;
+          }
+        }
+        return [...bars.values()];
       } catch (err) {
         return asRefusal(c.venue, c.name, err, secrets());
       }

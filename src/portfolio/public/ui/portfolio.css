@@ -1,0 +1,169 @@
+/* The Portfolio pane (ui/portfolio.js), the Asset drawer (ui/asset.js), and Receive and Move money (ui/money.js), in the Clean cards look
+   (M2): each part of the pane a white card on the ground (shell.css .card, which a .sec in a pane is), what waits for the owner a warm card
+   with a soft orange edge, numbers in Manrope 800, labels in sentence case. Colours, radii and shadows only from ui/tokens.css, so Cream
+   and Black alike; up and down always with their glyph. */
+
+.pf { min-width: 0; }
+.pf-fresh { display: flex; flex-direction: column; gap: 20px; max-width: 760px; }
+
+/* the net worth card: its label, the number (52, 800), today's change, the range, and the curve (140 high, the line in the text colour,
+   the area under it barely) */
+.pane .sec.pf-worth { padding: 20px; gap: 16px; }
+.pf-worth-h { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.pf-worth-n { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.pf-today { font-size: 14px; display: flex; flex-wrap: wrap; gap: 0 6px; align-items: baseline; min-height: 20px; }
+.pf-today .skel { display: inline-block; vertical-align: middle; }
+.pf-note { margin: 0; }
+.pf-note .link { font-size: 12px; }
+.pf-skel-curve { height: 140px; border-radius: var(--radius-s); }
+.pf-plot { position: relative; }
+.pf-curve { height: 140px; }
+.pf-curve .pf-ev { stroke: var(--warn); stroke-width: 1; stroke-dasharray: 3 3; vector-effect: non-scaling-stroke; }
+.pf-curve .pf-cursor { stroke: var(--dim); stroke-width: 1; vector-effect: non-scaling-stroke; opacity: 0; }
+.pf-curve:hover .pf-cursor { opacity: 1; }
+/* the point under the pointer, in figures, on the card's own white */
+.pf-read { position: absolute; top: 0; right: 0; background: var(--surface); color: var(--text); padding: 2px 0 2px 10px; font-weight: 600; pointer-events: none; }
+.pf-read:empty { display: none; }
+.pf-range { margin: 0; }
+
+/* the rules between the parts of a warm card: the orange itself, faint, so they read on its fill in Cream and in Black */
+.pf-steps, .pf-wait { --pf-warm-rule: color-mix(in srgb, var(--warn) 28%, transparent); }
+
+/* the three first steps (a warm card): a round white tick per step, green with a ✓ once done */
+.pf-steps ol { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.pf-steps li { display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 12px 0; border-top: 1px solid var(--pf-warm-rule); }
+.pf-steps li:first-child { border-top: 0; padding-top: 4px; }
+.pf-steps li > div:nth-child(2) { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.pf-steps li > div:nth-child(2) b { font-weight: 600; }
+.pf-steps li.done b { color: var(--dim); font-weight: 500; text-decoration: line-through; text-decoration-color: var(--dim); }
+.pf-tick { width: 28px; height: 28px; border-radius: 50%; border: 1px solid var(--card-border); background: var(--surface); color: var(--text); box-shadow: var(--shadow-card); display: inline-flex; align-items: center; justify-content: center; font-family: var(--font-sans); font-size: 12px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.pf-steps li.done .pf-tick { background: var(--up); border-color: var(--up); color: var(--surface); box-shadow: none; }
+.pf-step-acts { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.pf-steps-h, .pf-wait-h { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.pf-steps-h h2, .pf-wait-h h2 { margin: 0; }
+
+/* waiting for you (a warm card): agent by agent, a round tile and its name, then its cards and its asks, each with Reject (a pill on the
+   second surface) and Approve (filled) side by side */
+.pf-grp { display: flex; flex-direction: column; gap: 12px; padding-top: 12px; border-top: 1px solid var(--pf-warm-rule); }
+.pf-wait-h + .pf-grp { border-top: 0; padding-top: 0; }
+.pf-grp-h { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.pf-grp-h .av { width: 36px; height: 36px; font-size: 10px; }
+.pf-grp-h .who b { font-weight: 600; }
+.pf-item { display: flex; flex-direction: column; gap: 10px; }
+.pf-item-t { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.pf-item-t b { font-weight: 600; overflow-wrap: anywhere; }
+.pf-item-t > .dim.small { font-size: 13px; }
+.pf-item-t > .dim.small .mono { font-size: 12px; }
+.pf-item-t details.more { margin-top: 2px; }
+.pf-item-t details.more pre { margin: 6px 0 0; font-family: var(--font-mono); font-size: 11px; white-space: pre-wrap; word-break: break-all; color: var(--dim); }
+.pf-btns { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.pf-item .pf-btns .btn { flex: 1 1 0; }
+.pf-ask .pf-btns .btn { flex: 0 0 auto; }
+/* an answer to give is a full target */
+.pf-wait .pf-item .pf-btns .btn { min-height: 44px; padding: 0 18px; font-size: 14px; }
+.pf-wait > .pf-item { padding-top: 12px; border-top: 1px solid var(--pf-warm-rule); }
+
+/* cash ready: the label over the number (28, 800), Receive and Move at the top right; what is not drawn on the bar has a hollow key */
+.pane .sec.pf-cash > .sec-head { align-items: flex-start; }
+.pf-cash > .sec-head > div:first-child, .pf-det-v { display: flex; flex-direction: column; gap: 4px; }
+.pf-sw-none { border: 1px solid var(--dim); }
+details.more.pf-where { margin-top: 2px; }
+details.more.pf-where[open] summary { display: block; margin-bottom: 4px; }
+
+/* agent activity: the mark says what happened, its colour only repeats it */
+.pane .sec.pf-act { gap: 6px; }
+.pf-act > .sec-head { margin-bottom: 4px; }
+.feed .pf-mk.ok { color: var(--up); }
+.feed .pf-mk.wait { color: var(--warn-text); }
+.feed .pf-mk.no { color: var(--dim); }
+.feed .pf-mk.say, .feed .pf-mk:not(.ok):not(.wait):not(.no) { color: var(--dim); }
+.feed .t1 { overflow-wrap: anywhere; }
+
+/* Assets · Positions · Accounts: a card that is mostly a table, its toggle and a few words or tools on the first row */
+.pane .sec.pf-table { padding: 18px 18px 8px; gap: 10px; }
+.pf-tabs { align-items: center; }
+.pf-tabs .tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.pf-name { border: 0; padding: 0; background: none; border-radius: 0; font: inherit; font-weight: 600; color: var(--text); text-align: left; min-height: 24px; }
+.pf-name:hover { background: none; text-decoration: underline; text-underline-offset: 3px; }
+.t .who .dim { white-space: normal; }
+.pf-chips { display: inline-flex; flex-wrap: wrap; gap: 6px; }
+.pf-miss, .pf-miss-l { margin: 4px 0 0; }
+.pf-miss-l { padding-left: 18px; font-size: 12px; color: var(--dim); display: flex; flex-direction: column; gap: 4px; }
+.pf-miss-l b { color: var(--text); font-weight: 600; }
+.pf-sub { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
+/* the accounts: the name has room to read, the buttons wrap two to a row rather than squeeze it */
+.pf-acct-t .who { min-width: 168px; }
+/* a narrow window: a name keeps room to read, and the figures scroll inside the card (.t-wrap) instead of squeezing it word by word */
+.pf-table .t .who { min-width: 150px; }
+.pf-acts { flex-wrap: wrap; min-width: 190px; max-width: 252px; margin-left: auto; }
+
+/* where a limit may act: a label over its boxes, the boxes in a field of their own, like every other field in the sheet */
+fieldset.pf-allow { border: 0; padding: 0; margin: 0; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+fieldset.pf-allow legend { float: left; width: 100%; padding: 0; margin: 0 0 4px; font-family: var(--font-sans); font-size: 12px; font-weight: 600; letter-spacing: 0; text-transform: none; color: var(--dim); }
+.pf-allow-box { clear: both; border: 1px solid var(--border); border-radius: var(--radius-s); background: var(--bg); padding: 8px 12px; display: flex; flex-wrap: wrap; gap: 4px 16px; }
+.pf-allow-box > p { flex-basis: 100%; margin: 0; }
+
+/* one account, in the drawer */
+.pf-det { display: flex; flex-direction: column; gap: 16px; }
+.pf-notes { margin: 0; padding-left: 18px; font-size: 13px; display: flex; flex-direction: column; gap: 4px; }
+
+/* ---- the Asset drawer (asset.js): its parts under hairlines in the drawer's white, the price as candles (an up bar hollow) ---------- */
+.as { display: flex; flex-direction: column; gap: 18px; }
+.as-head { display: flex; gap: 14px; align-items: flex-start; }
+.as-head > div { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.as-val { display: flex; flex-direction: column; gap: 2px; font-size: 14px; }
+.as-acts { display: flex; gap: 8px; flex-wrap: wrap; }
+.as-acts .btn { flex: 1 1 110px; }
+.as-sec { gap: 10px; }
+/* a part's name: the same heading as the Market drawer's parts (markets.css .mk-d .sec .h2), so the two drawers read as one */
+.as-sec > .label:first-child, .as-sec > .sec-head > .label { font-size: 17px; font-weight: 700; color: var(--text); letter-spacing: -0.01em; }
+.as-plot { position: relative; }
+.as-chart { width: 100%; height: 170px; display: block; }
+.as-chart line { stroke-width: 1; vector-effect: non-scaling-stroke; }
+.as-chart .c-up { stroke: var(--up); fill: var(--surface); }
+.as-chart .c-down { stroke: var(--down); fill: var(--down); }
+.as-chart rect { vector-effect: non-scaling-stroke; stroke-width: 1; }
+.as-read { position: absolute; top: 0; left: 0; background: var(--surface); padding: 2px 10px 2px 0; font-weight: 600; pointer-events: none; }
+.as-read:empty { display: none; }
+.as-miss { margin: 0; padding-left: 18px; font-size: 12px; color: var(--dim); display: flex; flex-direction: column; gap: 4px; }
+.as-miss b { color: var(--text); font-weight: 600; }
+.as-miss-p { margin: 0; }
+#drawer .t td, #drawer .t th { padding: 10px 8px; }
+#drawer .t td:first-child, #drawer .t th:first-child { padding-left: 0; }
+#drawer .t td:last-child, #drawer .t th:last-child { padding-right: 0; }
+
+/* ---- the Receive sheet (money.js): the address in a soft box of its own, on the ground's colour, the copy button a pill ------------- */
+.rcv-out { min-height: 96px; }
+.rcv-box { border: 1px solid var(--card-border); border-radius: var(--radius-m); padding: 16px; background: var(--bg); display: flex; flex-direction: column; gap: 10px; }
+.rcv-addr { font-size: 15px; font-weight: 500; line-height: 1.5; word-break: break-all; color: var(--text); user-select: all; }
+.rcv-acts { display: flex; gap: 8px; flex-wrap: wrap; }
+/* what may not arrive, in the warning's own colour (.path alone would dim it) */
+.rcv-box .path.warn-t { color: var(--warn-text); font-weight: 600; }
+
+/* a window too narrow for the side column beside the main one, yet with the rail (901 to 1243): what waits for the owner comes first, at
+   the pane's width, then the main column, then Cash ready and Allocation side by side, and Agent activity under them */
+@media (min-width: 901px) and (max-width: 1243px) {
+  .pf.cols { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+  .pf.cols > .col-main { grid-column: 1 / -1; }
+  .pf.cols > .col-side { display: contents; }
+  .pf.cols > .col-side > [data-pf-part="waiting"] { grid-column: 1 / -1; order: -1; }
+  .pf.cols > .col-side > [data-pf-part="waiting"]:empty { display: none; }
+  .pf.cols > .col-side > .pf-act { grid-column: 1 / -1; }
+  /* at that width an item's answer sits beside it, not stretched under it */
+  .pf-wait .pf-item { flex-direction: row; align-items: center; justify-content: space-between; gap: 16px; }
+  .pf-wait .pf-item .pf-btns { flex: none; }
+  .pf-wait .pf-item .pf-btns .btn { flex: 0 0 auto; min-width: 116px; }
+}
+
+@media (max-width: 900px) {
+  .pf-steps li { grid-template-columns: 28px minmax(0, 1fr); }
+  .pf-step-acts { grid-column: 2; justify-content: flex-start; }
+  .pane .sec.pf-worth { padding: 18px; }
+}
+
+/* ---- Move money (money.js openLiveMove): the fields each kind of move needs ----------------------------------------------------- */
+.mv-body { display: flex; flex-direction: column; gap: 14px; }
+.mv-body .path .link { font-size: 12px; }
+/* money in an earn product: its way out sits under its name, so the table needs no column of its own for it */
+.pf-earn-act { display: block; }
+.pf-earn-act .link { min-height: 44px; display: inline-flex; align-items: center; }

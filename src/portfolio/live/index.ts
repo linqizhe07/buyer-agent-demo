@@ -113,7 +113,7 @@ const alpaca: Connector = {
   async open(req, deps) {
     const key = loadKeyFile(deps.home, req.reference, ALPACA_KEY, req.venue);
     if (isRefusal(key)) return key;
-    const opened = await alpacaSource({ venue: req.venue, label: req.label, reference: req.reference || defaultKeyRef(req.venue), key, http: deps.http });
+    const opened = await alpacaSource({ venue: req.venue, label: req.label, reference: req.reference || defaultKeyRef(req.venue), key, http: deps.http, clock: deps.clock });
     return isRefusal(opened) ? opened : { ...opened, summary: said(opened.source) };
   },
 };
@@ -199,7 +199,8 @@ const metamask: Connector = {
   example: "Reads through MetaMask's own mm command line, signed in on this machine: nothing to paste. Check that mm wallet show works in a terminal first.",
   venues: ["metamask"],
   async open(req, deps) {
-    const opened = await metamaskSource({ venue: req.venue, label: req.label, run: deps.mm });
+    // the price values an earn vault whose asset is not a dollar stablecoin (without one, only stablecoin vaults are valued)
+    const opened = await metamaskSource({ venue: req.venue, label: req.label, run: deps.mm, price: deps.price });
     return isRefusal(opened) ? opened : { ...opened, summary: opened.source.probe.note };
   },
 };

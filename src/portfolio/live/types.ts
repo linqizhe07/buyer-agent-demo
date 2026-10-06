@@ -16,6 +16,7 @@
 import { isRefusal, type Refusal } from "../../core/errors.ts";
 import { no } from "../refuse.ts";
 import type { AccountKind, AssetClass } from "../accounts.ts";
+import type { LiveEarner } from "./earn.ts";
 import type { LiveTrader } from "./trade.ts";
 import type { LiveWriter } from "./writes.ts";
 
@@ -30,6 +31,7 @@ export interface LiveProbe {
 
 export interface LiveBalance {
   asset: string;
+  /** what is held; a short, where a venue carries one, is negative (and so are its dollars: what buying it back costs) */
   amount: number;
   /** what it is worth in dollars, when the venue or a price says so; absent = no price was found, and it counts as nothing */
   usd?: number | undefined;
@@ -57,6 +59,9 @@ export interface LiveSource {
   trader?: LiveTrader | undefined;
   /** why no order is placed here, when none is */
   noTradeBecause?: string | undefined;
+  /** how money is put to earn here (earn.ts: the mm wallet's vaults), when the source itself has a way; an exchange's earn is reached
+   * through its trader's own client instead (exchange-trade.ts exchangeEarnHook) */
+  earner?: LiveEarner | undefined;
 }
 
 export interface HttpReply {
@@ -121,6 +126,7 @@ export const num = (v: unknown): number => {
   return Number.isFinite(n) ? n : 0;
 };
 
-/** dollar stablecoins count one for one; everything else needs a price from somewhere */
-export const STABLES = new Set(["USD", "USDC", "USDC.E", "USDT", "USDT0", "USD₮0", "USD₮", "FDUSD", "PYUSD", "DAI", "TUSD", "USDP", "PUSD"]);
+/** dollar stablecoins count one for one; everything else needs a price from somewhere. USDG is Paxos's Global Dollar: the dollar Robinhood's
+ * Stock Tokens trade against on Robinhood Chain */
+export const STABLES = new Set(["USD", "USDC", "USDC.E", "USDT", "USDT0", "USD₮0", "USD₮", "FDUSD", "PYUSD", "DAI", "TUSD", "USDP", "PUSD", "USDG"]);
 export const isStable = (asset: string): boolean => STABLES.has(asset.toUpperCase());

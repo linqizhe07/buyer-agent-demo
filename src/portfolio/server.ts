@@ -22,14 +22,32 @@
  * only: the venues the owner connects through their own interfaces; no simulated venue is mounted.
  *
  *   GET  /                             the page: net worth, accounts, activity, agents, devices (`/account` sends you here)
- *   GET  /api/account                  what that page reads
+ *   GET  /api/account                  what that page reads, with `agentSetup`: the command an agent's owner runs to add this account's MCP seat
  *   GET  /api/now                      the service's clock (a signer takes its nonce from here)
  *   POST /api/account/pair   {jwk}     a browser offers the public half of its device key; the first one becomes the owner's device
  *   POST /api/account/prepare {draft}  turn what the owner asked for into the exact action to sign (a movement gets its route, fee and arrival;
  *                                      an order its exact size, price and the most it may be worth)
  *   GET  /api/account/markets?venue=okx&q=BTC        what a venue connected live trades (a read)
  *   GET  /api/account/market?venue=okx&symbol=BTC/USDT   one market: a fresh price, the smallest order, the steps, open or not (a read)
- *   GET  /api/account/positions?venue=okx                what is held there: perpetuals, shares, event contracts (a read)
+ *   GET  /api/account/positions?venue=okx                what is held there: perpetuals, shares, event contracts (a read); no venue: at
+ *                                                        every venue that lists positions, and the ones that could not be read
+ *   GET  /api/account/explore?tab=&q=&sort=&limit=       Markets: what the connected venues list and what the venues not connected
+ *                                                        publish without a key ("Connect to trade"), as one list with tabs, movers,
+ *                                                        what closes soon and what trades most
+ *   GET  /api/account/holdings?cost=1                    Portfolio: what is held by asset across every venue, the dollars that are ready,
+ *                                                        the last 24 hours; `cost=1` adds what was paid
+ *   GET  /api/account/history?range=1d|1w|1m|all         the net worth curve
+ *   GET  /api/account/receive?venue=&asset=&network=     where to send an asset so that it lands at a venue
+ *   GET  /api/account/asset?key=crypto:BTC&interval=1h   one asset: its row, every venue's price, price history, positions, orders, lines
+ *   GET  /api/account/quotes?pairs=okx|BTC/USDT,…        fresh prices for up to twelve markets
+ *   GET  /api/account/sellable                           everything held that is not a dollar, and what selling it would sign
+ *   GET  /api/account/agents                             the agents one by one: keys, limits, cards, orders, payments, wallets, intents
+ *   GET  /api/account/candles?venue=&symbol=&interval=   one market's price history (5m · 1h · 1d): a connected venue's own, or a venue not
+ *                                                        connected from its public data, without a key; kept a minute
+ *   GET  /api/account/earn?venue=&asset=                 Earn: the products the connected venues offer (the MetaMask Agent Wallet's
+ *                                                        vaults through mm, OKX Simple Earn, Kraken Earn), what is in them, and the venues
+ *                                                        that could not be read (money in or out is a signed liveEarn / agentLiveEarn)
+ *   GET  /ui/<name>.js|css                               the account page's own scripts and styles
  *   POST /api/exchange {action, nonce, signature}   THE door: every instruction, signed — an owner action by an owner key, an agent's by an
  *                                      authorised agent key (200 done · 202 a card is waiting · 401 not a signer · 409 refused)
  *
@@ -43,7 +61,7 @@ import { readFileSync } from "node:fs";
 import type { Server } from "node:http";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { isRefusal } from "../core/errors.ts";
+import { isRefusal, type Refusal } from "../core/errors.ts";
 import { parseIntent, parseOrder } from "./intents.ts";
 import { no } from "./refuse.ts";
 import { cardHash } from "./account/exchange.ts";
@@ -58,10 +76,22 @@ import { defaultHome } from "./home.ts";
 import type { Side } from "./venues.ts";
 
 const PUBLIC = fileURLToPath(new URL("./public/", import.meta.url));
+/** the MCP seat an agent mounts (mcp.ts), by its absolute path: the command the page hands an agent's owner runs from any folder */
+const MCP_ENTRY = fileURLToPath(new URL("./mcp.ts", import.meta.url));
+
+/** The command that adds this account's MCP seat to Claude Code: the seat reaches this server at `origin`. A path with anything a shell
+ * reads in it is quoted */
+export function agentSetupOf(origin: string): { command: string; url: string } {
+  const quote = (x: string) => (/^[A-Za-z0-9_./:@%+=,-]+$/.test(x) ? x : `'${x.replace(/'/g, `'\\''`)}'`);
+  return { command: `claude mcp add portfolio -e PORTFOLIO_URL=${quote(origin)} -- npx tsx ${quote(MCP_ENTRY)}`, url: origin };
+}
 
 export interface PortfolioServerOptions {
   port: number;
   service: PortfolioService;
+  /** how often the net worth curve gets a point (account/networth.ts), in milliseconds, on the real clock: 300000 (five minutes) unless
+   * said; 0 takes none, nor the points a connection or a disconnection adds. Only with the account layer mounted */
+  snapshotMs?: number | undefined;
 }
 
 export interface PortfolioServerHandle {
@@ -106,6 +136,8 @@ function signedInPage(error?: string): string {
 export async function startPortfolioServer(opts: PortfolioServerOptions): Promise<PortfolioServerHandle> {
   const svc = opts.service;
   const agent = new AgentSession(svc);
+  /** this server's own origin, once it listens: what an agent's seat is pointed at */
+  let origin = "";
   const app = express();
   app.use(express.json());
   app.use((_req, res, next) => {
@@ -118,9 +150,20 @@ export async function startPortfolioServer(opts: PortfolioServerOptions): Promis
   app.get("/portfolio.js", file("portfolio.js", "application/javascript"));
   app.get("/portfolio.css", file("portfolio.css", "text/css"));
   app.get("/account", (_req, res) => res.redirect(302, "/"));
-  app.get("/account.js", file("account.js", "application/javascript"));
   app.get("/account.css", file("account.css", "text/css"));
   app.get("/owner.js", file("owner.js", "application/javascript"));
+  // the account page's own scripts and styles: a plain name in ui/ and .js or .css, nothing else. The pattern is matched on the path as it
+  // arrived, before any decoding, so a folder, a second dot or anything percent-encoded is not a name here: it is a 404
+  app.get(/^\/ui\/([a-z0-9-]+)\.(js|css)$/, (req, res) => {
+    const [name, ext] = [req.params[0], req.params[1]];
+    let text: string;
+    try {
+      text = readFileSync(join(PUBLIC, "ui", `${name}.${ext}`), "utf8");
+    } catch {
+      return void res.sendStatus(404);
+    }
+    res.type(ext === "js" ? "application/javascript" : "text/css").send(text);
+  });
   // the owner talks to the page's scripted agent through a signed instruction (setPolicy · say); this is where it lands
   svc.sayHandler = async (text) => (await agent.say(text.trim().slice(0, 200))).no;
 
@@ -161,12 +204,14 @@ export async function startPortfolioServer(opts: PortfolioServerOptions): Promis
 
   app.get("/api/now", (_req, res) => void res.json({ ok: true, now: svc.now(), ms: Date.parse(svc.now()) }));
 
-  app.get("/api/account", wrap(async (_req, res) => {
+  app.get("/api/account", wrap(async (req, res) => {
     const view = await svc.accountView();
     if (!view) return void res.status(404).json({ ok: false, error: "the account layer is not mounted (--classic)" });
     const o = svc.policy();
     // the dial as the page needs it: the agents' session, the venues switched off for agents, the most leverage they may set
-    res.json({ ok: true, ...view, mode: o.mode, live: svc.live, dial: { sessionExpiresAt: o.sessionExpiresAt, sessionEnded: Date.parse(o.sessionExpiresAt) <= Date.parse(view.now), revoked: o.revoked, maxLeverage: o.maxLeverage ?? 1 } });
+    // and how each venue connected live has answered lately (its health, for the Venues board)
+    // and the command an agent's owner runs to add this account's seat (the server's own origin, the seat by its absolute path)
+    res.json({ ok: true, ...view, mode: o.mode, live: svc.live, dial: { sessionExpiresAt: o.sessionExpiresAt, sessionEnded: Date.parse(o.sessionExpiresAt) <= Date.parse(view.now), revoked: o.revoked, maxLeverage: o.maxLeverage ?? 1 }, health: svc.venueHealth(), agentSetup: agentSetupOf(origin || `${req.protocol}://${req.get("host") ?? "127.0.0.1"}`) });
   }));
 
   app.post("/api/account/pair", (req, res) => {
@@ -260,12 +305,89 @@ export async function startPortfolioServer(opts: PortfolioServerOptions): Promis
     res.status(isRefusal(r) ? 409 : 200).json(isRefusal(r) ? { ok: false, refusal: r } : { ok: true, ...r });
   }));
 
-  // what is held at a venue connected live: perpetuals, shares, event contracts (a read)
+  // what is held at a venue connected live — perpetuals, shares, event contracts — or, with no venue named, at every one that lists positions
+  // (each venue that could not be read is in `missing`). A read
   app.get("/api/account/positions", wrap(async (req, res) => {
     if (!svc.account) return void res.status(404).json({ ok: false, error: "the account layer is not mounted" });
     const venue = typeof req.query.venue === "string" ? req.query.venue.slice(0, 40) : "";
+    if (!venue) {
+      const all = await svc.allPositions();
+      return void res.status(isRefusal(all) ? 409 : 200).json(isRefusal(all) ? { ok: false, refusal: all } : { ok: true, ...all });
+    }
     const r = await svc.livePositions(venue);
     res.status(isRefusal(r) ? 409 : 200).json(isRefusal(r) ? { ok: false, refusal: r } : { ok: true, positions: r });
+  }));
+
+  // ---- the wallet's reads: Portfolio · Markets · Trade, and the agents one by one. None of them orders, moves or signs anything ----
+  const mounted = (res: express.Response) => (svc.account ? true : void res.status(404).json({ ok: false, error: "the account layer is not mounted (--classic)" }));
+  const query = (req: express.Request, k: string, max = 120) => (typeof req.query[k] === "string" ? String(req.query[k]).slice(0, max) : "");
+  const answerOf = <T extends object>(res: express.Response, r: T | Refusal, key?: string) => void res.status(isRefusal(r) ? 409 : 200).json(isRefusal(r) ? { ok: false, refusal: r } : key ? { ok: true, [key]: r } : { ok: true, ...r });
+
+  // MARKETS: what there is to trade, at the connected venues and (keyless, "Connect to trade") at the venues not connected
+  app.get("/api/account/explore", wrap(async (req, res) => {
+    if (!mounted(res)) return;
+    const limit = query(req, "limit", 6);
+    answerOf(res, await svc.explore({ tab: query(req, "tab", 20), q: query(req, "q", 80), sort: query(req, "sort", 20), ...(limit ? { limit: Number(limit) } : {}) }));
+  }));
+
+  // PORTFOLIO: what is held, by asset across every venue, the dollars that are ready, the last 24 hours; `cost=1` adds what was paid
+  app.get("/api/account/holdings", wrap(async (req, res) => {
+    if (!mounted(res)) return;
+    answerOf(res, await svc.holdings({ cost: query(req, "cost", 5) === "1" }));
+  }));
+
+  // the net worth curve: range 1d · 1w · 1m · all
+  app.get("/api/account/history", wrap(async (req, res) => {
+    if (!mounted(res)) return;
+    answerOf(res, svc.history(query(req, "range", 10) || "1d"));
+  }));
+
+  // where to send an asset on a network so that it lands at a venue: the exchange's own deposit address, or a proven wallet's own
+  app.get("/api/account/receive", wrap(async (req, res) => {
+    if (!mounted(res)) return;
+    answerOf(res, await svc.receive(query(req, "venue", 40), query(req, "asset", 20), query(req, "network", 30)));
+  }));
+
+  // one asset: its row, every venue's price, its price history, positions, open orders, statement lines and cost
+  app.get("/api/account/asset", wrap(async (req, res) => {
+    if (!mounted(res)) return;
+    answerOf(res, await svc.asset(query(req, "key", 140), query(req, "interval", 4) || "1h"));
+  }));
+
+  // a fresh price for each of up to twelve markets: ?pairs=okx|BTC/USDT,kalshi|KXFED-25DEC-T4.00:YES (or one ?pair= each)
+  app.get("/api/account/quotes", wrap(async (req, res) => {
+    if (!mounted(res)) return;
+    const list = (v: unknown): string[] => (Array.isArray(v) ? v : v === undefined ? [] : [v]).filter((x): x is string => typeof x === "string");
+    const pairs = [...list(req.query.pairs).flatMap((x) => x.split(",")), ...list(req.query.pair)].map((x) => x.trim()).filter(Boolean);
+    if (pairs.length > 12) return void bad(res, "at most 12 markets at once");
+    const parsed = pairs.map((x) => ({ venue: x.slice(0, Math.max(0, x.indexOf("|"))), symbol: x.slice(x.indexOf("|") + 1).slice(0, 160) }));
+    if (parsed.some((p) => !p.venue || !p.symbol)) return void bad(res, "each market is venue|symbol, e.g. okx|BTC/USDT");
+    answerOf(res, await svc.quotes(parsed), "quotes");
+  }));
+
+  // TRADE · Sell many: everything held that is not a dollar, with what selling it at its venue would sign
+  app.get("/api/account/sellable", wrap(async (_req, res) => {
+    if (!mounted(res)) return;
+    answerOf(res, await svc.sellable());
+  }));
+
+  // the agents one by one: each key's standing, its limits (spent, held, left), cards, orders, payments, wallets, intents, asks, flights
+  app.get("/api/account/agents", wrap(async (_req, res) => {
+    if (!mounted(res)) return;
+    answerOf(res, await svc.agents());
+  }));
+
+  // one market's price history: a connected venue's own, or a public source's without a key. The venue is an id the account knows and the
+  // symbol plain text: neither ever names a host (service.ts candles)
+  app.get("/api/account/candles", wrap(async (req, res) => {
+    if (!mounted(res)) return;
+    answerOf(res, await svc.candles(query(req, "venue", 60), query(req, "symbol", 200), query(req, "interval", 4) || "1h"));
+  }));
+
+  // EARN: the products the venues connected live offer, in one asset when asked, and what is in them (each venue not read is in `missing`)
+  app.get("/api/account/earn", wrap(async (req, res) => {
+    if (!mounted(res)) return;
+    answerOf(res, await svc.earn({ venue: query(req, "venue", 40) || undefined, asset: query(req, "asset", 20) || undefined }));
   }));
 
   // the routes a bridge could take across chains from a wallet of the owner's, the one the account would sign for first (a read)
@@ -403,13 +525,36 @@ export async function startPortfolioServer(opts: PortfolioServerOptions): Promis
     s.on("error", reject);
   });
   const bound = server.address();
+  origin = `http://127.0.0.1:${typeof bound === "object" && bound ? bound.port : opts.port}`;
+
+  // The net worth curve: a point every five minutes on the real clock, one once a restart has connected the venues again, and one when the
+  // owner connects or disconnects a venue (marked on the curve, never counted as a gain or a loss). One at a time, in order; none after close
+  const every = opts.snapshotMs ?? 300_000;
+  let closed = false;
+  let snapping: Promise<unknown> = Promise.resolve();
+  let timer: ReturnType<typeof setInterval> | undefined;
+  if (svc.account && every > 0) {
+    const snap = (event?: Parameters<NonNullable<PortfolioService["onConnection"]>>[0]) => {
+      if (closed) return;
+      snapping = snapping.then(() => (closed ? undefined : svc.snapshot(event))).catch(() => undefined);
+    };
+    svc.onConnection = (e) => snap(e);
+    timer = setInterval(() => snap(), every);
+    timer.unref();
+    void Promise.resolve(svc.restoring).then(() => snap());
+  }
   return {
     url: `http://127.0.0.1:${typeof bound === "object" && bound ? bound.port : opts.port}`,
-    close: () =>
-      new Promise<void>((resolve) => {
+    close: async () => {
+      closed = true;
+      if (timer) clearInterval(timer);
+      svc.onConnection = undefined;
+      await snapping;
+      await new Promise<void>((resolve) => {
         server.close(() => resolve());
         server.closeAllConnections();
-      }),
+      });
+    },
   };
 }
 

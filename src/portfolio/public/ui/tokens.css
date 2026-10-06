@@ -1,0 +1,154 @@
+/* The Account's two backgrounds, Cream and Black, as one set of names, in the Clean cards look (M2): content in white cards on a warm
+   ground, pills for buttons and toggles, Manrope throughout. account.html sets html[data-theme] before the first paint (Cream unless this
+   browser chose Black); with no script the system's own light or dark decides. Below them, the names the page used before (portfolio.css:
+   --paper --ink --line --sage --orange …) point at these, so every earlier class still renders in either background.
+   Contrast (WCAG AA, 4.5:1 for words): Cream dim on ground 6.3, warn-text on warn-fill 5.9, up on white 5.4, down on white 5.6, up on its
+   fill 4.5, down on its fill 4.6; Black dim on ground 8.1, warn-text on warn-fill 9.0, up on a card 8.0, down on a card 7.2. */
+:root,
+:root[data-theme="cream"] {
+  color-scheme: light;
+  --bg: #f6f4ef;
+  --surface: #ffffff;
+  --surface-2: #ece8e0;
+  --text: #121417;
+  --dim: #5d5a53;
+  --border: #e6e1d7;
+  /* a strong edge: what is picked or focused (a venue chosen in the ticket, a field being typed in) */
+  --rule: #121417;
+  --primary: #121417;
+  --on-primary: #ffffff;
+  --warn: #d9741e;
+  --warn-text: #94480c;
+  --warn-fill: #fdf0e3;
+  /* the soft edge of something waiting on the owner (the approval card) */
+  --warn-edge: #f3d2b4;
+  /* words on a warn fill (a count) */
+  --on-warn: #121417;
+  --up: #0d7a52;
+  --down: #b4441c;
+  /* a Yes and a No to press: the up and down colours on a fill of their own */
+  --up-fill: #e4efe6;
+  --down-fill: #f6e6df;
+  --hover: rgba(18, 20, 23, 0.05);
+  --area: rgba(18, 20, 23, 0.05);
+  --scrim: rgba(18, 20, 23, 0.32);
+  /* a card: a hairline of its own and a shadow you barely see; the ticket lifts a little more; a sheet or a menu floats */
+  --card-border: #ece8e0;
+  --shadow-card: 0 1px 2px rgba(16, 24, 40, 0.06), 0 1px 3px rgba(16, 24, 40, 0.05);
+  --shadow-lift: 0 8px 30px rgba(16, 24, 40, 0.1);
+  --shadow: 0 16px 48px rgba(16, 24, 40, 0.16);
+  --rail-bg: #ffffff;
+  /* what the money is in (the allocation bar): never told apart by colour alone, each slice has its name beside it */
+  --alloc-cash: #c9c3b7;
+  --alloc-stable: #5d5a53;
+  --alloc-crypto: #121417;
+  --alloc-equity: #3b5bdb;
+  --alloc-event: #0d7a52;
+  --alloc-rwa: #d9741e;
+  --alloc-earn: #8a6d3b;
+}
+
+:root[data-theme="black"] {
+  color-scheme: dark;
+  --bg: #0e0f11;
+  --surface: #17191c;
+  --surface-2: #212429;
+  --text: #f2f3f5;
+  --dim: #a3a9b4;
+  --border: #2b2e34;
+  --rule: #f2f3f5;
+  --primary: #f2f3f5;
+  --on-primary: #0e0f11;
+  --warn: #f0a040;
+  --warn-text: #f5b866;
+  --warn-fill: #2b2112;
+  --warn-edge: #f0a040;
+  --on-warn: #0e0f11;
+  --up: #4cc38a;
+  --down: #f08a6c;
+  --up-fill: #16301f;
+  --down-fill: #35201a;
+  --hover: rgba(242, 243, 245, 0.06);
+  --area: rgba(242, 243, 245, 0.06);
+  --scrim: rgba(0, 0, 0, 0.6);
+  --card-border: #25282d;
+  --shadow-card: none;
+  --shadow-lift: none;
+  --shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
+  --rail-bg: #12151b;
+  --alloc-cash: #4a4e56;
+  --alloc-stable: #a3a9b4;
+  --alloc-crypto: #f2f3f5;
+  --alloc-equity: #5c7cfa;
+  --alloc-event: #4cc38a;
+  --alloc-rwa: #f0a040;
+  --alloc-earn: #d2b07a;
+}
+
+/* no script to read the choice: the system's own dark gets Black */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    color-scheme: dark;
+    --bg: #0e0f11;
+    --surface: #17191c;
+    --surface-2: #212429;
+    --text: #f2f3f5;
+    --dim: #a3a9b4;
+    --border: #2b2e34;
+    --rule: #f2f3f5;
+    --primary: #f2f3f5;
+    --on-primary: #0e0f11;
+    --warn: #f0a040;
+    --warn-text: #f5b866;
+    --warn-fill: #2b2112;
+    --warn-edge: #f0a040;
+    --on-warn: #0e0f11;
+    --up: #4cc38a;
+    --down: #f08a6c;
+    --up-fill: #16301f;
+    --down-fill: #35201a;
+    --hover: rgba(242, 243, 245, 0.06);
+    --area: rgba(242, 243, 245, 0.06);
+    --scrim: rgba(0, 0, 0, 0.6);
+    --card-border: #25282d;
+    --shadow-card: none;
+    --shadow-lift: none;
+    --shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
+    --rail-bg: #12151b;
+    --alloc-cash: #4a4e56;
+    --alloc-stable: #a3a9b4;
+    --alloc-crypto: #f2f3f5;
+    --alloc-equity: #5c7cfa;
+    --alloc-event: #4cc38a;
+    --alloc-rwa: #f0a040;
+    --alloc-earn: #d2b07a;
+  }
+}
+
+:root {
+  /* Manrope everywhere, numbers in its 800 with tabular figures; IBM Plex Mono only for hashes, addresses and what is signed */
+  --font-sans: "Manrope", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, "PingFang SC", sans-serif;
+  --font-num: var(--font-sans);
+  --font-mono: "IBM Plex Mono", "SF Mono", Menlo, Consolas, monospace;
+  /* the earlier name for the numbers' face: Manrope now, so a rule still naming it draws in the new look */
+  --font-serif: var(--font-sans);
+  --radius-s: 10px;
+  --radius-m: 16px;
+  --radius-l: 20px;
+  --radius-pill: 999px;
+  --radius: var(--radius-s);
+  --radius-2: var(--radius-m);
+  --rail: 248px;
+  /* the earlier names, pointed at the ones above. --orange stays a fill: words in it use --warn-text, which reads on either background */
+  --paper: var(--bg);
+  --ink: var(--text);
+  --line: var(--border);
+  --card: var(--surface);
+  --sage: var(--up);
+  --orange: var(--warn);
+  --rust: var(--down);
+  --muted: var(--dim);
+  --gold: var(--alloc-equity);
+  --plum: var(--alloc-event);
+  --blue: var(--alloc-rwa);
+}

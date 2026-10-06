@@ -8,7 +8,7 @@ import { isRefusal, type Refusal } from "../../src/core/errors.ts";
 import type { ChainReader } from "../../src/portfolio/live/chain.ts";
 import { KEY_SHAPES, keyFileStatus, liveOptions, openLive, type LiveDeps } from "../../src/portfolio/live/index.ts";
 import { polyHmac, polymarketTradeSource } from "../../src/portfolio/live/polymarket-clob.ts";
-import { inDollars, type LiveTrader, type OrderRequest, type OrderState } from "../../src/portfolio/live/trade.ts";
+import { inDollars, type Candle, type LiveTrader, type OrderRequest, type OrderState } from "../../src/portfolio/live/trade.ts";
 import type { Http, HttpReply, LiveBalance, LiveSource } from "../../src/portfolio/live/types.ts";
 
 /** TRADING at Polymarket's CLOB, against stand-ins for the CLOB, Gamma, the Data API and polymarket.com's location check that record every
@@ -276,7 +276,7 @@ describe("one market, with a fresh price", () => {
   it("<slug>:<outcome>: Gamma for what it is, the book for its price — the best bid and ask computed, not read off the ends", async () => {
     const { t, seen } = await pm({ answers: MARKET_ANSWERS });
     const m = ok(await t.market(`${IRAN_SLUG}:yes`));
-    expect(m).toEqual({ symbol: `${IRAN_SLUG}:Yes`, name: "Will the U.S. invade Iran before 2027? · Yes", kind: "event", base: "Yes", quote: "pUSD", price: 0.155, bid: 0.15, ask: 0.16, minQty: 5, qtyStep: 0.01, priceStep: 0.01, open: true, note: "Polymarket restricts this market in some places", types: ["market", "limit"], tifs: ["gtc", "ioc", "fok"], postOnly: true, sellsReduce: true });
+    expect(m).toEqual({ symbol: `${IRAN_SLUG}:Yes`, name: "Will the U.S. invade Iran before 2027? · Yes", kind: "event", base: "Yes", quote: "pUSD", price: 0.155, bid: 0.15, ask: 0.16, minQty: 5, qtyStep: 0.01, priceStep: 0.01, open: true, note: "Polymarket restricts this market in some places", types: ["market", "limit"], tifs: ["gtc", "ioc", "fok"], postOnly: true, sellsReduce: true, volumeUsd24h: 349164.43, group: { id: IRAN_CID, title: "Will the U.S. invade Iran before 2027?" }, outcome: "Yes" });
     expect(calls(seen)).toEqual([`GET ${GAMMA}/markets/slug/${IRAN_SLUG}`, `GET ${CLOB}/book?token_id=${YES}`]);
   });
 
@@ -786,5 +786,111 @@ describe("the L2 HMAC", () => {
     // the secret without its padding, or in plain base64, is the same key
     expect(polyHmac(SECRET.replace(/=+$/, ""), ts, "GET", "/data/orders")).toBe(V.getOpenOrdersHmac);
     expect(polyHmac(SECRET.replace(/-/g, "+").replace(/_/g, "/"), ts, "GET", "/data/orders")).toBe(V.getOpenOrdersHmac);
+  });
+});
+
+// ---- reading the market: what Gamma says of a market, events to discover, price history ----------------------------------------
+
+describe("what Gamma's market says beyond the order rules", () => {
+  it("its end, the pUSD traded in 24 hours (the market's, on every outcome), the day's change (the first outcome's: Gamma's price is that outcome's), and its question by condition id", async () => {
+    const { t } = await pm({ answers: { ...MARKET_ANSWERS, [`GET ${GAMMA}/markets/slug/${IRAN_SLUG}`]: json({ ...IRAN, endDate: "2026-12-31T00:00:00Z", oneDayPriceChange: 0.012 }) } });
+    const yes = ok(await t.market(`${IRAN_SLUG}:Yes`));
+    const no = ok(await t.market(`${IRAN_SLUG}:No`));
+    expect([yes.closeTime, yes.volumeUsd24h, yes.change24h, yes.group, yes.outcome]).toEqual(["2026-12-31T00:00:00Z", 349164.43, 0.012, { id: IRAN_CID, title: "Will the U.S. invade Iran before 2027?" }, "Yes"]);
+    expect([no.closeTime, no.volumeUsd24h, "change24h" in no, no.group, no.outcome]).toEqual(["2026-12-31T00:00:00Z", 349164.43, false, yes.group, "No"]);
+    // no percent: Gamma does not say which price its change is of
+    expect(["changePct24h" in yes, "category" in yes]).toEqual([false, false]);
+  });
+});
+
+describe("events(): event contracts to discover at Polymarket", () => {
+  const FED_EVENT = { id: "60001", slug: "fed-decision-in-october", title: "Fed decision in October?", active: true, closed: false, volume24hr: 3100000, tags: [{ id: "100328", label: "Economy", slug: "economy" }, { id: "159", label: "Fed Rates", slug: "fed-rates" }], markets: [{ ...FED, endDate: "2026-10-28T18:00:00Z", oneDayPriceChange: -0.02 }, { ...FED, slug: "fed-hike-in-october", conditionId: `0x${"0f".repeat(32)}`, closed: true, volume24hr: 9_000_000 }] };
+  const IRAN_EVENT = { id: "60002", slug: "us-x-iran", title: "US x Iran", active: true, closed: false, volume24hr: 400000, tags: [{ id: "2", label: "Politics", slug: "politics" }], markets: [{ ...IRAN, endDate: "2026-12-31T00:00:00Z", oneDayPriceChange: 0.012 }] };
+  const URL = `${GAMMA}/events?closed=false&order=volume24hr&ascending=false&limit=5`;
+  const iso = (ms: number) => encodeURIComponent(new Date(ms).toISOString());
+
+  it("Gamma's open events, busiest first: every outcome of every open order-book market, most traded first, each with its question, end and volume — a read, with no location check or credentials", async () => {
+    const { t, seen } = await pm({ answers: { [`GET ${URL}`]: json([IRAN_EVENT, FED_EVENT]) } });
+    const list = ok(await t.events!({ limit: 6 }));
+    expect(calls(seen)).toEqual([`GET ${URL}`]);
+    expect(list.map((m) => [m.symbol, m.group?.id, m.outcome, m.volumeUsd24h, m.change24h, m.closeTime])).toEqual([
+      [`${FED_SLUG}:Yes`, FED_CID, "Yes", 2862125.26, -0.02, "2026-10-28T18:00:00Z"],
+      [`${FED_SLUG}:No`, FED_CID, "No", 2862125.26, undefined, "2026-10-28T18:00:00Z"],
+      [`${IRAN_SLUG}:Yes`, IRAN_CID, "Yes", 349164.43, 0.012, "2026-12-31T00:00:00Z"],
+      [`${IRAN_SLUG}:No`, IRAN_CID, "No", 349164.43, undefined, "2026-12-31T00:00:00Z"],
+    ]);
+    // a closed market of an open event is not offered; without a tag asked, Gamma's events say no category
+    expect(list.some((m) => m.symbol.startsWith("fed-hike-in-october"))).toBe(false);
+    expect(list.every((m) => !("category" in m) && m.quote === "pUSD" && m.open && m.types.join() === "market,limit")).toBe(true);
+    expect(ok(await t.events!({ limit: 3 })).map((m) => m.symbol)).toEqual([`${FED_SLUG}:Yes`, `${FED_SLUG}:No`, `${IRAN_SLUG}:Yes`]);
+    expect(seen.some((r) => r.url === GEO || r.url.includes("/auth/"))).toBe(false);
+  });
+
+  it("one category is Gamma's tag (tag_slug), said in its own words; a window holds the events' and each market's end to it", async () => {
+    const tagged = `${GAMMA}/events?closed=false&order=volume24hr&ascending=false&limit=5&tag_slug=economy`;
+    const windowed = `${URL}&end_date_min=${iso(TS_MS)}&end_date_max=${iso(TS_MS + 30 * 86_400_000)}`;
+    const { t, seen } = await pm({ answers: { [`GET ${tagged}`]: json([FED_EVENT]), [`GET ${windowed}`]: json([IRAN_EVENT, FED_EVENT]) } });
+    const economy = ok(await t.events!({ category: "Economy", limit: 10 }));
+    expect(economy.map((m) => [m.symbol, m.category])).toEqual([[`${FED_SLUG}:Yes`, "Economy"], [`${FED_SLUG}:No`, "Economy"]]);
+    // the Iran market ends past the window, though Gamma listed its event: it is not offered
+    const soon = ok(await t.events!({ closingWithinMs: 30 * 86_400_000, limit: 10 }));
+    expect(soon.map((m) => m.symbol)).toEqual([`${FED_SLUG}:Yes`, `${FED_SLUG}:No`]);
+    expect(calls(seen)).toEqual([`GET ${tagged}`, `GET ${windowed}`]);
+    expect(refusal(await t.events!({ category: "!!!", limit: 10 })).code).toBe("E_ACCOUNT_BAD_ACTION");
+    expect(refusal(await t.events!({ closingWithinMs: 0, limit: 10 })).code).toBe("E_ACCOUNT_BAD_ACTION");
+    expect(ok(await t.events!({ limit: 0 }))).toEqual([]);
+    expect(calls(seen)).toHaveLength(2);
+  });
+});
+
+describe("candles(): an outcome's price history at Polymarket", () => {
+  const H = Math.floor(TS_MS / 3_600_000) * 3600 - 7200;
+  const END = Math.floor(TS_MS / 1000);
+
+  it("GET /prices-history for the outcome's token: five-minute prices folded into hourly bars — first, highest, lowest, last — and no volume, which Polymarket does not give", async () => {
+    const history = `${CLOB}/prices-history?market=${YES}&startTs=${H}&endTs=${END}&fidelity=5`;
+    const points = [{ t: H + 17, p: 0.15 }, { t: H + 317, p: 0.17 }, { t: H + 617, p: 0.14 }, { t: H + 3317, p: 0.16 }, { t: H + 3617, p: 0.155 }];
+    const { t, seen } = await pm({ answers: { ...MARKET_ANSWERS, [`GET ${history}`]: json({ history: points }) } });
+    const bars = ok(await t.candles!(`${IRAN_SLUG}:Yes`, "1h", H * 1000));
+    expect(calls(seen)).toEqual([`GET ${GAMMA}/markets/slug/${IRAN_SLUG}`, `GET ${CLOB}/book?token_id=${YES}`, `GET ${history}`]);
+    expect(bars).toEqual<Candle[]>([
+      { t: H * 1000, o: 0.15, h: 0.17, l: 0.14, c: 0.16 },
+      { t: (H + 3600) * 1000, o: 0.155, h: 0.155, l: 0.155, c: 0.155 },
+    ]);
+  });
+
+  it("five-minute bars from one-minute prices; a range too long for them is Polymarket's no, in its words; what cannot be a history is refused first", async () => {
+    const since = (END - 600) * 1000;
+    const history = `${CLOB}/prices-history?market=${YES}&startTs=${END - 600}&endTs=${END}&fidelity=1`;
+    const { t, seen } = await pm({ answers: { ...MARKET_ANSWERS, [`GET ${history}`]: [json({ history: [] }), json({ error: "invalid filters: 'startTs' and 'endTs' interval is too long" }, 400)] } });
+    expect(ok(await t.candles!(`${IRAN_SLUG}:Yes`, "5m", since))).toEqual([]);
+    const long = refusal(await t.candles!(`${IRAN_SLUG}:Yes`, "5m", since));
+    expect([long.code, long.message]).toEqual(["E_VENUE_REJECTED", "Polymarket: invalid filters: 'startTs' and 'endTs' interval is too long"]);
+    const n = seen.length;
+    expect(refusal(await t.candles!(`${IRAN_SLUG}:Yes`, "4h" as never, since)).code).toBe("E_ACCOUNT_BAD_ACTION");
+    expect(refusal(await t.candles!(`${IRAN_SLUG}:Yes`, "1h", TS_MS + 1)).code).toBe("E_ACCOUNT_BAD_ACTION");
+    expect(seen.length).toBe(n);
+  });
+  it("the Asset sheet's daily bars, three hundred days of them: a startTs alone, which Polymarket answers up to now — never a startTs-to-endTs range longer than the fifteen days or so it refuses, whatever the fidelity", async () => {
+    const DAY = 86_400;
+    const since = TS_MS - 300 * DAY * 1000;
+    const start = Math.floor(since / 1000);
+    const history = `${CLOB}/prices-history?market=${YES}&startTs=${start}&fidelity=60`;
+    // the first whole day in the range: hourly prices folded into its bar, then the next day's
+    const day0 = Math.ceil(start / DAY) * DAY;
+    const points = [{ t: day0 + 3_600, p: 0.1 }, { t: day0 + 7_200, p: 0.12 }, { t: day0 + DAY + 60, p: 0.11 }];
+    const { t, seen } = await pm({ answers: { ...MARKET_ANSWERS, [`GET ${history}`]: json({ history: points }) } });
+    const bars = ok(await t.candles!(`${IRAN_SLUG}:Yes`, "1d", since));
+    const asked = seen.filter((r) => r.url.includes("/prices-history")).map((r) => r.url);
+    expect(asked).toEqual([history]);
+    expect(bars).toEqual<Candle[]>([
+      { t: day0 * 1000, o: 0.1, h: 0.12, l: 0.1, c: 0.12 },
+      { t: (day0 + DAY) * 1000, o: 0.11, h: 0.11, l: 0.11, c: 0.11 },
+    ]);
+    // twelve days of hourly bars stay a range with its end: it is under the limit
+    const hourly = `${CLOB}/prices-history?market=${YES}&startTs=${END - 12 * DAY}&endTs=${END}&fidelity=5`;
+    const h = await pm({ answers: { ...MARKET_ANSWERS, [`GET ${hourly}`]: json({ history: [] }) } });
+    expect(ok(await h.t.candles!(`${IRAN_SLUG}:Yes`, "1h", (END - 12 * DAY) * 1000))).toEqual([]);
+    expect(h.seen.filter((r) => r.url.includes("/prices-history")).map((r) => r.url)).toEqual([hourly]);
   });
 });

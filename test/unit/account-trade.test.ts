@@ -297,7 +297,8 @@ describe("orders at venues connected live", () => {
     const x = await boot();
     const v = (await x.page()).venues.find((y) => y.id === "ex")!;
     // and what else it does there: this stand-in lists no positions, changes no order in place, sets no leverage, closes nothing itself
-    expect(v.trade).toEqual({ can: true, what: "spot", positions: false, amend: false, leverage: false, close: false });
+    // (its kinds of market are read from the connector: a stand-in's is one the account names none for)
+    expect(v.trade).toEqual({ can: true, what: "spot", kinds: [], positions: false, amend: false, leverage: false, close: false });
     expect(await x.svc.liveMarkets("ex", "btc")).toEqual([BTC]);
     expect(code((await x.svc.liveMarket("nowhere", "BTC/USDT")) as Refusal)).toBe("E_WALLET_ACCOUNT_UNKNOWN");
   });

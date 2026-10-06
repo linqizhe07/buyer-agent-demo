@@ -14,6 +14,24 @@ const QUOTES = ["USD", "USDT", "USDC"];
 /** a wrapped or staked form is priced as what it wraps only where that is one for one by construction */
 const ALIAS: Record<string, string> = { WETH: "ETH", WBNB: "BNB", WPOL: "POL", MATIC: "POL" };
 
+/** the exchanges a public price is asked of, in the order they are asked; the Markets screen reads their keyless tickers too
+ * (public-markets.ts) */
+export const PUBLIC_EXCHANGES: readonly string[] = ORDER;
+
+/** one keyless client per exchange and per opener, opened on first use and kept: every read made through it shares the client, so its
+ * markets are loaded once. An exchange the library cannot open answers undefined, and is not opened again */
+const keyless = new WeakMap<OpenExchange, Map<string, Promise<ExchangeClient | undefined>>>();
+export function keylessExchange(id: string, open: OpenExchange = openExchange): Promise<ExchangeClient | undefined> {
+  let byId = keyless.get(open);
+  if (!byId) keyless.set(open, (byId = new Map()));
+  let c = byId.get(id);
+  if (!c) {
+    c = open(id, { apiKey: "", secret: "" }).catch(() => undefined);
+    byId.set(id, c);
+  }
+  return c;
+}
+
 export function publicPrices(opts: { open?: OpenExchange | undefined; clock?: (() => number) | undefined; order?: string[] | undefined } = {}): Price {
   const open = opts.open ?? openExchange;
   const clock = opts.clock ?? Date.now;

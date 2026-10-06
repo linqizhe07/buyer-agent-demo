@@ -181,10 +181,13 @@ describe("a wallet's swaps through LI.FI: the markets", () => {
     expect(first.every((m) => m.quote === "USDC" && m.kind === "token" && m.price! > 0)).toBe(true);
     expect(ok(await t.markets("pepe")).map((m) => m.symbol)).toEqual(["PEPE/USDC@Base"]);
     expect(ok(await t.markets("btc")).map((m) => m.symbol)).toEqual(["cbBTC/USDC@Base", "WBTC/USDC@Ethereum"]);
-    expect(ok(await t.markets("@ethereum")).map((m) => m.symbol)).toEqual(["ETH/USDC@Ethereum", "WBTC/USDC@Ethereum"]);
+    // a chain's coins first; after them the tokenised shares an issuer lists there (live-rwa.test.ts), found even where LI.FI's list has none
+    const eth = ok(await t.markets("@ethereum"));
+    expect(eth.slice(0, 2).map((m) => m.symbol)).toEqual(["ETH/USDC@Ethereum", "WBTC/USDC@Ethereum"]);
+    expect(eth.slice(2).every((m) => m.category === "RWA" && m.symbol.endsWith("/USDC@Ethereum"))).toBe(true);
     for (const q of ["USDT", "NOPRICE", "SCAM", "DUP", "MAYBE"]) expect(ok(await t.markets(q))).toEqual([]);
     // the list is asked once and kept five minutes
-    expect(lifiCalls(http).map((a) => `${a.method} ${a.url}`)).toEqual(["GET https://li.quest/v1/tokens?chains=1,10,56,137,8453,42161"]);
+    expect(lifiCalls(http).map((a) => `${a.method} ${a.url}`)).toEqual(["GET https://li.quest/v1/tokens?chains=1,10,56,137,8453,42161,4663"]);
   });
 
   it("the list is asked again after five minutes", async () => {
@@ -217,7 +220,8 @@ describe("a wallet's swaps through LI.FI: the markets", () => {
     expect(refusal(await t.market("WETH/EUR@Base")).code).toBe("E_ACCOUNT_UNPRICED");
     expect(refusal(await t.market("WETH/USDT@Base")).message).toBe("swaps here are against the chain's USDC: WETH/USDC@Base");
     expect(refusal(await t.market("WETH/USDC@Solana")).code).toBe("E_ACCOUNT_BAD_ACTION");
-    expect(refusal(await t.market("WETH/USDC@Robinhood Chain")).code).toBe("E_ACCOUNT_BAD_ACTION");
+    // Robinhood Chain is swapped on against its own dollar, USDG: LI.FI lists no USDC there
+    expect(refusal(await t.market("WETH/USDC@Robinhood Chain")).message).toBe("swaps here are against the chain's USDG: WETH/USDG@Robinhood Chain");
     expect(refusal(await t.market("DUP/USDC@Base")).message).toBe("LI.FI lists no single verified token DUP on Base: search the markets for its symbol");
     expect(refusal(await t.market("SCAM/USDC@Base")).code).toBe("E_ACCOUNT_BAD_ACTION");
     expect(refusal(await t.market("PEPE/USDC@Base")).code).toBe("E_VENUE_ORDER_INVALID");
@@ -836,19 +840,19 @@ describe("a wallet's swaps through LI.FI: the hash the wallet sent, held on chai
 
   it("a swap built for a chain not swapped on here is not followed, and the chain is not asked", async () => {
     const { t, chain, swap } = await placed({});
-    const no = refusal(await t.sent!("ord-0001", HASH, { ...swap, chainId: 4663, chainIdHex: "0x1237" }));
-    expect([no.code, no.message]).toEqual(["E_VENUE_REJECTED", `the swap built for this order is for chain 4663, not one swapped on here: ${HASH} is not followed`]);
+    const no = refusal(await t.sent!("ord-0001", HASH, { ...swap, chainId: 43114, chainIdHex: "0xa86a" }));
+    expect([no.code, no.message]).toEqual(["E_VENUE_REJECTED", `the swap built for this order is for chain 43114, not one swapped on here: ${HASH} is not followed`]);
     expect(chain.asked).toEqual([]);
   });
 });
 
 describe("the wallet connector carries the trader", () => {
-  it("walletSource: a proven wallet trades tokens on the six chains; a watched one does not; connecting asks LI.FI nothing", async () => {
+  it("walletSource: a proven wallet trades tokens on the seven chains, tokenised shares among them; a watched one does not; connecting asks LI.FI nothing", async () => {
     const http = lifi([]);
     const proven = await walletSource({ venue: "wallet-1", label: "OKX Wallet", address: WALLET.toLowerCase(), proven: "OKX Wallet", http, chain: chainStandIn({ held: { "Base:USDC": 12 } }) });
     if (isRefusal(proven)) throw new Error(proven.message);
     expect(proven.source.trader).toBeDefined();
-    expect([proven.source.trader!.can, proven.source.trader!.what]).toEqual([true, "tokens on Ethereum, Optimism, BNB Chain, Polygon, Base, Arbitrum"]);
+    expect([proven.source.trader!.can, proven.source.trader!.what]).toEqual([true, "tokens on Ethereum, Optimism, BNB Chain, Polygon, Base, Arbitrum, Robinhood Chain, tokenised shares among them (Robinhood Stock Tokens, Ondo Stocks, xStocks)"]);
     expect(proven.source.trader!.sent).toBeTypeOf("function");
     // the reads are what they were
     expect(proven.first).toEqual([{ asset: "USDC", amount: 12, where: "Base" }]);

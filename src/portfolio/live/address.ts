@@ -1,7 +1,10 @@
 /** Venues that are read by ADDRESS: no key, no credential — what the venue or the chain says about an address.
  *
- *   a wallet        dollar stablecoins and the chain's own coin on seven EVM chains, read from the chains (chain.ts), and Robinhood's
- *                   Stock Tokens on Robinhood Chain, priced by Robinhood's own bid (robinhood.ts)
+ *   a wallet        dollar stablecoins and the chain's own coin on seven EVM chains, read from the chains (chain.ts) — USDG on Robinhood
+ *                   Chain among them, the dollar its Stock Tokens are bought and sold with — Robinhood's Stock Tokens on Robinhood Chain,
+ *                   priced by Robinhood's own bid (robinhood.ts), and the best-known Ondo Stocks and xStocks, priced by LI.FI (dex.ts).
+ *                   The tokenised shares are held as RWAs, and a proven wallet sells each through the market its row finds by symbol
+ *                   and chain (`NVDA/USDG@Robinhood Chain`, `NVDAon/USDC@Ethereum`)
  *   Hyperliquid     POST /info `clearinghouseState` (perps: account value, withdrawable) and `spotClearinghouseState` (spot balances)
  *   Polymarket      GET data-api /v2/positions?user= (title, outcome, current_size, current_value) + pUSD at that address on Polygon
  *   Ondo            OUSG, rOUSG and USDY at an address on Ethereum, priced by Ondo's own on-chain oracle
@@ -13,7 +16,7 @@ import { getAddress, isAddress, type Hex } from "viem";
 import type { Refusal } from "../../core/errors.ts";
 import { no } from "../refuse.ts";
 import { STABLECOINS, type ChainName, type ChainReader, type TokenRef } from "./chain.ts";
-import { dexTrader } from "./dex.ts";
+import { dexTrader, issuedHoldings, USDG_ROBINHOOD } from "./dex.ts";
 import { stockTokenHoldings } from "./robinhood.ts";
 import { walletWriter } from "./writes.ts";
 import { walletBridge } from "./wallet-bridge.ts";
@@ -46,15 +49,22 @@ export async function walletSource(req: AddressRequest): Promise<Opened> {
   const name = req.label || req.proven || "Wallet";
   let unread: string[] = [];
   const read = async (): Promise<LiveBalance[]> => {
-    const [tokens, coins, stocks] = await Promise.all([req.chain.tokens(address, STABLECOINS), req.chain.native(address, ALL_CHAINS), stockTokenHoldings(address, req.chain, req.http, Date.now())]);
+    const [tokens, coins, stocks, issued] = await Promise.all([
+      req.chain.tokens(address, [...STABLECOINS, USDG_ROBINHOOD]),
+      req.chain.native(address, ALL_CHAINS),
+      stockTokenHoldings(address, req.chain, req.http, Date.now()),
+      issuedHoldings(address, req.chain, req.http).catch(() => ({ rows: [] as LiveBalance[], failed: ["Ethereum", "BNB Chain"] as ChainName[] })),
+    ]);
     const chains = [...new Set([...tokens.failed, ...coins.failed])];
     if (chains.length === ALL_CHAINS.length) throw no("E_VENUE_UNREACHABLE", { venue: req.venue, message: "none of the chains answered: the public endpoints may be rate-limiting this machine" });
-    unread = [...chains, ...(stocks.unread ? [stocks.unread] : [])];
-    return [...[...tokens.rows, ...coins.rows].filter((b) => b.amount > 0).map((b) => ({ asset: b.asset, amount: b.amount, where: b.chain })), ...stocks.rows];
+    unread = [...new Set<string>([...chains, ...issued.failed]), ...(stocks.unread ? [stocks.unread] : [])];
+    // USDG is a dollar (Paxos's), counted one for one like every other dollar stablecoin here
+    const dollar = (b: { asset: string; amount: number; chain: ChainName }): LiveBalance => (b.chain === USDG_ROBINHOOD.chain && b.asset === USDG_ROBINHOOD.asset ? { asset: b.asset, amount: b.amount, usd: b.amount, where: b.chain, class: "stable" } : { asset: b.asset, amount: b.amount, where: b.chain });
+    return [...[...tokens.rows, ...coins.rows].filter((b) => b.amount > 0).map(dollar), ...stocks.rows, ...issued.rows];
   };
   try {
     const first = await read();
-    const source: LiveSource = { name, kind: "agent-wallet", reference: address, via: `${req.proven ?? "an address"} · read from the chains`, address, writer: { ...walletWriter(address, req.chain), bridge: walletBridge(address, req.chain, req.http, req.venue) }, trader: dexTrader({ venue: req.venue, address, proven: req.proven, http: req.http, chain: req.chain }), probe: probeOf(req, `dollar stablecoins and each chain's own coin on ${ALL_CHAINS.join(", ")}, and Robinhood's Stock Tokens${unread.length ? ` (no answer this time: ${unread.join("; ")})` : ""}`, { address, chains: ALL_CHAINS, unread }), read };
+    const source: LiveSource = { name, kind: "agent-wallet", reference: address, via: `${req.proven ?? "an address"} · read from the chains`, address, writer: { ...walletWriter(address, req.chain), bridge: walletBridge(address, req.chain, req.http, req.venue) }, trader: dexTrader({ venue: req.venue, address, proven: req.proven, http: req.http, chain: req.chain }), probe: probeOf(req, `dollar stablecoins and each chain's own coin on ${ALL_CHAINS.join(", ")}, and Robinhood's Stock Tokens and the best-known Ondo Stocks and xStocks${unread.length ? ` (no answer this time: ${unread.join("; ")})` : ""}`, { address, chains: ALL_CHAINS, unread }), read };
     return { source, first };
   } catch (err) {
     return asRefusal(req.venue, name, err);
@@ -121,7 +131,16 @@ export async function polymarketSource(req: AddressRequest): Promise<Opened> {
       }
       if (r.status !== 200 || !r.body || typeof r.body !== "object") throw venueSaidNo(req.venue, name, r.status, r.text);
       const body = r.body as { data?: unknown; pagination?: { next_cursor?: unknown } };
-      for (const p of (Array.isArray(body.data) ? body.data : []) as Array<Record<string, unknown>>) if (num(p.current_size) > 0) out.push({ asset: `${String(p.title ?? "?").slice(0, 60)} · ${String(p.outcome ?? "?")}`, amount: num(p.current_size), usd: num(p.current_value), where: p.redeemable === true ? "redeemable" : "open", class: "event" });
+      // an outcome held is named as an order there names it, <slug>:<outcome> (polymarket-clob.ts positionOf), so that it is one holding
+      // with the account's own orders in it and what they cost; its question in words goes beside it
+      for (const p of (Array.isArray(body.data) ? body.data : []) as Array<Record<string, unknown>>) {
+        if (!(num(p.current_size) > 0)) continue;
+        const slug = typeof p.slug === "string" ? p.slug : "";
+        const outcome = typeof p.outcome === "string" ? p.outcome : "";
+        const title = String(p.title ?? (slug || "?")).slice(0, 60);
+        const named = /^[a-z0-9][a-z0-9-]*$/i.test(slug) && outcome !== "" && !outcome.includes(":");
+        out.push({ asset: named ? `${slug}:${outcome}` : `${title} · ${outcome || "?"}`, amount: num(p.current_size), usd: num(p.current_value), where: `${named ? `${title} · ` : ""}${p.redeemable === true ? "redeemable" : "open"}`, class: "event" });
+      }
       cursor = typeof body.pagination?.next_cursor === "string" ? body.pagination.next_cursor : "";
       if (!cursor) break;
     }

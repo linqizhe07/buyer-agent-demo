@@ -2,6 +2,7 @@
  *
  *   GET /trade-api/v2/portfolio/balance      balance, in cents
  *   GET /trade-api/v2/portfolio/positions    market_positions[]: ticker, position_fp (contracts; negative = NO), market_exposure_dollars (cost)
+ *   GET /trade-api/v2/markets?tickers=…      the held markets, for what a position is worth now: Kalshi reports only what it cost
  *
  * Orders (the trader below):
  *
@@ -17,6 +18,12 @@
  *   GET    /trade-api/v2/portfolio/fills?order_id=        the price of each fill, in YES and in NO terms, and its fee
  *   GET    /trade-api/v2/portfolio/positions?count_filter=position   what is held, for the trader's positions
  *   GET    /trade-api/v2/markets?tickers=…                those positions' markets, for their names and prices
+ *
+ * Reading the market (nothing signed for but the request itself, nothing placed):
+ *
+ *   GET    /trade-api/v2/markets?min_close_ts=&max_close_ts=   the markets closing within a window (get-markets.md)
+ *   GET    /trade-api/v2/events?tickers=…                 the events those markets belong to, for their category
+ *   GET    /trade-api/v2/markets/candlesticks?market_tickers=   a market's price history (batch-get-market-candlesticks.md)
  *
  * What an order may say (create-order-v2.md): every Kalshi event order is a limit order with a price, and it says how long it stays —
  * good_till_canceled, immediate_or_cancel or fill_or_kill, which V2 requires; a good-till-canceled one may carry an `expiration_time`, which
@@ -34,7 +41,7 @@ import { constants, createPrivateKey, sign as cryptoSign, type KeyObject } from 
 import { isRefusal, type Refusal } from "../../core/errors.ts";
 import { no } from "../refuse.ts";
 import { readSecretFile, type KeyFile, type KeyShape } from "./credentials.ts";
-import { badOrder, onStep, pick, plain, type LiveTrader, type Market, type OrderRequest, type OrderState, type OrderStatus, type Position, type Side, type TimeInForce } from "./trade.ts";
+import { badOrder, onStep, pick, plain, type Candle, type CandleInterval, type LiveTrader, type Market, type OrderRequest, type OrderState, type OrderStatus, type Position, type Side, type TimeInForce } from "./trade.ts";
 import { asRefusal, num, redact, REGION, unreachable, venueSaidNo, type Http, type HttpReply, type LiveBalance, type LiveSource } from "./types.ts";
 
 export const KALSHI_KEY: KeyShape = { required: ["keyId"], optional: ["privateKeyFile", "privateKey", "demo"], example: '{"keyId": "…", "privateKeyFile": "credentials/kalshi/private-key.pem"} (the .pem is the file Kalshi gives you when the key is made; a key made with write access places orders, a read-only one only reads)' };
@@ -92,17 +99,37 @@ export async function kalshiSource(req: { venue: string; label: string; referenc
   const read = async (): Promise<LiveBalance[]> => {
     const balance = await get("/portfolio/balance");
     const out: LiveBalance[] = [{ asset: "USD", amount: num(balance.balance) / 100, usd: num(balance.balance) / 100, where: "cash", class: "cash" }];
+    const held: Array<{ ticker: string; outcome: Outcome; qty: number; cost: number }> = [];
     let cursor = "";
     // a page at a time, and not for ever: five pages is a thousand positions
     for (let page = 0; page < 5; page++) {
       const body = await get(`/portfolio/positions?limit=200${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
       for (const p of (Array.isArray(body.market_positions) ? body.market_positions : []) as Array<Record<string, unknown>>) {
         const n = num(p.position_fp);
-        // what Kalshi reports per position is what it cost, not what it is worth now: said as that
-        if (n !== 0) out.push({ asset: `${String(p.ticker ?? "?")}:${n > 0 ? "YES" : "NO"}`, amount: Math.abs(n), usd: num(p.market_exposure_dollars), where: "at cost", class: "event" });
+        if (n !== 0) held.push({ ticker: String(p.ticker ?? "?"), outcome: n > 0 ? "YES" : "NO", qty: Math.abs(n), cost: num(p.market_exposure_dollars) });
       }
       cursor = typeof body.cursor === "string" ? body.cursor : "";
       if (!cursor) break;
+    }
+    // What Kalshi reports per position is what it cost, not what it is worth now. So it is valued as positions() values it: at its market's
+    // price now, or $1 or $0 a contract once the market has a result — the held markets read with GET /markets?tickers=, a hundred to a
+    // call, of any status. A market Kalshi answers for and shows no price, or does not list, leaves its position at what it cost, said as
+    // that. A call that FAILS (a 429, no answer) fails the read: the account keeps the last good number and says the venue is stale, rather
+    // than show the positions at cost now and at market the next time — a swing that is no gain and no loss
+    const markets = new Map<string, Record<string, unknown>>();
+    const tickers = [...new Set(held.map((h) => h.ticker.toUpperCase()).filter((t) => t !== "?"))];
+    for (let i = 0; i < tickers.length; i += 100) {
+      const chunk = tickers.slice(i, i + 100);
+      const body = await get(`/markets?tickers=${chunk.map(encodeURIComponent).join(",")}&limit=${chunk.length}`);
+      for (const m of (Array.isArray(body.markets) ? body.markets : []) as unknown[]) if (isRec(m)) markets.set(String(m.ticker ?? "").toUpperCase(), m);
+    }
+    for (const h of held) {
+      const m = markets.get(h.ticker.toUpperCase());
+      const mark = markOf(m, h.outcome);
+      const cost = `cost $${h.cost.toFixed(2)}`;
+      const asset = `${h.ticker}:${h.outcome}`;
+      if (mark !== undefined) out.push({ asset, amount: h.qty, usd: round(h.qty * mark), where: `${decided(m) ? `decided ${String(m!.result).toUpperCase()}` : "at market"} · ${cost}`, class: "event" });
+      else out.push({ asset, amount: h.qty, usd: h.cost, where: `at cost: ${m ? "no price now" : "Kalshi did not list its market"}`, class: "event" });
     }
     return out;
   };
@@ -116,8 +143,8 @@ export async function kalshiSource(req: { venue: string; label: string; referenc
       via: `Kalshi trade API${demo ? " · demo" : ""}`,
       probe: {
         can: [],
-        note: "a Kalshi key carries the scopes it was made with: read to see the account, write (or write::trade) to place and cancel orders here; positions are shown at what they cost, which is what Kalshi reports",
-        native: { calls: ["GET /trade-api/v2/portfolio/balance", "GET /trade-api/v2/portfolio/positions", "GET /trade-api/v2/api_keys", "POST /trade-api/v2/portfolio/events/orders", "DELETE /trade-api/v2/portfolio/events/orders/{order_id}", "POST /trade-api/v2/portfolio/events/orders/{order_id}/amend", "GET /trade-api/v2/portfolio/orders/{order_id}"], signed: key.asymmetricKeyType === "ed25519" ? "Ed25519" : "RSA-PSS SHA-256", demo },
+        note: "a Kalshi key carries the scopes it was made with: read to see the account, write (or write::trade) to place and cancel orders here; positions are valued at their market's price now (its last trade, or the middle of its book), what they cost — which is all Kalshi reports for them — beside it",
+        native: { calls: ["GET /trade-api/v2/portfolio/balance", "GET /trade-api/v2/portfolio/positions", "GET /trade-api/v2/markets?tickers=", "GET /trade-api/v2/api_keys", "POST /trade-api/v2/portfolio/events/orders", "DELETE /trade-api/v2/portfolio/events/orders/{order_id}", "POST /trade-api/v2/portfolio/events/orders/{order_id}/amend", "GET /trade-api/v2/portfolio/orders/{order_id}"], signed: key.asymmetricKeyType === "ed25519" ? "Ed25519" : "RSA-PSS SHA-256", demo },
       },
       read,
       readOnlyBecause: "Kalshi's API moves no money: deposits and withdrawals are made at Kalshi",
@@ -256,8 +283,12 @@ const NOT_ACTIVE: Record<string, string> = {
   finalized: "settled",
 };
 
-/** one Kalshi market as the account's market for one of its outcomes; NO is the other side of the same book */
-function toMarket(m: Rec, outcome: Outcome, paused?: string, caveat?: string): Market {
+/** One Kalshi market as the account's market for one of its outcomes; NO is the other side of the same book. What the market's own answer
+ * says beyond the order rules is kept: its close (`close_time`), the change since the last trade a day ago (`previous_price_dollars`
+ * beside `last_price_dollars`, the outcome's own), its question (the market's ticker, which both outcomes share) and, when the caller
+ * knows it, its event's category. Kalshi counts volume in contracts, not dollars (`volume_24h_fp`): it is carried as `contracts24h`, and no
+ * dollar volume is said */
+function toMarket(m: Rec, outcome: Outcome, paused?: string, caveat?: string, category?: string): Market {
   const ticker = String(m.ticker ?? "").toUpperCase();
   const yes = outcome === "YES";
   // an empty side of the book shows as 0 (no bid) or 1 (no ask) — OBSERVED — and neither is a price
@@ -283,10 +314,39 @@ function toMarket(m: Rec, outcome: Outcome, paused?: string, caveat?: string): M
   // the finest band's step: every valid price is a whole number of it. The coarsest would push the account's worst price for a market order
   // off the book on a mixed grid (a 0.048 ask, 2% over, floored to the cent, is 0.04); the trader checks the full grid before anything goes
   const priceStep = Math.min(...bandsOf(m).map((b) => b.step)) / CC;
+  // the last trade a day ago: 0 when there was none (OBSERVED on markets made that day), which is no price. NO's price is 1 − YES's, so its
+  // change is YES's turned over, and its percent is of NO's own price then
+  const prevYes = px(m.previous_price_dollars);
+  const change = lastYes !== undefined && prevYes !== undefined ? round((yes ? 1 : -1) * (lastYes - prevYes), 4) : undefined;
+  const prev = prevYes === undefined ? undefined : yes ? prevYes : 1 - prevYes;
+  const closeTime = typeof m.close_time === "string" && m.close_time ? m.close_time : undefined;
+  // the market's 24 hours in contracts, as Kalshi counts them (volume_24h_fp, a fixed-point count): a market, so both of its legs carry it
+  const vol = m.volume_24h_fp === undefined || m.volume_24h_fp === null || m.volume_24h_fp === "" ? Number.NaN : Number(m.volume_24h_fp);
+  const contracts = Number.isFinite(vol) && vol >= 0 ? vol : undefined;
   // What V2's create takes in every event market: limit orders (the account's market order goes as one), the four times in force above,
   // post_only, and reduce_only — which Kalshi takes only on an order that fills at once, so the trader holds it to a sell sent ioc
-  return { symbol: `${ticker}:${outcome}`, name: `${words} · ${yes ? "Yes" : "No"}`, kind: "event", base: `${ticker}:${outcome}`, quote: "USD", price, bid, ask, minQty: COUNT_STEP, qtyStep: COUNT_STEP, priceStep, open, ...(note ? { note } : {}), types: ["market", "limit"], tifs: [...KALSHI_TIFS], tifsByType: { market: ["ioc", "fok"], limit: [...KALSHI_TIFS] }, postOnly: true, reduceOnly: true };
+  return { symbol: `${ticker}:${outcome}`, name: `${words} · ${yes ? "Yes" : "No"}`, kind: "event", base: `${ticker}:${outcome}`, quote: "USD", price, bid, ask, minQty: COUNT_STEP, qtyStep: COUNT_STEP, priceStep, open, ...(note ? { note } : {}), types: ["market", "limit"], tifs: [...KALSHI_TIFS], tifsByType: { market: ["ioc", "fok"], limit: [...KALSHI_TIFS] }, postOnly: true, reduceOnly: true,
+    ...(change !== undefined && prev !== undefined ? { change24h: change, changePct24h: round((change / prev) * 100, 2) } : {}), ...(contracts !== undefined ? { contracts24h: contracts } : {}), ...(closeTime ? { closeTime } : {}), ...(category ? { category } : {}), group: { id: ticker, title: words }, outcome };
 }
+
+/** a market with a result: it pays $1 a contract to the side that won and nothing to the other, whatever its last trade was */
+const decided = (m: Rec | undefined): boolean => m?.result === "yes" || m?.result === "no";
+/** what one contract of an outcome is worth now: $1 or $0 once its market has a result, else its price (the last trade, or the middle of
+ * the book); nothing when the market shows neither */
+function markOf(m: Rec | undefined, outcome: Outcome): number | undefined {
+  if (!m) return undefined;
+  return decided(m) ? (m.result === outcome.toLowerCase() ? 1 : 0) : toMarket(m, outcome).price;
+}
+
+/** a category as words to compare: "Climate and Weather", "climate-and-weather" and "CLIMATE AND WEATHER" are one */
+const norm = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]+/g, "");
+
+/** Kalshi keeps candles of 1, 60 and 1440 minutes (get-market-candlesticks.md; asked for 5 it answers none — OBSERVED): five minutes are five
+ * one-minute candles folded together */
+const PERIOD_MIN: Record<CandleInterval, number> = { "5m": 1, "1h": 60, "1d": 1440 };
+const FOLD_MS: Partial<Record<CandleInterval, number>> = { "5m": 5 * 60_000 };
+/** a dollar string Kalshi gave, or nothing for a field that is absent or null (a candle's prices are null when nothing traded) */
+const dollars = (v: unknown): number | undefined => (typeof v === "string" && v.trim() !== "" && Number.isFinite(Number(v)) ? Number(v) : undefined);
 
 /** Kalshi's answer that is not a yes, as the account's refusal, with Kalshi's own words in `native`. Kalshi does not enumerate its REST
  * order-error codes, so this reads the HTTP status first and then the words: `available_balance_too_low` and `invalid_order_size` are
@@ -332,7 +392,8 @@ function kalshiTrader(o: { venue: string; name: string; keyId: string; call: Cal
   let scopes: { at: number; can: boolean | "unknown"; list?: string[]; caveat?: string } | undefined;
   /** a key Kalshi lists without a trading scope: its write is refused here, never sent */
   const mayNot = () => no("E_VENUE_PERMISSION", { venue, message: `${name}: this key may not trade — Kalshi lists its scopes as ${scopes?.list?.join(", ") || "none"}. A Kalshi key keeps the scopes it was made with: make one with write (or write::trade) at Kalshi`, native: { scopes: scopes?.list } });
-  let universe: { at: number; list: Market[] } | undefined;
+  let universe: { at: number; list: Market[]; raw: Rec[] } | undefined;
+  const eventsSeen = new Map<string, { at: number; ev: Rec }>();
   const series = new Map<string, { at: number; list: Rec[] }>();
 
   /** What the key may do: GET /api_keys lists the account's keys with their scopes (read-only keys exist since 2025-12-18). Learned when the
@@ -409,8 +470,47 @@ function kalshiTrader(o: { venue: string; name: string; keyId: string; call: Cal
     const firsts = known.map((ms) => ms.filter(tradable).sort(byVolume)[0]).filter((m): m is Rec => m !== undefined);
     const ordered = new Map<string, Rec>();
     for (const m of [...firsts, ...[...general!, ...known.flat()].filter(tradable).sort(byVolume)]) if (!ordered.has(String(m.ticker))) ordered.set(String(m.ticker), m);
-    universe = { at: now, list: [...ordered.values()].flatMap((m) => [toMarket(m, "YES"), toMarket(m, "NO")]) };
+    const raw = [...ordered.values()];
+    universe = { at: now, list: raw.flatMap((m) => [toMarket(m, "YES"), toMarket(m, "NO")]), raw };
     return universe.list;
+  };
+  /** The markets closing between two instants (Unix seconds): GET /markets?min_close_ts=&max_close_ts=, which Kalshi takes with no status or
+   * `closed` only (get-markets.md, its table of filters), so the active ones are kept by the caller. Combos left out; three pages at most */
+  const closing = async (from: number, to: number): Promise<Rec[]> => {
+    const out: Rec[] = [];
+    let cursor = "";
+    for (let page = 0; page < 3; page++) {
+      const r = await call("GET", `/markets?min_close_ts=${from}&max_close_ts=${to}&mve_filter=exclude&limit=1000${cursor ? `&cursor=${enc(cursor)}` : ""}`);
+      if (r.status !== 200 || !isRec(r.body)) throw fail(r);
+      out.push(...(Array.isArray(r.body.markets) ? (r.body.markets as unknown[]).filter(isRec) : []));
+      cursor = typeof r.body.cursor === "string" ? r.body.cursor : "";
+      if (!cursor) break;
+    }
+    return out;
+  };
+  /** The events of some markets, for their category: GET /events?tickers=… (get-events.md), a hundred at a time, kept five minutes. Kalshi
+   * marks an event's `category` deprecated and still sends it (OBSERVED); markets carry none of their own */
+  const eventsOf = async (tickers: string[]): Promise<Map<string, Rec>> => {
+    const now = o.clock();
+    const out = new Map<string, Rec>();
+    const wanted: string[] = [];
+    for (const t of new Set(tickers.filter(Boolean))) {
+      const hit = eventsSeen.get(t);
+      if (hit && now - hit.at < LIST_MS) out.set(t, hit.ev);
+      else wanted.push(t);
+    }
+    for (let i = 0; i < wanted.length; i += 100) {
+      const chunk = wanted.slice(i, i + 100);
+      const r = await call("GET", `/events?tickers=${chunk.map(enc).join(",")}&limit=${chunk.length}`);
+      if (r.status !== 200 || !isRec(r.body)) throw fail(r);
+      for (const ev of Array.isArray(r.body.events) ? (r.body.events as unknown[]).filter(isRec) : []) {
+        const t = String(ev.event_ticker ?? "");
+        out.set(t, ev);
+        eventsSeen.set(t, { at: now, ev });
+      }
+    }
+    if (eventsSeen.size > 2000) eventsSeen.clear();
+    return out;
   };
   /** a query that looks like a ticker is also asked of its series (GET /markets?series_ticker=), which the list of the newest may not hold */
   const ofSeries = async (root: string): Promise<Market[]> => {
@@ -767,10 +867,97 @@ function kalshiTrader(o: { venue: string; name: string; keyId: string; call: Cal
           const cost = num(p.market_exposure_dollars);
           const m = markets.get(ticker);
           const mk = m ? toMarket(m, outcome) : undefined;
-          // a market with a result pays $1 a contract to the side that won and nothing to the other, whatever its last trade was
-          const mark = m?.result === "yes" || m?.result === "no" ? (m.result === outcome.toLowerCase() ? 1 : 0) : mk?.price;
+          const mark = markOf(m, outcome);
           return { symbol: `${ticker}:${outcome}`, name: mk?.name ?? `${ticker} · ${outcome === "YES" ? "Yes" : "No"}`, kind: "event", side: "long", qty, ...(cost > 0 ? { entryPrice: round(cost / qty) } : {}), ...(mark !== undefined ? { markPrice: mark, usd: round(qty * mark), ...(cost > 0 ? { unrealizedUsd: round(qty * mark - cost) } : {}) } : {}), native: p };
         });
+      } catch (err) {
+        return asRefusal(venue, name, err, secrets);
+      }
+    },
+
+    /** Event contracts to discover, both outcomes of each market, the markets most traded in 24 hours first. Kalshi has no order of its own
+     * to ask for, so the markets are read and sorted here by `volume_24h_fp` (contracts). Without a window, they are the markets a search runs
+     * over (the open ones, combos left out, the well-known series' busiest first); closing within one, they are GET /markets with
+     * min_close_ts and max_close_ts. Either way only `active` ones (the only status that trades). Each carries its event's category, from
+     * GET /events?tickers=, and one category asked keeps the markets whose event says it, in Kalshi's own words */
+    async events({ category, closingWithinMs, limit }) {
+      try {
+        const n = Math.min(200, Math.floor(limit));
+        if (!(n > 0)) return [];
+        if (closingWithinMs !== undefined && !(Number.isFinite(closingWithinMs) && closingWithinMs > 0)) return no("E_ACCOUNT_BAD_ACTION", { venue, message: "a window for markets closing soon is a number of milliseconds, more than 0" });
+        const now = o.clock();
+        let candidates: Rec[];
+        if (closingWithinMs === undefined) {
+          await all();
+          candidates = [...universe!.raw].sort(byVolume);
+        } else {
+          candidates = (await closing(Math.floor(now / 1000), Math.ceil((now + closingWithinMs) / 1000))).filter(tradable).sort(byVolume);
+        }
+        // the questions, two outcomes each; the events are asked for a hundred markets at a time, only as far as the answer needs
+        const want = Math.ceil(n / 2);
+        const picked: Array<{ m: Rec; category: string | undefined }> = [];
+        for (let i = 0; picked.length < want && i < candidates.length; i += 100) {
+          const batch = candidates.slice(i, i + 100);
+          let evs: Map<string, Rec>;
+          try {
+            evs = await eventsOf(batch.map((m) => String(m.event_ticker ?? "")));
+          } catch (err) {
+            // without a category asked, a market whose event could not be read is still the market, said without one
+            if (category !== undefined) throw err;
+            evs = new Map();
+          }
+          for (const m of batch) {
+            const c = evs.get(String(m.event_ticker ?? ""))?.category;
+            const cat = typeof c === "string" && c ? c : undefined;
+            if (category !== undefined && (!cat || norm(cat) !== norm(category))) continue;
+            picked.push({ m, category: cat });
+            if (picked.length >= want) break;
+          }
+        }
+        return picked.flatMap(({ m, category: cat }) => [toMarket(m, "YES", undefined, undefined, cat), toMarket(m, "NO", undefined, undefined, cat)]).slice(0, n);
+      } catch (err) {
+        return asRefusal(venue, name, err, secrets);
+      }
+    },
+
+    /** A market's price history: GET /markets/candlesticks (batch-get-market-candlesticks.md: market_tickers, start_ts and end_ts in Unix
+     * seconds, period_interval in minutes), one candle for each minute, hour or day in which something changed. A candle's prices are the
+     * trades' (`price`: open_dollars, high_dollars, low_dollars, close_dollars, null when nothing traded — such a candle is left out: no trade,
+     * no price, and the book's bid and ask are not a trade) and its volume the contracts traded (`volume_fp`). NO's prices are YES's turned over:
+     * 1 − YES, its high YES's low. A bar starts where Kalshi's period does: its end less its length */
+    async candles(symbol, interval, sinceMs) {
+      try {
+        const s = parse(symbol);
+        if (!s) return badSymbol(symbol);
+        if (!Object.hasOwn(PERIOD_MIN, interval)) return no("E_ACCOUNT_BAD_ACTION", { venue, message: `price history comes in bars of 5m, 1h or 1d, not "${String(interval).slice(0, 12)}"` });
+        const now = o.clock();
+        if (!(Number.isFinite(sinceMs) && sinceMs < now)) return no("E_ACCOUNT_BAD_ACTION", { venue, message: "price history starts before now" });
+        const period = PERIOD_MIN[interval];
+        const r = await call("GET", `/markets/candlesticks?market_tickers=${enc(s.ticker)}&start_ts=${Math.floor(sinceMs / 1000)}&end_ts=${Math.floor(now / 1000)}&period_interval=${period}`);
+        if (r.status !== 200 || !isRec(r.body)) return fail(r);
+        const row = (Array.isArray(r.body.markets) ? (r.body.markets as unknown[]).filter(isRec) : []).find((x) => String(x.market_ticker ?? "").toUpperCase() === s.ticker);
+        const sticks = (row && Array.isArray(row.candlesticks) ? (row.candlesticks as unknown[]).filter(isRec) : []).sort((a, b) => num(a.end_period_ts) - num(b.end_period_ts));
+        const fold = FOLD_MS[interval];
+        const bars = new Map<number, Candle>();
+        for (const k of sticks) {
+          const p = isRec(k.price) ? k.price : {};
+          const [yo, yh, yl, yc] = [dollars(p.open_dollars), dollars(p.high_dollars), dollars(p.low_dollars), dollars(p.close_dollars)];
+          const end = num(k.end_period_ts);
+          if (yo === undefined || yh === undefined || yl === undefined || yc === undefined || !(end > 0)) continue;
+          const [op, hi, lo, cl] = s.outcome === "YES" ? [yo, yh, yl, yc] : [round(1 - yo, 4), round(1 - yl, 4), round(1 - yh, 4), round(1 - yc, 4)];
+          const v = typeof k.volume_fp === "string" ? num(k.volume_fp) : undefined;
+          const start = (end - period * 60) * 1000;
+          const t = fold ? Math.floor(start / fold) * fold : start;
+          const b = bars.get(t);
+          if (!b) bars.set(t, { t, o: op, h: hi, l: lo, c: cl, ...(v !== undefined ? { v } : {}) });
+          else {
+            b.h = Math.max(b.h, hi);
+            b.l = Math.min(b.l, lo);
+            b.c = cl;
+            if (v !== undefined) b.v = round((b.v ?? 0) + v, 2);
+          }
+        }
+        return [...bars.values()];
       } catch (err) {
         return asRefusal(venue, name, err, secrets);
       }

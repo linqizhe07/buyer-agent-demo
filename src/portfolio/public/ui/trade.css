@@ -1,0 +1,164 @@
+/* The Trade pane (ui/trade.js) and the Hand-to-agent composer (ui/intent.js), in the Clean cards look (M2): the head with Do it myself |
+   Hand to agent, the tiles as cards, Under way, Positions and the fills as cards holding tables, in the main column; the order ticket as a
+   lifted card, sticky on the right — the market, where (rows with a hairline, the one picked edged in the text colour), Buy | Sell, the
+   fields, the quote edged in orange, what is signed, a filled pill to sign and a pill to hand it to an agent instead. Colours, radii and
+   shadows only from ui/tokens.css, so Cream and Black alike (Black drops the shadows and keeps the hairlines). */
+
+/* the pane's head: its name, and Do it myself | Hand to agent */
+.tp-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.tp-title { font-size: 20px; }
+/* nothing to say above the tiles: no empty row between the head and them */
+.tp-main > [data-tp-note]:empty { display: none; }
+.choice .ico { width: 22px; height: 22px; }
+/* a tile whose venues all refuse: drawn, quieter — no card under it, a dashed edge; opening it says why */
+.choice.tk-off { background: transparent; box-shadow: none; border: 1px dashed var(--dim); }
+.choice.tk-off b { color: var(--dim); }
+/* Under way, Positions, Recent fills, your words to agents: cards holding a table, the table running nearly to the card's foot */
+.tp-main > .sec { padding: 18px 18px 8px; gap: 8px; }
+.tp-main > .sec > :last-child:not(.t-wrap) { margin-bottom: 10px; }
+/* the pane's tables: the first column (what it is) keeps room to be read */
+.tp-main .t td:first-child { min-width: 190px; }
+/* …unless it is a date (Recent fills' When): that one takes only its own width, so What has the room */
+.tp-main .t td.nw:first-child { min-width: 0; }
+.tp-main .t .why { max-width: 360px; }
+/* an order's buttons (Approve · Reject, Change · Cancel) wrap under each other before the table gets wider than its card */
+.tp-main .t .acts { flex-wrap: wrap; }
+/* Under way's By (who placed it, and on what): room for a name, so "Claude Code · inside its limit" breaks in two, not word by word */
+.tp-main .t td.tp-by { min-width: 116px; }
+/* Positions' Entry, Mark and Liq., and Under way's Where and By: columns of their own when the card has the room for them (about 720:
+   from 1440 wide with the ticket beside, and from 1080 to 1243 where the ticket sits in the pane); otherwise a line under the position's
+   or the order's name, so P&L and Close / Sell, and an order's Status and its Approve · Reject or Change · Cancel stay in the card */
+.tp-px-l, .tp-wb-l { display: none; }
+/* Recent fills' Where on one line, but where the card is narrow, where it may break */
+.tp-main .t td.tp-fw { white-space: nowrap; }
+@media (min-width: 1244px) and (max-width: 1439px), (max-width: 1079px) {
+  .tp-main .t th.tp-px, .tp-main .t td.tp-px, .tp-main .t th.tp-wb, .tp-main .t td.tp-wb { display: none; }
+  .tp-main .t .tp-px-l, .tp-main .t .tp-wb-l { display: block; }
+  .tp-main .t td.tp-fw { white-space: normal; }
+}
+/* a status in Under way: a word in bold, coloured by what it waits on */
+.tp-st { font-weight: 700; white-space: nowrap; }
+.tp-st.dim { color: var(--dim); }
+.tp-st.warn-t { color: var(--warn-text); }
+/* the fields of a card waiting for the owner: exactly what is signed, so in mono */
+.tk-pre { margin: 6px 0 0; font-family: var(--font-mono); font-size: 12px; white-space: pre-wrap; word-break: break-all; color: var(--dim); }
+
+/* ---- the panel: the ticket (or the composer), a lifted card on the right (.panel), sticky, scrolling inside itself when taller than the
+   window. 340 beside the pane (shell.css .col-side), so Positions keeps its Close buttons in view; 380 as on the board once the window
+   has the room ---------------------------------------------------------------------------------------------------------------------- */
+@media (min-width: 1520px) {
+  .cols > .tk-panel { flex-basis: 380px; }
+}
+.tk-panel { max-height: calc(100vh - 48px); overflow-y: auto; overscroll-behavior: contain; min-width: 0; }
+.tk-h { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: -6px -10px -2px 0; }
+.tk-title { font-family: var(--font-sans); font-size: 20px; font-weight: 700; letter-spacing: -0.01em; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* the ticket's parts, one under another, 14 apart (the form, the order's body, Sell many, Earn) */
+.tk-form, .tk-stack { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.tk-find, .tk-where-w { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.tk-form textarea { resize: vertical; min-height: 72px; line-height: 1.4; }
+.tk-cap { margin-top: -6px; }
+.tk-form [data-go] { min-height: 48px; }
+/* a field in the ticket: 46 high, radius 10, on the ground's colour, what is typed in 16 semibold (shell.css .fld draws the rest) */
+.tk-panel .fld input:not([type="checkbox"]):not([type="radio"]), .tk-panel .fld select { font-size: 16px; font-weight: 600; }
+.tk-panel .fld input::placeholder, .tk-panel .fld textarea::placeholder { font-weight: 500; color: var(--dim); opacity: 1; }
+/* Buy | Sell (Long | Short): the pill track across the ticket, the choices at its start */
+.tk-side .seg { display: flex; width: 100%; }
+
+/* finding the market: a list of rows inside the card, each a button — a letter tile, the name and where, the price and the day's change */
+.tk-res { display: flex; flex-direction: column; gap: 8px; }
+.tk-list { list-style: none; margin: 0 -8px; padding: 0; }
+.tk-list li + li { border-top: 1px solid var(--border); }
+.tk-list button { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 52px; padding: 8px; border: 0; border-radius: var(--radius-s); text-align: left; background: transparent; color: var(--text); }
+.tk-list button:hover, .tk-list button:focus-visible { background: var(--hover); }
+.tk-rn { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.tk-rn b { font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+.tk-rn .dim { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tk-rp { display: flex; flex-direction: column; align-items: flex-end; font-size: 13px; white-space: nowrap; }
+.tk-rp .tab-nums { font-weight: 600; }
+/* a venue's own words (a market it refuses), a tokenised asset's issuer and terms: a soft note on the second surface */
+.tk-said, .tk-iss { margin: 0; padding: 8px 12px; border-radius: var(--radius-s); background: var(--surface-2); line-height: 1.45; }
+/* the market picked: a row on the ground's colour, rounded like the fields */
+.tk-picked { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: var(--radius-s); background: var(--bg); min-width: 0; }
+.tk-picked .link { flex: none; }
+
+/* where: one row a venue — yours that trade it (pressed: the one the order goes to), yours that cannot (in their words), public ones */
+.tk-where { display: flex; flex-direction: column; gap: 6px; }
+.tk-at { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 44px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-s); font-size: 14px; text-align: left; background: transparent; color: var(--text); width: 100%; }
+/* the name, its word beside it (Best · Closed · Public), the venue's note under them */
+.tk-at > span:first-child { display: block; min-width: 0; }
+.tk-at b { font-weight: 600; }
+button.tk-at:hover:not(:disabled) { border-color: var(--dim); }
+.tk-at[aria-pressed="true"] { border: 1.5px solid var(--rule); padding: 9.5px 11.5px; }
+.tk-at-r { display: flex; flex-direction: column; align-items: flex-end; font-weight: 600; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.tk-at-r .why { font-weight: 400; }
+.tk-at.pub { color: var(--dim); }
+/* a public venue: its price over "Connect to trade", so its name keeps the room to read on one or two lines */
+.tk-at.pub .tk-at-r { flex-direction: column; gap: 2px; align-items: flex-end; font-size: 12px; }
+.tk-at.pub .tk-sep { display: none; }
+.tk-at.off { border-style: dashed; color: var(--dim); }
+/* the word beside a venue's name, as on the board: bold and small, Best in the up colour (the word says it, not the colour alone) */
+.tk-at .tag { background: none; padding: 0; margin-left: 6px; font-size: 11px; font-weight: 700; color: var(--dim); }
+.tk-at .tag.up { color: var(--up); }
+
+/* an event's outcomes: Yes and No to press (tinted, shell.css), the price on each; the one pressed ringed in its own colour */
+.tk-out { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.tk-out button[aria-pressed="true"] { box-shadow: inset 0 0 0 2px currentColor; }
+.tk-out .tk-oth { background: var(--surface-2); color: var(--text); }
+
+/* the order's extras, what the market says, the leverage */
+.tk-more { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px 14px; }
+.tk-more > span:empty { display: none; }
+.tk-facts { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--dim); line-height: 1.45; }
+.tk-facts b { color: var(--text); font-weight: 600; }
+.tk-facts:empty { display: none; }
+.tk-lev { display: flex; flex-direction: column; gap: 8px; border-top: 1px solid var(--border); padding-top: 12px; }
+.tk-lev-go { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.tk-max { display: flex; flex-direction: column; justify-content: flex-end; gap: 4px; padding-bottom: 6px; }
+.tk-max .link { align-self: flex-start; min-height: 24px; }
+
+/* Sell many: one row a holding, a box to pick it and how much — light rules between the rows */
+.tk-sm { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--border); }
+.tk-sm-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border); }
+.tk-sm-row:last-child { border-bottom: 0; }
+.tk-sm-row.off { color: var(--dim); }
+.tk-sm-row .tk-rn .dim { white-space: normal; }
+.tk-sm-row .chk1 { min-height: 44px; min-width: 32px; justify-content: center; }
+.tk-sm-q { width: 96px; flex: none; font-family: var(--font-sans); font-size: 15px; font-weight: 600; min-height: 44px; padding: 6px 10px; border: 1px solid var(--border); border-radius: var(--radius-s); background: var(--bg); color: var(--text); text-align: right; font-variant-numeric: tabular-nums; }
+.tk-sm-q:focus { border-color: var(--rule); outline: none; box-shadow: 0 0 0 1px var(--rule); }
+.tk-legs { margin: 0; padding: 0 0 0 20px; display: flex; flex-direction: column; gap: 12px; }
+.tk-legs li { display: flex; flex-direction: column; gap: 6px; }
+.tk-legs li::marker { font-family: var(--font-sans); font-size: 12px; font-weight: 700; color: var(--dim); }
+
+/* Earn: what is earning now */
+.tk-earning { list-style: none; margin: -6px 0 0; padding: 0; border-top: 1px solid var(--border); }
+.tk-earning li { display: flex; justify-content: space-between; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 13px; flex-wrap: wrap; }
+.tk-earning li:last-child { border-bottom: 0; }
+
+/* ---- Hand to agent: the composer and the owner's open words ------------------------------------------------------------------------ */
+.hta-lead { line-height: 1.45; }
+.hta-count { align-self: flex-end; font-family: var(--font-sans); font-size: 12px; font-weight: 600; color: var(--dim); font-variant-numeric: tabular-nums; letter-spacing: 0; text-transform: none; }
+.hta-limit { border: 0; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.hta-limit[title]:not([title=""]) .chk1 { color: var(--dim); }
+.hta-acts { justify-content: flex-start; flex-wrap: wrap; }
+.hta-list { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--border); }
+.hta-it { display: flex; flex-direction: column; gap: 6px; padding: 12px 0; border-bottom: 1px solid var(--border); }
+.hta-it:last-child { border-bottom: 0; }
+.hta-top { display: flex; flex-direction: column; gap: 2px; }
+.hta-top b { font-weight: 600; }
+.hta-rep { font-size: 13px; line-height: 1.45; }
+.hta-rep .tag { margin-right: 4px; }
+
+/* a window too narrow for the ticket beside the pane, yet with the rail (901 to 1243): the ticket comes right after the tiles that open it,
+   at the pane's width, and Under way, Positions and the fills follow it (the main column's parts are laid out with the ticket) */
+@media (min-width: 901px) and (max-width: 1243px) {
+  .tp.cols { gap: 20px; }
+  .tp.cols > .tp-main { display: contents; }
+  .tp.cols > .tp-main > * { flex: 1 1 100%; order: 2; }
+  .tp.cols > .tp-main > .tp-head, .tp.cols > .tp-main > [data-tp-note], .tp.cols > .tp-main > [data-tp-tiles] { order: 0; }
+  .tp.cols > .tk-panel { order: 1; flex: 1 1 100%; max-width: none; position: static; max-height: none; overflow: visible; }
+}
+
+/* a narrower window: the panel sits under the pane, at full width (shell.css stops it being sticky) */
+@media (max-width: 900px) {
+  .tk-panel { max-height: none; overflow: visible; }
+}

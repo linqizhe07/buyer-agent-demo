@@ -13,7 +13,8 @@ import { agentCode, CAP_LABEL, describeIntent, qtyText, r2, type Intent } from "
 import { AgentSession } from "./agent.ts";
 import { etaLabel } from "./rails.ts";
 import { bestVenue, fillAt, splitOrder, venueQuotes } from "./venues.ts";
-import { defaultHome, startPortfolioServer } from "./server.ts";
+import { demoHome } from "./home.ts";
+import { startPortfolioServer } from "./server.ts";
 import { isPending, PortfolioService, type ExecuteOutcome } from "./service.ts";
 
 const argv = process.argv.slice(2);
@@ -82,7 +83,7 @@ export const NOT_PROVEN = [
 
 async function main(): Promise<number> {
   const live = flag("--mm") || process.env.PORTFOLIO_MM === "1";
-  const home = value("--home") ?? defaultHome();
+  const home = value("--home") ?? demoHome("portfolio-demo-");
   // the sim clock is fixed, so the ledger's file name is too: every run starts from an empty ledger, like the main demo
   const svc = await PortfolioService.create({ home, now, live, freshLedger: true });
   const server = flag("--serve") ? await startPortfolioServer({ port: Number(value("--port") ?? 4820), service: svc }) : undefined;
