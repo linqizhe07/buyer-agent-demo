@@ -140,6 +140,15 @@ export class OAuthSignIn {
     return true;
   }
 
+  /** whether a sign-in could start here: the discovery alone (its two public metadata documents), and that the venue lets a client
+   * register itself. Nothing is registered (live/reach.ts, before the owner presses Sign in) */
+  async reachable(): Promise<Refusal | undefined> {
+    const e = await this.discover();
+    if ("ok" in e) return e;
+    if (!e.registration) return no("E_VENUE_REJECTED", { venue: this.o.venue, message: `${this.o.name} does not let a new client register itself, so this account cannot sign in there` });
+    return undefined;
+  }
+
   private async discover(): Promise<Endpoints | Refusal> {
     if (this.endpoints) return this.endpoints;
     const pr = await this.get(wellKnown(this.o.resource, "oauth-protected-resource"));

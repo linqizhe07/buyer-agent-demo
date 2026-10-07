@@ -72,6 +72,38 @@ const optionOf = (kind) => ((A.connectLive || {}).options || []).find((o) => o.k
 const BY_ADDRESS = new Set(["wallet", "polymarket", "hyperliquid", "ondo"]);
 const isOn = (kind, extra) => (kind === "wallet" ? false : A.venues.some((v) => v.id === (extra || kind) || (BY_ADDRESS.has(kind) && v.id.startsWith(`${kind}-`))));
 
+/* what each tile's venue answered from this machine before any key was made: its own first, keyless question (GET
+   /api/account/connect/reach, live/reach.ts). A venue that does not serve this location says so on its tile and in its form, in its own
+   words, before a key is made that it would refuse; nothing here looks for a way around it */
+const REACH = new Map();
+/* the connection a tile asks about: an exchange by its id; the ones read by address ask nothing (a public read is the same everywhere) */
+const tileConnector = (kind, extra) => (kind === "exchange" ? (extra ? `live:exchange:${extra}` : "") : BY_ADDRESS.has(kind) ? "" : `live:${kind}`);
+/* a tile's second line once its venue said no */
+const REACH_WORD = { location: "Not served here", setup: "Set up first", closed: "Not available" };
+async function askReach(connectors, force = false) {
+  const list = [...new Set(connectors.filter(Boolean))];
+  if (!list.length) return;
+  const got = await api(`/api/account/connect/reach?${new URLSearchParams({ connector: list.join(","), ...(force ? { force: "1" } : {}) })}`);
+  for (const r of got && Array.isArray(got.reach) ? got.reach : []) REACH.set(r.connector, r);
+}
+/* the form's note: the venue's no in its words and when it was asked, "Check again"; Polymarket's adds the way to see a wallet there */
+function reachNoteHtml(r, kind) {
+  if (!r || r.state === "ok") return "";
+  const instead = r.state === "location" && kind === "polymarket-trade" && optionOf("polymarket") ? ' <button type="button" class="link" data-reach="watch">Watch a Polymarket wallet by its address instead</button>' : "";
+  return `${esc(r.said || "")}${r.at ? ` <span class="dim">(asked ${esc(nyTime(r.at))})</span>` : ""} <button type="button" class="link" data-reach="again">Check again</button>${instead}`;
+}
+/* the tiles of the open picker, marked from what their venues answered */
+function markTiles() {
+  for (const b of document.querySelectorAll("#modal button.tile")) {
+    const r = REACH.get(tileConnector(b.dataset.kind, b.dataset.extra));
+    const word = r && REACH_WORD[r.state];
+    if (!word || b.querySelector("em.on")) continue;
+    b.classList.add("tile-off");
+    b.title = r.said || "";
+    b.querySelector("span").innerHTML = `<em class="off">${esc(word)}</em>`;
+  }
+}
+
 /** the tiles, grouped; `wide` lays them out across the page instead of inside the dialog. A way of connecting the server offers that no tile
  * above names is still a tile, under "More", by the server's own name for it: nothing the account can connect is left off */
 function catalog(owner, wide = "") {
@@ -79,7 +111,10 @@ function catalog(owner, wide = "") {
     const o = optionOf(kind);
     if (!o) return "";
     const how = kind === "wallet" ? (extra === "watch" ? "Address" : "Sign one sentence") : o.needs === "cli" && kind !== "metamask" ? "On this machine" : HOW[o.needs] || "";
-    return `<button type="button" class="tile" data-kind="${esc(kind)}" data-extra="${esc(extra)}"${owner ? "" : " disabled"}><b>${esc(name)}</b><span>${isOn(kind, extra) ? '<em class="on">Connected</em> · add another' : esc(how)}</span></button>`;
+    const on = isOn(kind, extra);
+    const r = on ? null : REACH.get(tileConnector(kind, extra));
+    const word = r && REACH_WORD[r.state];
+    return `<button type="button" class="tile${word ? " tile-off" : ""}" data-kind="${esc(kind)}" data-extra="${esc(extra)}"${word ? ` title="${esc(r.said || "")}"` : ""}${owner ? "" : " disabled"}><b>${esc(name)}</b><span>${on ? '<em class="on">Connected</em> · add another' : word ? `<em class="off">${esc(word)}</em>` : esc(how)}</span></button>`;
   };
   const named = new Set(TILES.flatMap(([, tiles]) => tiles.map(([kind]) => kind)));
   const more = ((A.connectLive || {}).options || []).filter((o) => !named.has(o.kind)).map((o) => [o.kind, "", o.label.split(" · ")[0]]);
@@ -151,6 +186,10 @@ function openPicker() {
   $("modal-cancel").addEventListener("click", () => $("modal").close());
   for (const b of $("modal-form").querySelectorAll("button.tile")) b.addEventListener("click", () => openConnect(optionOf(b.dataset.kind), { exchange: b.dataset.kind === "exchange" ? b.dataset.extra : "", watch: b.dataset.extra === "watch", name: b.querySelector("b").textContent, back: true }));
   if (!$("modal").open) $("modal").showModal();
+  // each venue's first question, asked as the list opens (kept on the server): a tile whose venue says no is marked while the owner reads
+  askReach(TILES.flatMap(([, tiles]) => tiles.map(([kind, extra]) => tileConnector(kind, extra)))).then(() => {
+    if ($("modal").open && ($("modal-form-title") || {}).textContent === "Connect an account") markTiles();
+  });
 }
 
 /** one way of connecting, as one short form */
@@ -161,6 +200,7 @@ async function openConnect(o, { exchange = "", watch = false, name = "", back = 
   const title = o.kind === "exchange" && !exchange ? "an exchange" : name || o.label.split(" · ")[0];
   const heading = watch ? "Watch an address" : o.kind === "wallet" ? "Connect a browser wallet" : `Connect ${title}`;
   $("modal-form").innerHTML = `${back ? '<button type="button" class="link dim back" id="modal-back">← All accounts</button>' : ""}<h2 id="modal-form-title">${esc(heading)}</h2>
+    <div class="reach-note" id="reach-note" hidden></div>
     <div id="live-body"></div>
     <div class="msg" id="modal-msg"></div>
     <div class="end"><button type="button" id="modal-cancel">Cancel</button><button type="submit" class="ink" id="modal-go"${Owner.role === "owner" ? "" : " disabled"}>${watch ? "Watch it" : "Connect"}</button></div>`;
@@ -183,6 +223,36 @@ async function openConnect(o, { exchange = "", watch = false, name = "", back = 
     if (o.needs === "address") return A.venues.some((v) => v.id === o.kind) ? `${o.kind}-${ref.slice(2, 8).toLowerCase()}` : o.kind;
     return o.kind;
   };
+  /* what this form's venue answered from here before anything was made (live/reach.ts): a no closes the way in — the steps folded away,
+     Connect off — and says why in the venue's words; "Check again" asks it again now */
+  const connNow = () => (o.kind === "exchange" ? (exchangeId() ? `live:exchange:${exchangeId()}` : "") : tileConnector(o.kind, ""));
+  let reachShut = false;
+  const showReach = () => {
+    const note = $("reach-note");
+    if (!note || body.isConnected === false) return;
+    const r = REACH.get(connNow());
+    const was = reachShut;
+    reachShut = !!(r && REACH_WORD[r.state]);
+    note.hidden = !r || r.state === "ok";
+    note.className = `reach-note msg ${reachShut ? "no" : "wait"}`;
+    note.innerHTML = reachNoteHtml(r, o.kind);
+    for (const el of form.querySelectorAll("#live-body .steps, #live-body details.opts")) el.hidden = reachShut;
+    if (reachShut) $("modal-go").disabled = true;
+    else if (was) $("modal-go").disabled = Owner.role !== "owner" || (o.needs === "sign-in" && !form.elements.ref.value);
+  };
+  const reachAsk = (force = false) => {
+    const c = connNow();
+    if (!c || (!force && REACH.has(c))) return void showReach();
+    askReach([c], force).then(showReach);
+  };
+  $("reach-note").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-reach]");
+    if (!b) return;
+    if (b.dataset.reach === "watch") return void openConnect(optionOf("polymarket"), { name: "Polymarket · by address", back });
+    $("reach-note").className = "reach-note msg wait";
+    $("reach-note").textContent = "Asking again…";
+    reachAsk(true);
+  });
 
   if (o.needs === "key-file") {
     const pick = o.kind === "exchange" && !exchange;
@@ -253,7 +323,7 @@ async function openConnect(o, { exchange = "", watch = false, name = "", back = 
       st.textContent = r.message;
     };
     fill();
-    if (pick) form.elements.exchange.addEventListener("change", () => { fill(); check(); });
+    if (pick) form.elements.exchange.addEventListener("change", () => { fill(); check(); reachAsk(); });
     const typed = () => { path = pathOf(form.elements.ref.value.trim()); show(); check(); };
     form.elements.ref.addEventListener("input", () => { refTyped = true; typed(); });
     // a new name is a new venue: its file follows it, until one is typed
@@ -331,8 +401,11 @@ async function openConnect(o, { exchange = "", watch = false, name = "", back = 
     $("live-body").innerHTML = `<div class="path dim small">${esc(o.example)}</div><input type="hidden" name="ref" value="" /><input type="hidden" name="label" value="" />`;
   }
 
+  reachAsk();
+
   form.onsubmit = async (e) => {
     e.preventDefault();
+    if (reachShut) return;
     const ref = (form.elements.ref.value || "").trim();
     const label = (form.elements.label.value || "").trim();
     if (o.needs === "address" && !/^0x[0-9a-fA-F]{40}$/.test(ref)) return say("An address is 0x and 40 hex digits.", "no");

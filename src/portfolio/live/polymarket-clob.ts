@@ -395,6 +395,16 @@ function positionOf(p: Json): Position | undefined {
  * shared REGION pattern does not catch */
 const PM_REGION = /restricted in your (region|country|jurisdiction)|trading (is )?restricted|geo-?blocked|not available in your (region|country)/i;
 const GEO_WORDS = "Polymarket does not serve this location: that is its own rule, and the account does not look for a way around it";
+/** Polymarket's location check, the first thing a connection to trade asks (and live/reach.ts asks before any key exists) */
+export const POLYMARKET_GEOBLOCK = GEOBLOCK;
+/** what Polymarket's location check answered, as the account reads it: blocked — completely, or close-only as the US is — is its rule; no
+ * answer is not taken for a yes. The IP it reports is left out of everything */
+export function polymarketLocationSaid(r: HttpReply, venue: string, name: string): Refusal | undefined {
+  if (r.status === 451 || (r.status !== 200 && (REGION.test(r.text) || PM_REGION.test(r.text)))) return no("E_VENUE_GEOBLOCKED", { venue, message: GEO_WORDS, native: { status: r.status } });
+  if (r.status !== 200 || !isObj(r.body) || typeof r.body.blocked !== "boolean") return no("E_VENUE_UNREACHABLE", { venue, message: `${name}'s location check did not answer: nothing goes to Polymarket without it`, native: { status: r.status } });
+  if (r.body.blocked) return no("E_VENUE_GEOBLOCKED", { venue, message: GEO_WORDS, native: { blocked: true, ...(typeof r.body.country === "string" ? { country: r.body.country } : {}), ...(typeof r.body.region === "string" ? { region: r.body.region } : {}) } });
+  return undefined;
+}
 const INSUFFICIENT = /not enough balance|allowance/i;
 const NO_TRADE = /address banned|closed only mode/i;
 const KEY_OWNER = /has to be the (owner|address) of the api key/i;
@@ -607,10 +617,7 @@ function polymarketTrader(c: { venue: string; name: string; wallet: Wallet; http
       const x = asRefusal(c.venue, c.name, err, secrets());
       return { ...x, message: `${c.name}'s location check could not be reached: nothing goes to Polymarket without it` };
     }
-    if (r.status === 451 || (r.status !== 200 && (REGION.test(r.text) || PM_REGION.test(r.text)))) return no("E_VENUE_GEOBLOCKED", { venue: c.venue, message: GEO_WORDS, native: { status: r.status } });
-    if (r.status !== 200 || !isObj(r.body) || typeof r.body.blocked !== "boolean") return no("E_VENUE_UNREACHABLE", { venue: c.venue, message: `${c.name}'s location check did not answer: nothing goes to Polymarket without it`, native: { status: r.status } });
-    if (r.body.blocked) return no("E_VENUE_GEOBLOCKED", { venue: c.venue, message: GEO_WORDS, native: { blocked: true, ...(typeof r.body.country === "string" ? { country: r.body.country } : {}), ...(typeof r.body.region === "string" ? { region: r.body.region } : {}) } });
-    return undefined;
+    return polymarketLocationSaid(r, c.venue, c.name);
   };
 
   /** L1: the key signs ClobAuth (no verifyingContract; the timestamp is seconds, signed as a string; nonce 0) and Polymarket answers the

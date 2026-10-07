@@ -288,6 +288,21 @@ export interface ExchangeRequest {
   open?: OpenExchange | undefined;
 }
 
+/** the first question exchangeSource asks — the exchange's public clock — asked alone, with no key (live/reach.ts: before the owner makes
+ * one). Undefined: the exchange answers here, or the library has no clock call for it (that is the library's word, not the exchange's) */
+export async function exchangeClock(venue: string, exchangeId: string, open: OpenExchange = openExchange): Promise<Refusal | undefined> {
+  const client = await open(exchangeId, {}).catch(() => undefined);
+  if (!client) return no("E_WALLET_UNKNOWN_VENUE", { venue, message: `the exchange library knows no exchange called "${exchangeId}"`, detail: { exchange: exchangeId } });
+  if (client.has?.fetchTime === false) return undefined;
+  try {
+    await client.fetchTime?.();
+    return undefined;
+  } catch (err) {
+    if (String((err as { name?: string } | undefined)?.name) === "NotSupported") return undefined;
+    return exchangeSaidNo(venue, client.name ?? exchangeId, err, {});
+  }
+}
+
 /** connect: the clock, the key's permissions, the balances — then a source that reads, and that moves money and places orders only behind
  * the account's door */
 export async function exchangeSource(req: ExchangeRequest): Promise<{ source: LiveSource; first: LiveBalance[] } | Refusal> {
