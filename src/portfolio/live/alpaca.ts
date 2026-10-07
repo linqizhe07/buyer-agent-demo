@@ -8,7 +8,8 @@
  *   GET /v2/assets?status=active&asset_class=…        the markets: tradable, fractionable; a coin pair's min_order_size,
  *                                                    min_trade_increment and price_increment (kept five minutes)
  *   GET /v2/assets/{symbol}                          one of them (a coin pair URL-encoded: BTC%2FUSD)
- *   GET /v2/clock                                    whether the US stock market is open, and when it next opens
+ *   GET /v2/clock                                    whether the US stock market is open, and when it next opens and closes: a
+ *                                                    stock market's session (Market.session)
  *   GET data.alpaca.markets …/quotes/latest          a fresh bid and ask (stocks: also …/trades/latest, the last trade)
  *   POST /v2/orders                                  an order, with the account's id as client_order_id. A MARKET order goes as a
  *                                                    limit order at its worst price, and a STOP as a stop-limit at its worst price,
@@ -44,7 +45,7 @@ import { isRefusal, type Refusal } from "../../core/errors.ts";
 import { no } from "../refuse.ts";
 import type { ChainName } from "./chain.ts";
 import type { KeyFile, KeyShape } from "./credentials.ts";
-import { badOrder, ceilTo, CANDLE_INTERVALS, DONE, floorTo, inDollars, pick, plain, type Candle, type CandleInterval, type LiveTrader, type Market, type MarketStats, type OrderRequest, type OrderState, type OrderStatus, type Position, type TimeInForce } from "./trade.ts";
+import { badOrder, ceilTo, CANDLE_INTERVALS, DONE, floorTo, inDollars, pick, plain, type Candle, type CandleInterval, type LiveTrader, type Market, type MarketSession, type MarketStats, type OrderRequest, type OrderState, type OrderStatus, type Position, type TimeInForce } from "./trade.ts";
 import { asRefusal, num, REGION, redact, unreachable, venueSaidNo, type Http, type HttpReply, type LiveBalance, type LiveSource } from "./types.ts";
 import type { LiveWriter } from "./writes.ts";
 
@@ -250,6 +251,19 @@ const SIZE_403 = /not fractionable|cannot be sold short/i;
 const nyDay = (ms: number): string => new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(ms);
 /** "2026-10-06T09:30:00-04:00" as "2026-10-06 09:30": Alpaca's clock speaks New York time */
 const nyTime = (s: unknown): string => (typeof s === "string" && s.length >= 16 ? `${s.slice(0, 10)} ${s.slice(11, 16)}` : "");
+/** "2026-10-06T09:30:00-04:00" as the instant it is, ISO 8601 in UTC ("2026-10-06T13:30:00.000Z"); undefined for what is not a time */
+const isoOf = (s: unknown): string | undefined => {
+  const ms = typeof s === "string" ? Date.parse(s) : NaN;
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : undefined;
+};
+/** the US stock market's session as Alpaca's clock gives it (GET /v2/clock: is_open, next_open, next_close); a clock that did not answer, or
+ * answered without saying whether the market is open, gives none — the session is then unknown, and nothing is said of it */
+function sessionOf(clock: unknown): MarketSession | undefined {
+  if (!isObj(clock) || isRefusal(clock) || typeof clock.is_open !== "boolean") return undefined;
+  const opensAt = isoOf(clock.next_open);
+  const closesAt = isoOf(clock.next_close);
+  return { open: clock.is_open, ...(opensAt ? { opensAt } : {}), ...(closesAt ? { closesAt } : {}) };
+}
 
 function alpacaTrader(c: { venue: string; name: string; base: string; keyId: string; secret: string; http: Http; clock: () => number }): LiveTrader {
   const secrets = [c.keyId, c.secret];
@@ -444,7 +458,10 @@ function alpacaTrader(c: { venue: string; name: string; base: string; keyId: str
       else if (isRefusal(clock)) note = `${c.name}'s market clock did not answer, so no market order is placed here: outside market hours ${c.name} holds an order until the market opens, and a market order would fill at the opening price`;
       if (price === undefined && isRefusal(quote)) note = `${note ? `${note} · ` : ""}${c.name}'s market data did not answer: ${quote.message}`;
     }
-    return { ...m, price, bid, ask, priceStep, note, types };
+    // the session, by Alpaca's own clock: in session now, and when it next opens and closes. At night a stock is open (Alpaca takes an order
+    // and holds it for the open) and out of its session. No clock answer: unknown, and no session is said
+    const session = sessionOf(clock);
+    return { ...m, price, bid, ask, priceStep, note, types, ...(session ? { session } : {}) };
   };
 
   const order = async (ref: string): Promise<Json> => {

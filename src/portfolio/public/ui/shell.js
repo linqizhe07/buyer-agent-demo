@@ -400,6 +400,14 @@ routed();
 (async () => {
   await Owner.ready();
   await refresh();
+  // the lists Markets and Trade open with, asked for once the page has drawn and the browser is idle: their first visit comes in drawn
+  // (paneIn) rather than as a skeleton swapped for its content after the entrance (markets.js mkPrefetch · trade.js tkReadKinds)
+  const ahead = () => {
+    if (typeof mkPrefetch === "function") mkPrefetch();
+    if (typeof tkReadKinds === "function") tkReadKinds();
+  };
+  if (typeof requestIdleCallback === "function") requestIdleCallback(ahead, { timeout: 2000 });
+  else setTimeout(ahead, 500);
   // a refresh due in the middle of a scroll waits for it to rest (its drawing is main-thread work the scroll's frames would wait for)
   setInterval(() => {
     if (A && quiet()) whenStill(() => quiet() && refresh());

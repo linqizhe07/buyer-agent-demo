@@ -14,12 +14,16 @@
  * agent key, the way the tests sign them:
  *
  *   venues        Stand-in Exchange (spot and perpetuals, a BTC perpetual it already held, and earn: a flexible USDT product and a bonded
- *                 ETH one), Stand-in Predictions (event contracts), Stand-in Wallet (tokens, an RWA among them); agents may set leverage up
- *                 to 5x. Each trader says the kinds of market it trades itself (live/trade.ts `kinds`)
+ *                 ETH one), Stand-in Predictions (event contracts), Stand-in Wallet (tokens, an RWA among them), Stand-in Broker (AAPL,
+ *                 NVDA and SPY in New York's market hours by the stand-in's clock; $2,000 in cash, 3 AAPL and 2 NVDA held); agents may set
+ *                 leverage up to 5x. Each trader says the kinds of market it trades itself (live/trade.ts `kinds`)
  *   the owner's   a market buy of ETH, a resting limit buy of SOL (it fills when the price comes down to it), a limit sell of BTC above the
  *   own trading   market, a stop under SOL, 5x on the ETH perpetual and a long there, 50 YES contracts on the Fed, WETH bought from the
- *                 wallet, a limit placed and canceled; spot to futures, USDC swapped for USDT, $25 withdrawn to the agent's wallet,
- *                 $150 of USDT put into the flexible earn product (done on the next tick)
+ *                 wallet, a limit placed and canceled; at the broker, while the US market is open, market buys of half a share of AAPL and
+ *                 a share of NVDA (while it is closed no market order is taken: the broker held them already), and a limit buy of a
+ *                 quarter share of SPY under the market — on the book, or held by the broker until the open; a fraction of a share is a
+ *                 day order, so it lapses at its session's close; spot to futures, USDC swapped for USDT, $25 withdrawn to the agent's
+ *                 wallet, $150 of USDT put into the flexible earn product (done on the next tick)
  *   the agent     "Claude Code": let in for 30 days, a trading limit ($150 an order, $600 in all, at the three venues), a limit between the
  *                 user's own places and a payees limit, an agent wallet; in Beast it places a limit buy of SOL inside its limit, then
  *                 in Guard it asks for a market buy of ETH, which waits on a card for the owner
@@ -35,9 +39,9 @@
  * The agent wallet's key is made in the home the way a real one is (account/keystore.ts), so its address is a real address on every EVM
  * chain: its balance here is the stand-in chain's, and nothing real should ever be sent to it.
  *
- * While it runs: prices move every few seconds, a resting order fills when the price crosses it, a stop fires, the fifteen-minute bitcoin
- * market rolls over and settles; Claude Code reports when its order fills, and when its card expires unanswered the seed key closes it and
- * Claude Code asks again (in Guard only).
+ * While it runs: prices move every few seconds, a resting order fills when the price crosses it (at the broker, only while the US market
+ * is open), a stop fires, the fifteen-minute bitcoin market rolls over and settles; Claude Code reports when its order fills, and when its
+ * card expires unanswered the seed key closes it and Claude Code asks again (in Guard only).
  */
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -55,7 +59,7 @@ import { isStable, type LiveBalance } from "../../src/portfolio/live/types.ts";
 import { pairingCode, startPortfolioServer, type PortfolioServerHandle } from "../../src/portfolio/server.ts";
 import { loadOpenness, PortfolioService } from "../../src/portfolio/service.ts";
 import { DAY, toStep } from "./model.ts";
-import { makeWorld, publicSources, registerStandins, standinChain, standinPrice, standinSender, tick, type World } from "./venues.ts";
+import { makeWorld, publicSources, registerStandins, standinChain, standinPrice, standinSender, stockSession, tick, type World } from "./venues.ts";
 
 type NoNonce<T> = T extends unknown ? Omit<T, "nonce"> : never;
 const HOUR = 3_600_000;
@@ -175,7 +179,7 @@ export async function startStandin(o: StandinOptions): Promise<Standin> {
     agentNonce = Math.max(agentNonce + 1, Date.now());
     return svc.exchange(await signAgent(agent, { ...a, nonce: agentNonce } as AgentAction));
   };
-  const price = (book: "ex" | "predict" | "wallet", symbol: string, side: "bid" | "ask" | "price" = "price"): number => {
+  const price = (book: "ex" | "predict" | "wallet" | "broker", symbol: string, side: "bid" | "ask" | "price" = "price"): number => {
     const m = world[book].market(symbol);
     if (!m?.[side]) throw new Error(`the stand-in has no price for ${symbol}`);
     return m[side]!;
@@ -186,6 +190,11 @@ export async function startStandin(o: StandinOptions): Promise<Standin> {
   ok("Stand-in Exchange", await own({ type: "connectVenue", venue: "ex", connector: "live:standin-exchange", label: "Stand-in Exchange", credentialRef: "" }));
   ok("Stand-in Predictions", await own({ type: "connectVenue", venue: "predict", connector: "live:standin-events", label: "Stand-in Predictions", credentialRef: "" }));
   ok("Stand-in Wallet", await own({ type: "connectVenue", venue: "wallet", connector: "live:standin-wallet", label: "Stand-in Wallet", credentialRef: "" }));
+  // the broker keeps New York's market hours by the stand-in's clock. While the market is closed it takes no market order, so the half share
+  // of Apple and the share of NVIDIA the owner buys below while it is open were held there already
+  const stocksOpen = stockSession(now).open;
+  if (!stocksOpen) for (const [symbol, qty] of [["AAPL", 0.5], ["NVDA", 1]] as const) world.broker.add("stocks", symbol, qty);
+  ok("Stand-in Broker", await own({ type: "connectVenue", venue: "broker", connector: "live:standin-broker", label: "Stand-in Broker", credentialRef: "" }));
   ok("the agents' leverage cap", await own({ type: "setPolicy", change: "maxLeverage", value: "5" }));
 
   // ---- the owner's own trading: the statement's first lines ----
@@ -200,6 +209,14 @@ export async function startStandin(o: StandinOptions): Promise<Standin> {
   orders.weth = orderOf("WETH from the wallet", await own({ type: "liveOrder", venue: "wallet", symbol: "WETH/USDC@Base", side: "buy", orderType: "market", qty: "0.02" }));
   orders.btcCanceled = orderOf("a limit buy of BTC", await own({ type: "liveOrder", venue: "ex", symbol: "BTC/USDT", side: "buy", orderType: "limit", qty: "0.001", limitPrice: String(toStep(price("ex", "BTC/USDT", "bid") * 0.95, 0.1, "floor")) }));
   ok("the BTC limit canceled", await own({ type: "liveCancel", venue: "ex", order: orders.btcCanceled }));
+  // stocks: market buys only while the market is open — half a share of Apple (a fraction: a day order, the broker's default) and a whole
+  // share of NVIDIA (whole shares only) — and a limit buy of a quarter share of SPY under the market, open or closed: on the book, or held
+  // by the broker for the open; a day order, so it lapses at its session's close
+  if (stocksOpen) {
+    orders.aaplBuy = orderOf("a market buy of AAPL", await own({ type: "liveOrder", venue: "broker", symbol: "AAPL", side: "buy", orderType: "market", qty: "0.5" }));
+    orders.nvdaBuy = orderOf("a market buy of NVDA", await own({ type: "liveOrder", venue: "broker", symbol: "NVDA", side: "buy", orderType: "market", qty: "1" }));
+  }
+  orders.spyLimit = orderOf("a limit buy of SPY", await own({ type: "liveOrder", venue: "broker", symbol: "SPY", side: "buy", orderType: "limit", qty: "0.25", limitPrice: String(toStep(price("broker", "SPY", "bid") * 0.997, 0.01, "floor")) }));
   ok("spot to futures", await own({ type: "liveMove", kind: "transfer", from: "ex", fromLedger: "spot", to: "ex", toLedger: "futures", asset: "USDT", toAsset: "USDT", amount: "200" }));
   ok("USDC for USDT", await own({ type: "liveMove", kind: "swap", from: "ex", to: "ex", asset: "USDC", toAsset: "USDT", amount: "50" }));
 
@@ -311,7 +328,7 @@ export async function startStandin(o: StandinOptions): Promise<Standin> {
   every(o.tickMs ?? 3_000, () => tick(world));
   every(o.agentMs ?? 15_000, agentLooks);
 
-  const seeded: Seeded = { venues: ["ex", "predict", "wallet", walletVenue], agent: { name: AGENT_NAME, address: agent.address, wallet: walletVenue }, orders, card, intents, asks: 2, watch: 3, curvePoints };
+  const seeded: Seeded = { venues: ["ex", "predict", "wallet", "broker", walletVenue], agent: { name: AGENT_NAME, address: agent.address, wallet: walletVenue }, orders, card, intents, asks: 2, watch: 3, curvePoints };
   return {
     url: server.url,
     code,
@@ -347,7 +364,7 @@ async function drawThePast(svc: PortfolioService, world: World, home: string, wa
     const asset = world.earn.specs.find((x) => x.id === product)!.asset;
     return { asset, amount, ...(isStable(asset) ? { class: "stable" as const } : {}) };
   });
-  const held: Array<[string, LiveBalance[]]> = [["ex", [...world.ex.read(), ...earned]], ["predict", world.predict.read()], ["wallet", world.wallet.read()], [walletVenue, chain]];
+  const held: Array<[string, LiveBalance[]]> = [["ex", [...world.ex.read(), ...earned]], ["predict", world.predict.read()], ["wallet", world.wallet.read()], ["broker", world.broker.read()], [walletVenue, chain]];
   const log = new NetWorthLog(networthPath(home), world.clock);
   const now = world.clock();
   const keyOf = (asset: string): { key: string; flip: boolean } | undefined => {

@@ -71,13 +71,17 @@
  * An event past its close: Kalshi's close_time is the real close, so a Kalshi leg whose closeTime has passed is `open: false` whatever the
  * listing still says; Polymarket's endDate is Gamma's estimate and a market trades on past it, so a Polymarket leg keeps `open` as Gamma
  * says. Either way the row and its legs carry `pastEnd: true`, so the page can say "past its end date, still trading" rather than "closed".
+ *
+ * A stock out of its session (a stock market at night) may still take orders — Alpaca holds one for the open — so its line keeps `open` as
+ * the venue says and carries the venue's `session` (in session now, when it next opens or closes), with the venue's note on what it does
+ * until the open; the row carries the session of its first connected venue that says one, so the page can say "Closed" from it.
  */
 import { isRefusal, type Refusal } from "../../core/errors.ts";
 import { isExcludedCategory, isIpoCategory, isRwaMarket, TABS, type TabId } from "./categories.ts";
 import { normalBase, type CompareMissing } from "./compare.ts";
 import { impliedUsd, PRE_IPO_CATEGORY, PRE_IPO_GROUP, PRE_IPO_PER_POINT } from "./preipo.ts";
 import type { EventsQuery, Listing, PublicSource } from "./public-markets.ts";
-import { inDollars, type LiveTrader, type Market, type MarketStats } from "./trade.ts";
+import { inDollars, type LiveTrader, type Market, type MarketSession, type MarketStats } from "./trade.ts";
 import { isStable } from "./types.ts";
 
 export interface ExploreVenue {
@@ -138,6 +142,9 @@ export interface ExploreAt {
   ask?: number | undefined;
   /** the market takes orders now, as the venue says — except a Kalshi event past its close, which is closed whatever the listing says */
   open?: boolean | undefined;
+  /** the venue's trading session for it, where the venue keeps one (a stock: Market.session) — in session now, when it next opens or closes.
+   * A stock out of its session may still be `open` (the venue holds an order for the open): its `note` then says so in the venue's words */
+  session?: MarketSession | undefined;
   /** an event whose close time has passed: a Polymarket market may still trade then (Gamma's endDate is an estimate), a Kalshi one is closed */
   pastEnd?: boolean | undefined;
   /** a public listing: the venue to connect to trade it, and the connection that does. Left out of a read-only listing's line (Stock
@@ -197,6 +204,8 @@ export interface ExploreItem {
   /** a perpetual's funding rate per interval and when it is next paid, from its most traded venue that says */
   fundingRate?: number | undefined;
   nextFundingAt?: string | undefined;
+  /** a stock's trading session (Market.session), from the first of its connected venues that says one */
+  session?: MarketSession | undefined;
   outcomes?: ExploreOutcome[] | undefined;
   /** a token an issuer stands behind (kind rwa), or a pre-IPO perpetual whose issuer has spoken: who issues it and what the issuer says, in
    * the issuer's own words, from the first venue that says */
@@ -503,6 +512,15 @@ function keyOf(m: Market, kind: ExploreKind, r: Reader): string | undefined {
 }
 
 const priceOf = (m: Market): number | undefined => pos(m.price) ?? (pos(m.bid) !== undefined && pos(m.ask) !== undefined ? (m.bid! + m.ask!) / 2 : undefined);
+/** a market's session as the venue said it (Market.session), with nothing else carried; none where it said none, or not in that shape */
+function sessionOf(m: Market): MarketSession | undefined {
+  const s = m.session;
+  if (!s || typeof s !== "object" || typeof s.open !== "boolean") return undefined;
+  const at = (x: unknown): string | undefined => (typeof x === "string" && Number.isFinite(Date.parse(x)) ? x : undefined);
+  const opensAt = at(s.opensAt);
+  const closesAt = at(s.closesAt);
+  return { open: s.open, ...(opensAt ? { opensAt } : {}), ...(closesAt ? { closesAt } : {}) };
+}
 /** how busy a row is, only to order: an event's whole event where the venue reports it, else the market's dollars, else its contracts counted
  * at the dollar each pays at settlement */
 const volumeOf = (i: { volumeUsd24h?: number | undefined; contracts24h?: number | undefined; eventVolumeUsd24h?: number | undefined }): number => i.eventVolumeUsd24h ?? i.volumeUsd24h ?? i.contracts24h ?? -1;
@@ -518,7 +536,10 @@ function atOf(r: Reader, m: Market, symbol = m.symbol, price = priceOf(m), open 
   const issuerWords = rwa && typeof rwa.eligibility === "string" && rwa.eligibility ? rwa.eligibility : undefined;
   const issuer = typeof m.issuer === "string" && m.issuer ? m.issuer : undefined;
   const eligibility = typeof m.eligibility === "string" && m.eligibility ? m.eligibility : undefined;
-  const note = (r.connected && r.canTrade === false ? r.whyNot : undefined) ?? r.readOnly ?? issuerWords ?? (open === false && typeof m.note === "string" && m.note ? m.note : undefined);
+  // the venue's own words where it takes no order now, or where its market is out of its session (a stock at night: the venue says what it
+  // does with an order until the open)
+  const session = sessionOf(m);
+  const note = (r.connected && r.canTrade === false ? r.whyNot : undefined) ?? r.readOnly ?? issuerWords ?? ((open === false || session?.open === false) && typeof m.note === "string" && m.note ? m.note : undefined);
   return {
     venue: r.id,
     venueName: r.name,
@@ -530,6 +551,7 @@ function atOf(r: Reader, m: Market, symbol = m.symbol, price = priceOf(m), open 
     ...(pos(m.bid) !== undefined ? { bid: m.bid } : {}),
     ...(pos(m.ask) !== undefined ? { ask: m.ask } : {}),
     ...(typeof open === "boolean" ? { open } : {}),
+    ...(session ? { session } : {}),
     ...(!r.connected && offer && r.connectTo ? { connectTo: r.connectTo } : {}),
     ...(!r.connected && offer && r.connector ? { connector: r.connector } : {}),
     ...(note ? { note } : {}),
@@ -572,6 +594,8 @@ function rowOf(key: string, kind: ExploreKind, venues: Map<string, Got[]>, aside
   }
   const vols = [...byFamily.values()];
   const funded = entries.find((e) => fin(e.m.fundingRate) !== undefined);
+  // a stock's session: its first connected venue's that says one (the order its lines are in)
+  const sessioned = entries.find((e) => e.r.connected && sessionOf(e.m) !== undefined);
   const named = entries.find((e) => e.m.name && !e.m.name.includes(" / ") && e.m.name.toUpperCase() !== e.m.symbol.toUpperCase());
   const name = kind === "coin" ? base : kind === "perp" ? `${base} perpetual` : (named?.m.name ?? base);
   const category = entries.map((e) => e.m.category).find((c): c is string => typeof c === "string" && c !== "");
@@ -589,6 +613,7 @@ function rowOf(key: string, kind: ExploreKind, venues: Map<string, Got[]>, aside
     ...(vols.length ? { volumeUsd24h: vols.reduce((s, v) => s + v, 0) } : {}),
     ...(category ? { category } : {}),
     ...(funded ? { fundingRate: funded.m.fundingRate, ...(funded.m.nextFundingAt ? { nextFundingAt: funded.m.nextFundingAt } : {}) } : {}),
+    ...(sessioned ? { session: sessionOf(sessioned.m) } : {}),
     ...(issued ? { issuer: issued.m.issuer } : {}),
     ...(eligible ? { eligibility: eligible.m.eligibility } : {}),
     tabs: ["all", TAB_OF[kind as Exclude<ExploreKind, "event">]],

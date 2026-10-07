@@ -589,16 +589,15 @@ function pfWire(el) {
     }
     pfAct(t.dataset.pfAct, t.dataset);
   });
-  // the curve under the pointer: the point nearest it, in figures — the pointer's place kept as it moves, the line and the words written
-  // once a frame, the curve's box read once as the pointer comes onto it (and again when its size changes)
+  // the curve under the pointer: the point nearest it, in figures — the line and the words written as the pointer moves (the browser hands
+  // moves over once a frame; a frame asked for here on top would hold the next move back a frame) and only when the nearest point changes;
+  // the curve's box read once as the pointer comes onto it (and again when its size changes), never per move
   el.addEventListener("mousemove", (e) => {
     const svg = e.target.closest && e.target.closest("svg[data-pf-curve]");
     if (!svg || !PF.curve) return;
     if (!PF.hover || PF.hover.svg !== svg) pfHoverOn(svg);
     PF.hover.x = e.clientX;
-    if (PF.hover.queued) return;
-    PF.hover.queued = true;
-    nextFrame(pfHoverDraw);
+    pfHoverDraw();
   });
 }
 /* the pointer came onto the curve: its box, kept while it is there; leaving the curve itself (heard on the curve: a part inside it is not
@@ -606,7 +605,7 @@ function pfWire(el) {
 function pfHoverOn(svg) {
   const plot = svg.parentElement;
   const box = svg.getBoundingClientRect();
-  PF.hover = { svg, left: box.left, width: box.width, x: 0, i: -1, queued: false, cur: plot && plot.querySelector(".pf-cursor"), out: plot && plot.querySelector("[data-pf-read]") };
+  PF.hover = { svg, left: box.left, width: box.width, x: 0, i: -1, cur: plot && plot.querySelector(".pf-cursor"), out: plot && plot.querySelector("[data-pf-read]") };
   if (svg.pfHeard) return;
   svg.pfHeard = true;
   svg.addEventListener("mouseleave", () => {
@@ -627,9 +626,7 @@ function pfHoverOn(svg) {
 function pfHoverDraw() {
   const h = PF.hover;
   const c = PF.curve;
-  if (!h) return;
-  h.queued = false;
-  if (!c || !h.svg.isConnected) return;
+  if (!h || !c || !h.svg.isConnected) return;
   const x = ((h.x - h.left) / (h.width || 1)) * c.w;
   let i = 0;
   for (let k = 1; k < c.pts.length; k++) if (Math.abs(c.pts[k][0] - x) < Math.abs(c.pts[i][0] - x)) i = k;

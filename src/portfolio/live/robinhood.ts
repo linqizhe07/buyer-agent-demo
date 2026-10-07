@@ -23,6 +23,7 @@
 import { createHash, createPrivateKey, sign as cryptoSign, type KeyObject } from "node:crypto";
 import { getAddress, isAddress, type Hex } from "viem";
 import { isRefusal, type Refusal } from "../../core/errors.ts";
+import { regularSession } from "../account/calendar.ts";
 import { no } from "../refuse.ts";
 import { CHAIN_BY_ID, type ChainName, type ChainReader, type TokenRef } from "./chain.ts";
 import type { KeyFile, KeyShape } from "./credentials.ts";
@@ -922,8 +923,10 @@ export async function robinhoodStocksSource(req: { venue: string; label: string;
     // The tick is the US market's ($0.01, or $0.0001 under a dollar): Robinhood's tools do not say it. The order types are place_equity_order's
     // (market, limit, stop_market, stop_limit; Robinhood's page "Trading with your agent" lists the same four), its time_in_force gfd or gtc —
     // "Market orders are Good-for-Day (GFD) orders and you can enter other order types as GFD or Good-til-Canceled (GTC)" (Robinhood's
-    // "Order types"), which place() holds a market order to. No post-only, reduce-only or leverage: the tool has none
-    return { symbol, name: String(t?.simple_name ?? t?.name ?? symbol), kind: "stock", base: symbol, quote: "USD", ...(price !== undefined ? { price } : {}), bid: bid > 0 ? bid : undefined, ask: ask > 0 ? ask : undefined, minQty: 1, qtyStep: 1, priceStep: (price ?? 1) < 1 ? 0.0001 : 0.01, open: !why, note, types: stops ? ["market", "limit", "stop", "stop_limit"] : ["market", "limit"], tifs: ["gtc", "day"], tifsByType: { market: ["day"], limit: ["gtc", "day"], stop: ["gtc", "day"], stop_limit: ["gtc", "day"] }, sellsReduce: true };
+    // "Order types"), which place() holds a market order to. No post-only, reduce-only or leverage: the tool has none. The session is the
+    // regular one every order here is sent for (market_hours "regular_hours"), from the market calendar (account/calendar.ts): Robinhood's
+    // tools give no clock
+    return { symbol, name: String(t?.simple_name ?? t?.name ?? symbol), kind: "stock", base: symbol, quote: "USD", ...(price !== undefined ? { price } : {}), bid: bid > 0 ? bid : undefined, ask: ask > 0 ? ask : undefined, minQty: 1, qtyStep: 1, priceStep: (price ?? 1) < 1 ? 0.0001 : 0.01, open: !why, session: regularSession(clock()), note, types: stops ? ["market", "limit", "stop", "stop_limit"] : ["market", "limit"], tifs: ["gtc", "day"], tifsByType: { market: ["day"], limit: ["gtc", "day"], stop: ["gtc", "day"], stop_limit: ["gtc", "day"] }, sellsReduce: true };
   };
   const market = async (symbol: string): Promise<Market | Refusal> => {
     const sym = symbol.trim().toUpperCase();

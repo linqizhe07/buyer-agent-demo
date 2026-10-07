@@ -60,7 +60,9 @@
    and where it is listed wrap, so the button at the end of a row always fits the card */
 .mk-t td { white-space: nowrap; }
 .mk-t td.mk-c-name { white-space: normal; min-width: 180px; }
-.mk-t td.mk-c-where { white-space: normal; min-width: 120px; max-width: 280px; }
+.mk-t td.mk-c-where { white-space: normal; min-width: 150px; max-width: 280px; }
+/* a venue's name never breaks inside itself: a cell wraps between names only (two at most, then +N) */
+.mk-where .mk-v, .mk-where .mk-more { white-space: nowrap; }
 .mk-d .mk-t td { white-space: normal; }
 /* an event's countdown in its row, under the question */
 .mk-t .mk-close { font-weight: 600; }

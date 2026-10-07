@@ -12,7 +12,7 @@
      busy         an owner action is being signed and sent                            view  { month, account, type, agent } the statement's
      flash, said  a refusal / what was done: set them, then load() or render(), and          filters · lens: the top bar's lens, see lensNow()
                   the shell shows each once as a toast
-     ROUTE        { tab: "portfolio" | "markets" | "trade", params } from the hash (#/markets?tab=crypto&q=btc · #/trade?tile=swap)
+     ROUTE        { tab: "portfolio" | "markets" | "trade", params } from the hash (#/markets?tab=crypto&q=btc · #/trade?kind=perps)
    Doing
      load()                       read the account and the statement again, then render() (shell.js): the chrome, the visible pane, and
                                   the redraw of whatever sheet or drawer is open; the latest read wins over a slower earlier one

@@ -4,7 +4,8 @@
  * aggregator's transaction for the user's own wallet. This file is the one shape the account sees all of them through:
  *
  *   markets(query)      what can be traded there that matches a few letters
- *   market(symbol)      one market, with a fresh price, the smallest order, the steps of size and price, and whether it is open now
+ *   market(symbol)      one market, with a fresh price, the smallest order, the steps of size and price, whether it takes orders now,
+ *                       and — a stock — the venue's trading session (in session now, when it next opens or closes)
  *   place(order)        one order, at the venue, with the account's id for it (the venue's idempotency key, where it takes one):
  *                       market, limit, stop (a market order once a trigger price is reached) or stop-limit, with the time in force,
  *                       post-only and reduce-only flags the venue takes in that market
@@ -60,8 +61,14 @@ export interface Market {
   minNotional?: number | undefined;
   /** a contract (a perp, a future) is this much base */
   contractSize?: number | undefined;
-  /** open for orders now: a stock market at night, an event past its close, a pair the venue halted is not */
+  /** the venue takes orders in it now. An event past its close, a pair or a stock the venue halted does not; a stock outside its session
+   * may — Alpaca takes an order at night and holds it for the open, Robinhood sends every stock order for the regular session — so
+   * whether the market is in session is `session`, never this */
   open: boolean;
+  /** the venue's trading session, where it keeps one (a stock market): in session now, and when it next opens / closes (ISO 8601). Outside
+   * it a venue may still take an order and hold it for the open: `open` says whether it takes orders now. From the venue's own clock
+   * (Alpaca's GET /v2/clock) or the market calendar the venue sends its orders by (account/calendar.ts); absent where neither said */
+  session?: MarketSession | undefined;
   /** why not, or what the owner should know (extended hours, a market order queued for the open) */
   note?: string | undefined;
   /** the order types the venue takes here */
@@ -111,6 +118,14 @@ export interface Market {
    * one dollar of price stands for, `unit` that rule in words, and `usd` the valuation the price implies now (price × perPoint), where a
    * price is known (a listing's always; a trader's start-from list carries none until the market is read) */
   implied?: { perPoint: number; unit: string; usd?: number | undefined } | undefined;
+}
+
+/** a venue's trading session (Market.session): in session now, and when it next opens and next closes, ISO 8601 — each where the venue or
+ * the calendar says it */
+export interface MarketSession {
+  open: boolean;
+  opensAt?: string | undefined;
+  closesAt?: string | undefined;
 }
 
 /** a market's last 24 hours, as the venue reports it */

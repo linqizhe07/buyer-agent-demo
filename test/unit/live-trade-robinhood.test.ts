@@ -588,11 +588,13 @@ describe("Robinhood stocks: orders through its MCP server, in the Agentic accoun
     expect(err!.message).toContain("token •••");
   });
 
-  it("market(): the quote, the tick, whole shares or fractions, and whether the Agentic account may trade the stock", async () => {
+  it("market(): the quote, the tick, whole shares or fractions, whether the Agentic account may trade the stock, and the regular session it is sent for", async () => {
     let t = tradability("AAPL");
     let q = quote("AAPL");
     const s = server({ ...READS, get_equity_quotes: () => done({ results: [q] }), get_equity_tradability: () => done({ results: [t] }) });
-    const { trader } = await stocks(s);
+    // Monday 5 October 2026, 10:00 New York: in the regular session
+    let now = START;
+    const { trader } = await stocks(s, () => now);
     s.called.length = 0;
     expect(ok(await trader.market("aapl"))).toEqual({
       symbol: "AAPL",
@@ -608,6 +610,8 @@ describe("Robinhood stocks: orders through its MCP server, in the Agentic accoun
       qtyStep: 1,
       priceStep: 0.01,
       open: true,
+      // every order here is for the regular session (market_hours "regular_hours"): its session is the market calendar's, by the clock
+      session: { open: true, closesAt: "2026-10-05T20:00:00.000Z" },
       note: "orders go to your Robinhood Agentic account ··9876, the one account an agent may trade in · a market order goes as a limit at its worst price, a stop as a stop-limit at its worst price; orders are for the regular session (9:30 to 16:00 New York) and outside it wait for the next open · good for the day, Robinhood's default, unless good till canceled is chosen (Robinhood keeps such an order 90 days); a market order is good for the day only · whole shares only: Robinhood takes a fraction of a share only as a plain market order, which cannot be held to a worst price",
       // place_equity_order's four types (market, limit, stop_market, stop_limit) and its two times in force (gfd, gtc): a market order is
       // good for the day only. Long only
@@ -620,6 +624,12 @@ describe("Robinhood stocks: orders through its MCP server, in the Agentic accoun
     // and nothing the tool does not take: no post-only, no reduce-only, no leverage
     const aapl = ok(await trader.market("AAPL"));
     expect(["postOnly", "reduceOnly", "maxLeverage"].filter((k) => k in aapl)).toEqual([]);
+    // after the close, and over the weekend: still open for orders (they wait for the next open), out of session, and when it opens
+    now = Date.parse("2026-10-05T20:30:00.000Z");
+    expect([ok(await trader.market("AAPL")).open, ok(await trader.market("AAPL")).session]).toEqual([true, { open: false, opensAt: "2026-10-06T13:30:00.000Z" }]);
+    now = Date.parse("2026-10-10T16:00:00.000Z");
+    expect(ok(await trader.market("AAPL")).session).toEqual({ open: false, opensAt: "2026-10-12T13:30:00.000Z" });
+    now = START;
     // a server whose place_equity_order no longer takes a stop_price is offered no stops
     const noStops = server({ ...READS, get_equity_quotes: () => done({ results: [q] }), get_equity_tradability: () => done({ results: [t] }) }, TOOLS.map((x) => (x.name === "place_equity_order" ? { ...x, inputSchema: { required: ["account_number", "symbol", "side", "type"], properties: props("account_number", "symbol", "side", "type", "quantity", "limit_price", "time_in_force", "market_hours", "ref_id") } } : x)));
     const plainOnly = ok(await (await stocks(noStops)).trader.market("AAPL"));
@@ -876,6 +886,8 @@ describe("Robinhood stocks: orders through its MCP server, in the Agentic accoun
     const first = ok(await trader.markets(""));
     expect(first.map((m) => m.symbol)).toEqual(["SPY", "QQQ", "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "HOOD"]);
     expect(first.every((m) => m.kind === "stock" && m.quote === "USD" && m.price === 230.1)).toBe(true);
+    // each with its session, so Markets can say one is closed: the regular session, by the calendar, at the clock's time
+    expect(first.every((m) => JSON.stringify(m.session) === JSON.stringify({ open: true, closesAt: "2026-10-05T20:00:00.000Z" }))).toBe(true);
     expect(s.called).toEqual([["get_equity_quotes", { symbols: first.map((m) => m.symbol) }]]);
     s.called.length = 0;
     const apple = ok(await trader.markets("apple"));

@@ -157,7 +157,8 @@ describe("one market, with a fresh price", () => {
   it("a stock while the market is open: the asset, the clock, the latest quote and trade, asked at once with the key's two headers", async () => {
     const { t, seen } = await alpaca(stockAnswers(AAPL, OPEN, quote("AAPL", 200.25, 200.75), trade("AAPL", 200.4)));
     const m = ok(await t.market("aapl"));
-    expect(m).toEqual({ symbol: "AAPL", name: "Apple Inc. Common Stock", kind: "stock", base: "AAPL", quote: "USD", price: 200.5, bid: 200.25, ask: 200.75, qtyStep: 1e-9, priceStep: 0.01, minNotional: 1, open: true, types: ["market", "limit", "stop", "stop_limit"], tifs: ["day", "gtc"] } satisfies Market);
+    // the session is Alpaca's clock's: in session, its next close today at 16:00 EDT and its next open tomorrow at 09:30, as instants
+    expect(m).toEqual({ symbol: "AAPL", name: "Apple Inc. Common Stock", kind: "stock", base: "AAPL", quote: "USD", price: 200.5, bid: 200.25, ask: 200.75, qtyStep: 1e-9, priceStep: 0.01, minNotional: 1, open: true, session: { open: true, opensAt: "2026-10-06T13:30:00.000Z", closesAt: "2026-10-05T20:00:00.000Z" }, types: ["market", "limit", "stop", "stop_limit"], tifs: ["day", "gtc"] } satisfies Market);
     // Alpaca has no post-only or reduce-only order, and no leverage per position: none is declared
     expect(["postOnly", "reduceOnly", "maxLeverage"].filter((k) => k in m)).toEqual([]);
     expect(calls(seen)).toEqual([`GET ${LIVE}/v2/assets/AAPL`, `GET ${LIVE}/v2/clock`, `GET ${DATA}/v2/stocks/AAPL/quotes/latest`, `GET ${DATA}/v2/stocks/AAPL/trades/latest`]);
@@ -169,6 +170,8 @@ describe("one market, with a fresh price", () => {
     const m = ok(await t.market("PNNY"));
     expect([m.open, m.price, m.bid, m.ask, m.minQty, m.qtyStep, m.priceStep, m.minNotional, m.types, m.tifs]).toEqual([true, 0.5123, undefined, undefined, 1, 1, 0.0001, 1, ["limit", "stop", "stop_limit"], ["day", "gtc"]]);
     expect(m.note).toBe("the US stock market is closed: Alpaca holds an order and sends it when the market opens (2026-10-06 09:30 New York time). Until then no market order is placed here: it would fill at the opening price, which can be well away from this one. A limit, stop or stop-limit order waits for the open with its limit");
+    // still open for orders (Alpaca holds them), and out of its session by Alpaca's clock: when it opens, and that session's close
+    expect(m.session).toEqual({ open: false, opensAt: "2026-10-06T13:30:00.000Z", closesAt: "2026-10-06T20:00:00.000Z" });
   });
 
   it("a clock that does not answer cannot say the market is open: no market order, and the owner is told why", async () => {
@@ -176,6 +179,13 @@ describe("one market, with a fresh price", () => {
     const m = ok(await t.market("AAPL"));
     expect([m.open, m.types, m.price]).toEqual([true, ["limit", "stop", "stop_limit"], 200.5]);
     expect(m.note).toBe("Alpaca's market clock did not answer, so no market order is placed here: outside market hours Alpaca holds an order until the market opens, and a market order would fill at the opening price");
+    // no clock, no session: unknown, and nothing is said of one (never read from `open`)
+    expect("session" in m).toBe(false);
+    // a clock that answers without saying whether the market is open says no session either; one without its times says only what it gave
+    const mute = await alpaca({ ...stockAnswers(AAPL, { timestamp: "2026-10-05T10:15:22-04:00", next_open: "2026-10-06T09:30:00-04:00" }, quote("AAPL", 200.25, 200.75), trade("AAPL", 200.4)) });
+    expect("session" in ok(await mute.t.market("AAPL"))).toBe(false);
+    const bare = await alpaca({ ...stockAnswers(AAPL, { is_open: false, next_open: "not a time" }, quote("AAPL", 200.25, 200.75), trade("AAPL", 200.4)) });
+    expect(ok(await bare.t.market("AAPL")).session).toEqual({ open: false });
   });
 
   it("an IPO-flagged stock takes limit orders only; one Alpaca does not trade now is closed, in Alpaca's words", async () => {

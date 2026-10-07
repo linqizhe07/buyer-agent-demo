@@ -71,6 +71,13 @@ function mkEnded(item, oi) {
   const legs = mkLegs(item, oi).map((l) => mkAtOf(item, l.venue));
   return { ended: true, trading: legs.some((a) => a.pastEnd === true || a.open === true) };
 }
+/** a stock's session in a few words, from the venue's own stamps (Market.session), never the page's clock: "closes 16:00 New York" while it
+ * is in session, "opens Wed 7 Oct, 09:30 New York" while it is not; "" where the venue gave no time */
+function mkSessionWhen(s) {
+  const at = s ? (s.open ? s.closesAt : s.opensAt) : "";
+  if (!at || !Number.isFinite(Date.parse(at))) return "";
+  return s.open ? `closes ${nyTime(at)} New York` : `opens ${nyDay(at)}, ${nyTime(at)} New York`;
+}
 /* the countdown's words once the time has run out: still trading past its end date, or closed (what a countdown still running will say
    the moment it ends, until the next read says what the venue did) */
 const mkEndedWords = (state) => (state.ended && state.trading ? "Past its end date · still trading" : "Closed");
@@ -104,6 +111,17 @@ const mkPairsOf = (item, oi) => mkLegs(item, oi).filter((l) => l.symbol && mkVen
 const mkAllPairs = (item) => [...new Set(item.kind === "event" && item.outcomes ? item.outcomes.flatMap((o, oi) => mkPairsOf(item, oi)) : mkPairsOf(item))];
 /* the first leg at a connected venue: whose fresh price the drawer shows */
 const mkLeadLeg = (item, oi) => mkLegs(item, oi).find((l) => l.symbol && mkVenue(l.venue)) || null;
+/** a stock's trading session (Market.session) at its connected venues: the lead venue's fresh market's while it is fresh (read with the
+ * price, from the venue's own clock), else what the explore read carried — the row's (its first connected venue that says one), else a
+ * connected line's. Null for anything else, and where no venue says one: then nothing is said of a session */
+function mkSessionOf(item) {
+  if (!item || item.kind !== "stock") return null;
+  const lead = mkLeadLeg(item);
+  const m = lead && mkFresh(`${lead.venue}|${lead.symbol}`);
+  const line = (item.at || []).find((a) => a.connected && a.session);
+  const s = (m && m.session) || item.session || (line && line.session);
+  return s && typeof s.open === "boolean" ? s : null;
+}
 /* a perpetual on a pre-IPO valuation: its listing says so, or carries the valuation its price implies */
 const mkIsPreipo = (x) => !!x && (!!x.implied || x.category === "Pre-IPO");
 /** a row's kind id — the Trade pane's seg word, which every ticket opened from here carries: coin → crypto, stock → stocks, rwa → rwas,
@@ -240,6 +258,8 @@ function mkIssuer(item) {
 const mkClip = (t, n = 72) => { const s = String(t || "").trim(); return s.length > n ? `${s.slice(0, n - 1).replace(/\s+\S*$/, "")}…` : s; };
 /* a row's issuer line: who issues it, and the start of whom it is for */
 function mkIssuerLine(item) {
+  // a pre-IPO perpetual is written by its venue, not by the company: the company's own notice is said in the drawer and the ticket
+  if (typeof mkIsPreipo === "function" && mkIsPreipo(item)) return "";
   const i = mkIssuer(item);
   if (!i) return "";
   const all = [i.issuer ? `Issued by ${i.issuer}` : "", i.eligibility].filter(Boolean).join(" · ");
@@ -267,7 +287,10 @@ function mkStar(item, i, since) {
 function mkWhere(item) {
   const seen = new Set();
   const at = [...item.at.filter((a) => a.connected), ...item.at.filter((a) => !a.connected)].filter((a) => !seen.has(a.venueName) && seen.add(a.venueName));
-  return `<span class="mk-where">${at.map((a) => (a.connected ? esc(a.venueName) : `<span class="pub" title="Public prices, read without a key">${esc(a.venueName)}</span>`)).join(" · ")}</span>`;
+  // two venues by name (yours first), the rest as "+N" with their names in its title: a row stays one or two lines high
+  const name = (a) => (a.connected ? `<span class="mk-v">${esc(a.venueName)}</span>` : `<span class="mk-v pub" title="Public prices, read without a key">${esc(a.venueName)}</span>`);
+  const more = at.length > 2 ? ` <span class="dim mk-more" title="${esc(at.slice(2).map((a) => a.venueName).join(", "))}">+${at.length - 2}</span>` : "";
+  return `<span class="mk-where">${at.slice(0, 2).map(name).join(" · ")}${more}</span>`;
 }
 /* the same, as a line under the market's name: drawn in place of the Where column when the window is too narrow for it (markets.css) */
 const mkWhereLine = (item) => `<div class="mk-where-l">${mkWhere(item)}</div>`;
@@ -301,7 +324,15 @@ function mkPriceCell(item) {
   }
   const imp = mkIsPreipo(item) ? mkImplied(item) : null;
   if (imp) return `<span class="mk-implied"><b>${esc(mkValuation(imp.usd))}</b> <span class="tag">implied</span></span><span class="dim small mk-contract"${q}>${mkUsd(mkPriceOf(item))}</span>`;
-  return `<span${q}>${mkUsd(mkPriceOf(item))}</span>`;
+  return `${mkClosedTag(item)}<span${q}>${mkUsd(mkPriceOf(item))}</span>`;
+}
+/* a small "Closed" beside a stock's price while its connected venue is out of its session, its title when it opens: nothing in session, or
+   where no venue says a session. Before the figure, so the prices of a column stay aligned */
+function mkClosedTag(item) {
+  const s = mkSessionOf(item);
+  if (!s || s.open) return "";
+  const when = mkSessionWhen(s);
+  return `<span class="tag"${when ? ` title="${esc(when.charAt(0).toUpperCase() + when.slice(1))}"` : ""}>Closed</span> `;
 }
 /* the volume cell: dollars, or contracts where the venue counts those */
 const mkVolCell = (item) => (item.volumeUsd24h !== undefined ? mkVol(item.volumeUsd24h) : item.contracts24h !== undefined ? `${mkCount(item.contracts24h)} contracts` : "—");
@@ -435,7 +466,7 @@ function mkWatchingHtml(lens) {
       const m = mkVenue(x.w.venue) ? mkFresh(`${x.w.venue}|${x.w.symbol}`) : null;
       const o = x.oi !== undefined ? x.item.outcomes[x.oi] : null;
       const shown = m ? (ev ? mkCents(m.price ?? m.ask) : mkUsd(m.price ?? m.ask)) : ev ? mkCents(o ? o.price : x.item.price) : mkUsd(x.item.price);
-      return `<span${mkVenue(x.w.venue) ? ` data-q="${esc(`${x.w.venue}|${x.w.symbol}`)}" data-fmt="${ev ? "c-last" : "usd"}"` : ""}>${shown}</span>`;
+      return `${ev ? "" : mkClosedTag(x.item)}<span${mkVenue(x.w.venue) ? ` data-q="${esc(`${x.w.venue}|${x.w.symbol}`)}" data-fmt="${ev ? "c-last" : "usd"}"` : ""}>${shown}</span>`;
     } },
     { label: "24h", r: true, cell: (x) => (x.item.kind === "event" ? chg(x.oi !== undefined && x.item.outcomes[x.oi].change24h !== undefined ? x.item.outcomes[x.oi].change24h * 100 : undefined, "¢") : chg(x.item.changePct24h)) },
     { label: "", sr: "Actions", r: true, cell: (x) => mkActs(x.item, x.i) },
@@ -483,6 +514,13 @@ function mkFetch(path) {
   });
 }
 const mkRedraw = () => renderMarkets({ ...MKT.ctx, owner: owns(), lens: lensNow(), params: ROUTE.params });
+/* the All list, asked for once while the owner is elsewhere (shell.js, after the first account read, when the browser is idle): the first
+   visit to Markets then comes in drawn (shell.js paneIn) instead of a skeleton swapped for the list after the entrance. Kept like any read
+   (MKT_TTL): a later visit asks again only when it is stale */
+function mkPrefetch() {
+  const path = mkPath({ tab: "all", q: "" });
+  if (A && !MKT.got.has(path)) mkFetch(path);
+}
 /* drawn again only if Markets is still what is shown */
 function mkRedrawShown() {
   if (A && ROUTE.tab === "markets" && MKT.ctx) mkRedraw();
@@ -943,6 +981,7 @@ function mkDrawerClick(e) {
   switch (b.dataset.act) {
     case "trade-at": return void mkTicket({ venue: v, symbol: b.dataset.symbol, side: "buy", ...(b.dataset.outcome ? { outcome: b.dataset.outcome } : {}) }, o.item);
     case "sell": return void mkTicket({ venue: v, symbol: b.dataset.symbol, side: "sell" }, o.item);
+    case "short": return void mkTrade(o.item, "sell");
     case "connect": return void connectVia(b.dataset.connector, { name: b.dataset.name });
     case "interval":
       if (b.dataset.v === o.interval) return;
@@ -1146,6 +1185,9 @@ function mkDrawerParts(o) {
   o.ipo = [];
   const ev = it.kind === "event";
   const pre = mkIsPreipo(it);
+  // a perpetual is Long / Short, the ticket's words (a pre-IPO one too); the company's words over a pre-IPO one are not an issuer's
+  const perpNow = it.kind === "perp";
+  const preipoNow = pre;
   const lead = mkLeadLeg(it);
   const fresh = lead && mkFresh(`${lead.venue}|${lead.symbol}`);
   const q = lead ? ` data-q="${esc(`${lead.venue}|${lead.symbol}`)}"` : "";
@@ -1170,6 +1212,9 @@ function mkDrawerParts(o) {
   const la = lead ? mkAtOf(it, lead.venue) : it.at.find((a) => a.bid !== undefined || a.ask !== undefined) || {};
   const bid = fresh ? fresh.bid : ev ? (o0 && o0.bid !== undefined ? o0.bid : la.bid) : la.bid;
   const ask = fresh ? fresh.ask : ev ? (o0 && o0.ask !== undefined ? o0.ask : la.ask) : la.ask;
+  // a stock's session, from its venue's own stamps: open until when, or closed until when
+  const session = mkSessionOf(it);
+  const sessionWhen = session ? mkSessionWhen(session) : "";
   // a market's facts; a holding no listing carries shows only the facts its venue gave (no box of dashes)
   const facts = [
     ["Bid", `<span${q} data-fmt="${ev ? "bid-c" : "bid"}">${ev ? mkCents(bid) : mkUsd(bid)}</span>`, !it.held || bid !== undefined],
@@ -1178,6 +1223,7 @@ function mkDrawerParts(o) {
     ...(it.fundingRate !== undefined ? [["Funding", `${Number((it.fundingRate * 100).toFixed(4))}%${it.nextFundingAt ? ` · next ${esc(nyTime(it.nextFundingAt))}` : ""}`]] : []),
     ...(fresh && fresh.maxLeverage ? [["Leverage", `up to ${esc(String(fresh.maxLeverage))}x`]] : []),
     ...(it.closeTime ? [[state.ended ? (state.trading ? "End date" : "Closed") : "Closes", `${esc(nyDay(it.closeTime))} ${esc(nyTime(it.closeTime))} New York${state.ended && state.trading ? " · still trading" : ""}`]] : []),
+    ...(session ? [["Session", `${session.open ? "Open" : "Closed"}${sessionWhen ? ` · ${esc(sessionWhen)}` : ""}`]] : []),
   ].filter((f) => f[2] !== false);
   const outcomes = ev && it.outcomes ? `<div class="mk-outs">${it.outcomes.map((x, oi) => {
     const rr = mkRoute(it, oi);
@@ -1187,9 +1233,10 @@ function mkDrawerParts(o) {
     return `<div class="mk-out"><span class="lbl">${esc(mkLabel(x.label))}</span><span class="mk-out-px"${leg ? ` data-q="${esc(`${leg.venue}|${leg.symbol}`)}" data-fmt="c"` : ""}>${mkCents(m ? m.ask ?? m.price : x.ask ?? x.price)}</span>${chg(x.change24h !== undefined ? x.change24h * 100 : undefined, "¢")}${btn}</div>`;
   }).join("")}</div>` : "";
   const acts = [
-    !ev && r.act === "trade" ? `<button type="button" class="btn btn-primary" data-act="trade" data-fk="d-buy"${mkDis()}>Buy</button>` : "",
+    !ev && r.act === "trade" ? `<button type="button" class="btn btn-primary" data-act="trade" data-fk="d-buy"${mkDis()}>${perpNow ? "Long" : "Buy"}</button>` : "",
+    !ev && perpNow && r.act === "trade" ? `<button type="button" class="btn" data-act="short" data-fk="d-short"${mkDis()}>Short</button>` : "",
     !ev && r.act === "connect" ? `<button type="button" class="btn btn-primary" data-act="connect" data-connector="${esc(r.connector)}" data-name="${esc(r.venueName)}" data-fk="d-connect"${mkDis()}>${icon("plug", "sm")}Connect to trade</button>` : "",
-    sell ? `<button type="button" class="btn" data-act="sell" data-venue="${esc(sell.venue)}" data-symbol="${esc(sell.symbol)}" data-fk="d-sell"${mkDis()}>Sell</button>` : "",
+    sell && !perpNow ? `<button type="button" class="btn" data-act="sell" data-venue="${esc(sell.venue)}" data-symbol="${esc(sell.symbol)}" data-fk="d-sell"${mkDis()}>Sell</button>` : "",
     (r.act === "trade" || r.act === "connect") && typeof openHandToAgent === "function" ? `<button type="button" class="btn" data-act="hand" data-fk="d-hand"${mkDis()}>${icon("agent", "sm")}Hand to agent</button>` : "",
     watchedNow || mkWatchTarget(it) ? `<button type="button" class="btn" data-act="watch" data-fk="d-watch" aria-pressed="${String(watchedNow)}"${mkDis()}>${icon("star", `sm${watchedNow ? " mk-on" : ""}`)}${watchedNow ? "Watching" : "Watch"}</button>` : "",
   ].filter(Boolean);
@@ -1202,7 +1249,7 @@ function mkDrawerParts(o) {
     ${it.closeTime ? mkCloseHtml(it, state) : ""}
     <div class="mk-d-px"${lead ? ` data-pairs="${esc(mkAllPairs(it).slice(0, 4).join(","))}"` : ""}>${price}</div>
     ${facts.length ? `<dl class="mk-facts">${facts.map(([k, val]) => `<div><dt>${esc(k)}</dt><dd>${val}</dd></div>`).join("")}</dl>` : ""}
-    ${iss ? `<div class="box mk-iss-box"><div class="label">Issuer</div>${iss.issuer ? `<b>${esc(iss.issuer)}</b>` : ""}${iss.eligibility ? `<p class="small">${esc(iss.eligibility)}</p>` : ""}</div>` : ""}
+    ${iss ? `<div class="box mk-iss-box"><div class="label">${preipoNow ? "What the company says" : "Issuer"}</div>${iss.issuer && !preipoNow ? `<b>${esc(iss.issuer)}</b>` : ""}${iss.eligibility ? `<p class="small">${esc(iss.eligibility)}</p>` : ""}</div>` : ""}
     ${outcomes}
     ${acts.length ? `<div class="mk-d-acts">${acts.join("")}</div>` : ""}
     ${why}`;

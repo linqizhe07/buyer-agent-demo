@@ -441,6 +441,44 @@ describe("a venue's line", () => {
   });
 });
 
+describe("a stock's session", () => {
+  const CLOSED = { open: false, opensAt: "2026-10-06T13:30:00.000Z", closesAt: "2026-10-06T20:00:00.000Z" };
+  const HELD = "the US stock market is closed: Alpaca holds an order and sends it when the market opens (2026-10-06 09:30 New York time)";
+
+  it("is carried on each venue's line and on the row, from the first connected venue that says one; out of session, the venue's note says what it does until the open", async () => {
+    const alpaca = trader({ markets: [mk("AAPL", "stock", "AAPL", "USD", { name: "Apple Inc.", price: 230, volumeUsd24h: 5e9, session: CLOSED, note: HELD })] });
+    const rh = trader({ markets: [mk("AAPL", "stock", "AAPL", "USD", { name: "AAPL", price: 230.1, session: { open: false, opensAt: "2026-10-06T13:30:00.000Z" } })] });
+    const out = await exploreAcross({ connected: [venue("alpaca", "Alpaca", alpaca), venue("robinhood", "Robinhood", rh)] }, { clock });
+    const row = out.items.find((i) => i.key === "stock:AAPL")!;
+    expect(row.session).toEqual(CLOSED);
+    // still open for orders (the venue holds them for the open), and out of session: the line says both, and the venue's words
+    expect(row.at[0]).toMatchObject({ venue: "alpaca", open: true, session: CLOSED, note: HELD });
+    expect(row.at[1]).toMatchObject({ venue: "robinhood", open: true, session: { open: false, opensAt: "2026-10-06T13:30:00.000Z" } });
+    expect(row.at[1]!.note).toBeUndefined();
+  });
+
+  it("in session it is carried too, and an open market's note stays the venue's own business, as before", async () => {
+    const OPEN = { open: true, closesAt: "2026-10-05T20:00:00.000Z" };
+    const out = await exploreAcross({ connected: [venue("alpaca", "Alpaca", trader({ markets: [mk("AAPL", "stock", "AAPL", "USD", { price: 230, session: OPEN, note: "no commission" })] }))] }, { clock });
+    expect(out.items[0]).toMatchObject({ key: "stock:AAPL", session: OPEN, at: [{ venue: "alpaca", open: true, session: OPEN }] });
+    expect(out.items[0]!.at[0]!.note).toBeUndefined();
+  });
+
+  it("is never made up: a venue that says none gives none (never read from `open`), a coin has none, and a public line's never stands for the row", async () => {
+    const quiet = trader({ markets: [mk("AAPL", "stock", "AAPL", "USD", { price: 230 }), mk("BTC/USD", "crypto", "BTC", "USD", { price: 100_000 })] });
+    const none = await exploreAcross({ connected: [venue("alpaca", "Alpaca", quiet)] }, { clock });
+    expect(none.items.map((i) => i.key).sort()).toEqual(["coin:BTC", "stock:AAPL"]);
+    expect(none.items.every((i) => i.session === undefined && i.at.every((a) => a.session === undefined))).toBe(true);
+    // a session not in its shape is not carried
+    const odd = await exploreAcross({ connected: [venue("alpaca", "Alpaca", trader({ markets: [mk("AAPL", "stock", "AAPL", "USD", { price: 230, session: { open: "no" } as unknown as Market["session"] })] }))] }, { clock });
+    expect([odd.items[0]!.session, odd.items[0]!.at[0]!.session]).toEqual([undefined, undefined]);
+    const listed = pub("stocks-public", "Public Stocks", { listings: [mk("MSFT", "stock", "MSFT", "USD", { price: 400, session: CLOSED, note: HELD, types: [] })] });
+    const pubOnly = await exploreAcross({ public: [listed] }, { clock });
+    expect(pubOnly.items[0]).toMatchObject({ key: "stock:MSFT", at: [{ public: true, session: CLOSED, note: HELD }] });
+    expect(pubOnly.items[0]!.session).toBeUndefined();
+  });
+});
+
 describe("order among ties", () => {
   it("rows that report no volume keep their source's order — Robinhood's well-known tokens first, not the alphabet", async () => {
     const tokens = pub("robinhood-stock-tokens", "Robinhood Stock Tokens", { kind: "tokens", connectTo: "robinhood-wallet", connector: "live:wallet", readOnly: "only read here", listings: ["NVDA", "AAPL", "MSFT", "AEHR"].map((s) => mk(s, "token", s, "USD", { name: `${s} • Robinhood Token`, price: 100, types: [] })) });

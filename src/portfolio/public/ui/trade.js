@@ -781,7 +781,11 @@ function tkTicket(panel, kind0, preset) {
       if (saidByIssuer(r.why)) r.why = `${r.venueName} takes no order for it: the issuer's terms`;
     }
     const priceOf = (r) => (r.implied && r.implied.usd ? `${esc(tkValuation(r.implied.usd))} implied` : r.price ? esc(item.kind === "event" ? tkCents(r.price) : `$${px(r.price)}`) : "");
-    const unitOf = (r) => (r.implied && r.implied.unit ? `<span class="why">${esc(r.implied.unit)}</span>` : "");
+    // a pre-IPO company's venues: the unit sentence most of them share is said once, in the face's block; a line says its own only where it
+    // differs (OKX's ANTHROPIC and OPENAI swaps, $1 for $10,000,000,000)
+    const units = rows.map((r) => (r.implied && r.implied.unit) || "").filter(Boolean);
+    const commonUnit = units.sort((a, b) => units.filter((u) => u === b).length - units.filter((u) => u === a).length)[0] || "";
+    const unitOf = (r) => (r.implied && r.implied.unit && r.implied.unit !== commonUnit ? `<span class="why">${esc(r.implied.unit)}</span>` : "");
     box2.innerHTML = `${none && rows.length ? `<p class="dim small">${rows.some((r) => r.state === "public" && r.connector) ? "None of your accounts trades it yet: connect one where it is listed." : "None of your accounts can trade it now."}</p>` : ""}${rows.map((r, i) => {
       if (r.state === "public") return `<div class="tk-at pub"><span><b>${esc(r.venueName)}</b> <span class="tag">Public</span>${!r.connector && r.note ? `<span class="why">${esc(r.note)}</span>` : ""}${unitOf(r)}</span><span class="tk-at-r">${priceOf(r) ? `<span class="tab-nums">${priceOf(r)}</span>${r.connector ? '<span class="tk-sep"> · </span>' : ""}` : ""}${r.connector ? `<button type="button" class="link" data-connect="${i}">Connect to trade</button>` : ""}</span></div>`;
       if (r.state === "off") return `<div class="tk-at off"><span><b>${esc(r.venueName)}</b><span class="why">${esc(r.why)}${r.how ? ` ${esc(r.how)}` : ""}</span></span></div>`;
@@ -1437,6 +1441,16 @@ function tkAdvSummary(m, f = {}) {
   return `${allowed.length ? `The venue's default · ${allowed.map(word).join(" · ")}` : "The venue's default time in force"}${m.postOnly && t === "limit" ? " · post-only possible" : ""}${m.reduceOnly ? " · reduce-only possible" : ""}`;
 }
 
+/* a stock market's session as the face says it — open now and when it closes, or closed and when it opens — from the venue's own clock or
+   the market calendar it sends its orders by (the market's `session`), never from `open`: a stock out of its session may still take an
+   order, which the venue holds for the open. "" where the venue said no session */
+function tkSessionLine(s) {
+  if (!s || typeof s.open !== "boolean") return "";
+  const at = s.open ? s.closesAt : s.opensAt;
+  const when = at && Number.isFinite(Date.parse(at)) ? at : "";
+  return s.open ? `<b>Open now</b>${when ? ` · closes ${esc(nyTime(when))} New York` : ""}` : `<b>Closed</b>${when ? ` · opens ${esc(nyDay(when))}, ${esc(nyTime(when))} New York` : ""}`;
+}
+
 /* the one line to the sibling kind, when the ticket found one: a stock as a token (RWAs), a token as shares (Stocks) */
 const tkCrossLine = (kind) => {
   const x = TK.cross;
@@ -1454,14 +1468,16 @@ function tkKindBlock(kind, m, at, item, c = {}) {
   const said = (t) => esc(String(t || "").trim());
   const pre = kind === "preipo";
   if (!m && !(pre && item)) return "";
-  if (m && !m.open && kind !== "stocks") L.push(`<b>Closed now.</b>${m.note ? ` ${said(m.note)}` : ""}`);
+  if (m && !m.open) L.push(`<b>Closed now.</b>${m.note ? ` ${said(m.note)}` : ""}`);
   if (kind === "crypto") {
     if (m.bid || m.ask) L.push(`Bid ${esc(px(m.bid))} · ask ${esc(px(m.ask))} ${esc(m.quote)}${m.changePct24h !== undefined ? ` · 24h ${chg(m.changePct24h)}` : ""}`);
     // a wallet's route, its slippage and gas in the venue's own words; an exchange says nothing more
     if (m.open && m.note) L.push(said(m.note));
     if (c.pay) L.push(`Paid with <b>${esc(c.pay.asset)}</b>: sold first, then ${esc(m.base)} bought with what it brings — two orders, two signatures.`);
   } else if (kind === "stocks") {
-    L.push(`<b>${m.open ? "Open now" : "Closed"}</b>${m.note ? ` · ${said(m.note)}` : ""}`);
+    // the session (when the venue keeps one), then the venue's own words verbatim; no session said: its words alone. A stock that takes no
+    // order now says so in the line above
+    if (m.open) L.push([tkSessionLine(m.session), m.note ? said(m.note) : ""].filter(Boolean).join(" · "));
     if (m.qtyStep === 1) L.push("Whole shares only here.");
     if (m.bid || m.ask) L.push(`Bid ${esc(px(m.bid))} · ask ${esc(px(m.ask))} ${esc(m.quote)}`);
     L.push(tkCrossLine(kind));
@@ -1501,9 +1517,8 @@ function tkKindBlock(kind, m, at, item, c = {}) {
       if (m.open && m.note) L.push(said(m.note));
     }
     if (pre) {
-      const iss = (item && item.issuer) || (m && m.issuer) || "";
       const el = (item && item.eligibility) || (m && m.eligibility) || "";
-      if (iss || el) L.push(`<div class="tk-iss">${iss ? `<b>${esc(iss)}</b>` : ""}${el ? ` <span class="dim">${esc(el)}</span>` : ""}</div>`);
+      if (el) L.push(`<div class="tk-iss"><b>What the company says</b> <span class="dim">${esc(el)}</span></div>`);
       L.push("This is a contract on a valuation, not a share.");
     }
   } else if (kind === "predictions") {

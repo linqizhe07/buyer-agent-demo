@@ -17,6 +17,15 @@
  *                            cbBTC on Base, and USDY, a tokenised fund (an RWA), on Ethereum — its market carries the RWA category, an
  *                            issuer and the issuer's words, as a real wallet's tokenised shares do (dex.ts), so it is an RWA in Markets
  *                            and in holdings alike
+ *   live:standin-broker      a cash stock broker, as Alpaca and Robinhood are: AAPL and SPY to a billionth of a share, NVDA in whole shares
+ *                            only, priced off the same curves as the stock tokens below (NVDA and SPY), cash in dollars; each market's
+ *                            steps, minimum and times in force are Alpaca's (live/alpaca.ts). It keeps New York's market hours by the
+ *                            world's clock and the account's market calendar (account/calendar.ts) — 09:30 to 16:00 on a market day, the
+ *                            market's holidays closed — and says its session as a market does (Market.session): while the market is closed
+ *                            it takes no market order and says when it opens, in Alpaca's words, and holds any other order (pending, as
+ *                            Alpaca's `accepted`) until the open, nothing filling and no stop firing before then; a day order lapses at its
+ *                            session's close (a fraction of a share is a day order, as at Alpaca). No positions, leverage or orders changed
+ *                            in place, and no money moves: it gives no deposit address and makes no withdrawal
  *   live:standin-pubex       the exchange behind the public listing below, for "Connect to trade"
  *   live:standin-pubperps    the perp exchange behind the public perpetuals below (as Hyperliquid stands behind the real ones); it lists
  *                            the same Anthropic pre-IPO perpetual, unconnected, so Markets shows one Anthropic row with Trade at the
@@ -29,6 +38,7 @@
  * made of (`notes`). The exchanges' and the event market's public sources give price history too (`candles`), as the real keyless ones do.
  */
 import { isRefusal, type Refusal } from "../../src/core/errors.ts";
+import { nextRegularSession, regularSession } from "../../src/portfolio/account/calendar.ts";
 import { no } from "../../src/portfolio/refuse.ts";
 import { register } from "../../src/portfolio/live/index.ts";
 import { isExcludedCategory, RWA_CATEGORY } from "../../src/portfolio/live/categories.ts";
@@ -36,7 +46,7 @@ import type { EarnPosition, EarnProduct, EarnState, LiveEarner } from "../../src
 import { CHAINS, type ChainName, type ChainReader, type ChainSender } from "../../src/portfolio/live/chain.ts";
 import { impliedUsd, PRE_IPO_CATEGORY, PRE_IPO_ISSUERS, PRE_IPO_PER_POINT } from "../../src/portfolio/live/preipo.ts";
 import type { Listing, PublicSource } from "../../src/portfolio/live/public-markets.ts";
-import { badOrder, DONE, notionalOf, onStep, type Candle, type CandleInterval, type LiveTrader, type Market, type MarketKind, type MarketStats, type OrderChange, type OrderRequest, type OrderState, type OrderStatus, type Position } from "../../src/portfolio/live/trade.ts";
+import { badOrder, DONE, notionalOf, onStep, type Candle, type CandleInterval, type LiveTrader, type Market, type MarketKind, type MarketStats, type OrderChange, type OrderRequest, type OrderState, type OrderStatus, type Position, type TimeInForce } from "../../src/portfolio/live/trade.ts";
 import { isStable, type LiveBalance, type LiveSource } from "../../src/portfolio/live/types.ts";
 import { tokenOn, type LiveWriter } from "../../src/portfolio/live/writes.ts";
 import { DAY, PriceBook, seedOf, toStep } from "./model.ts";
@@ -61,6 +71,8 @@ export interface World {
   predict: EventBook;
   pubevents: EventBook;
   wallet: WalletBook;
+  /** the stock broker: New York's market hours, by `clock` */
+  broker: BrokerBook;
   /** the Stand-in Exchange's earn products and what is in them */
   earn: EarnBook;
   /** what the stand-in chain holds: `address|chain|asset` → amount (an agent wallet's dollars, its gas) */
@@ -89,6 +101,8 @@ interface Rec {
   triggered: boolean;
   /** what it holds of a balance while it rests */
   hold?: Need | undefined;
+  /** when it lapses by itself: a day order, at its session's close */
+  until?: number | undefined;
   at: number;
   note?: string | undefined;
 }
@@ -127,6 +141,15 @@ abstract class Book {
   /** what a balance holds for something besides resting orders (a perpetual's margin) */
   protected locked(_ledger: string, _asset: string): number {
     return 0;
+  }
+  /** does the venue match orders in this market now: a stock market outside its session takes an order and holds it until the open
+   * (Alpaca's `accepted`), so nothing fills and no stop fires before then */
+  protected inSession(_m: Market): boolean {
+    return true;
+  }
+  /** when an order that rests lapses by itself (a day order, at its session's close), or never */
+  protected lapsesAt(_o: OrderRequest, _m: Market): number | undefined {
+    return undefined;
   }
 
   bal(ledger: string, asset: string): number {
@@ -206,7 +229,9 @@ abstract class Book {
     const wrong = this.check(venue, o, m);
     if (wrong) return wrong;
     const rec: Rec = { ref: `${this.tag}-${String(++this.seq).padStart(5, "0")}`, clientId: o.clientId, venue, req: { ...o }, status: "open", filledQty: 0, feeUsd: 0, triggered: false, at: w().clock() };
-    const fill = this.fillOf(rec, m, false);
+    // outside its session the venue takes the order and holds it for the open: nothing fills, and no stop fires, now
+    const live = this.inSession(m);
+    const fill = live ? this.fillOf(rec, m, false) : undefined;
     if (o.postOnly && fill && !fill.maker) return badOrder(venue, this.name, `a post-only order at ${o.limitPrice} would have taken liquidity, so it was not placed`);
     if (fill) {
       const done = this.execute(rec, m, fill);
@@ -219,6 +244,9 @@ abstract class Book {
       if (n && this.available(n.ledger, n.asset) + 1e-9 < n.amount) return this.short(venue, n);
       rec.hold = n;
       this.hold(n, 1);
+      rec.until = this.lapsesAt(o, m);
+      // taken, not on the book yet: it goes there at the open
+      if (!live) rec.status = "pending";
     }
     this.recs.set(rec.ref, rec);
     this.clients.set(o.clientId, rec.ref);
@@ -228,7 +256,7 @@ abstract class Book {
   cancel(venue: string, ref: string): OrderState | Refusal {
     const rec = this.recs.get(ref);
     if (!rec) return no("E_VENUE_REJECTED", { venue, message: `${this.name} has no order ${ref}` });
-    if (rec.status === "open" || rec.status === "partial") {
+    if (rec.status === "open" || rec.status === "partial" || rec.status === "pending") {
       this.release(rec);
       rec.status = "canceled";
     }
@@ -270,10 +298,11 @@ abstract class Book {
     return this.view(rec);
   }
 
-  /** a few seconds passed: what rests is filled where the price crossed it, a stop fires, an order in a market that closed expires */
+  /** a few seconds passed: what rests is filled where the price crossed it, a stop fires, an order in a market that closed expires, a day
+   * order lapses at its session's close, and what a venue held while its market was closed goes to the book at the open */
   sweep(): void {
     for (const rec of this.recs.values()) {
-      if (rec.status !== "open") continue;
+      if (rec.status !== "open" && rec.status !== "pending") continue;
       const m = this.market(rec.req.symbol);
       if (!m) continue;
       if (!m.open) {
@@ -282,7 +311,17 @@ abstract class Book {
         rec.note = "the market closed";
         continue;
       }
-      const fill = this.fillOf(rec, m, true);
+      if (rec.until !== undefined && w().clock() >= rec.until) {
+        this.release(rec);
+        rec.status = "expired";
+        rec.note = "a day order: its session closed";
+        continue;
+      }
+      if (!this.inSession(m)) continue;
+      // held for the open: on the book now, as if placed now — one that crosses the book takes it at the opening price
+      const opening = rec.status === "pending";
+      if (opening) rec.status = "open";
+      const fill = this.fillOf(rec, m, !opening);
       if (!fill) {
         if (rec.triggered && rec.req.type === "stop") {
           this.release(rec);
@@ -857,12 +896,188 @@ export class WalletBook extends Book {
   }
 }
 
+// ---- the stock broker: New York's market hours -------------------------------------------------------------------------------------
+
+const NY_PARTS = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+const nyParts = (ms: number): { y: number; mo: number; d: number; h: number; mi: number } => {
+  const p = Object.fromEntries(NY_PARTS.formatToParts(new Date(ms)).map((x) => [x.type, x.value]));
+  return { y: Number(p.year), mo: Number(p.month), d: Number(p.day), h: Number(p.hour), mi: Number(p.minute) };
+};
+/** a moment as Alpaca's note gives its clock's next open (alpaca.ts nyTime): "2026-10-07 09:30", New York time */
+const nyStamp = (ms: number): string => {
+  const p = nyParts(ms);
+  const two = (n: number): string => String(n).padStart(2, "0");
+  return `${p.y}-${two(p.mo)}-${two(p.d)} ${two(p.h)}:${two(p.mi)}`;
+};
+
+/** The US stock market's regular session as the stand-in keeps it — the account's market calendar (account/calendar.ts nextRegularSession):
+ * 09:30 to 16:00 New York time on a market day, the market's holidays closed — the one under way at `ms`, or else the next one. What the
+ * broker says of its session (Market.session) is the same calendar's (regularSession), as Robinhood's is */
+export function stockSession(ms: number): { open: boolean; opensAt: number; closesAt: number } {
+  return nextRegularSession(ms);
+}
+
+export interface StockSpec {
+  symbol: string;
+  name: string;
+  /** its price curve: NVDA's and SPY's are the stock tokens' own (STOCK_TOKENS), so a share and its token are priced alike */
+  key: string;
+  /** a fraction of a share is taken (Alpaca's `fractionable`): a size to nine decimals; otherwise whole shares only */
+  fractionable: boolean;
+  /** the book's width, as a fraction of the price */
+  spread: number;
+  /** dollars traded a day */
+  volume: number;
+}
+
+const STOCK_TYPES: Market["types"] = ["market", "limit", "stop", "stop_limit"];
+const whole = (qty: number): boolean => Math.abs(qty - Math.round(qty)) < 1e-9;
+
+export class BrokerBook extends Book {
+  constructor(
+    tag: string,
+    name: string,
+    readonly stocks: StockSpec[],
+  ) {
+    // a US stock trade pays no commission at a broker like Alpaca
+    super(tag, name, { taker: 0, maker: 0 });
+  }
+
+  private spec(symbol: string): StockSpec | undefined {
+    return this.stocks.find((x) => x.symbol === symbol);
+  }
+
+  /** A stock as Alpaca's market() gives one (alpaca.ts): to nine decimals of a share or whole shares, $1 the smallest order, day and gtc, a
+   * price step of a cent ($0.0001 under $1), a sell selling only what is held. While the market is closed it stays open for orders but takes
+   * no market order, and says so in Alpaca's words with the next open; its session says it is out of session, and when it opens */
+  build(s: StockSpec): Market {
+    const now = w().clock();
+    const session = stockSession(now);
+    const p = w().prices.now(s.key);
+    const step = p < 1 ? 0.0001 : 0.01;
+    const half = Math.max(step, (p * s.spread) / 2);
+    const bid = toStep(p - half, step, "floor");
+    const ask = Math.max(toStep(p + half, step, "ceil"), toStep(bid + step, step));
+    const day = w().prices.day(s.key);
+    const volume = s.volume * (1 + 0.04 * Math.sin(now / (3 * HOUR) + (seedOf(s.symbol) % 7)));
+    return {
+      symbol: s.symbol,
+      name: s.name,
+      kind: "stock",
+      base: s.symbol,
+      quote: "USD",
+      price: toStep(p, step),
+      bid,
+      ask,
+      ...(s.fractionable ? {} : { minQty: 1 }),
+      qtyStep: s.fractionable ? 1e-9 : 1,
+      priceStep: step,
+      minNotional: 1,
+      open: true,
+      // the session as Robinhood says one: the market calendar's, at the stand-in's clock (the calendar `session` above is read from too)
+      session: regularSession(now),
+      ...(session.open ? {} : { note: `the US stock market is closed: ${this.name} holds an order and sends it when the market opens (${nyStamp(session.opensAt)} New York time). Until then no market order is placed here: it would fill at the opening price, which can be well away from this one. A limit, stop or stop-limit order waits for the open with its limit` }),
+      types: session.open ? [...STOCK_TYPES] : STOCK_TYPES.filter((t) => t !== "market"),
+      tifs: ["day", "gtc"],
+      sellsReduce: true,
+      changePct24h: Number(day.changePct24h.toFixed(2)),
+      change24h: toStep(day.change24h, step),
+      volumeUsd24h: Math.round(volume),
+    };
+  }
+
+  markets(): Market[] {
+    return this.stocks.map((s) => this.build(s));
+  }
+
+  protected override inSession(): boolean {
+    return stockSession(w().clock()).open;
+  }
+
+  /** the time in force an order has here: its own, or Alpaca's default for it — a fraction of a share and a market order are day orders,
+   * anything else gtc (alpaca.ts place) */
+  private tifOf(o: OrderRequest): TimeInForce {
+    return o.tif ?? (!whole(o.qty) || o.type === "market" ? "day" : "gtc");
+  }
+
+  /** a day order lapses at the close of the session it is for: the one under way, or — taken while the market is closed — the next one */
+  protected override lapsesAt(o: OrderRequest): number | undefined {
+    return this.tifOf(o) === "day" ? stockSession(w().clock()).closesAt : undefined;
+  }
+
+  protected override check(venue: string, o: OrderRequest): Refusal | undefined {
+    // Alpaca's own rule (alpaca.ts place): a fraction of a share is a day order
+    if (!whole(o.qty) && this.tifOf(o) !== "day") return badOrder(venue, this.name, `a fraction of a share is a day order, not ${this.tifOf(o)}`);
+    return undefined;
+  }
+
+  protected override need(o: OrderRequest, m: Market, price: number): Need | undefined {
+    return o.side === "buy" ? { ledger: "cash", asset: "USD", amount: notionalOf(m, o.qty, price) * (1 + this.fees.taker) } : { ledger: "stocks", asset: m.base, amount: o.qty };
+  }
+
+  protected override settle(o: OrderRequest, m: Market, price: number, fee: number): void {
+    const worth = notionalOf(m, o.qty, price);
+    if (o.side === "buy") {
+      this.add("cash", "USD", -(worth + fee));
+      this.add("stocks", m.base, o.qty);
+    } else {
+      this.add("stocks", m.base, -o.qty);
+      this.add("cash", "USD", worth - fee);
+    }
+  }
+
+  /** the cash, and each stock held at what it is worth now — as Alpaca's account and positions read (alpaca.ts) */
+  read(): LiveBalance[] {
+    const out: LiveBalance[] = [{ asset: "USD", amount: this.bal("cash", "USD"), usd: this.bal("cash", "USD"), where: "cash", class: "cash" }];
+    for (const s of this.stocks) {
+      const qty = this.bal("stocks", s.symbol);
+      if (qty > 1e-12) out.push({ asset: s.symbol, amount: qty, usd: qty * w().prices.now(s.key), where: "stocks", class: "equity" });
+    }
+    return out;
+  }
+
+  stats(symbols?: string[]): Map<string, MarketStats> {
+    const out = new Map<string, MarketStats>();
+    for (const m of this.markets()) {
+      if (symbols && !symbols.includes(m.symbol)) continue;
+      const d = w().prices.day(this.spec(m.symbol)!.key);
+      const step = m.priceStep ?? 0.01;
+      out.set(m.symbol, { price: m.price, changePct24h: m.changePct24h, change24h: m.change24h, volumeUsd24h: m.volumeUsd24h, high24h: toStep(d.high24h, step), low24h: toStep(d.low24h, step) });
+    }
+    return out;
+  }
+
+  candles(venue: string, symbol: string, interval: CandleInterval, since: number): Candle[] | Refusal {
+    const s = this.spec(symbol);
+    if (!s) return notFound(venue, this.name, symbol);
+    return w().prices.candles(s.key, interval, since, s.volume).map((c) => ({ t: c.t, o: toStep(c.o, 0.01), h: toStep(c.h, 0.01), l: toStep(c.l, 0.01), c: toStep(c.c, 0.01), ...(c.v !== undefined ? { v: c.v } : {}) }));
+  }
+
+  /** a cash broker's trader: no positions call, no leverage, no order changed in place */
+  trader(venue: string): LiveTrader {
+    const name = this.name;
+    return {
+      can: true,
+      what: "US stocks and ETFs",
+      // the kind it trades, said by the trader itself as every stand-in's is (a broker's, as accounts.ts tradeKinds gives Robinhood's)
+      kinds: ["stock"],
+      markets: async (q) => this.matching(q),
+      market: async (symbol) => this.market(symbol) ?? notFound(venue, name, symbol),
+      place: async (o) => this.place(venue, o),
+      cancel: async (ref) => this.cancel(venue, ref),
+      status: async (ref) => this.status(venue, ref),
+      stats: async (symbols) => this.stats(symbols),
+      candles: async (symbol, interval, since) => this.candles(venue, symbol, interval, since),
+    };
+  }
+}
+
 // ---- what the stand-in trades, and where it starts --------------------------------------------------------------------------------
 
 const H = HOUR;
 const D = DAY;
 
-/** the curves: coins, a fund token, stock tokens, and each event's YES */
+/** the curves: coins, a fund token, stocks (the broker's shares and the stock tokens share theirs), and each event's YES */
 function curves(prices: PriceBook, t0: number): { events: EventSpec[]; publicEvents: EventSpec[] } {
   const coins: Array<[string, number, number, number]> = [
     ["BTC", 62_480, 2.3, 1],
@@ -872,6 +1087,7 @@ function curves(prices: PriceBook, t0: number): { events: EventSpec[]; publicEve
     ["AVAX", 24.37, -8.2, 2],
     ["LINK", 13.92, 4.9, 1.6],
     ["USDY", 1.1052, 0.01, 0.015],
+    ["AAPL", 228.4, 0.8, 0.5],
     ["NVDA", 182.4, 1.9, 0.6],
     ["TSLA", 251.3, -2.7, 0.9],
     ["SPY", 662.1, 0.4, 0.3],
@@ -942,6 +1158,14 @@ export const STOCK_TOKENS: Array<{ symbol: string; name: string; key: string; vo
   { symbol: "SPY", name: "S&P 500 ETF stock token", key: "SPY", volume: 4.3e6 },
 ];
 
+/** the broker's stocks. NVDA and SPY are on the stock tokens' own curves, so Stocks and RWAs show a share and its token at one price; NVDA
+ * is whole shares only here (most stocks are fractionable at Alpaca), so the ticket shows both kinds of size */
+const BROKER_STOCKS: StockSpec[] = [
+  { symbol: "AAPL", name: "Apple Inc. common stock", key: "AAPL", fractionable: true, spread: 0.0002, volume: 1.12e10 },
+  { symbol: "NVDA", name: "NVIDIA Corporation common stock", key: "NVDA", fractionable: false, spread: 0.0002, volume: 3.05e10 },
+  { symbol: "SPY", name: "SPDR S&P 500 ETF Trust", key: "SPY", fractionable: true, spread: 0.0001, volume: 2.71e10 },
+];
+
 /** Make the stand-in's world: the curves, the books with what they hold at the start (the exchange already holds a BTC perpetual), and
  * an empty stand-in chain. One world per process: the connectors registered below read the latest one */
 export function makeWorld(o: { t0?: number | undefined; clock?: (() => number) | undefined } = {}): World {
@@ -964,15 +1188,19 @@ export function makeWorld(o: { t0?: number | undefined; clock?: (() => number) |
   pubevents.add("cash", "USD", 200);
   const wallet = new WalletBook("sw", "Stand-in Wallet", WALLET_TOKENS);
   for (const [chain, asset, amount] of [["Base", "USDC", 820], ["Base", "WETH", 0.35], ["Base", "cbBTC", 0.004], ["Ethereum", "USDY", 1_500], ["Ethereum", "USDC", 150]] as const) wallet.add(chain, asset, amount);
+  // held at the broker before the account connected it: $2,000, two and a half shares of Apple, one of NVIDIA (ui-standin.ts makes them
+  // three and two: the owner's market buys while the US market is open, held already while it is closed)
+  const broker = new BrokerBook("sb", "Stand-in Broker", BROKER_STOCKS);
+  for (const [ledger, asset, amount] of [["cash", "USD", 2_000], ["stocks", "AAPL", 2.5], ["stocks", "NVDA", 1]] as const) broker.add(ledger, asset, amount);
   const earn = new EarnBook(ex, EARN_PRODUCTS);
-  current = { t0, clock, prices, ex, pubex, pubperps, predict, pubevents, wallet, earn, chain: new Map() };
+  current = { t0, clock, prices, ex, pubex, pubperps, predict, pubevents, wallet, broker, earn, chain: new Map() };
   return current;
 }
 
 /** a few seconds pass: prices step, every book fills what the price crossed, and earn finishes what was asked of it */
 export function tick(world: World): void {
   world.prices.tick();
-  for (const b of [world.ex, world.pubex, world.pubperps, world.predict, world.pubevents, world.wallet]) b.sweep();
+  for (const b of [world.ex, world.pubex, world.pubperps, world.predict, world.pubevents, world.wallet, world.broker]) b.sweep();
   world.earn.tick();
 }
 
@@ -1112,6 +1340,13 @@ function exchangeSource(book: ExchangeBook, venue: string, label: string, what: 
   return { name: label || book.name, kind: "cex", reference: "stand-in", via: `${book.name} · ${STANDIN}`, probe: probe(withWriter ? ["read", "trade", "transfer", "withdraw", "earn"] : ["read", "trade"]), read: async () => book.read(), trader: book.trader(venue, what), ...(withWriter ? { writer: book.writer(venue), earner: w().earn.earner(venue, label || book.name) } : { readOnlyBecause: readOnly }) };
 }
 
+/** the broker: read and traded; no money moves — a broker's cash moves by ACH, at the broker, as Robinhood says of itself and Alpaca of an
+ * account without crypto wallets, so this stand-in gives no deposit address and makes no withdrawal */
+function brokerSource(book: BrokerBook, venue: string, label: string): LiveSource {
+  const name = label || book.name;
+  return { name, kind: "broker", reference: "stand-in", via: `${book.name} · ${STANDIN}`, probe: probe(["read", "trade"]), read: async () => book.read(), trader: book.trader(venue), readOnlyBecause: `${name} is a stand-in: it gives no deposit address and makes no withdrawal, so no money is sent to it or from it here (a broker's cash moves by ACH, at the broker)` };
+}
+
 let registered = false;
 /** add the stand-in connectors to the account's table of live connections (live/index.ts): once per process */
 export function registerStandins(): void {
@@ -1129,6 +1364,7 @@ export function registerStandins(): void {
   add("standin-events", "Stand-in Predictions · event contracts (test harness)", `Event contracts with a YES and a NO leg; ${STANDIN}.`, (venue, label) => ({ name: label || w().predict.name, kind: "prediction", reference: "stand-in", via: `${w().predict.name} · ${STANDIN}`, probe: probe(["read", "trade"]), read: async () => w().predict.read(), trader: w().predict.trader(venue), readOnlyBecause: readOnly }));
   add("standin-pubevents", "Stand-in Event Exchange · event contracts (test harness)", `Event contracts; ${STANDIN}.`, (venue, label) => ({ name: label || w().pubevents.name, kind: "prediction", reference: "stand-in", via: `${w().pubevents.name} · ${STANDIN}`, probe: probe(["read", "trade"]), read: async () => w().pubevents.read(), trader: w().pubevents.trader(venue), readOnlyBecause: readOnly }));
   add("standin-wallet", "Stand-in Wallet · tokens on Base and Ethereum (test harness)", `A wallet that swaps on its own (as the mm command line does): WETH, cbBTC and USDY, a tokenised fund; ${STANDIN}.`, (venue, label) => ({ name: label || w().wallet.name, kind: "agent-wallet", reference: "stand-in", via: `${w().wallet.name} · ${STANDIN}`, probe: probe(["read", "swap"]), read: async () => w().wallet.read(), trader: w().wallet.trader(venue), readOnlyBecause: readOnly }));
+  add("standin-broker", "Stand-in Broker · US stocks and ETFs (test harness)", `AAPL, NVDA and SPY in New York's market hours, cash in dollars; ${STANDIN}.`, (venue, label) => brokerSource(w().broker, venue, label));
 }
 
 // ---- the public market data of venues that are not connected ------------------------------------------------------------------------

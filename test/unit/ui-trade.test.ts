@@ -172,11 +172,30 @@ describe("the six kinds, as the page runs them", () => {
     p.set("A", pageOf([EX, WALLET]));
     p.run("TK.cross = null");
     const kb = (kind: string, m: unknown, at: unknown, item: unknown, c: unknown = {}) => p.run<string>(`tkKindBlock(${JSON.stringify(kind)}, ${JSON.stringify(m)}, ${JSON.stringify(at)}, ${JSON.stringify(item)}, ${JSON.stringify(c)})`);
-    // Stocks: open or closed with the venue's note verbatim; whole shares where the step is one
-    const aapl = kb("stocks", { symbol: "AAPL", kind: "stock", base: "AAPL", quote: "USD", open: false, note: "A market order waits for 09:30 New York", qtyStep: 1, types: ["limit"] }, null, null);
-    expect(aapl).toContain("<b>Closed</b> · A market order waits for 09:30 New York");
+    // Stocks: the session from the venue's own clock (or the market calendar), never from `open` — at night a real broker's stock is still
+    // open (Alpaca holds an order for the open) — then the venue's note verbatim; whole shares where the step is one
+    const held = "the US stock market is closed: Alpaca holds an order and sends it when the market opens (2026-10-07 09:30 New York time). Until then no market order is placed here: it would fill at the opening price, which can be well away from this one. A limit, stop or stop-limit order waits for the open with its limit";
+    const night = { symbol: "AAPL", kind: "stock", base: "AAPL", quote: "USD", open: true, session: { open: false, opensAt: "2026-10-07T13:30:00.000Z", closesAt: "2026-10-07T20:00:00.000Z" }, note: held, qtyStep: 1, types: ["limit", "stop", "stop_limit"] };
+    const aapl = kb("stocks", night, null, null);
+    expect(aapl).toContain(`<div><b>Closed</b> · opens Wed 7 Oct, 09:30 New York · ${held}</div>`);
+    expect(aapl).not.toContain("Open now");
     expect(aapl).toContain("Whole shares only here.");
-    expect(kb("stocks", { symbol: "AAPL", kind: "stock", base: "AAPL", quote: "USD", open: true, qtyStep: 0.001, types: ["market"] }, null, null)).toContain("<b>Open now</b>");
+    // in session: open now, and when it closes, in New York time (an early close as the venue's clock says it)
+    const day = kb("stocks", { ...night, session: { open: true, opensAt: "2026-10-07T13:30:00.000Z", closesAt: "2026-10-06T20:00:00.000Z" }, note: undefined, qtyStep: 0.001, types: ["market", "limit"] }, null, null);
+    expect(day).toContain("<div><b>Open now</b> · closes 16:00 New York</div>");
+    expect(day).not.toContain("Whole shares only here.");
+    expect(kb("stocks", { ...night, session: { open: true, closesAt: "2026-11-27T18:00:00.000Z" }, note: undefined }, null, null)).toContain("<b>Open now</b> · closes 13:00 New York");
+    // no session said (Alpaca's clock did not answer): no Open or Closed word at all, only the venue's own words
+    const words = "Alpaca's market clock did not answer, so no market order is placed here: outside market hours Alpaca holds an order until the market opens, and a market order would fill at the opening price";
+    const unknown = kb("stocks", { ...night, session: undefined, note: words }, null, null);
+    expect(unknown).toContain(`<div>${words.replace(/'/g, "&#39;")}</div>`);
+    expect(unknown).not.toMatch(/Open now|<b>Closed/);
+    expect(kb("stocks", { ...night, session: undefined, note: undefined, qtyStep: 1 }, null, null)).toBe("<div>Whole shares only here.</div>");
+    // a stock the venue takes no order in now (halted) says so with the venue's words, whatever the session
+    const halted = kb("stocks", { ...night, open: false, session: { open: true, closesAt: "2026-10-06T20:00:00.000Z" }, note: "AAPL is halted at Robinhood: news pending" }, null, null);
+    expect(halted).toContain("<div><b>Closed now.</b> AAPL is halted at Robinhood: news pending</div>");
+    expect(halted).not.toContain("Open now");
+    expect(halted.match(/halted at Robinhood/g)).toHaveLength(1);
     // RWAs: the issuer's words once, the pay token and the chain, the route's own line
     const ousg = kb("rwas", { symbol: "OUSG/USDC@Ethereum", kind: "token", base: "OUSG", quote: "USDC", open: true, note: "LI.FI: 0.25% fee, 0.5% slippage, gas paid by the wallet", types: ["market"] }, null, { kind: "rwa", base: "OUSG", issuer: "Ondo Finance", eligibility: "OUSG moves only between wallets Ondo has approved", at: [] });
     expect(ousg).toContain("Issued by <b>Ondo Finance</b>.");
@@ -202,6 +221,9 @@ describe("the six kinds, as the page runs them", () => {
     expect(pre).toContain("1 contract = 1/1,000,000,000 of the implied company valuation");
     expect(pre).toContain("Becomes a stock perpetual at the IPO; the venue rebases when the share count is public.");
     expect(pre).toContain("Anthropic, 29 June 2026: transfers of its shares it has not approved are void");
+    // the company's own words, labelled as such — the venue writes the contract, so nothing here says the company issues it
+    expect(pre).toContain("<b>What the company says</b>");
+    expect(pre).not.toContain("Issued by");
     expect(pre).toContain("This is a contract on a valuation, not a share.");
     // …and with the venue's market, the venue's own implied figure and the perpetual's facts too
     const preAt = kb("preipo", { symbol: "ANTHROPIC/USDT:USDT", kind: "perp", base: "ANTHROPIC", quote: "USDT", price: 2080, open: true, maxLeverage: 20, types: ["market"] }, ANTH.at[1], ANTH, { positions: [] });

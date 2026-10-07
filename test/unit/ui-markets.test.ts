@@ -731,7 +731,15 @@ describe("the one drawer", () => {
     expect(drawer).toContain('<span class="num-m">$2.08T</span><span class="tag">implied</span>');
     expect(drawer).toContain('<span class="mk-contract"><span data-q="ex|ANTHROPIC/USDT:USDT" data-fmt="usd">$208.00</span> a contract · $1 of contract price stands for $1B of valuation</span>');
     expect(drawer).toContain("Pre-IPO · Anthropic · ANTHROPIC");
-    expect(drawer).toContain('<div class="box mk-iss-box"><div class="label">Issuer</div><b>Anthropic</b><p class="small">Anthropic, 29 June 2026: transfers of its shares without its approval are void</p></div>');
+    // the company's own words — never as an issuer's: the venue writes the contract, the company says such transfers are void
+    expect(drawer).toContain('<div class="box mk-iss-box"><div class="label">What the company says</div><p class="small">Anthropic, 29 June 2026: transfers of its shares without its approval are void</p></div>');
+    expect(drawer).not.toContain("Issued by Anthropic");
+    expect(drawer).not.toContain('<div class="label">Issuer</div>');
+    expect(rows).not.toContain("Issued by");
+    // a perpetual's side buttons are the ticket's words: Long and Short
+    expect(drawer).toContain('data-fk="d-buy"');
+    expect(drawer).toMatch(/data-act="trade" data-fk="d-buy"[^>]*>Long</);
+    expect(drawer).toMatch(/data-act="short" data-fk="d-short"[^>]*>Short</);
     expect(drawer).toContain('<span class="why mk-unit">$2.08T implied · OKX: $1 of contract price stands for $10B of valuation (since 30 June 2026)</span>');
     expect(drawer).toContain('<span class="why mk-unit">$2.08T implied · Exchange X: $1 of contract price stands for $1B of valuation</span>');
     expect(drawer).toContain('<th scope="col" class="r">Contract</th>');
@@ -849,6 +857,35 @@ describe("the one drawer", () => {
     expect(none).toContain("Nothing on the statement about it yet.");
   });
 
+  it("asks for the All list once, ahead of the first visit, so Markets comes in drawn instead of a skeleton swapped after its entrance", async () => {
+    const explore = { ok: true, items: [], tabs: [{ id: "all", label: "All", count: 0 }], notes: [], missing: [] };
+    const p = page(() => explore);
+    p.set("A", account());
+    p.run("mkPrefetch(); mkPrefetch();");
+    await settle();
+    p.run("mkPrefetch();");
+    // one read of the All list (the very path the All tab draws from), none again while it is kept
+    expect(p.asked.map((a) => a.path)).toEqual(["/api/account/explore"]);
+    expect(p.run('MKT.got.get("/api/account/explore").good.tabs[0].id')).toBe("all");
+    // the shell asks for it (and for the Trade picker's lists) once the first account read is drawn, when the browser is idle
+    const shell = readFileSync(join(PUBLIC, "ui/shell.js"), "utf8");
+    expect(shell).toMatch(/requestIdleCallback\(ahead/);
+    expect(shell).toMatch(/typeof mkPrefetch === "function"\) mkPrefetch\(\)/);
+    expect(shell).toMatch(/typeof tkReadKinds === "function"\) tkReadKinds\(\)/);
+  });
+
+  it("names two venues in Where, the rest as +N with their names in its title, so a row stays short", () => {
+    const p = page(() => ({}));
+    p.set("A", account());
+    const at = (venueName: string, connected: boolean) => ({ venue: venueName.toLowerCase(), venueName, symbol: "BTC/USDT", connected, canTrade: connected, public: !connected });
+    const html = p.run<string>(`mkWhere(${JSON.stringify({ key: "coin:BTC", kind: "coin", name: "Bitcoin", at: [at("Kraken", false), at("Exchange X", true), at("OKX", false), at("Coinbase", false)] })})`);
+    // yours first, then the public ones; two by name
+    expect(html).toContain('<span class="mk-v">Exchange X</span> · ');
+    expect(html).toContain('<span class="mk-v pub" title="Public prices, read without a key">Kraken</span>');
+    expect(html).toContain('<span class="dim mk-more" title="OKX, Coinbase">+2</span>');
+    expect(p.run<string>(`mkWhere(${JSON.stringify({ key: "coin:ETH", kind: "coin", name: "Ether", at: [at("Exchange X", true)] })})`)).not.toContain("mk-more");
+  });
+
   it("lists the watchlist without a lead sentence or a date column: the date is the star's title", () => {
     const p = page((path) => (path.startsWith("/api/account/explore") ? explore : {}));
     p.set("A", account({ watch: [{ venue: "ex", symbol: "BTC/USDT", at: "2026-10-06T04:00:00.000Z" }, { venue: "kraken", symbol: "ETH/USD", at: "2026-10-01T04:00:00.000Z" }] }));
@@ -862,5 +899,62 @@ describe("the one drawer", () => {
     expect(html).toContain('data-fk="open:coin:BTC"');
     expect(html).toContain("ETH/USD");
     expect([...html.matchAll(/<th scope="col"[^>]*>(?:<span class="sr">)?([^<]*)/g)].map((m) => m[1])).toEqual(["Watch", "Market", "Where", "Price", "24h", "Actions"]);
+  });
+});
+
+describe("a stock out of its session", () => {
+  /* a broker connected live, and a stock it lists at night: still open for orders (the broker holds them for the open), out of its session */
+  const withBroker = () => account({ venues: [...account().venues, venue("broker", "Broker", { trade: { can: true, what: "US stocks and ETFs", kinds: ["stock"] } })] });
+  const NIGHT = { open: false, opensAt: "2026-10-06T13:30:00.000Z", closesAt: "2026-10-06T20:00:00.000Z" };
+  const DAY = { open: true, opensAt: "2026-10-07T13:30:00.000Z", closesAt: "2026-10-06T20:00:00.000Z" };
+  const HELD = "the US stock market is closed: Broker holds an order and sends it when the market opens (2026-10-06 09:30 New York time)";
+  const aapl = (session?: unknown) => ({
+    key: "stock:AAPL",
+    kind: "stock",
+    name: "Apple Inc.",
+    base: "AAPL",
+    price: 255.12,
+    changePct24h: 0.4,
+    volumeUsd24h: 5.1e9,
+    ...(session ? { session } : {}),
+    tabs: ["all", "stocks"],
+    at: [{ venue: "broker", venueName: "Broker", symbol: "AAPL", connected: true, canTrade: true, public: false, price: 255.12, open: true, ...(session ? { session } : {}), ...(session && !(session as { open: boolean }).open ? { note: HELD } : {}) }],
+  });
+
+  it("says Closed beside its price, with when it opens as the tag's title — from the venue's own stamp, and only while it is out of session", () => {
+    const p = page(() => ({}));
+    p.set("A", withBroker());
+    p.set("ITEMS", { night: aapl(NIGHT), day: aapl(DAY), unknown: aapl() });
+    const night = p.run<string>("MKT.reg = []; mkTable([ITEMS.night], '')");
+    expect(night).toContain('<span class="tag" title="Opens Tue 6 Oct, 09:30 New York">Closed</span> <span data-q="broker|AAPL" data-fmt="usd">$255.12</span>');
+    // still traded: a broker holds the order for the open, and the drawer says so in its words
+    expect(night).toContain('data-act="trade"');
+    // in session, and where no venue says a session: no tag (never read from `open`)
+    expect(p.run<string>("mkTable([ITEMS.day], '')")).not.toContain(">Closed<");
+    expect(p.run<string>("mkTable([ITEMS.unknown], '')")).not.toContain(">Closed<");
+    // a fresh price read with the venue's clock says the session now: in session, the tag goes; out of it, it comes
+    p.run(`MKT.quotes.set("broker|AAPL", { at: ${NOW}, market: { price: 256, session: ${JSON.stringify(DAY)} } })`);
+    expect(p.run<string>("mkTable([ITEMS.night], '')")).not.toContain(">Closed<");
+    p.run(`MKT.quotes.set("broker|AAPL", { at: ${NOW}, market: { price: 256, session: ${JSON.stringify(NIGHT)} } })`);
+    expect(p.run<string>("mkTable([ITEMS.unknown], '')")).toContain('title="Opens Tue 6 Oct, 09:30 New York">Closed</span>');
+    // a coin has no session, whatever a line carries
+    expect(p.run<string>(`mkTable([{ ...${JSON.stringify(btc)}, session: ${JSON.stringify(NIGHT)} }], '')`)).not.toContain(">Closed<");
+  });
+
+  it("says it in the drawer's facts — Closed · opens …, or Open · closes … — and nothing where no venue says a session", () => {
+    const p = page(() => ({}));
+    p.set("A", withBroker());
+    p.set("ITEMS", { night: aapl(NIGHT), day: aapl(DAY), unknown: aapl() });
+    const night = p.run<string>('mkDrawerHtml({ item: ITEMS.night, interval: "1h", ipo: [] })');
+    expect(night).toContain("<dt>Session</dt><dd>Closed · opens Tue 6 Oct, 09:30 New York</dd>");
+    // Buy stays: the broker takes the order and holds it for the open
+    expect(night).toContain('data-act="trade" data-fk="d-buy"');
+    expect(p.run<string>('mkDrawerHtml({ item: ITEMS.day, interval: "1h", ipo: [] })')).toContain("<dt>Session</dt><dd>Open · closes 16:00 New York</dd>");
+    expect(p.run<string>('mkDrawerHtml({ item: ITEMS.unknown, interval: "1h", ipo: [] })')).not.toContain("<dt>Session</dt>");
+    // the Watching tab's row says it too
+    p.set("A", { ...withBroker(), watch: [{ venue: "broker", symbol: "AAPL", at: "2026-10-06T04:00:00.000Z" }] });
+    const read = { ...explore, items: [aapl(NIGHT)] };
+    p.run(`MKT.got.set(${JSON.stringify("/api/account/explore?limit=200")}, { at: ${NOW}, body: ${JSON.stringify(read)}, good: ${JSON.stringify(read)}, goodAt: ${NOW} })`);
+    expect(p.run<string>("MKT.reg = []; mkWatchingHtml(lensNow())")).toContain('title="Opens Tue 6 Oct, 09:30 New York">Closed</span>');
   });
 });
