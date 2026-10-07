@@ -257,6 +257,7 @@ Robinhood 的三条线都是它自己发布的接口（2026-10-05 读）：股�
 | `GET /api/account/compare?base=&side=&usd=&asset=` | 比价：同一个币或股票在接上的每个场所按这一单会成交的价格排；`asset`（`stock` 或 `crypto`）说一个既是币又是股票的名字指哪一个，别的值不理 |
 | `GET /api/account/markets?venue=&q=` · `GET /api/account/market?venue=&symbol=` | 一个接上的场所交易什么；一个市场此刻的价格、最小单、步长、开没开 |
 | `GET /api/account/exchanges` · `GET /api/account/keyfile?kind=&venue=&ref=` | 统一接口库覆盖的交易所（连接表单用）；一个钥匙文件在不在、权限对不对、缺哪些字段（只看字段名，不读值） |
+| `GET /api/account/connect/reach?connector=live:exchange:okx,live:kalshi[&force=1]` | 建 key 之前：每个连接的场所从这台机器答不答（`live/reach.ts`，问它自己第一个不带钥匙的问题）：`ok` · `location`（不服务这个地区，带它的原话）· `setup`（本机先要 mm）· `closed` · `unreachable`；地区的答案留十分钟，同时问的只问一次，`force=1` 立刻再问；最多 24 个 |
 | `GET /api/account/signin/status?state=` | Robinhood 的 OAuth 登录走到哪一步 |
 | `GET /api/account/holdings?cost=1` | Portfolio：按资产跨场所汇总、现成可用的钱、24 小时变化和它的覆盖；`cost=1` 加成本价和持仓 |
 | `GET /api/account/history?range=1d\|1w\|1m\|all` | 净值曲线：点、接拔事件、`changeUsd`、`paidOutUsd` |

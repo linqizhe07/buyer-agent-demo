@@ -82,6 +82,7 @@ import { realMm } from "./live/metamask.ts";
 import { publicPrices } from "./live/prices.ts";
 import { ROBINHOOD_MCP } from "./live/robinhood.ts";
 import { OAuthSignIn } from "./live/signin.ts";
+import { reachKeepMs, reachOf, type Reach } from "./live/reach.ts";
 import { isStable, realHttp } from "./live/types.ts";
 import { isPlain } from "./account/state.ts";
 import type { AgentAction, Envelope, Hex } from "./account/sign.ts";
@@ -1087,6 +1088,27 @@ export class PortfolioService {
   /** whether a key file in this server's home is ready for a connection; names, never values */
   keyFile(kind: string, venue: string, ref: string, needs: string[] = []): ReturnType<typeof keyFileStatus> {
     return keyFileStatus(this.opts.home, kind, venue, ref, needs);
+  }
+  /** what each connection's venue answers from this machine before any key is made (live/reach.ts): its own first, keyless question. Kept
+   * per connection (a location rule ten minutes, an answer two), asked once while an answer is on its way; `force` asks again now */
+  private readonly reaches = new Map<string, { r: Reach; until: number } | { pending: Promise<Reach> }>();
+  connectReach(connectors: string[], force = false): Promise<Reach[]> {
+    const deps = this.liveDeps();
+    return Promise.all(
+      connectors.map((c) => {
+        const kept = this.reaches.get(c);
+        if (kept && "pending" in kept) return kept.pending;
+        if (kept && !force && kept.until > deps.clock()) return Promise.resolve(kept.r);
+        const pending = reachOf(c, { http: deps.http, clock: deps.clock, open: deps.openExchange, mm: deps.mm, signIn: (k) => this.signIn(k) })
+          .catch((): Reach => ({ connector: c, state: "unreachable", said: "no answer just now; connecting asks again", at: new Date(deps.clock()).toISOString() }))
+          .then((r) => {
+            this.reaches.set(c, { r, until: deps.clock() + reachKeepMs(r) });
+            return r;
+          });
+        this.reaches.set(c, { pending });
+        return pending;
+      }),
+    );
   }
   /** which sign-in a state that came back belongs to */
   signInHolding(state: string): OAuthSignIn | undefined {

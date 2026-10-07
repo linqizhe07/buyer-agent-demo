@@ -65,7 +65,9 @@ alias seat='npx tsx examples/account/agent-seat.ts'
 
 ## 2 · 接你真的账户
 
-"Connect an account" 打开一组卡片，按 Exchanges · Brokers · Wallets · Markets and tokens 分组（服务能接、上面没列的，放在 "More" 里）。它在这几处：Portfolio 的三步清单第一步；Portfolio › Accounts 段头的 "Connect an account"；一个都没接时 Trade 屏的 "Connect an account"。agent 请求你接一个场所时，Waiting for you 里那条请求的 "Connect" 直接是那家的表单。点哪张就是哪个的接法，已经接上的写着 "Connected · add another"。银行和卡不在里面：它们没有给个人的接口。Markets 里没接的场所的行写着 "Connect to trade"，点了直接是那家的连接表单（第 2c 条）。
+"Connect an account" 打开一组卡片，按 Exchanges · Brokers · Wallets · Markets and tokens 分组（服务能接、上面没列的，放在 "More" 里）。它在这几处：Portfolio 的三步清单第一步；Portfolio › Accounts 段头的 "Connect an account"；一个都没接时 Trade 屏的 "Connect an account"。agent 请求你接一个场所时，Waiting for you 里那条请求的 "Connect" 直接是那家的表单。点哪张就是哪个的接法，已经接上的写着 "Connected · add another"。银行和卡不在里面：它们没有给个人的接口。
+
+打开这组卡片时，账户替每个要钥匙、要登录或要 mm 的连接，先问一遍它的场所在建 key 之前的那个问题（不带任何钥匙、令牌或地址：交易所的公开时钟、Alpaca 和 Robinhood Crypto 不带 key 的一次 GET、Kalshi 的公开状态、Polymarket 自己的地区检查、Robinhood 登录的两份公开元数据、本机 `mm auth status`；`GET /api/account/connect/reach`）。场所说不服务这个地区的，卡片上直接写 "Not served here"（悬停是它的原话），点进去是它的原话和问的时间、"Check again"，建 key 的步骤收起来、Connect 按不了；Polymarket 的还给一个 "Watch a Polymarket wallet by its address instead"，那是只看、不交易。mm 没装或没登录的写 "Set up first" 和要跑的命令。一个都没答的不标，Connect 时照样再问。地区的答案留十分钟，别的两分钟；"Another exchange" 里每挑一家就问那一家。从这台机器问（2026-10-07）：Binance、Bybit 和 Polymarket 的交易连接不服务这里，其余的都答。Markets 里没接的场所的行写着 "Connect to trade"，点了直接是那家的连接表单（第 2c 条）。
 
 **交易所**（OKX、Kraken、Coinbase、Bybit、Binance，或 "Another exchange" 从统一接口库的一百来家里挑）：
 
@@ -91,7 +93,7 @@ OKX connected live · $1,000.00 there now · the venue says this credential can 
 
 拔掉在那一行的 Details 抽屉里点 "Disconnect…"，先确认一次，再是一次签名。还有没完成的单时拔不掉，先撤单。场所那边的钥匙不动，要删去那边删。agent 钱包没有 "Disconnect"：账户握着它的钥匙和里面的钱，要收走用 Agents 弹层里的 "Take back…"，它随 agent 的子账户留在账户上。Accounts 段头的 "CSV" 下载每个账户的持有。
 
-会被拒：钥匙文件不在、权限不是 600、缺字段 `E_ACCOUNT_CREDENTIAL` · 交易所不认这把钥匙 `E_VENUE_UNAUTHORIZED` · 场所不服务这个地区 `E_VENUE_GEOBLOCKED`（Binance、Bybit 从这台机器就是这样，那是它们的规矩）· 没应答，或连接器抛了异常、答得账户读不懂 `E_VENUE_UNREACHABLE` · 统一接口库不认识这个交易所 id、或连接器名字不对 `E_WALLET_UNKNOWN_VENUE` · 已经接过同一个 `E_ACCOUNT_BAD_ACTION`（第二个账户在弹窗的 "More options" 里换一个 "Shown as"）· 还有没完成的单 `E_ACCOUNT_BAD_ACTION`。
+会被拒：钥匙文件不在、权限不是 600、缺字段 `E_ACCOUNT_CREDENTIAL` · 交易所不认这把钥匙 `E_VENUE_UNAUTHORIZED` · 场所不服务这个地区 `E_VENUE_GEOBLOCKED`（Binance、Bybit 从这台机器就是这样，那是它们的规矩；卡片在建 key 之前就会写出来）· 没应答，或连接器抛了异常、答得账户读不懂 `E_VENUE_UNREACHABLE` · 统一接口库不认识这个交易所 id、或连接器名字不对 `E_WALLET_UNKNOWN_VENUE` · 已经接过同一个 `E_ACCOUNT_BAD_ACTION`（第二个账户在弹窗的 "More options" 里换一个 "Shown as"）· 还有没完成的单 `E_ACCOUNT_BAD_ACTION`。
 
 ## 2b · Portfolio：你有什么，在哪
 

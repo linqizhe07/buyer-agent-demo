@@ -26,6 +26,10 @@
 .tile b { font-weight: 600; font-size: 14px; overflow-wrap: anywhere; }
 .tile span { font-size: 12px; color: var(--dim); }
 .tile em.on { font-style: normal; color: var(--up); }
+/* a venue that said no before any key was made (connect.js REACH): the tile says it; the form says why, in the venue's words */
+.tile em.off { font-style: normal; color: var(--warn-text); }
+#modal-form .reach-note { line-height: 1.45; }
+#modal-form .reach-note .link { margin-left: 4px; }
 #modal-form .back { align-self: flex-start; margin-bottom: -8px; }
 #modal-form .steps { display: flex; flex-direction: column; gap: 12px; }
 #modal-form .step { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 10px; font-size: 14px; line-height: 1.45; }

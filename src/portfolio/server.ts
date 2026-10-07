@@ -30,6 +30,8 @@
  *                                      an order its exact size, price and the most it may be worth)
  *   GET  /api/account/exchanges        the exchanges the unified library covers, for the connect form
  *   GET  /api/account/keyfile?kind=&venue=&ref=    whether a key file is in place for a connection: its place, its mode, the fields it misses
+ *   GET  /api/account/connect/reach?connector=[&force=1]   before a key is made: whether each connection's venue answers from here
+ *                                      (its first, keyless question; a location rule in the venue's words) — live/reach.ts
  *   POST /api/account/wallet/challenge {address, wallet, chainId}   the sentence a wallet signs to show an address is the owner's (EIP-4361)
  *   POST /api/account/wallet/prove {address, signature}            that signature, checked; the address is then proven, not watched
  *   POST /api/account/signin/start {connector}     a venue's own OAuth sign-in (Robinhood): the page to open, and its state
@@ -380,6 +382,16 @@ export async function startPortfolioServer(opts: PortfolioServerOptions): Promis
     if (!q) return;
     const needs = q.kind === "exchange" && q.exchange ? ((await exchangeList()).find((x) => x.id === q.exchange)?.needs ?? []) : [];
     res.json({ ok: true, ...svc.keyFile(q.kind, q.venue, q.ref, needs) });
+  }));
+  // Before a key is made: whether each connection's venue answers from this machine at all (live/reach.ts) — its first, keyless question,
+  // so the list of accounts says up front which venue does not serve this location, in its own words. No key, token or address is sent
+  app.get("/api/account/connect/reach", wrap(async (req, res) => {
+    if (!svc.account) return void res.status(404).json({ ok: false, error: "the account layer is not mounted" });
+    const q = strings(req, res, { connector: 2000, force: 5 });
+    if (!q) return;
+    const list = [...new Set(q.connector.split(",").map((x) => x.trim()).filter(Boolean))];
+    if (!list.length || list.length > 24 || list.some((c) => !/^live:[a-z0-9-]{1,40}(?::[a-z0-9-]{1,40})?$/.test(c))) return void bad(res, "connector is a comma-separated list of 1 to 24 connections, like live:exchange:okx,live:kalshi");
+    res.json({ ok: true, reach: await svc.connectReach(list, q.force === "1") });
   }));
 
   // A wallet shows that an address is the user's by signing the sentence the account writes for it (EIP-4361). Nothing is connected by this:

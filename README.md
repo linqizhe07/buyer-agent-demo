@@ -48,6 +48,8 @@ Node ≥ 22。常用开关：`--live-cap 50`（单笔上限，默认 $100）、`
 | 钱包 | 浏览器钱包（OKX Wallet、MetaMask 等，签一句话证明地址）、MetaMask Agent Wallet（本机 `mm`） | 换币、跨链、代币化股票（RWA）；`mm` 还有永续、预测、earn，写操作要 `PORTFOLIO_MM_WRITES=1` |
 | 只看 | Hyperliquid、Ondo、Robinhood Wallet（按地址） | 读 |
 
+打开 Connect an account 时，账户先替每个要钥匙的连接问一遍它的场所（不带钥匙）：不服务你这个地区的，卡片上直接写 "Not served here" 和它的原话，不用先建 key 再被拒。
+
 **Pre-IPO**：交易所上按一家未上市公司的估值定价的永续合约，不是股份。六家不带钥匙读得到（OKX、Gate、Kraken Futures、Deribit、KuCoin Futures、MEXC），一家公司一行，写各家隐含估值的中位数；接上其中一家的钥匙，就在同一行下单。Anthropic、OpenAI 都说未经同意的股权转让无效，原话跟着它们那一行走。
 
 ## 给 agent 的接口

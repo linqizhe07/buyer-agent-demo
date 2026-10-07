@@ -491,6 +491,23 @@ describe("the Markets pane", () => {
     const cat = p.run<string>("catalog(true, 'wide')");
     expect(cat).toContain('<div class="pick-h">More</div>');
     expect(cat).toContain('data-kind="standin-pubex" data-extra=""><b>Stand-in Public Exchange</b><span>On this machine</span>');
+    // a venue that answered no before any key was made (GET /api/account/connect/reach): its tile says so, its words in the title; the ones
+    // read by address ask nothing; an answer of ok changes nothing
+    const said = "Binance does not serve this location: that is its own rule, and the account does not look for a way around it. It answered: “Service unavailable from a restricted location”";
+    p.run(`REACH.set("live:exchange:binance", { connector: "live:exchange:binance", state: "location", said: ${JSON.stringify(said)}, at: "2026-10-06T05:00:00.000Z" }); REACH.set("live:exchange:okx", { connector: "live:exchange:okx", state: "ok", at: "2026-10-06T05:00:00.000Z" }); REACH.set("live:metamask", { connector: "live:metamask", state: "setup", said: "mm is not signed in on this machine: run mm login in a terminal, then check again", at: "2026-10-06T05:00:00.000Z" })`);
+    const marked = p.run<string>("catalog(true)");
+    expect(marked).toContain(`<button type="button" class="tile tile-off" data-kind="exchange" data-extra="binance" title="${said.replace(/'/g, "&#39;")}"><b>Binance</b><span><em class="off">Not served here</em></span></button>`);
+    expect(marked).toContain('<button type="button" class="tile" data-kind="exchange" data-extra="okx"><b>OKX</b><span>API key</span></button>');
+    expect(p.run("[tileConnector('exchange', 'okx'), tileConnector('exchange', ''), tileConnector('hyperliquid', ''), tileConnector('wallet', 'watch'), tileConnector('kalshi', '')]")).toEqual(["live:exchange:okx", "", "", "", "live:kalshi"]);
+    // the form's note: the venue's words, when it was asked, Check again; Polymarket's offers to watch a wallet there by its address
+    const note = p.run<string>(`reachNoteHtml(REACH.get("live:exchange:binance"), "exchange")`);
+    expect(note).toContain("It answered: “Service unavailable from a restricted location”");
+    expect(note).toContain('<span class="dim">(asked 01:00)</span>');
+    expect(note).toContain('<button type="button" class="link" data-reach="again">Check again</button>');
+    expect(note).not.toContain("data-reach=\"watch\"");
+    p.set("A", { ...account(), connectLive: { ...account().connectLive, options: [...account().connectLive.options, { kind: "polymarket", connector: "live:polymarket", needs: "address", label: "Polymarket · by the account wallet's address" }] } });
+    expect(p.run<string>(`reachNoteHtml({ state: "location", said: "Polymarket does not serve this location", at: "2026-10-06T05:00:00.000Z" }, "polymarket-trade")`)).toContain('data-reach="watch">Watch a Polymarket wallet by its address instead</button>');
+    expect(p.run(`reachNoteHtml({ state: "ok" }, "kalshi")`)).toBe("");
   });
 
   it("shows in the drawer what the agents are doing in a market: their cards (Review → Portfolio), open orders and the owner's intents", () => {
