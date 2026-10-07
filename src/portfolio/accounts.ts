@@ -12,6 +12,7 @@
 import type { Refusal } from "../core/errors.ts";
 import { eventMark, isEventSymbol } from "./events.ts";
 import type { MarketKind } from "./live/trade.ts";
+import type { LiveWriter } from "./live/writes.ts";
 
 /** `broker`: a stock-market account at a broker · `perp`: an account at a perp DEX (Hyperliquid) */
 export type AccountKind = "cex" | "agent-wallet" | "rwa" | "prediction" | "broker" | "perp";
@@ -61,7 +62,7 @@ export interface Account {
   /** a live venue reached by address: who showed the address is the user's (the wallet that signed); absent, it is only watched */
   proven?: string | undefined;
   /** what real money can be asked of a live venue, when the server moves real money at all */
-  liveCan?: { withdraw: boolean | "unknown"; ledgers: string[]; transfer: boolean | "unknown"; swap: boolean | "unknown"; receive: boolean; send: "wallet" | "mm" | false } | undefined;
+  liveCan?: LiveWriter["can"] | undefined;
   /** a venue connected live where orders can be placed: whether the key may trade (as the venue said), and what is traded there */
   liveTrade?: { can: boolean | "unknown"; what: string; /** the kinds of market its trader offers, structured (`what` says it in words); absent: `tradeKinds` reads them from the connector */ kinds?: MarketKind[] | undefined; /** what else its trader does there: positions, an order changed in place, leverage, its own close */ positions?: boolean; amend?: boolean; leverage?: boolean; close?: boolean } | undefined;
   /** why no order is placed at this venue from the account, when none is */

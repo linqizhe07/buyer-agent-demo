@@ -96,7 +96,7 @@ const ledgers = (home: string) => readdirSync(join(home, "portfolio")).filter((f
 const order = { type: "agentLiveOrder" as const, venue: "ex", symbol: "BTC/USDT", side: "buy", orderType: "limit", qty: "0.0005", usd: "", limitPrice: "50000" };
 
 describe("the account after a restart", () => {
-  it("is the account it was: the owner's browser, the venue, the agent, its limit and what it used, Aggressive, the open order", async () => {
+  it("is the account it was: the owner's browser, the venue, the agent, its limit and what it used, Beast, the open order", async () => {
     const home = fresh();
     const a = await run(home, 0);
     expect(a.engine.pairDevice(browser.jwk, "this browser", "K7QX-M2PA")).toMatchObject({ role: "owner" });
@@ -108,7 +108,7 @@ describe("the account after a restart", () => {
     expect([resting.id, resting.status, a.trade()!.spentMicro]).toEqual(["ord-0001", "open", 25_000_000]);
 
     const b = await run(home, HOUR);
-    expect(b.svc.restored).toMatchObject({ runs: 1, owner: true, agents: 1, limits: 1, mode: "Aggressive", venues: [{ venue: "ex", ok: true }], orders: 1, payments: 0, skipped: [], state: "done" });
+    expect(b.svc.restored).toMatchObject({ runs: 1, owner: true, agents: 1, limits: 1, mode: "Beast", venues: [{ venue: "ex", ok: true }], orders: 1, payments: 0, skipped: [], state: "done" });
     // the same browser is the owner without a code; another one waits to be added
     expect(b.engine.pairDevice(browser.jwk)).toMatchObject({ role: "owner" });
     expect(b.engine.pairDevice(simKey("device:another").jwk)).toMatchObject({ role: "pending" });
@@ -127,7 +127,7 @@ describe("the account after a restart", () => {
 
     // and a third run continues the second, which continued the first
     const c = await run(home, 2 * HOUR);
-    expect(c.svc.restored).toMatchObject({ runs: 2, agents: 1, orders: 1, mode: "Aggressive" });
+    expect(c.svc.restored).toMatchObject({ runs: 2, agents: 1, orders: 1, mode: "Beast" });
     expect(c.engine.orders.map((o) => o.id)).toEqual(["ord-0002"]);
     expect(c.svc.verifyChain().ok).toBe(true);
   });
@@ -149,7 +149,7 @@ describe("the account after a restart", () => {
     expect(b.svc.policy().mode).toBe("guard");
     expect((b.svc.restored as { skipped: string[] }).skipped).toEqual([
       "approveAgent of 2026-10-05T14:01:00.000Z: its signature does not check out against the account's owners",
-      "the dial was open, and the owner's signature that opened it is not in the chain: it starts Conservative",
+      "the dial was open, and the owner's signature that opened it is not in the chain: it starts Guard",
     ]);
   });
 

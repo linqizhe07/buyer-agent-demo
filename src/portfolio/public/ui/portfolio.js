@@ -1,24 +1,28 @@
 /* PORTFOLIO — what the owner has, in one place: the net worth and its curve, what waits for the owner (the agents' cards and what they
-   asked for), the dollars that are ready, what the money is in, what the agents did, and every asset, position and account — all narrowed
-   by the top bar's lens. Every button does what it says through the account's own door: a card approved is the owner's signature on it
-   (approveCard), a position closed a signed liveClose, an account disconnected a signed disconnectVenue, and Grant… opens the owner's own
-   form for what an agent asked (a limit: approveSpend · a wallet: createSubAccount, or a top-up move · a session, leverage or the mode:
-   setPolicy · a venue: its connection), and Decline… is the owner's signed answerAsk. Reads: GET /api/account/holdings?cost=1 · /history ·
-   /positions · /agents · /earn. */
+   asked for), the agents at work (the owner's words to them and what they did), the dollars that are ready, what the money is in, and
+   every asset, position and account — all narrowed by the top bar's lens. Every button does what it says through the account's own door:
+   a card approved is the owner's signature on it (approveCard), a position closed a signed liveClose, an account disconnected a signed
+   disconnectVenue, an account closed to agents a free POST /api/revoke and reopened a signed setPolicy restore, a key that can't trade
+   replaced through a signed disconnect and the venue's own connect form, and Grant… opens the owner's own form for what an agent asked
+   (a limit: approveSpend · a wallet: createSubAccount, or a top-up move · a session, leverage or the mode: setPolicy · a venue: its
+   connection), and Decline… is the owner's signed answerAsk. Money already held goes to its own sheets: Earn… and an earn row's Withdraw…
+   open the Earn sheet (ui/earn.js openEarn), Sell many… the Sell many sheet (openSellMany). Reads: GET /api/account/holdings?cost=1 ·
+   /history · /positions · /agents (· /earn, to find which product an earn row is in). */
 
-/* what the pane keeps between draws: the segment and the curve's range, the last answer of each read, and what each part last drew */
-const PF = { tab: "assets", range: "1w", hold: null, holdErr: "", hist: new Map(), pos: null, agents: null, earn: null, last: new Map(), curve: null };
+/* what the pane keeps between draws: the segment and the curve's range, the last answer of each read, what the curve last drew, the key
+   of the intents last mounted under Agents at work, and the card a "Review" elsewhere asked to be shown */
+const PF = { tab: "assets", range: "1w", hold: null, holdErr: "", hist: new Map(), pos: null, agents: null, earn: null, curve: null, intentsKey: "", hiWant: "", soon: false, hover: null };
 const PF_RANGES = [["1d", "1D"], ["1w", "1W"], ["1m", "1M"], ["all", "All"]];
 const PF_TABS = [["assets", "Assets"], ["positions", "Positions"], ["accounts", "Accounts"]];
 const PF_RANGE_WORDS = { "1d": "past day", "1w": "past week", "1m": "past month", all: "since the start" };
 const r2pf = (n) => Number(Number(n || 0).toFixed(2)) || 0;
 const pfDollars = (cls) => cls === "cash" || cls === "stable";
-/* the stablecoins an earn product's dollars are counted in */
-const PF_DOLLAR_ASSETS = new Set(["USD", "USDC", "USDT", "USDG", "DAI", "PYUSD", "FDUSD", "USDE", "USDS", "TUSD"]);
-/* a row worth a dollar a dollar: cash, a stablecoin, or a stablecoin in an earn product */
-const pfDollarRow = (r) => pfDollars(r.class) || (r.class === "earn" && PF_DOLLAR_ASSETS.has(String(r.asset || "").toUpperCase()));
+/* a row worth a dollar a dollar: cash, a stablecoin, or a dollar stablecoin (as the account lists them, core isDollar) in an earn product */
+const pfDollarRow = (r) => pfDollars(r.class) || (r.class === "earn" && isDollar(r.asset));
 /* an agent wallet's place on the account (live/agent-wallet.ts agentWalletVenue) */
 const pfWalletVenue = (name) => `agent-${slug(name)}`;
+/* a venue's sentence without its full stop, so it reads on in another */
+const pfSaid = (t) => String(t || "").trim().replace(/[.\s]+$/, "");
 
 // ---- what the lens lets through ------------------------------------------------------------------------------------------------------
 
@@ -88,10 +92,15 @@ function pfCash(m, venueIn) {
   return { ready, canMove, stays: r2pf(ready - canMove), trades: r2pf(vs.filter((v) => v.tradesHere).reduce((s, v) => s + v.usd, 0)), venues: vs };
 }
 
-/** what the money is in: each class's dollars and its share, largest first */
+/** what the money is in: each class's dollars and its share, largest first. Money in an earn product is still the dollar or the coin it is
+ * (the Assets rows say where it earns), so it counts with them, not as a class of its own */
 function pfAlloc(rows) {
   const by = {};
-  for (const r of rows || []) if (r.usd > 0) by[r.class] = (by[r.class] || 0) + r.usd;
+  for (const r of rows || []) {
+    if (!(r.usd > 0)) continue;
+    const cls = r.class === "earn" ? (isDollar(r.asset) ? "stable" : "crypto") : r.class;
+    by[cls] = (by[cls] || 0) + r.usd;
+  }
   const total = Object.values(by).reduce((s, x) => s + x, 0);
   if (!(total > 0)) return [];
   return Object.entries(by).map(([cls, usd]) => ({ cls, usd: r2pf(usd), pct: Number(((usd / total) * 100).toFixed(1)) })).sort((a, b) => b.usd - a.usd);
@@ -126,21 +135,19 @@ function pfGroups(cards, asks) {
   return [...g.values()];
 }
 
-/** What the agents did, newest first: their orders and payments as the statement has them (✓ done · ✗ refused or failed · · under way),
- * what waits for the owner (▣), what the account refused them on the way (✗, from their flights), and what they reported on the owner's
- * intents (›). Each item names its agent's key and, where it has one, its venue */
-function pfActivity({ agents = [], lines = [], intents = [], cards = [] } = {}) {
+/** What the agents did, newest first — done ✓ or refused ✗, nothing else: their orders and payments as the statement has them, and what
+ * the account refused them on the way (from their flights). What waits for the owner is under Waiting for you; what they report on the
+ * owner's words is under the words themselves (Agents at work). Each item names its agent's key and, where it has one, its venue */
+function pfAgentLines({ agents = [], lines = [] } = {}) {
   const out = [];
-  const flightAt = new Map(agents.flatMap((a) => (a.flights || []).map((f) => [f.no, f.at])));
-  for (const c of cards) out.push({ at: flightAt.get(c.flight) || "", mark: "▣", cls: "wait", word: "waiting", text: c.reason, sub: `${c.agentName || "An agent"} · waiting for you`, agent: c.agent || "", venue: pfCardVenue(c) });
   for (const l of lines) {
     if (!l.agent) continue;
     const done = l.status === "filled" || l.status === "settled" || l.status === "done";
     const bad = ["rejected", "failed", "returned"].includes(l.status);
-    out.push({ at: l.updatedAt || l.at, mark: done ? "✓" : bad ? "✗" : "·", cls: done ? "ok" : bad ? "no" : "", word: done ? "done" : bad ? "refused" : "under way", text: l.description, sub: [l.by || l.agentName, l.status, l.accountName].filter(Boolean).join(" · "), agent: l.agent, venue: l.account });
+    if (!done && !bad) continue;
+    out.push({ at: l.updatedAt || l.at, mark: done ? "✓" : "✗", cls: done ? "ok" : "no", word: done ? "done" : "refused", text: l.description, sub: [l.by || l.agentName, l.status, l.accountName].filter(Boolean).join(" · "), agent: l.agent, venue: l.account });
   }
   for (const a of agents) for (const f of a.flights || []) for (const leg of f.legs || []) if (String(leg).startsWith("✗")) out.push({ at: f.at, mark: "✗", cls: "no", word: "refused", text: f.request, sub: `${a.name} · ${String(leg).slice(1).trim()}`, agent: a.address, venue: "" });
-  for (const i of intents) for (const r of i.byAgent || []) out.push({ at: r.at, mark: "›", cls: "say", word: "reported", text: r.note || r.status, sub: `${r.byName} · ${r.status} · on “${i.text}”`, agent: r.by, venue: i.venue });
   return out.sort((a, b) => (Date.parse(b.at) || 0) - (Date.parse(a.at) || 0));
 }
 
@@ -154,6 +161,29 @@ function pfSteps(a) {
   ];
 }
 
+// ---- what an account can do from here, in words (moved here from the Venues board) --------------------------------------------------
+
+/** a venue's health, as its reads went: `bad` when the last read failed (a geoblock in the venue's own words), `read` when it ever answered */
+function pfHealth(v) {
+  const h = (A.health || {})[v.id] || {};
+  const failed = h.lastFailAt && (!h.lastOkAt || Date.parse(h.lastFailAt) >= Date.parse(h.lastOkAt));
+  if (failed && h.code === "E_VENUE_GEOBLOCKED") return { bad: true, read: !!h.lastOkAt, text: `${pfSaid(h.message) || `${v.name} does not serve this location`}. That is ${v.name}'s own rule for this location.` };
+  if (failed) return { bad: true, read: !!h.lastOkAt, text: `Didn't answer at ${nyTime(h.lastFailAt)}: ${pfSaid(h.message || h.code)}.` };
+  if (v.stale) return { bad: true, read: true, text: `Last read failed: ${pfSaid(v.stale)}.` };
+  if (h.lastOkAt) return { bad: false, read: true, text: `Answered at ${nyTime(h.lastOkAt)}${h.ms !== undefined ? ` · ${h.ms} ms` : ""}` };
+  return { bad: false, read: !!v.asOf, text: v.asOf ? `Read at ${nyTime(v.asOf)}` : "Not read yet" };
+}
+/** what a connected venue trades from here, or why not — and whether a new key would fix it (`rekey`: the key can't trade and the
+ * connection it was made with is still offered here, so a key that can is connected in its place) */
+function pfTrades(v) {
+  if (!writesOn()) return { can: false, text: "Read-only: this server places no orders." };
+  if (watched(v)) return { can: false, text: "Watched address: nothing is traded from it." };
+  if (canTrade(v)) return { can: true, text: `Trades ${v.trade.what}.` };
+  if (v.trade && v.trade.can === false) return { can: false, rekey: typeof connectorOfVenue === "function" && !!connectorOfVenue(v), text: `This key can't trade. ${typeof keyHowFor === "function" ? keyHowFor(v) : ""}`.trim() };
+  // nothing is placed here from the account: the venue's own words (as it said them), or what its way in gives
+  return { can: false, text: pfSaid(readOnlyWords(v)) };
+}
+
 // ---- drawing ----------------------------------------------------------------------------------------------------------------------
 
 /** the Portfolio pane (the shell calls it on every read, on the route and on the lens) */
@@ -163,22 +193,23 @@ function renderPortfolio({ el, owner, params = {} }) {
   if (!el.firstElementChild || el.firstElementChild.dataset.pf !== mode) {
     el.innerHTML = mode === "fresh"
       ? '<div class="pf pf-fresh" data-pf="fresh"><div data-pf-part="worth"></div><div data-pf-part="steps"></div><div data-pf-part="waiting"></div></div>'
-      : '<div class="pf cols" data-pf="full"><div class="col-main"><div data-pf-part="steps"></div><section class="sec pf-worth" data-pf-part="worth" aria-label="Net worth"></section><div class="quick" data-pf-part="quick"></div><section class="sec pf-table" data-pf-part="table" aria-label="Assets, positions and accounts"></section></div><div class="col-side"><div data-pf-part="waiting"></div><section class="sec pf-cash" data-pf-part="cash" aria-label="Cash ready"></section><section class="sec pf-alloc" data-pf-part="alloc" aria-label="Allocation"></section><section class="sec pf-act" data-pf-part="activity" aria-label="Agent activity"></section></div></div>';
-    PF.last.clear();
+      : '<div class="pf cols" data-pf="full"><div class="col-main"><div data-pf-part="steps"></div><section class="sec pf-worth" data-pf-part="worth" aria-label="Net worth"></section><div class="quick" data-pf-part="quick"></div><section class="sec pf-table" data-pf-part="table" aria-label="Assets, positions and accounts"></section></div><div class="col-side"><div data-pf-part="waiting"></div><section class="sec pf-agents" data-pf-part="agents" aria-label="Agents at work"></section><section class="sec pf-cash" data-pf-part="cash" aria-label="Cash ready"></section><section class="sec pf-alloc" data-pf-part="alloc" aria-label="Allocation"></section></div></div>';
   }
   pfWire(el);
   pfDraw(el, owner);
   pfRead();
+  if (PF.hiWant) {
+    pfShowCard(el, PF.hiWant);
+    PF.hiWant = "";
+  }
 }
 
-/* one part, drawn again only when what it shows changed: a focused button keeps its focus through the page's refresh */
+/* one part, drawn again only when what it shows changed, the focused button focused again (core paint). True when it drew */
 function pfPut(el, part, html) {
   const node = el.querySelector(`[data-pf-part="${part}"]`);
-  if (!node) return;
+  if (!node) return false;
   node.hidden = !html;
-  if (PF.last.get(part) === html) return;
-  PF.last.set(part, html);
-  node.innerHTML = html;
+  return paint(node, html);
 }
 
 function pfDraw(el, owner) {
@@ -191,12 +222,22 @@ function pfDraw(el, owner) {
   if (el.firstElementChild.dataset.pf === "fresh") return;
   pfPut(el, "quick", pfQuickHtml(l, venueIn, owner));
   pfPut(el, "table", pfTableHtml(l, venueIn, rows, owner));
-  pfPut(el, "cash", pfCashHtml(venueIn, owner));
+  pfIntents(el, pfPut(el, "agents", pfAgentsHtml(l)));
+  pfPut(el, "cash", pfCashHtml(l, venueIn, owner));
   pfPut(el, "alloc", pfAllocHtml(rows));
-  pfPut(el, "activity", pfActivityHtml(l));
 }
-/* draw again when an answer came back, if the Portfolio is still what is shown */
+/* draw again when an answer came back, if the Portfolio is still what is shown: once a frame, however many answers land in it */
 function pfAgain() {
+  if (PF.soon) return;
+  PF.soon = true;
+  // and, while the pane is still coming in, once it has (core paneLater)
+  nextFrame(() => paneLater("portfolio", pfAgainSoon));
+}
+function pfAgainSoon() {
+  PF.soon = false;
+  pfAgainNow();
+}
+function pfAgainNow() {
   const el = $("pane-portfolio");
   if (!A || ROUTE.tab !== "portfolio" || !el || !el.querySelector("[data-pf]")) return;
   try {
@@ -229,13 +270,13 @@ function pfReadPositions() {
     PF.pos = b && b.ok ? b : { error: refusalOf(b) || "The account did not answer.", positions: [], missing: [] };
     pfAgain();
   });
-  if (connected().some((v) => v.earn)) api("/api/account/earn", { ttl: 15_000 }).then((b) => { PF.earn = b && b.ok ? b : { error: refusalOf(b) || "The account did not answer.", positions: [], missing: [] }; pfAgain(); });
 }
 
 /* a toggle of the pane's own (Range, Assets/Positions/Accounts): its markup stays the same from draw to draw, so a part is drawn again
    only when what it shows changed; its clicks are heard by the pane */
-const pfSeg = (name, items, on, label) => `<div class="seg" role="group" aria-label="${esc(label)}">${items.map(([v, t]) => `<button type="button" data-pf-${name}="${esc(v)}" aria-pressed="${String(v === on)}">${esc(t)}</button>`).join("")}</div>`;
-const pfBtn = (act, label, { cls = "btn", data = {}, off = false, title = "" } = {}) => `<button type="button" class="${cls}" data-pf-act="${act}"${Object.entries(data).map(([k, v]) => ` data-${k}="${esc(v)}"`).join("")}${off ? " disabled" : ""}${title ? ` title="${esc(title)}"` : ""}>${label}</button>`;
+const pfSeg = (name, items, on, label) => `<div class="seg" role="group" aria-label="${esc(label)}">${items.map(([v, t]) => `<button type="button" data-pf-${name}="${esc(v)}" data-fk="pf-${name}:${esc(v)}" aria-pressed="${String(v === on)}">${esc(t)}</button>`).join("")}</div>`;
+/* a button of the pane's: what it does and about what (data-fk names it, so a redraw gives it its focus back) */
+const pfBtn = (act, label, { cls = "btn", data = {}, off = false, title = "" } = {}) => `<button type="button" class="${cls}" data-pf-act="${act}"${Object.entries(data).map(([k, v]) => ` data-${k}="${esc(v)}"`).join("")} data-fk="${esc([act, ...Object.values(data)].join(":"))}"${off ? " disabled" : ""}${title ? ` title="${esc(title)}"` : ""}>${label}</button>`;
 const PF_LOOK_ONLY = "This browser can look but not sign";
 
 /* the three steps, until they are done: on a fresh account the page's main content, afterwards a short reminder of what is left */
@@ -248,24 +289,52 @@ function pfStepsHtml(owner, fresh) {
   const how = {
     connect: ["An exchange, a broker, a wallet or a prediction market, read through its own interface. Nothing moves without your signature.", A.connectLive ? pfBtn("connect", "Connect an account", { cls: "btn btn-primary btn-sm", off: !owner, title: owner ? "" : PF_LOOK_ONLY }) : ""],
     agent: [asking ? `${plural(asking, "agent")} asking to be let in.` : `Copy the command and run it where your agent runs; then let it in here.${A.agentSetup && A.agentSetup.command ? "" : " Run it in this account's folder."}`, `${pfBtn("setup", `${icon("copy", "sm")}Copy setup command`, { cls: "btn btn-sm" })}${asking ? pfBtn("letin", "Let it in…", { cls: "btn btn-primary btn-sm", data: { agent: A.requests[0].address }, off: !owner }) : ""}`],
-    limit: [trading ? "It acts only inside a limit you sign: where, how much an order, how much in all. In Conservative each order still waits for you." : "Connect an account that trades first: a limit names where an agent may trade.", pfBtn("limit", "Give a limit…", { cls: "btn btn-primary btn-sm", off: !owner || !trading || !steps[1].done })],
+    limit: [trading ? "It acts only inside a limit you sign: where, how much an order, how much in all. In Guard each order still waits for you." : "Connect an account that trades first: a limit names where an agent may trade.", pfBtn("limit", "Give a limit…", { cls: "btn btn-primary btn-sm", off: !owner || !trading || !steps[1].done })],
   };
   return `<section class="callout pf-steps" aria-labelledby="pf-steps-h"><div class="pf-steps-h"><h2 class="label warn-t" id="pf-steps-h">${fresh ? "Get started" : "Next steps"} · ${n} of 3</h2></div><ol>${steps.map((s, i) => `<li class="${s.done ? "done" : ""}"><span class="pf-tick" aria-hidden="true">${s.done ? "✓" : i + 1}</span><div><b>${esc(s.title)}</b>${s.done ? '<span class="sr"> (done)</span>' : `<span class="dim small">${esc(how[s.id][0])}</span>`}</div>${s.done ? "" : `<div class="pf-step-acts">${how[s.id][1]}</div>`}</li>`).join("")}</ol></section>`;
 }
 
-/* the net worth, today's change and the curve */
+/* the net worth: the figure, ONE change line that follows the range (1D is today, from the holdings' own 24 hours; the others from the
+   curve's history), the curve, and one ⓘ holding the footnotes */
 function pfWorthHtml(l, venueIn, rows) {
   const L = connected().filter((v) => venueIn(v.id));
   if (!connected().length) return `<section class="sec pf-worth"><div class="label">Net worth</div><div class="num">${money(0)}</div><p class="dim">Nothing is connected yet. Connect an account and what it holds shows here.</p></section>`;
-  const usd = l.kind === "all" ? A.liveUsd : L.reduce((s, v) => s + v.usd, 0);
+  // the figure and today's change come from one read where they can (the holdings read says both), so they never disagree by a tick
+  const usd = l.kind === "all" ? (PF.hold && Number.isFinite(Number(PF.hold.totalUsd)) ? Number(PF.hold.totalUsd) : A.liveUsd) : L.reduce((s, v) => s + v.usd, 0);
   const label = l.kind === "all" ? "Net worth" : l.kind === "venue" ? `Net worth · ${l.name}` : `${l.name} · agent wallets`;
   const day = !PF.hold ? null : l.kind === "all" ? PF.hold.change24h : pfDayChange(rows || []);
-  const missingWords = day && day.missing.length ? `No 24-hour figure for ${day.missing.map((k) => k.split(":").slice(1).join(":")).join(", ")}` : "";
-  const today = !day ? '<span class="skel" style="width:180px" aria-hidden="true"></span>' : day.ofUsd > 0 ? `<span>${chg(day.usd, "$")}${day.pct !== undefined ? ` <span class="tab-nums">(${Math.abs(day.pct).toFixed(2)}%)</span>` : ""} <span class="dim">today</span>${day.coveredUsd < day.ofUsd - 0.5 ? ` <span class="dim small" title="${esc(missingWords)}">· on ${money(day.coveredUsd)} of ${money(day.ofUsd)}</span>` : ""}</span>` : '<span class="dim">Nothing priced here yet.</span>';
-  const away = l.kind === "all" && A.inFlightUsd ? ` <span class="dim small">· ${money(A.inFlightUsd)} on the way</span>` : "";
-  const head = `<div class="pf-worth-h"><div class="pf-worth-n"><div class="label">${esc(label)}</div><div class="num">${money(usd)}</div><div class="pf-today">${today}${away}</div>${PF.holdErr && !PF.hold ? `<div class="msg no">${esc(PF.holdErr)}</div>` : ""}</div>${l.kind === "all" ? pfSeg("range", PF_RANGES, PF.range, "Range") : ""}</div>`;
+  const h = l.kind === "all" ? PF.hist.get(PF.range) : null;
+  const today = l.kind !== "all" || PF.range === "1d";
+  const notes = pfWorthNotes(l, today ? day : null, today ? null : h);
+  const info = notes.length ? `<details class="more pf-info"><summary aria-label="About these figures" title="${esc(notes.join(" "))}">ⓘ</summary><ul class="pf-info-l">${notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul></details>` : "";
+  const head = `<div class="pf-worth-h"><div class="pf-worth-n"><div class="label">${esc(label)}</div><div class="num">${money(usd)}</div><div class="pf-today">${today ? pfTodayLine(day) : pfRangeLine(h)}${info}</div>${PF.holdErr && !PF.hold ? `<div class="msg no">${esc(PF.holdErr)}</div>` : ""}</div>${l.kind === "all" ? pfSeg("range", PF_RANGES, PF.range, "Range") : ""}</div>`;
   if (l.kind !== "all") return `${head}<p class="dim small pf-note">The curve covers all accounts together. ${pfBtn("all", "Show all accounts", { cls: "link" })}</p>`;
-  return `${head}${pfCurveHtml(PF.hist.get(PF.range))}`;
+  return `${head}${pfCurveHtml(h)}`;
+}
+/* today's change, from each row's own 24 hours */
+function pfTodayLine(day) {
+  if (!day) return '<span class="skel" style="width:180px" aria-hidden="true"></span>';
+  if (!(day.ofUsd > 0)) return '<span class="dim">Nothing priced here yet.</span>';
+  return `<span>${chg(day.usd, "$")}${day.pct !== undefined ? ` <span class="tab-nums">(${Math.abs(day.pct).toFixed(2)}%)</span>` : ""} <span class="dim">today</span></span>`;
+}
+/* the change over the range, from the curve's history: since the first point when the range starts before it */
+function pfRangeLine(h) {
+  if (!h) return '<span class="skel" style="width:180px" aria-hidden="true"></span>';
+  if (h.error) return '<span class="dim">The curve could not be read.</span>';
+  const since = h.first && Date.parse(h.first) > Date.parse(h.from) + 60_000 ? `since ${nyDay(h.first)}` : PF_RANGE_WORDS[h.range] || "";
+  return `<span>${chg(h.changeUsd, "$")}${h.changePct !== undefined ? ` <span class="tab-nums">(${Math.abs(h.changePct).toFixed(2)}%)</span>` : ""} <span class="dim">${esc(since)}</span></span>`;
+}
+/* the footnotes behind the one ⓘ: what the change covers, what is on the way, what the curve leaves out or carries */
+function pfWorthNotes(l, day, h) {
+  const notes = [];
+  if (day && day.ofUsd > 0 && day.coveredUsd < day.ofUsd - 0.5) notes.push(`The 24-hour change covers ${money(day.coveredUsd)} of ${money(day.ofUsd)}: no 24-hour figure for ${day.missing.map((k) => k.split(":").slice(1).join(":")).join(", ")}.`);
+  if (l.kind === "all" && A.inFlightUsd) notes.push(`${money(A.inFlightUsd)} on the way between your accounts is counted in the figure.`);
+  if (h && !h.error) {
+    if (h.paidOutUsd) notes.push(`${money(h.paidOutUsd)} paid out by agents is not counted as a loss.`);
+    if (h.events && h.events.length) notes.push("Connections and disconnections are left out of the change.");
+    if (h.partial) notes.push("A venue's last good number is in it.");
+  }
+  return notes;
 }
 
 function pfCurveHtml(h) {
@@ -275,12 +344,12 @@ function pfCurveHtml(h) {
   const c = pfCurve(h.points);
   if (!c) return `<p class="dim small pf-note">${h.first ? `The curve draws once the account has two points: the first was taken ${esc(nyDay(h.first))} ${esc(nyTime(h.first))}.` : "The curve starts with the account's first snapshot, a few minutes after an account is connected."}</p>`;
   PF.curve = c;
-  const since = h.first && Date.parse(h.first) > Date.parse(h.from) + 60_000 ? `since ${nyDay(h.first)}` : PF_RANGE_WORDS[h.range] || "";
   const ticks = (h.events || []).map((e) => { const x = c.at(Date.parse(e.at)); return x >= 0 && x <= c.w ? `<line x1="${x}" x2="${x}" y1="0" y2="${c.h}" class="pf-ev"><title>${esc(`${e.kind === "connect" ? "Connected" : "Disconnected"} ${e.name || e.venue} · ${nyDay(e.at)} ${nyTime(e.at)}`)}</title></line>` : ""; }).join("");
   const first = c.points[0];
   const last = c.points[c.points.length - 1];
   const words = `Net worth from ${money(first.usd)} on ${nyDay(first.at)} to ${money(last.usd)} on ${nyDay(last.at)}; low ${money(c.lo)}, high ${money(c.hi)}`;
-  return `<div class="pf-plot"><svg class="spark pf-curve" viewBox="0 0 ${c.w} ${c.h}" preserveAspectRatio="none" role="img" aria-label="${esc(words)}" data-pf-curve><path class="area" d="${c.area}"/><path class="line" d="${c.line}"/>${ticks}<line class="pf-cursor" x1="-10" x2="-10" y1="0" y2="${c.h}"/></svg><div class="pf-read small tab-nums" data-pf-read aria-hidden="true"></div></div><p class="small pf-range">${chg(h.changeUsd, "$")}${h.changePct !== undefined ? ` <span class="tab-nums">(${Math.abs(h.changePct).toFixed(2)}%)</span>` : ""} <span class="dim">${esc(since)}${h.paidOutUsd ? ` · ${money(h.paidOutUsd)} paid out by agents, not counted as a loss` : ""}${h.events && h.events.length ? ` · connections left out of the change` : ""}${h.partial ? " · a venue's last good number is in it" : ""}</span></p>`;
+  // the cursor is a line of its own over the curve, moved by a transform (no redraw of the curve as the pointer moves)
+  return `<div class="pf-plot"><svg class="spark pf-curve" viewBox="0 0 ${c.w} ${c.h}" preserveAspectRatio="none" role="img" aria-label="${esc(words)}" data-pf-curve><path class="area" d="${c.area}"/><path class="line" d="${c.line}"/>${ticks}</svg><span class="pf-cursor" aria-hidden="true"></span><div class="pf-read small tab-nums" data-pf-read aria-hidden="true"></div></div>`;
 }
 
 /* Trade · Move · Receive · Hand to agent: each shown only where some account (or agent) can do it */
@@ -297,21 +366,21 @@ function pfQuickHtml(l, venueIn, owner) {
   return b.join("");
 }
 
-/* what waits for the owner: the agents' cards and asks, agent by agent, and the agents asking to be let in */
+/* what waits for the owner: the agents' cards and asks, agent by agent, and the agents asking to be let in. Each card says its time once */
 function pfWaitingHtml(l, owner) {
   const cards = A.cards.filter((c) => pfAboutIn(c.agent, pfCardVenue(c), l));
   const asks = (A.asks || []).filter((a) => pfAboutIn(a.agent, a.venue, l));
   const knocks = l.kind === "all" ? A.requests : [];
   const n = cards.length + asks.length + knocks.length;
   if (!n) return "";
-  const soonest = cards.map((c) => Date.parse(c.expiresAt)).filter((x) => x > 0).sort((a, b) => a - b)[0];
-  const mins = soonest ? Math.max(0, Math.round((soonest - nowMs()) / 60_000)) : 0;
   const off = !owner;
-  const card = (c) => `<div class="pf-item"><div class="pf-item-t"><b>${esc(c.reason)}</b><span class="dim small">${fine(c.usd)}${c.expiresAt ? ` · answer by ${esc(pfWhen(c.expiresAt))}` : ""}</span><details class="more"><summary>What it asks</summary><pre>${esc((c.shown || []).filter((f) => f.value !== "" && f.name !== "nonce").map((f) => `${f.name}: ${f.value}`).join("\n"))}</pre></details></div><div class="pf-btns">${pfBtn("reject", "Reject", { cls: "btn btn-sm", data: { card: c.id }, off })}${pfBtn("approve", "Approve", { cls: "btn btn-sm btn-primary", data: { card: c.id }, off })}</div></div>`;
-  const ask = (a) => `<div class="pf-item pf-ask"><div class="pf-item-t"><b>${esc(a.text || PF_ASK_WORDS[a.kind] || a.kind)}</b><span class="dim small">${esc([`Asks for ${PF_ASK_WORDS[a.kind] || a.kind}`, a.usd && (a.kind === "limit" || a.kind === "topup") ? money(Number(a.usd)) : "", a.venue ? `at ${pfVenueName(a.venue)}` : "", a.at ? `asked ${pfWhen(a.at)}` : ""].filter(Boolean).join(" · "))}</span>${pfGrantable(a) ? "" : `<span class="dim small">${esc(pfWhyNot(a))}</span>`}</div><div class="pf-btns">${pfBtn("decline", "Decline…", { cls: "btn btn-sm", data: { ask: a.id }, off })}${pfGrantable(a) ? pfBtn("grant", "Grant…", { cls: "btn btn-sm btn-primary", data: { ask: a.id }, off }) : ""}</div></div>`;
+  const card = (c) => `<div class="pf-item" data-pf-card="${esc(c.id)}"><div class="pf-item-t"><b>${esc(c.reason)}</b><span class="dim small">${fine(c.usd)}${c.expiresAt ? ` · answer by ${esc(pfWhen(c.expiresAt))}` : ""}</span><details class="more"><summary>What it asks</summary><pre>${esc((c.shown || []).filter((f) => f.value !== "" && f.name !== "nonce").map((f) => `${f.name}: ${f.value}`).join("\n"))}</pre></details></div><div class="pf-btns">${pfBtn("reject", "Reject", { cls: "btn btn-sm", data: { card: c.id }, off })}${pfBtn("approve", "Approve", { cls: "btn btn-sm btn-primary", data: { card: c.id }, off })}</div></div>`;
+  // a venue asked for is connected from here, as the board offered it: its own connect form
+  const grant = (a) => (a.kind === "venue" ? pfBtn("grant", `${icon("plug", "sm")}Connect`, { cls: "btn btn-sm btn-primary", data: { ask: a.id }, off }) : pfBtn("grant", "Grant…", { cls: "btn btn-sm btn-primary", data: { ask: a.id }, off }));
+  const ask = (a) => `<div class="pf-item pf-ask"><div class="pf-item-t"><b>${esc(a.text || PF_ASK_WORDS[a.kind] || a.kind)}</b><span class="dim small">${esc([`Asks for ${PF_ASK_WORDS[a.kind] || a.kind}`, a.usd && (a.kind === "limit" || a.kind === "topup") ? money(Number(a.usd)) : "", a.venue ? `at ${pfVenueName(a.venue)}` : "", a.at ? `asked ${pfWhen(a.at)}` : ""].filter(Boolean).join(" · "))}</span>${pfGrantable(a) ? "" : `<span class="dim small">${esc(pfWhyNot(a))}</span>`}</div><div class="pf-btns">${pfBtn("decline", "Decline…", { cls: "btn btn-sm", data: { ask: a.id }, off })}${pfGrantable(a) ? grant(a) : ""}</div></div>`;
   const knock = (r) => `<div class="pf-item pf-ask"><div class="pf-item-t"><b>${esc(r.name || "An agent")} asks to be let in</b><span class="dim small"><span class="mono">${esc(short(r.address))}</span> · ${esc(nyDay(r.at))} ${esc(nyTime(r.at))}</span></div><div class="pf-btns">${pfBtn("letin", "Let in…", { cls: "btn btn-sm btn-primary", data: { agent: r.address }, off })}</div></div>`;
-  const groups = pfGroups(cards, asks).map((g) => `<div class="pf-grp"><div class="pf-grp-h"><div class="who">${avatar((A.keys.find((k) => k.address === g.agent) || {}).code || g.name, "sm")}<div><b>${esc(g.name)}</b><span class="dim">${esc([g.cards.length ? plural(g.cards.length, "card") : "", g.asks.length ? plural(g.asks.length, "ask") : ""].filter(Boolean).join(" · "))}</span></div></div>${g.cards.length > 1 ? pfBtn("approve-all", `Approve all ${g.cards.length}`, { cls: "btn btn-sm", data: { agent: g.agent }, off }) : ""}</div>${g.cards.map(card).join("")}${g.asks.map(ask).join("")}</div>`).join("");
-  return `<section class="callout pf-wait" aria-labelledby="pf-wait-h"><div class="pf-wait-h"><h2 class="label warn-t" id="pf-wait-h">Waiting for you · ${n}</h2>${soonest ? `<span class="dim small">answer in ${mins < 1 ? "under a minute" : plural(mins, "min")}</span>` : ""}</div>${groups}${knocks.map(knock).join("")}</section>`;
+  const groups = pfGroups(cards, asks).map((g) => `<div class="pf-grp"><div class="pf-grp-h"><div class="who">${avatar((A.keys.find((k) => k.address === g.agent) || {}).code || g.name, "sm")}<div><b>${esc(g.name)}</b></div></div>${g.cards.length > 1 ? pfBtn("approve-all", `Approve all ${g.cards.length}`, { cls: "btn btn-sm", data: { agent: g.agent }, off }) : ""}</div>${g.cards.map(card).join("")}${g.asks.map(ask).join("")}</div>`).join("");
+  return `<section class="callout pf-wait" aria-labelledby="pf-wait-h"><div class="pf-wait-h"><h2 class="label warn-t" id="pf-wait-h">Waiting for you · ${n}</h2></div>${groups}${knocks.map(knock).join("")}</section>`;
 }
 /* a venue by its name: a connected one's, or the name of the connection that would connect it */
 function pfVenueName(id) {
@@ -323,30 +392,48 @@ function pfVenueName(id) {
 /* a time as it is read: today's by the clock, another day's with its day */
 const pfWhen = (iso) => (nyDay(iso) === nyDay(A.now) ? nyTime(iso) : `${nyDay(iso)} ${nyTime(iso)}`);
 /* what each kind of ask asks for, in words */
-const PF_ASK_WORDS = { letIn: "to be let in", limit: "a bigger limit", venue: "a venue connected", topup: "money in its wallet", session: "a new session", leverage: "more leverage", mode: "Aggressive mode" };
+const PF_ASK_WORDS = { letIn: "to be let in", limit: "a bigger limit", venue: "a venue connected", topup: "money in its wallet", session: "a new session", leverage: "more leverage", mode: "Beast mode" };
 /* an ask the owner can grant from here: the form it needs exists on this account */
 function pfGrantable(a) {
   if (a.kind === "venue") return !!A.connectLive;
   if (a.kind === "limit") return writesOn();
   if (a.kind === "topup") return writesOn() && (connected().some((v) => canMove(v) && !v.id.startsWith("agent-")) || !A.subAccounts.some((s) => s.agent.toLowerCase() === String(a.agent).toLowerCase()));
   if (a.kind === "session" || a.kind === "leverage") return writesOn() && !!A.dial;
-  if (a.kind === "mode") return A.mode !== "open";
+  if (a.kind === "mode") return modeOf(A.mode) !== "open";
   return a.kind === "letIn";
 }
-const pfWhyNot = (a) => (!writesOn() && a.kind !== "venue" && a.kind !== "mode" && a.kind !== "letIn" ? "This server was started read-only." : a.kind === "mode" ? "Already Aggressive." : a.kind === "topup" ? "None of your accounts can send money from here." : "Nothing here can grant it.");
+const pfWhyNot = (a) => (!writesOn() && a.kind !== "venue" && a.kind !== "mode" && a.kind !== "letIn" ? "This server was started read-only." : a.kind === "mode" ? "Already Beast." : a.kind === "topup" ? "None of your accounts can send money from here." : "Nothing here can grant it.");
 
-/* the dollars that are ready, where they can go */
-function pfCashHtml(venueIn, owner) {
-  if (!PF.hold) return `<div class="label">Cash ready</div>${PF.holdErr ? `<div class="msg no">${esc(PF.holdErr)}</div>` : '<span class="skel" aria-hidden="true"></span>'}`;
-  const c = pfCash(PF.hold.money, venueIn);
+/* the agents at work: the owner's open words to them (ui/intent.js draws them, with what each agent reported), then the last five things
+   they did — done or refused — and the way to the Statement */
+function pfAgentsHtml(l) {
+  if (!A.keys.length && !(A.intents || []).length) return "";
+  const venueIn = pfVenueIn(l);
+  const items = pfAgentLines({ agents: (PF.agents && PF.agents.agents) || [], lines: S }).filter((x) => (l.kind === "all" ? true : l.kind === "agent" ? String(x.agent).toLowerCase() === l.id.toLowerCase() : !!x.venue && venueIn(x.venue))).slice(0, 5);
+  const none = !A.keys.length ? "No agent is connected yet." : "Nothing from an agent yet.";
+  return `<div class="sec-head"><div class="label">Agents at work</div>${pfBtn("statement", "Statement", { cls: "link dim" })}</div><div data-pf-intents></div>${items.length ? `<div class="feed">${items.map((x) => `<div><span class="mk pf-mk ${x.cls}" aria-hidden="true">${x.mark}</span><div><div class="t1"><span class="sr">${esc(x.word)}: </span>${esc(x.text)}</div><div class="t2">${esc(x.sub)}${x.at ? ` · ${esc(nyTime(x.at))}` : ""}</div></div></div>`).join("")}</div>` : `<p class="empty">${none}</p>`}`;
+}
+/* the open intents, mounted under Agents at work by ui/intent.js (when it is there): drawn again only when the part was, or when the words,
+   the limits given with them, the lens or the owner's role changed — never on a plain refresh, so Change words and Withdraw keep their focus */
+function pfIntents(el, drawn) {
+  const box = el.querySelector("[data-pf-intents]");
+  if (!box || typeof htaIntents !== "function") return;
+  const l = lensNow();
+  const key = JSON.stringify([owns(), l.kind, l.id, A.intents || [], A.spend || []]);
+  if (!drawn && PF.intentsKey === key) return;
+  PF.intentsKey = key;
+  htaIntents(box, owns(), { change: (x) => typeof openHandToAgent === "function" && openHandToAgent({ intent: x }) });
+}
+
+/* the dollars that are ready: one figure, one line, and the way to put them to earn where a venue takes them */
+function pfCashHtml(l, venueIn, owner) {
   const L = connected().filter((v) => venueIn(v.id));
-  const acts = `${L.some(canReceive) ? pfBtn("receive", "Receive", { cls: "btn btn-sm" }) : ""}${L.some(canMove) ? pfBtn("move", "Move", { cls: "btn btn-sm", off: !owner }) : ""}`;
-  const legend = [[c.canMove, "var(--alloc-crypto)", "Can move between your accounts"], [c.stays, "var(--alloc-cash)", "Stays at its venue"]];
-  return `<div class="sec-head"><div><div class="label">Cash ready</div><div class="num-m">${money(c.ready)}</div></div><div class="pf-btns">${acts}</div></div>${c.ready > 0 ? `<div class="bar" aria-hidden="true">${legend.filter(([n]) => n > 0).map(([n, col]) => `<span style="flex:${n};background:${col}"></span>`).join("")}</div><div class="legend-l">${legend.map(([n, col, t]) => `<div><span class="sw-k" style="background:${col}" aria-hidden="true"></span><span>${t}</span><span>${money(n)}</span></div>`).join("")}<div><span class="sw-k pf-sw-none" aria-hidden="true"></span><span>Of it, trades where it is</span><span>${money(c.trades)}</span></div></div><details class="more pf-where"><summary>Where it is</summary>${table([
-    { label: "Account", cell: (v) => `${esc(v.venueName)}<span class="why">${esc(v.lines.map((x) => `${x.asset}${x.note ? ` (${x.note})` : ""} ${money(x.usd)}`).join(" · "))}</span>` },
-    { label: "Ready", r: true, cell: (v) => money(v.usd) },
-    { label: "", sr: "Where it can go", cell: (v) => `<span class="dim small">${esc([v.tradesHere ? "trades here" : "", v.movesOut ? "moves out" : v.why || "stays"].filter(Boolean).join(" · "))}</span>` },
-  ], c.venues)}</details>` : `<p class="dim small">No cash or dollar stablecoins here.${L.some(canReceive) ? " Receive some to trade with." : ""}</p>`}`;
+  const earn = typeof openEarn === "function" && L.some((v) => v.earn && v.earn.can !== false) ? pfBtn("earn", "Earn…", { cls: "btn btn-sm", off: !owner, title: owner ? "" : PF_LOOK_ONLY }) : "";
+  const head = `<div class="sec-head"><div class="label">Cash ready</div>${earn}</div>`;
+  if (!PF.hold) return `${head}${PF.holdErr ? `<div class="msg no">${esc(PF.holdErr)}</div>` : '<span class="skel" aria-hidden="true"></span>'}`;
+  const c = pfCash(PF.hold.money, venueIn);
+  const line = !(c.ready > 0) ? `No cash or dollar stablecoins here.${L.some(canReceive) ? " Receive some to trade with." : ""}` : c.canMove > 0 ? `${money(c.canMove)} can move between your accounts.` : "None of it can move between your accounts from here.";
+  return `${head}<div class="num-m">${money(c.ready)}</div><p class="dim small pf-cash-l">${esc(line)}</p>`;
 }
 
 /* what the money is in */
@@ -357,31 +444,17 @@ function pfAllocHtml(rows) {
   return `<div class="label">Allocation</div><div class="bar" aria-hidden="true">${s.map((x) => `<span style="flex:${x.usd};background:${(CLASS[x.cls] || ["", "var(--dim)"])[1]}"></span>`).join("")}</div><div class="legend-l">${s.map((x) => `<div><span class="sw-k" style="background:${(CLASS[x.cls] || ["", "var(--dim)"])[1]}" aria-hidden="true"></span><span>${esc((CLASS[x.cls] || [x.cls])[0])}</span><span>${x.pct}% · ${money(x.usd)}</span></div>`).join("")}</div>`;
 }
 
-/* what the agents did */
-function pfActivityHtml(l) {
-  const venueIn = pfVenueIn(l);
-  const items = pfActivity({ agents: (PF.agents && PF.agents.agents) || [], lines: S, intents: A.intents || [], cards: A.cards }).filter((x) => (l.kind === "all" ? true : l.kind === "agent" ? String(x.agent).toLowerCase() === l.id.toLowerCase() : !!x.venue && venueIn(x.venue))).slice(0, 8);
-  const none = !A.keys.length ? "No agent is connected yet." : "Nothing from an agent yet.";
-  return `<div class="sec-head"><div class="label">Agent activity</div>${pfBtn("statement", "Statement", { cls: "link dim" })}</div>${items.length ? `<div class="feed">${items.map((x) => `<div><span class="mk pf-mk ${x.cls}" aria-hidden="true">${x.mark}</span><div><div class="t1"><span class="sr">${esc(x.word)}: </span>${esc(x.text)}</div><div class="t2">${esc(x.sub)}${x.at ? ` · ${esc(nyTime(x.at))}` : ""}</div></div></div>`).join("")}</div>` : `<p class="empty">${none}</p>`}`;
-}
-
 // ---- Assets · Positions · Accounts ------------------------------------------------------------------------------------------------
 
 function pfTableHtml(l, venueIn, rows, owner) {
-  const tools = PF.tab === "assets" ? pfCostWords(rows) : PF.tab === "accounts" ? `${A.connectLive ? pfBtn("connect", `${icon("plug", "sm")}Connect an account`, { cls: "btn btn-sm", off: !owner }) : ""}${pfBtn("csv", `${icon("download", "sm")}CSV`, { cls: "btn btn-sm btn-ghost" })}` : "";
+  const L = connected().filter((v) => venueIn(v.id));
+  const tools = PF.tab === "assets"
+    ? (typeof openSellMany === "function" && L.some(canTrade) ? pfBtn("sellmany", `${icon("sellmany", "sm")}Sell many…`, { cls: "btn btn-sm", off: !owner, title: owner ? "" : PF_LOOK_ONLY }) : "")
+    : PF.tab === "accounts"
+      ? `${A.connectLive ? pfBtn("connect", `${icon("plug", "sm")}Connect an account`, { cls: "btn btn-sm", off: !owner }) : ""}${typeof downloadBalances === "function" ? pfBtn("csv", `${icon("download", "sm")}CSV`, { cls: "btn btn-sm btn-ghost" }) : ""}`
+      : "";
   const body = PF.tab === "positions" ? pfPositionsHtml(l, venueIn, owner) : PF.tab === "accounts" ? pfAccountsHtml(venueIn, owner) : pfAssetsHtml(l, rows);
   return `<div class="sec-head pf-tabs">${pfSeg("tab", PF_TABS, PF.tab, "Show")}<span class="tools">${tools}</span></div>${body}`;
-}
-
-/* how much of what is held has a known cost */
-function pfCostWords(rows) {
-  if (!rows || !PF.hold || !PF.hold.cost) return "";
-  const held = rows.filter((r) => !pfDollarRow(r) && r.class !== "earn" && r.usd > 0);
-  if (!held.length) return "";
-  const cost = new Map(PF.hold.cost.map((c) => [c.key, c]));
-  const full = held.filter((r) => { const c = cost.get(r.key); return c && c.coveredQty >= c.ofQty * 0.999; }).length;
-  const part = held.filter((r) => { const c = cost.get(r.key); return c && c.coveredQty > 0 && c.coveredQty < c.ofQty * 0.999; }).length;
-  return `<span class="dim small" title="What the account paid is known from its own orders and from venues that report an entry price; coins that came in from elsewhere have a cost it never saw">Cost known for ${full} of ${held.length}${part ? ` · part of ${part} more` : ""}</span>`;
 }
 
 /* an asset's name: an event contract by its question (from the position that holds it), cash by its currency, money in an earn product by
@@ -394,8 +467,9 @@ function pfNameOf(r) {
   if (r.class === "earn") return `${r.asset} · earning`;
   return r.class === "cash" ? `Cash · ${r.asset}` : r.asset;
 }
-/* a price as it is read: an event contract in cents (its chance), a dollar to the cent, anything under a dollar to four figures */
-const pfPrice = (r) => (r.price === undefined ? "—" : r.class === "event" ? `${Number((r.price * 100).toFixed(1))}¢` : pfDollarRow(r) || r.price >= 1 ? money(r.price) : `$${px(Number(r.price.toPrecision(4)))}`);
+/* a price as it is read: an event contract in cents (its chance), a dollar to the cent, anything under a dollar to four figures (core
+   cents and usd: a dash for a price that is not a number) */
+const pfPrice = (r) => (r.class === "event" ? cents(r.price) : pfDollarRow(r) && Number.isFinite(Number(r.price)) && r.price !== undefined && r.price !== null ? money(r.price) : usd(r.price));
 /* the earn products an Earning row is in, venue by venue: the product the row's line names, else the one /earn lists at that venue for that
    asset (PF.earn) — each with what can be taken out of it */
 function pfEarnLines(r) {
@@ -416,20 +490,14 @@ const pfEarnOutAt = (venue) => { const v = connected().find((x) => x.id === venu
 
 function pfAssetsHtml(l, rows) {
   if (!rows) return PF.holdErr ? `<div class="msg no">${esc(PF.holdErr)}</div>` : '<div class="skel-rows" aria-hidden="true"><span class="skel"></span><span class="skel"></span><span class="skel" style="width:60%"></span></div>';
-  const cost = new Map(((PF.hold && PF.hold.cost) || []).map((c) => [c.key, c]));
   const chips = (r) => { const names = [...new Set(r.venues.map((x) => x.venueName))]; return names.length > 3 ? `${names.slice(0, 2).map(esc).join(" · ")} · +${names.length - 2}` : names.map(esc).join(" · "); };
-  const since = (r) => {
-    const c = cost.get(r.key);
-    if (pfDollarRow(r) || !c || !(c.coveredQty > 0) || c.unrealizedUsd === undefined) return `<span class="flat" title="${esc(c ? c.words : "")}">—</span>`;
-    return `${chg(c.unrealizedUsd, "$")}${c.coveredQty < c.ofQty * 0.999 ? `<span class="why">for ${esc(qtyOf(c.coveredQty))} of ${esc(qtyOf(c.ofQty))}</span>` : ""}`;
-  };
+  // the price has a column of its own where the card has the room; narrower, it sits on the line under the name (portfolio.css .pf-px-l)
   const t = table([
-    { label: "Asset", cell: (r) => `<div class="who">${avatar(r.class === "event" ? (r.asset.endsWith(":NO") ? "NO" : "YES") : r.asset)}<div>${r.class === "earn" ? `<b class="pf-name">${esc(pfNameOf(r))}</b><span class="dim">${esc(pfEarnWhere(r))}</span>${r.venues.some((x) => pfEarnOutAt(x.venue)) ? `<span class="pf-earn-act">${pfBtn("earn-row-out", "Withdraw…", { cls: "link", data: { key: r.key } })}</span>` : ""}` : `<button type="button" class="pf-name" data-pf-act="asset" data-key="${esc(r.key)}">${esc(pfNameOf(r))}</button><span class="dim">${chips(r)}</span>`}</div></div>` },
+    { label: "Asset", cell: (r) => `<div class="who">${avatar(r.class === "event" ? (r.asset.endsWith(":NO") ? "NO" : "YES") : r.asset)}<div>${r.class === "earn" ? `<b class="pf-name">${esc(pfNameOf(r))}</b><span class="dim">${esc(pfEarnWhere(r))}<span class="pf-px-l"> · ${pfPrice(r)}</span></span>${typeof openEarn === "function" && r.venues.some((x) => pfEarnOutAt(x.venue)) ? `<span class="pf-earn-act">${pfBtn("earn-row-out", "Withdraw…", { cls: "link", data: { key: r.key } })}</span>` : ""}` : `<button type="button" class="pf-name" data-pf-act="asset" data-key="${esc(r.key)}">${esc(pfNameOf(r))}</button><span class="dim">${chips(r)}<span class="pf-px-l"> · ${pfPrice(r)}</span></span>`}</div></div>` },
     { label: "Amount", r: true, cell: (r) => `${esc(qtyOf(r.amount))}${r.unpriced ? `<span class="why">${esc(qtyOf(r.unpriced))} unpriced</span>` : ""}` },
-    { label: "Price", r: true, cell: (r) => pfPrice(r) },
+    { label: "Price", r: true, cls: "pf-px", cell: (r) => pfPrice(r) },
     { label: "24h", r: true, cell: (r) => (pfDollarRow(r) ? '<span class="flat">—</span>' : `<span title="${esc(r.changeFrom ? `as ${r.changeFrom.venueName} reports it` : "no venue reported it")}">${chg(r.changePct24h)}</span>`) },
     { label: "Value", r: true, cell: (r) => `<b>${money(r.usd)}</b>` },
-    { label: l.kind === "all" ? "Since bought" : "Since bought · all", r: true, cell: since },
   ], rows, { empty: l.kind === "agent" ? "Its wallet holds nothing yet." : "Nothing held here yet.", rowAttr: (r) => (r.class === "earn" ? 'class="pf-earn-row"' : `class="click" data-pf-act="asset" data-key="${esc(r.key)}"`) });
   const miss = (PF.hold.missing || []).filter((m) => m.part !== "positions");
   return `${t}${miss.length ? `<p class="small dim pf-miss">Not read this time: ${miss.map((m) => `${esc(m.venueName)} (${esc(m.why)})`).join(" · ")}</p>` : ""}`;
@@ -440,67 +508,61 @@ function pfPositionsHtml(l, venueIn, owner) {
   if (PF.pos.error) return `<div class="msg no">${esc(PF.pos.error)}</div>`;
   const list = PF.pos.positions.filter((p) => p.qty > 0 && venueIn(p.venue));
   const closable = (p) => { const v = connected().find((x) => x.id === p.venue); return owner && !!v && canTrade(v) && !!v.trade.positions; };
+  // an event contract's prices are its chance, in cents; everything else in the market's quote
+  const at = (p, n) => (n === undefined || n === null ? "—" : esc(p.kind === "event" ? cents(n) : px(n)));
+  // a derivative is closed; a holding — contracts, shares, coins — is sold
+  const verb = (p) => (p.kind === "event" || p.kind === "spot" || p.kind === "stock" || p.kind === "crypto" || p.kind === "token" ? "Sell…" : "Close…");
   const t = table([
-    { label: "Position", cell: (p) => `<b>${esc(p.name)}</b><span class="why">${esc([p.venueName || nameOf(p.venue), `${p.side === "short" ? "short" : "long"} ${qtyOf(p.qty)}`, p.leverage ? `${p.leverage}x${p.marginMode ? ` ${p.marginMode}` : ""}` : ""].filter(Boolean).join(" · "))}</span>` },
+    { label: "Position", cell: (p) => `<b>${esc(p.name)}</b><span class="why">${esc([p.venueName || nameOf(p.venue), `${p.side === "short" ? "short" : "long"} ${qtyOf(p.qty)}${p.kind === "event" ? " contracts" : ""}`, p.leverage ? `${p.leverage}x${p.marginMode ? ` ${p.marginMode}` : ""}` : ""].filter(Boolean).join(" · "))}</span>` },
     { label: "Value", r: true, cell: (p) => (p.usd !== undefined ? money(p.usd) : "—") },
-    { label: "Entry · Mark", r: true, cell: (p) => `${p.entryPrice !== undefined ? esc(px(p.entryPrice)) : "—"} · ${p.markPrice !== undefined ? esc(px(p.markPrice)) : "—"}` },
+    { label: "Entry · Mark", r: true, cell: (p) => `${at(p, p.entryPrice)} · ${at(p, p.markPrice)}` },
     { label: "Liquidation", r: true, cell: (p) => (p.liquidationPrice ? esc(px(p.liquidationPrice)) : '<span class="flat">—</span>') },
     { label: "P&L", r: true, cell: (p) => chg(p.unrealizedUsd, "$") },
-    { cell: (p) => (closable(p) ? pfBtn("close", "Close…", { cls: "btn btn-sm", data: { venue: p.venue, symbol: p.symbol } }) : "") },
+    { cell: (p) => (closable(p) ? pfBtn("close", verb(p), { cls: "btn btn-sm", data: { venue: p.venue, symbol: p.symbol } }) : "") },
   ], list, { empty: l.kind === "agent" ? "An agent's wallet holds coins, not positions." : "Nothing held in positions." });
   const miss = PF.pos.missing.filter((m) => venueIn(m.venue));
-  return `${t}${miss.length ? `<ul class="pf-miss-l">${miss.map((m) => `<li><b>${esc(m.venueName)}</b> could not be read: ${esc(m.why)}</li>`).join("")}</ul>` : ""}${pfEarnHtml(venueIn, owner)}`;
+  return `${t}${miss.length ? `<ul class="pf-miss-l">${miss.map((m) => `<li><b>${esc(m.venueName)}</b> could not be read: ${esc(m.why)}</li>`).join("")}</ul>` : ""}`;
 }
 
-/* what is in the venues' earn products, with each one's way out (a signed liveEarn withdrawal) */
-function pfEarnHtml(venueIn, owner) {
-  if (!connected().some((v) => v.earn && venueIn(v.id))) return "";
-  const e = PF.earn;
-  if (!e) return '<div class="label pf-sub">Earning</div><span class="skel" aria-hidden="true"></span>';
-  if (e.error) return `<div class="label pf-sub">Earning</div><div class="msg no">${esc(e.error)}</div>`;
-  const list = e.positions.filter((p) => venueIn(p.venue));
-  const out = (p) => { const prod = e.products.find((x) => x.venue === p.venue && x.id === p.product); const v = connected().find((x) => x.id === p.venue); return owner && writesOn() && !!v && !!v.earn && v.earn.can !== false && (!prod || prod.canWithdraw); };
-  return `<div class="label pf-sub">Earning</div>${table([
-    { label: "Product", cell: (p) => `<b>${esc(p.name || p.product)}</b><span class="why">${esc([p.venueName, p.protocol, p.chain].filter(Boolean).join(" · "))}</span>` },
-    { label: "In it", r: true, cell: (p) => `${esc(qtyOf(p.amount))} ${esc(p.asset)}${p.pending ? `<span class="why">${esc(qtyOf(p.pending))} on its way</span>` : ""}` },
-    { label: "Value", r: true, cell: (p) => (p.usd !== undefined ? money(p.usd) : "—") },
-    { label: "Yield", r: true, cell: (p) => (p.apy !== undefined ? `${Number((p.apy * 100).toFixed(2))}%` : "—") },
-    { cell: (p) => (out(p) ? pfBtn("earn-out", "Withdraw…", { cls: "btn btn-sm", data: { venue: p.venue, product: p.product } }) : "") },
-  ], list, { empty: "Nothing in an earn product." })}${e.missing.filter((m) => venueIn(m.venue)).map((m) => `<p class="small dim">${esc(m.venueName)}: ${esc(m.why)}</p>`).join("")}`;
-}
-
-/* how an account is reached, in a few words */
+/* how an account is reached, in a few words (the drawer's) */
 function pfCaption(v) {
   if (v.address) return `${short(v.address)}${v.proven ? "" : " · watched"}`;
   if (/MCP server/.test(v.via || "")) return "Robinhood sign-in";
   const can = /credential can:? ([^·]+)/.exec(v.via || "");
   return `API key${can ? ` · ${can[1].trim()}` : ""}`;
 }
-/* an account's standing, as chips */
+/* an account's standing, as chips: its health first (✓ answers · ✗ not answering, the whole of it on hover), then what it can do from here */
 function pfChips(v) {
-  const h = (A.health || {})[v.id];
+  const h = pfHealth(v);
+  const word = h.bad ? "Not answering" : h.read ? "Answers" : "Not read yet";
   return [
-    v.stale ? `<span class="chip bad" title="${esc(v.stale)}">Read failed</span>` : "",
-    !v.stale && h && h.lastFailAt && (!h.lastOkAt || Date.parse(h.lastFailAt) > Date.parse(h.lastOkAt)) ? `<span class="chip bad" title="${esc(h.message || "")}">Not answering</span>` : "",
+    `<span class="chip pf-health${h.bad ? " bad" : ""}" title="${esc(h.text)}"><span aria-hidden="true">${h.bad ? "✗" : h.read ? "✓" : "·"}</span>${esc(word)}</span>`,
     canTrade(v) ? '<span class="chip warm">Trades</span>' : "",
     canMove(v) ? '<span class="chip warm">Moves money</span>' : "",
     canReceive(v) ? '<span class="chip">Receives</span>' : "",
     v.earn && v.earn.can !== false ? '<span class="chip">Earns</span>' : "",
     watched(v) ? '<span class="chip">Watched</span>' : "",
-    writesOn() && v.trade && v.trade.can === false ? '<span class="chip" title="This key cannot trade">Read-only key</span>' : "",
-    !canTrade(v) && !canMove(v) && !canReceive(v) && !watched(v) && !(v.trade && v.trade.can === false) ? '<span class="chip">Read-only</span>' : "",
+    // a venue nothing is placed at from here says so in its own words (the key's, the venue's, or its way in), the whole of them on hover
+    writesOn() && v.trade && v.trade.can === false ? `<span class="chip" title="${esc(v.noTradeBecause || "this key can't trade")}">${esc(pfClip(v.noTradeBecause || "Key can't trade"))}</span>` : "",
+    !canTrade(v) && !canMove(v) && !canReceive(v) && !watched(v) && !(v.trade && v.trade.can === false) ? `<span class="chip" title="${esc(readOnlyWords(v))}">${esc(pfClip(readOnlyWords(v)))}</span>` : "",
   ].filter(Boolean).join(" ");
 }
+/* a venue's sentence, short enough for a chip (all of it in the chip's title, and under Details) */
+const pfClip = (t, n = 44) => { const s = String(t || "").trim(); return s.length > n ? `${s.slice(0, n - 1).replace(/\s+\S*$/, "")}…` : s; };
+/* "Open to agents": a switch. Closing is free (POST /api/revoke: agents keep reads only), so any browser may; reopening widens what they
+   may do, so it is signed — a browser that only looks finds a closed switch disabled. The word beside the track says the state too */
+const pfSwitchHtml = (v, on, owner) => `<button type="button" role="switch" class="pf-switch" aria-checked="${String(on)}" data-pf-act="agents" data-venue="${esc(v.id)}" data-on="${String(on)}" data-fk="agents:${esc(v.id)}" aria-label="${esc(v.name)} open to agents"${on || owner ? "" : ' disabled title="Reopening is signed: only a browser that signs for the owner can"'}><span class="track" aria-hidden="true"></span><span>${on ? "Open" : "Closed"}</span></button>`;
 
 function pfAccountsHtml(venueIn, owner) {
   const L = connected().filter((v) => venueIn(v.id));
-  const ticket = typeof openTicket === "function";
-  const off = !owner;
+  const revoked = new Set((A.dial && A.dial.revoked) || []);
   return table([
-    { label: "Account", cell: (v) => `<div class="who">${avatar(v.name)}<div><b>${esc(v.name)}</b><span class="dim">${esc(pfCaption(v))}</span></div></div>` },
-    { label: "Value", r: true, cell: (v) => `${money(v.usd)}${v.asOf ? `<span class="why">as of ${esc(nyTime(v.asOf))}</span>` : ""}` },
+    { label: "Account", cell: (v) => `<div class="who">${avatar(v.name)}<div><b>${esc(v.name)}</b></div></div>` },
+    { label: "Value", r: true, cell: (v) => money(v.usd) },
     { label: "Status", cell: (v) => `<span class="pf-chips">${pfChips(v)}</span>` },
-    { cell: (v) => `<div class="acts pf-acts">${ticket && canTrade(v) ? pfBtn("acct-trade", "Trade…", { cls: "btn btn-sm", data: { venue: v.id }, off }) : ""}${canMove(v) ? pfBtn("acct-move", "Move…", { cls: "btn btn-sm", data: { venue: v.id }, off }) : ""}${pfBtn("acct-details", "Details", { cls: "btn btn-sm btn-ghost", data: { venue: v.id } })}${v.plugged ? pfBtn("acct-off", "Disconnect", { cls: "btn btn-sm btn-ghost", data: { venue: v.id }, off }) : ""}</div>` },
+    { label: "Open to agents", cell: (v) => pfSwitchHtml(v, !revoked.has(v.id), owner) },
+    // the rest of what an account can do from here — Trade…, Move…, Receive, a new key, Disconnect… — is in its drawer
+    { cell: (v) => `<div class="acts pf-acts">${pfBtn("acct-details", "Details", { cls: "btn btn-sm btn-ghost", data: { venue: v.id } })}</div>` },
   ], L, { empty: "No account here.", cls: "pf-acct-t" });
 }
 
@@ -527,27 +589,55 @@ function pfWire(el) {
     }
     pfAct(t.dataset.pfAct, t.dataset);
   });
-  // the curve under the pointer: the point nearest it, in figures
+  // the curve under the pointer: the point nearest it, in figures — the pointer's place kept as it moves, the line and the words written
+  // once a frame, the curve's box read once as the pointer comes onto it (and again when its size changes)
   el.addEventListener("mousemove", (e) => {
     const svg = e.target.closest && e.target.closest("svg[data-pf-curve]");
-    const c = PF.curve;
-    if (!svg || !c) return;
-    const box = svg.getBoundingClientRect();
-    const x = ((e.clientX - box.left) / (box.width || 1)) * c.w;
-    let i = 0;
-    for (let k = 1; k < c.pts.length; k++) if (Math.abs(c.pts[k][0] - x) < Math.abs(c.pts[i][0] - x)) i = k;
-    const p = c.points[i];
-    const cur = svg.querySelector(".pf-cursor");
-    if (cur) for (const a of ["x1", "x2"]) cur.setAttribute(a, String(c.pts[i][0]));
-    const out = el.querySelector("[data-pf-read]");
-    if (out) out.textContent = `${money(p.usd)} · ${nyDay(p.at)} ${nyTime(p.at)}${p.partial ? " · a venue's last good number" : ""}`;
+    if (!svg || !PF.curve) return;
+    if (!PF.hover || PF.hover.svg !== svg) pfHoverOn(svg);
+    PF.hover.x = e.clientX;
+    if (PF.hover.queued) return;
+    PF.hover.queued = true;
+    nextFrame(pfHoverDraw);
   });
-  el.addEventListener("mouseleave", () => {
-    const out = el.querySelector("[data-pf-read]");
-    if (out) out.textContent = "";
-    const cur = el.querySelector(".pf-cursor");
-    if (cur) for (const a of ["x1", "x2"]) cur.setAttribute(a, "-10");
-  }, true);
+}
+/* the pointer came onto the curve: its box, kept while it is there; leaving the curve itself (heard on the curve: a part inside it is not
+   it) clears the line and the words */
+function pfHoverOn(svg) {
+  const plot = svg.parentElement;
+  const box = svg.getBoundingClientRect();
+  PF.hover = { svg, left: box.left, width: box.width, x: 0, i: -1, queued: false, cur: plot && plot.querySelector(".pf-cursor"), out: plot && plot.querySelector("[data-pf-read]") };
+  if (svg.pfHeard) return;
+  svg.pfHeard = true;
+  svg.addEventListener("mouseleave", () => {
+    const h = PF.hover;
+    PF.hover = null;
+    if (!h) return;
+    if (h.out) h.out.textContent = "";
+    if (h.cur) h.cur.style.transform = "";
+  });
+  if (typeof ResizeObserver === "function") new ResizeObserver(() => {
+    if (PF.hover && PF.hover.svg === svg) {
+      const b = svg.getBoundingClientRect();
+      PF.hover.left = b.left;
+      PF.hover.width = b.width;
+    }
+  }).observe(svg);
+}
+function pfHoverDraw() {
+  const h = PF.hover;
+  const c = PF.curve;
+  if (!h) return;
+  h.queued = false;
+  if (!c || !h.svg.isConnected) return;
+  const x = ((h.x - h.left) / (h.width || 1)) * c.w;
+  let i = 0;
+  for (let k = 1; k < c.pts.length; k++) if (Math.abs(c.pts[k][0] - x) < Math.abs(c.pts[i][0] - x)) i = k;
+  if (i === h.i) return;
+  h.i = i;
+  const p = c.points[i];
+  if (h.cur) h.cur.style.transform = `translateX(${((c.pts[i][0] / c.w) * h.width).toFixed(1)}px)`;
+  if (h.out) setText(h.out, `${money(p.usd)} · ${nyDay(p.at)} ${nyTime(p.at)}${p.partial ? " · a venue's last good number" : ""}`);
 }
 
 async function pfAct(act, d) {
@@ -561,6 +651,8 @@ async function pfAct(act, d) {
     case "move": return void pfMove(pfVenueIn(l));
     case "receive": return void openReceive(l.kind === "venue" ? l.id : "");
     case "hand": return void (typeof openHandToAgent === "function" && openHandToAgent(l.kind === "agent" ? { agent: l.id } : l.kind === "venue" ? { venue: l.id } : {}));
+    case "earn": return void (typeof openEarn === "function" && openEarn(l.kind === "venue" ? { venue: l.id } : {}));
+    case "sellmany": return void (typeof openSellMany === "function" && openSellMany(l.kind === "venue" ? { venue: l.id } : {}));
     case "approve":
     case "reject": {
       const c = A.cards.find((x) => x.id === d.card);
@@ -572,14 +664,11 @@ async function pfAct(act, d) {
     case "decline": return void declineAsk((A.asks || []).find((a) => a.id === d.ask));
     case "asset": return void (typeof openAsset === "function" && openAsset(d.key));
     case "close": return void pfClose(d.venue, d.symbol);
-    case "earn-out": return void pfEarnOut(d.venue, d.product);
     case "earn-row-out": return void pfEarnRowOut(d.key);
-    case "acct-trade": return void pfTrade({ venue: d.venue });
-    case "acct-move": return void openLiveMove(d.venue);
+    case "agents": return void pfAgentsSwitch(d.venue, d.on === "true");
     case "acct-details": return void pfDetails(d.venue);
-    case "acct-off": return void pfDisconnect(d.venue);
-    case "csv": return void downloadBalances();
-    case "statement": return void openStatement();
+    case "csv": return void (typeof downloadBalances === "function" && downloadBalances());
+    case "statement": return void (typeof openStatement === "function" && openStatement());
     case "all":
       view.lens = "";
       return void render();
@@ -641,39 +730,66 @@ async function pfDisconnect(venue) {
   }
 }
 
-/* one account, in the drawer: what it holds, how it is reached, what it can do from here and why not */
+/** "Open to agents": closing is free (POST /api/revoke: agents keep reads only); reopening widens what they may do, so it is signed */
+async function pfAgentsSwitch(venueId, isOpen) {
+  const v = connected().find((x) => x.id === venueId);
+  if (!v || busy) return;
+  if (!isOpen) return void (owns() && (await own({ type: "setPolicy", change: "restore", value: venueId })));
+  const r = await postJson("/api/revoke", { account: venueId });
+  if (r.status >= 400 || (r.body && r.body.ok === false)) flash = Owner.why(r) || "Refused";
+  else said = `${v.name} is closed to agents: they keep reading it, and place or move nothing there. Reopening it is signed.`;
+  await load();
+}
+
+/** a venue whose key can't trade: disconnect it (signed), then its connect form for a key that can */
+async function pfRekey(venueId) {
+  const v = connected().find((x) => x.id === venueId);
+  const connector = v && typeof connectorOfVenue === "function" ? connectorOfVenue(v) : "";
+  if (!v || !connector || !owns()) return;
+  // the file this venue's key is read from, as the account signed it: a second account at an exchange has its own
+  const ref = v.keyFile || "";
+  const file = !ref ? "" : ref.startsWith("/") ? ref : `${String((A.connectLive && A.connectLive.home) || "").replace(/\/$/, "")}/${ref}`;
+  if (!(await confirmSheet(`${v.name}'s key can't trade. ${keyHowFor(v)} Save the new key in the same file${file ? `, ${file}` : ""}, then the account disconnects ${v.name} (nothing there moves) and opens its connect form.`, { title: "Connect a new key", yes: "Disconnect and continue" }))) return;
+  const r = await own({ type: "disconnectVenue", venue: venueId });
+  // connected again under its own name and from its own file, so it comes back as the same venue reading the same account
+  if (r && !refusedAt(r)) connectVia(connector, { name: v.name, label: v.name, ref });
+}
+
+/* one account, in the drawer: what it holds, how it is reached, what it can do from here and why not — and every action on it */
 function pfDetails(venue) {
   const draw = () => {
     const v = A.venues.find((x) => x.id === venue);
     if (!v) return '<p class="empty">This account is no longer connected.</p>';
     const owner = owns();
     const h = (A.health || {})[v.id];
+    const t = pfTrades(v);
     const can = v.liveCan && writesOn() && !watched(v) ? ["withdraw", "transfer", "swap"].filter((k) => v.liveCan[k] === true) : [];
     const notes = [
-      canTrade(v) ? `Trades ${v.trade.what}.` : "",
-      v.trade && v.trade.can === false && writesOn() ? `This key can't trade. ${keyHowFor(v)} Then connect it again.` : "",
+      t.text,
       can.length ? `Moves money: ${can.join(", ")}.` : "",
       keyOnlyReads(v) && !canTrade(v) ? "Read-only key: it can receive, not send." : "",
-      watched(v) ? "Watched address: nothing is traded or sent from it." : "",
       v.proven ? `Proven yours: ${v.proven}.` : "",
       v.earn ? `Earn: ${v.earn.what}${v.earn.can === false && v.earn.whyNot ? ` · ${v.earn.whyNot}` : ""}.` : "",
-      v.noTradeBecause && writesOn() ? v.noTradeBecause : "",
-      v.readOnlyBecause && writesOn() && !canTrade(v) ? v.readOnlyBecause : "",
+      v.noTradeBecause && writesOn() && !t.text.includes(v.noTradeBecause) ? v.noTradeBecause : "",
+      v.readOnlyBecause && writesOn() && !canTrade(v) && !t.text.includes(v.readOnlyBecause) ? v.readOnlyBecause : "",
       v.stale ? `Last read failed: ${v.stale}` : "",
       h && h.lastFailAt ? `Last failed ${nyDay(h.lastFailAt)} ${nyTime(h.lastFailAt)}: ${h.message || h.code || ""}` : "",
       h && h.lastOkAt ? `Last answered ${nyTime(h.lastOkAt)}${h.ms ? ` in ${h.ms} ms` : ""}.` : "",
     ].filter(Boolean);
     const ticket = typeof openTicket === "function";
-    return `<div class="pf-det"><div class="who">${avatar(v.name, "lg")}<div><b>${esc(v.name)}</b><span class="dim">${esc(pfCaption(v))}</span></div></div><div class="pf-det-v"><div class="label">Value</div><div class="num-m">${money(v.usd)}</div>${v.asOf ? `<span class="dim small">as of ${esc(nyDay(v.asOf))} ${esc(nyTime(v.asOf))}</span>` : ""}</div><div class="pf-chips">${pfChips(v)}</div><div class="as-acts">${ticket && canTrade(v) ? `<button type="button" class="btn btn-sm btn-primary" data-det="trade"${owner ? "" : " disabled"}>Trade…</button>` : ""}${canMove(v) ? `<button type="button" class="btn btn-sm" data-det="move"${owner ? "" : " disabled"}>Move…</button>` : ""}${canReceive(v) ? '<button type="button" class="btn btn-sm" data-det="receive">Receive</button>' : ""}<button type="button" class="btn btn-sm btn-ghost" data-det="lens">Show only this</button></div><section class="sec as-sec"><div class="label">Holds</div>${table([
+    const btn = (act, label, { primary = false, ghost = false, needsOwner = true } = {}) => `<button type="button" class="btn btn-sm${primary ? " btn-primary" : ghost ? " btn-ghost" : ""}" data-det="${act}" data-fk="det:${act}"${needsOwner && !owner ? " disabled" : ""}>${label}</button>`;
+    // an agent wallet is emptied with Take back… (under Agents), never disconnected: the account holds its key and its money
+    return `<div class="pf-det"><div class="who">${avatar(v.name, "lg")}<div><b>${esc(v.name)}</b><span class="dim">${esc(pfCaption(v))}</span></div></div><div class="pf-det-v"><div class="label">Value</div><div class="num-m">${money(v.usd)}</div>${v.asOf ? `<span class="dim small">as of ${esc(nyDay(v.asOf))} ${esc(nyTime(v.asOf))}</span>` : ""}</div><div class="pf-chips">${pfChips(v)}</div><div class="pf-det-acts">${ticket && canTrade(v) ? btn("trade", "Trade…", { primary: true }) : ""}${canMove(v) ? btn("move", "Move…") : ""}${canReceive(v) ? btn("receive", "Receive", { needsOwner: false }) : ""}${btn("lens", "Show only this", { ghost: true, needsOwner: false })}${t.rekey ? btn("rekey", "Connect a new key") : ""}</div><section class="sec pf-det-sec"><div class="label">Holds</div>${table([
       { label: "Asset", cell: (x) => `${esc(x.asset)}${x.note ? `<span class="why">${esc(x.note)}</span>` : ""}` },
       { label: "Amount", r: true, cell: (x) => esc(qtyOf(x.amount)) },
       { label: "Value", r: true, cell: (x) => (x.usd ? money(x.usd) : '<span class="dim">no price</span>') },
-    ], (v.holdings || []).filter((x) => x.amount), { empty: "Nothing held there." })}</section><section class="sec as-sec"><div class="label">From here</div><ul class="pf-notes">${notes.map((x) => `<li>${esc(x)}</li>`).join("") || "<li>Read only.</li>"}</ul>${v.via ? `<p class="small dim">${esc(v.via)}</p>` : ""}</section>${v.plugged ? `<div class="end"><button type="button" class="btn btn-sm btn-danger" data-det="off"${owner ? "" : " disabled"}>Disconnect…</button></div>` : ""}</div>`;
+    ], (v.holdings || []).filter((x) => x.amount), { empty: "Nothing held there." })}</section><section class="sec pf-det-sec"><div class="label">From here</div><ul class="pf-notes">${notes.map((x) => `<li>${esc(x)}</li>`).join("") || `<li>${esc(readOnlyWords(v))}</li>`}</ul>${v.via ? `<p class="small dim">${esc(v.via)}</p>` : ""}</section>${v.plugged && !isAgentWallet(v) ? `<div class="end"><button type="button" class="btn btn-sm btn-danger" data-det="off" data-fk="det:off"${owner ? "" : " disabled"}>Disconnect…</button></div>` : isAgentWallet(v) ? '<p class="dim small">An agent wallet is not disconnected: the account holds its key. Empty it with Take back…, under Agents.</p>' : ""}</div>`;
   };
   const v = A.venues.find((x) => x.id === venue);
   if (!v) return;
-  let drawn = draw();
-  const body = openDrawer(drawn, { title: v.name, redraw: () => { const html = draw(); if (html !== drawn) [body.innerHTML, drawn] = [html, html]; } });
+  // drawn again after each read in place, and not while the drawer is still sliding in
+  const again = () => paint(body, draw());
+  const body = openDrawer(draw(), { title: v.name, redraw: () => drawerLater(again) });
   body.addEventListener("click", (e) => {
     const b = e.target.closest && e.target.closest("button[data-det]");
     if (!b || b.disabled) return;
@@ -683,11 +799,34 @@ function pfDetails(venue) {
     if (act === "trade") pfTrade({ venue });
     else if (act === "move") openLiveMove(venue);
     else if (act === "receive") openReceive(venue);
+    else if (act === "rekey") pfRekey(venue);
     else if (act === "lens") {
       view.lens = `venue:${venue}`;
       render();
     }
   });
+}
+
+// ---- a card named from elsewhere ----------------------------------------------------------------------------------------------------
+
+/* "Review" on an agent's card elsewhere (Under way, the market drawer) sends here: #/portfolio?card=<id>. The pane shows that card the next
+   time it draws; an id that names no card here does nothing */
+onRoute((tab, params) => { PF.hiWant = tab === "portfolio" ? String((params && params.card) || "") : ""; });
+/* the card named: brought into view and ringed for a moment (outline colour only; no motion under prefers-reduced-motion) */
+function pfShowCard(el, id) {
+  if (!id || !el || !el.querySelector) return false;
+  const safe = typeof CSS !== "undefined" && CSS.escape ? CSS.escape(id) : String(id).replace(/["\\]/g, "\\$&");
+  const node = el.querySelector(`[data-pf-card="${safe}"]`);
+  if (!node) return false;
+  const still = typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (node.scrollIntoView) node.scrollIntoView({ block: "center", behavior: still ? "auto" : "smooth" });
+  node.classList.add("pf-hi");
+  const on = () => node.classList.add("on");
+  if (typeof requestAnimationFrame === "function") requestAnimationFrame(on);
+  else on();
+  setTimeout(() => node.classList.remove("on"), 1600);
+  setTimeout(() => node.classList.remove("pf-hi"), 1900);
+  return true;
 }
 
 // ---- granting what an agent asked -----------------------------------------------------------------------------------------------------
@@ -714,16 +853,19 @@ async function pfGrant(a) {
     if (v !== null && Number(v) !== now) await own({ type: "setPolicy", change: "maxLeverage", value: String(v) });
     return;
   }
-  if (a.kind === "mode" && (await confirmSheet(`Switch to Aggressive: agents' orders inside their limits go at once, without a card. ${a.agentName} said: “${a.text || "Aggressive mode"}”`, { title: "Aggressive mode", yes: "Switch" }))) await setMode("open");
+  if (a.kind === "mode" && (await confirmSheet(`Switch to Beast: agents' orders inside their limits go at once, without a card. ${a.agentName} said: “${a.text || "Beast mode"}”`, { title: "Beast mode", yes: "Switch" }))) await setMode("open");
 }
 
-/* a venue an agent asked for: its own connection form, or every way of connecting when the page has no form for it by name */
+/* a venue an agent asked for: the connection it is reached through, as the board offered it (its one short form, straight away); else
+   its own connection form by kind, an exchange's by id, or every way of connecting when the page has no form for it by name */
 function pfConnectVenue(venue) {
   if (typeof openConnect !== "function" || typeof optionOf !== "function") return;
   const opts = (A.connectLive && A.connectLive.options) || [];
   const byKind = optionOf(venue);
-  if (byKind) return void openConnect(byKind, { name: byKind.label.split(" · ")[0] });
   const ex = opts.find((o) => o.kind === "exchange" && (o.venues || []).includes(venue));
+  const connector = byKind && byKind.connector ? byKind.connector : ex ? `live:exchange:${venue}` : "";
+  if (connector && typeof connectVia === "function" && connectVia(connector, { name: byKind ? byKind.label.split(" · ")[0] : "" })) return;
+  if (byKind) return void openConnect(byKind, { name: byKind.label.split(" · ")[0] });
   if (ex) return void openConnect(ex, { exchange: venue });
   const any = opts.find((o) => (o.venues || []).includes(venue));
   if (any) return void openConnect(any, {});
@@ -755,7 +897,7 @@ function pfLimitForm({ agent = "", venue = "", usd = "", ask = null } = {}) {
   }).join("");
   const q = quoteDialog({
     title: "Give a limit",
-    sub: ask ? `${esc(ask.agentName)} asked: “${esc(ask.text || "a bigger limit")}”${ask.usd ? ` · ${esc(money(Number(ask.usd)))}` : ""}. A limit is the most it may do on its own; in Conservative each order still waits for you.` : "The most an agent may do on its own. In Conservative each order still waits for you; in Aggressive it goes at once inside this limit.",
+    sub: ask ? `${esc(ask.agentName)} asked: “${esc(ask.text || "a bigger limit")}”${ask.usd ? ` · ${esc(money(Number(ask.usd)))}` : ""}. A limit is the most it may do on its own; in Guard each order still waits for you.` : "The most an agent may do on its own. In Guard each order still waits for you; in Beast it goes at once inside this limit.",
     fields: `<div class="row2">${field("Agent", select("agent", keys.map((k) => [k.address, k.name]), who.address))}${field("For", select("scope", scopes.map(([sc, t]) => [sc, t]), scopes[0][0]))}</div>${boxes}<div class="row2">${field("Each one up to ($)", `<input name="per" inputmode="decimal" autocomplete="off" value="${esc(String(per))}" />`)}${field("In all ($)", `<input name="budget" inputmode="decimal" autocomplete="off" value="${esc(String(budget))}" />`)}</div>${field("Until", select("days", [["1", "1 day"], ["7", "7 days"], ["30", "30 days"], ["90", "90 days"], ["180", "180 days"]], "30"))}`,
     go: "Sign the limit",
     draft(form) {
@@ -774,7 +916,7 @@ function pfLimitForm({ agent = "", venue = "", usd = "", ask = null } = {}) {
       const name = keyName(a.agent);
       const before = had(a.agent, a.scope);
       const what = { trade: "trade at", venues: "move money between", earn: "put money to earn at" }[a.scope] || a.scope;
-      return `<div class="big"><span>${esc(name)} may ${esc(what)} ${esc(a.allow.split(",").map(nameOf).join(", "))}</span></div><div class="path">Up to <b>${esc(money(Number(a.perPayment)))}</b> each, <b>${esc(money(Number(a.budget)))}</b> in all, until ${esc(nyDay(new Date(a.validUntil).toISOString()))}.${cap ? ` No single order goes over ${esc(money(cap))} on this server.` : ""}</div>${before ? `<div class="path">It replaces the limit it has now: ${esc(money(before.perPaymentUsd))} each, ${esc(money(before.spentUsd))} of ${esc(money(before.budgetUsd))} used.</div>` : ""}`;
+      return `<div class="big"><span>${esc(name)} may ${esc(what)} ${esc(a.allow.split(",").map(nameOf).join(", "))}</span></div><div class="path">Up to <b>${esc(money(Number(a.perPayment)))}</b> each, <b>${esc(money(Number(a.budget)))}</b> in all, until ${esc(nyDay(a.validUntil))}.${cap ? ` No single order goes over ${esc(money(cap))} on this server.` : ""}</div>${before ? `<div class="path">It replaces the limit it has now: ${esc(money(before.perPaymentUsd))} each, ${esc(money(before.spentUsd))} of ${esc(money(before.budgetUsd))} used. What it has used starts again at $0.00 under the new limit.</div>` : ""}`;
     },
     done: (r, p) => `Limit signed for ${keyName(p.action.agent)}.`,
   });
@@ -824,14 +966,10 @@ function pfWalletForm(a) {
   });
 }
 
-/* money out of an earn product listed under Positions › Earning */
-function pfEarnOut(venue, product) {
-  const e = PF.earn;
-  const p = e && e.positions.find((x) => x.venue === venue && x.product === product);
-  if (p) pfEarnWithdraw(p);
-}
-/* money out of an Earning row under Assets: the product it is in (the one picked, when it is in more than one) */
+/* money out of an Earning row under Assets: the Earn sheet (ui/earn.js) on Take out, the product the row is in picked first — the one the
+   row names, the one /earn lists at that venue for that asset, or the one the owner picks when the money is in more than one */
 async function pfEarnRowOut(key) {
+  if (typeof openEarn !== "function") return;
   const r = ((PF.hold && PF.hold.rows) || []).find((x) => x.key === key && x.class === "earn");
   if (!r) return;
   // which product the money is in comes from /earn when the row does not name it
@@ -842,33 +980,5 @@ async function pfEarnRowOut(key) {
   const lines = pfEarnLines(r).filter((x) => pfEarnOutAt(x.venue));
   if (!lines.length) return void toast(PF.earn && PF.earn.error ? PF.earn.error : `No earn product with ${r.asset} in it answers from here.`, "no");
   const i = lines.length === 1 ? 0 : await pickSheet(`Withdraw ${r.asset} from`, lines.map((x, n) => [n, `${x.name} · ${x.venueName}`, `${qtyOf(x.amount)} ${x.asset}`]));
-  if (i !== null && lines[i]) pfEarnWithdraw(lines[i]);
-}
-/* money out of an earn product, back where it came from: the owner's liveEarn withdrawal, quoted by the venue. `p` { venue, venueName,
-   product, name, asset, amount } */
-function pfEarnWithdraw(p) {
-  const product = p.product;
-  const venue = p.venue;
-  const prod = PF.earn && !PF.earn.error ? (PF.earn.products || []).find((x) => x.venue === venue && x.id === product) : null;
-  quoteDialog({
-    title: "Withdraw from earn",
-    sub: `${esc(p.name || product)} at ${esc(p.venueName || nameOf(venue))}: ${esc(qtyOf(p.amount))} ${esc(p.asset)} in it.`,
-    fields: field(`Amount (${esc((prod && prod.asset) || p.asset)})`, `<input name="amount" inputmode="decimal" autocomplete="off" value="${esc(String(p.amount))}" />`),
-    go: "Sign and withdraw",
-    draft(form) {
-      const amount = String(new FormData(form).get("amount") || "").trim();
-      if (!(Number(amount) > 0)) return "How much to take out.";
-      return { type: "liveEarn", venue, kind: "withdraw", product, asset: (prod && prod.asset) || p.asset, amount };
-    },
-    show(pr) {
-      const q = (pr.quote && pr.quote.earn) || {};
-      return `<div class="big"><span>${esc(q.words || `withdraw ${pr.action.amount} ${pr.action.asset}`)}</span><span>${q.usd !== undefined ? esc(money(q.usd)) : ""}</span></div><div class="path">Lands in <b>${esc(q.lands || pr.action.lands || "")}</b>${q.lockDays ? ` after ${esc(plural(q.lockDays, "day"))}` : ""}.${q.note ? ` ${esc(q.note)}` : ""}</div>`;
-    },
-    // what is held, and what is in the products, are read again rather than kept
-    done: () => {
-      forget("/api/account/holdings");
-      forget("/api/account/earn");
-      return "";
-    },
-  });
+  if (i !== null && lines[i]) openEarn({ venue: lines[i].venue, side: "withdraw", product: lines[i].product });
 }

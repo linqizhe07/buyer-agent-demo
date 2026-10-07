@@ -3,7 +3,11 @@
  * Markets are the library's own list (loadMarkets), kept for five minutes: spot markets quoted in dollars or a dollar stablecoin, and LINEAR
  * perpetuals and futures quoted and settled in one. Inverse contracts, options and anything priced in another coin are not offered. A
  * market is named as the library names it: `BTC/USDT` spot, `BTC/USDT:USDT` the perpetual, `BTC/USDT:USDT-251226` a future. A contract
- * market is sized in contracts, and `contractSize` says how much of the coin one contract is.
+ * market is sized in contracts, and `contractSize` says how much of the coin one contract is. A perpetual the exchange's own record flags
+ * as a PRE-IPO contract (live/preipo.ts: OKX's ruleType, Gate's is_pre_market, KuCoin's marketStage, MEXC's conceptPlate, Deribit's
+ * underlying_type, Kraken Futures' category, each kept in the library market's `info`) carries the category "Pre-IPO", its company, the
+ * valuation its price implies in the exchange's unit and the issuer's words; the start-from list (query empty) carries such perpetuals
+ * after the well-known markets, so Markets groups them with the public venues'.
  *
  * An order is one createOrder, then one look at what became of it (fetchOrder, or what the exchange has instead), because most exchanges
  * answer an order with little more than its id. Every later look is the same call.
@@ -39,9 +43,11 @@
  *     whose positions are not listed here. The account closes a position with a reduce-only order, which goes inside a worst price.
  *
  * Reading the market (nothing signed, nothing placed), with nothing kept beyond the market list — the account's service keeps the answers:
- *   · a market's last 24 hours — its change, the dollars traded, its high and low — as the exchange's own ticker says them, and only at the
- *     five exchanges above, each ticker read against the exchange's docs (dayOf); many markets' at once (stats), one fetchTickers per kind
- *     of market, Binance never for its whole list;
+ *   · a market's last 24 hours — its change, the dollars traded, its high and low — as the exchange's own ticker says them, at the five
+ *     exchanges above and at KuCoin, each ticker read against the exchange's docs (dayOf); at any other exchange the library's unified
+ *     reading of its ticker (percentage, change, quoteVolume, high, low), marked as the library's word (`statsFrom`), since neither its
+ *     24-hour window nor its volume has been checked here; many markets' at once (stats), one fetchTickers per kind of market, Binance
+ *     never for its whole list;
  *   · a perpetual's funding rate and when it is next paid (fetchFundingRate; Bybit's ticker carries it already), at OKX, Binance and Bybit;
  *     a dated future's expiry as when it stops trading;
  *   · price history (fetchOHLCV), at most 300 bars of 5 minutes, an hour or a day.
@@ -50,8 +56,9 @@ import { isRefusal, type Refusal } from "../../core/errors.ts";
 import { no } from "../refuse.ts";
 import type { KeyFile } from "./credentials.ts";
 import { exchangeSaidNo, isBinance, isBybit, isOkx, type ExchangeClient } from "./exchange.ts";
+import { impliedUsd, PRE_IPO_CATEGORY, preIpoOf } from "./preipo.ts";
 import { badOrder, ceilTo, floorTo, inDollars, notionalOf, onStep, pick, plain, CANDLE_INTERVALS, DONE, type Candle, type CandleInterval, type LiveTrader, type Market, type MarketStats, type OrderChange, type OrderRequest, type OrderState, type OrderStatus, type OrderType, type Position, type TimeInForce } from "./trade.ts";
-import { num, redact, type LiveProbe } from "./types.ts";
+import { num, redact, type LiveProbe, type MarginMode, type MarketExtras } from "./types.ts";
 
 type Dict = Record<string, unknown>;
 type Kind = "spot" | "perp" | "future";
@@ -73,6 +80,12 @@ interface Library extends ExchangeClient {
 /** the exchanges whose stops, flags, order changes, positions and leverage the trader has checked (see the head of this file) */
 type Family = "okx" | "binance" | "bybit" | "coinbase" | "kraken";
 const familyOf = (id: string): Family | undefined => (isOkx(id) ? "okx" : isBinance(id) ? "binance" : isBybit(id) ? "bybit" : id === "coinbase" ? "coinbase" : id === "kraken" ? "kraken" : undefined);
+/** the exchanges whose 24-hour ticker the trader has read against their docs: the five above, and KuCoin's spot API — GET /api/v1/market/stats
+ * and /allTickers: "statistics of the specified ticker in the last 24 hours", changeRate and changePrice over the last 24 hours, high and low,
+ * vol in the coin and volValue in the quote (KuCoin's docs, read 2026-10-06), which the library reads as percentage, change, high, low,
+ * baseVolume and quoteVolume. Its futures API (kucoinfutures) is another host and another ticker, not read here */
+type DayFamily = Family | "kucoin";
+const dayFamilyOf = (id: string): DayFamily | undefined => familyOf(id) ?? (id === "kucoin" ? "kucoin" : undefined);
 
 /** an order in an exchange's book of trigger orders, apart from its order book (OKX's algo orders, Binance's futures algo service) */
 const TRIGGER = "trigger:";
@@ -164,6 +177,7 @@ export function exchangeTrader(client: ExchangeClient, venue: string, name: stri
   const id = client.id;
   const lib = client as Library;
   const fam = familyOf(id);
+  const dayFam = dayFamilyOf(id);
   const mode = typeof client.precisionMode === "number" ? client.precisionMode : TICK_SIZE;
   let loadedAt = 0;
   let all = new Map<string, Dict>();
@@ -180,6 +194,25 @@ export function exchangeTrader(client: ExchangeClient, venue: string, name: stri
   const dollars = (r: Dict, kind: Kind) => inDollars(String(r.quote ?? "")) && (kind === "spot" || inDollars(String(r.settle ?? "")));
   const contractsHere = client.has?.swap === true || client.has?.future === true;
   const offersContracts = () => (loadedAt ? list.some((m) => m.kind !== "spot") : contractsHere);
+  /** a perpetual's leverage is set from the account here (setLeverage below is attached on the same terms) */
+  const leverageHere = (fam === "okx" || fam === "binance" || fam === "bybit") && contractsHere && client.has?.setLeverage === true && typeof lib.setLeverage === "function";
+  /** the margin modes a contract's leverage is set with here, where that is known before asking the exchange: Binance sets the margin type per
+   * symbol, either; the account's OKX orders go in cross margin, so cross. Bybit's depends on the account — per symbol on a classic one, the
+   * whole account's on a unified one — which market() asks (bybitModes) */
+  const marginModesOf = (kind: Kind): MarginMode[] | undefined => (!leverageHere || kind === "spot" ? undefined : fam === "okx" ? ["cross"] : fam === "binance" ? ["cross", "isolated"] : undefined);
+  let bybitUnified: boolean | undefined;
+  const bybitModes = async (kind: Kind): Promise<MarginMode[] | undefined> => {
+    if (!leverageHere || fam !== "bybit" || kind === "spot") return undefined;
+    if (bybitUnified === undefined) {
+      try {
+        const u = client.isUnifiedEnabled ? await client.isUnifiedEnabled() : undefined;
+        bybitUnified = Array.isArray(u) ? u[0] === true || u[1] === true : undefined;
+      } catch {
+        bybitUnified = undefined;
+      }
+    }
+    return bybitUnified === undefined ? undefined : bybitUnified ? [] : ["cross", "isolated"];
+  };
   const allowed = (kind: Kind) => mayTrade(id, probe.can, kind === "spot" ? "spot" : "contract");
   const feature = (kind: Kind): Dict => {
     const f = obj(client.features);
@@ -324,7 +357,7 @@ export function exchangeTrader(client: ExchangeClient, venue: string, name: stri
     return { types, tifs, tifsByType, postOnly, reduceOnly, sellsReduce, maxLeverage };
   };
 
-  function toMarket(r: Dict, kind: Kind): Market {
+  function toMarket(r: Dict, kind: Kind): Market & MarketExtras {
     const symbol = String(r.symbol);
     const base = String(r.base ?? "");
     const quote = String(r.quote ?? "");
@@ -345,6 +378,9 @@ export function exchangeTrader(client: ExchangeClient, venue: string, name: stri
     const more = options(r, kind, t);
     const counting = mode === SIGNIFICANT_DIGITS ? `${name} counts prices here in ${num(precision.price)} significant digits` : undefined;
     const note = [t.note, counting].filter(Boolean).join(" · ");
+    const marginModes = marginModesOf(kind);
+    // a pre-IPO perpetual, by the exchange's own flag in its record (live/preipo.ts): its company, the unit its price is in, the issuer's words
+    const pre = kind === "perp" ? preIpoOf(id, obj(r.info), base, str(r.id) ?? symbol) : undefined;
     return {
       symbol,
       name: label,
@@ -366,6 +402,8 @@ export function exchangeTrader(client: ExchangeClient, venue: string, name: stri
       ...(more.reduceOnly ? { reduceOnly: true } : {}),
       ...(more.sellsReduce ? { sellsReduce: true } : {}),
       ...(more.maxLeverage !== undefined ? { maxLeverage: more.maxLeverage } : {}),
+      ...(marginModes ? { marginModes } : {}),
+      ...(pre ? { category: pre.category, group: pre.group, implied: pre.implied, ...(pre.issuer ? { issuer: pre.issuer, eligibility: pre.eligibility } : {}) } : {}),
     };
   }
 
@@ -958,23 +996,38 @@ export function exchangeTrader(client: ExchangeClient, venue: string, name: stri
     return { ...(price !== undefined ? { price } : {}), ...(bid !== undefined ? { bid } : {}), ...(ask !== undefined ? { ask } : {}) };
   };
 
-  /** What a ticker says of the last 24 hours, at the five exchanges whose tickers the trader has read against their docs and the library's
+  /** What a ticker says of the last 24 hours, at the exchanges whose tickers the trader has read against their docs and the library's
    * parsers: OKX (open24h, high24h, low24h, and volCcy24h — in the quote in spot; a contract's is in the coin, and the library leaves it out),
    * Binance (priceChange, priceChangePercent, quoteVolume, highPrice, lowPrice: a rolling 24 hours, spot and futures), Bybit (price24hPcnt,
    * prevPrice24h, turnover24h, highPrice24h, lowPrice24h), Coinbase (its list of products' price_percentage_change_24h and
-   * approximate_quote_24h_volume: one product's own ticker has neither) and Kraken (the last 24 hours of its volume, its VWAP, its high and
-   * its low — and no change: its `o` is today's opening price, at midnight UTC, not the price 24 hours ago). The library works out a change
-   * or a percentage from the exchange's own 24-hour open, or its percentage, and its last price, where the exchange gives those instead.
-   * Elsewhere nothing is said of the 24 hours: an exchange's "open" may be the day's, and its volume may be counted in contracts */
-  const dayOf = (t: Dict, quote: string): Omit<MarketStats, "price"> => {
-    if (fam === undefined) return {};
-    const changes = fam !== "kraken";
+   * approximate_quote_24h_volume: one product's own ticker has neither), Kraken (the last 24 hours of its volume, its VWAP, its high and
+   * its low — and no change: its `o` is today's opening price, at midnight UTC, not the price 24 hours ago) and KuCoin (changeRate,
+   * changePrice, high, low and volValue, each of the last 24 hours). The library works out a change or a percentage from the exchange's own
+   * 24-hour open, or its percentage, and its last price, where the exchange gives those instead.
+   * Elsewhere the library's unified reading is given — its percentage, change, quoteVolume (or baseVolume at the last price), high and low —
+   * marked as the library's word (`statsFrom`): whether that exchange's "open" is 24 hours ago or the day's, and whether its volume is in
+   * the quote or in contracts, has not been checked here */
+  const dayOf = (t: Dict, quote: string): Omit<MarketStats, "price"> & Pick<MarketExtras, "statsFrom"> => {
+    const changes = dayFam !== "kraken";
     const pct = changes ? finite(t.percentage) : undefined;
     const change = changes ? finite(t.change) : undefined;
-    const volume = inDollars(quote) ? finite(t.quoteVolume) : undefined;
+    let volume = inDollars(quote) ? finite(t.quoteVolume) : undefined;
+    if (dayFam === undefined && volume === undefined && inDollars(quote)) {
+      const base = finite(t.baseVolume);
+      const last = pos(t.last) ?? pos(t.close);
+      if (base !== undefined && last !== undefined) volume = base * last;
+    }
     const high = pos(t.high);
     const low = pos(t.low);
-    return { ...(pct !== undefined ? { changePct24h: pct } : {}), ...(change !== undefined ? { change24h: change } : {}), ...(volume !== undefined && volume >= 0 ? { volumeUsd24h: volume } : {}), ...(high !== undefined ? { high24h: high } : {}), ...(low !== undefined ? { low24h: low } : {}) };
+    const read = pct !== undefined || change !== undefined || volume !== undefined || high !== undefined || low !== undefined;
+    return {
+      ...(pct !== undefined ? { changePct24h: pct } : {}),
+      ...(change !== undefined ? { change24h: change } : {}),
+      ...(volume !== undefined && volume >= 0 ? { volumeUsd24h: volume } : {}),
+      ...(high !== undefined ? { high24h: high } : {}),
+      ...(low !== undefined ? { low24h: low } : {}),
+      ...(dayFam === undefined && read ? { statsFrom: `the exchange library's unified reading of ${name}'s ticker: its 24-hour window and its volume are the library's word, not checked against ${name}'s docs` } : {}),
+    };
   };
 
   /** A perpetual's funding rate for the period being paid next, and when it is paid: OKX GET /api/v5/public/funding-rate (fundingRate,
@@ -1013,7 +1066,7 @@ export function exchangeTrader(client: ExchangeClient, venue: string, name: stri
     if (asked && asked.length > STATS_MAX) return no("E_VENUE_REJECTED", { venue, message: `${name}: at most ${STATS_MAX} markets are read at once, not ${asked.length}`, detail: { max: STATS_MAX } });
     const offered = new Map(list.map((m) => [m.symbol.toUpperCase(), m]));
     const wanted = asked ? asked.map((s) => offered.get(s)).filter((m): m is Market => m !== undefined) : list.filter((m) => WELL_KNOWN.includes(m.base) && m.kind !== "future").slice(0, STATS_MAX);
-    const out = new Map<string, MarketStats>();
+    const out = new Map<string, MarketStats & Pick<MarketExtras, "statsFrom">>();
     let refused: Refusal | undefined;
     for (const kind of ["spot", "perp", "future"] as const) {
       let group = wanted.filter((m) => m.kind === kind);
@@ -1097,7 +1150,11 @@ export function exchangeTrader(client: ExchangeClient, venue: string, name: stri
       const failed = await load();
       if (failed) return failed;
       // a kind of market this key may not trade, by what the exchange said, is not offered
-      return pick(list.filter((m) => allowed(m.kind as Kind) !== false), query);
+      const offered = list.filter((m) => allowed(m.kind as Kind) !== false);
+      const few = pick(offered, query);
+      if (query.trim()) return few;
+      // the exchange's pre-IPO perpetuals too, after the well-known few, so that Markets groups them with the public venues' (live/preipo.ts)
+      return [...few, ...offered.filter((m) => m.category === PRE_IPO_CATEGORY && !few.includes(m))];
     },
 
     async market(symbol) {
@@ -1111,10 +1168,16 @@ export function exchangeTrader(client: ExchangeClient, venue: string, name: stri
       } catch (err) {
         return fail(err);
       }
-      // the same ticker's last 24 hours, where the trader has read it (a Market carries no high or low); a perpetual's funding
-      const { changePct24h, change24h, volumeUsd24h } = dayOf(t, f.m.quote);
+      // the same ticker's last 24 hours, as read above (a Market carries no high or low); a perpetual's funding, and at Bybit the margin
+      // modes its leverage is set with, which depend on the account
+      const { changePct24h, change24h, volumeUsd24h, statsFrom } = dayOf(t, f.m.quote);
       const funding = f.kind === "perp" ? await fundingOf(f.m.symbol, t) : {};
-      return { ...f.m, ...priceOf(t), ...(changePct24h !== undefined ? { changePct24h } : {}), ...(change24h !== undefined ? { change24h } : {}), ...(volumeUsd24h !== undefined ? { volumeUsd24h } : {}), ...funding };
+      const marginModes = await bybitModes(f.kind);
+      const fresh = priceOf(t);
+      // a pre-IPO perpetual: the valuation the fresh price implies, in the exchange's unit
+      const implied = f.m.implied && fresh.price !== undefined ? { implied: { ...f.m.implied, usd: impliedUsd(fresh.price, f.m.implied.perPoint) } } : {};
+      const m: Market & MarketExtras = { ...f.m, ...fresh, ...(changePct24h !== undefined ? { changePct24h } : {}), ...(change24h !== undefined ? { change24h } : {}), ...(volumeUsd24h !== undefined ? { volumeUsd24h } : {}), ...(statsFrom ? { statsFrom } : {}), ...funding, ...(marginModes ? { marginModes } : {}), ...implied };
+      return m;
     },
 
     async place(o: OrderRequest) {
@@ -1247,10 +1310,8 @@ export function exchangeTrader(client: ExchangeClient, venue: string, name: stri
   // has the call there; no close of its own (see the head of this file). Binance changes only a futures order in place: where it has no
   // futures (Binance.US) it changes none
   if (fam !== undefined && !(fam === "binance" && !contractsHere) && client.has?.editOrder === true && typeof lib.editOrder === "function") trader.amend = amend;
-  if ((fam === "okx" || fam === "binance" || fam === "bybit") && contractsHere) {
-    if (client.has?.fetchPositions === true && typeof lib.fetchPositions === "function") trader.positions = positions;
-    if (client.has?.setLeverage === true && typeof lib.setLeverage === "function") trader.setLeverage = setLeverage;
-  }
+  if ((fam === "okx" || fam === "binance" || fam === "bybit") && contractsHere && client.has?.fetchPositions === true && typeof lib.fetchPositions === "function") trader.positions = positions;
+  if (leverageHere) trader.setLeverage = setLeverage;
   // reading the market: many tickers where the library reads them (one at a time where it reads only one), price history where it has it
   if (able("fetchTickers") || typeof client.fetchTicker === "function") trader.stats = stats;
   if (able("fetchOHLCV")) trader.candles = candles;

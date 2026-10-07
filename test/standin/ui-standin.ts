@@ -21,8 +21,8 @@
  *                 wallet, a limit placed and canceled; spot to futures, USDC swapped for USDT, $25 withdrawn to the agent's wallet,
  *                 $150 of USDT put into the flexible earn product (done on the next tick)
  *   the agent     "Claude Code": let in for 30 days, a trading limit ($150 an order, $600 in all, at the three venues), a limit between the
- *                 user's own places and a payees limit, an agent wallet; in Aggressive it places a limit buy of SOL inside its limit, then
- *                 in Conservative it asks for a market buy of ETH, which waits on a card for the owner
+ *                 user's own places and a payees limit, an agent wallet; in Beast it places a limit buy of SOL inside its limit, then
+ *                 in Guard it asks for a market buy of ETH, which waits on a card for the owner
  *   steering      two intents (one to Claude Code, one to every agent), Claude Code's report on the first, two asks (a bigger budget, a
  *                 venue connected), three watched markets — one at a venue that is not connected
  *   the curve     net worth points over the last seven days, off the stand-in's own price curves, so the curve draws at once
@@ -37,7 +37,7 @@
  *
  * While it runs: prices move every few seconds, a resting order fills when the price crosses it, a stop fires, the fifteen-minute bitcoin
  * market rolls over and settles; Claude Code reports when its order fills, and when its card expires unanswered the seed key closes it and
- * Claude Code asks again (in Conservative only).
+ * Claude Code asks again (in Guard only).
  */
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -220,8 +220,8 @@ export async function startStandin(o: StandinOptions): Promise<Standin> {
   // money to earn: out of spot at once, done on the next tick (the timer's, or step()'s)
   ok("$150 of USDT to earn", await own({ type: "liveEarn", venue: "ex", kind: "supply", product: "flex:USDT", asset: "USDT", amount: "150" }));
 
-  // ---- Aggressive: the agent's order inside its limit goes at once; Conservative: its next one waits on a card ----
-  ok("Aggressive", await own({ type: "setPolicy", change: "mode", value: "open" }));
+  // ---- Beast: the agent's order inside its limit goes at once; Guard: its next one waits on a card ----
+  ok("Beast", await own({ type: "setPolicy", change: "mode", value: "open" }));
   orders.agentSol = orderOf("Claude Code's SOL limit", await ag({ type: "agentLiveOrder", venue: "ex", symbol: "SOL/USDT", side: "buy", orderType: "limit", qty: "", usd: "100", limitPrice: String(toStep(price("ex", "SOL/USDT", "ask") * 0.99, 0.01, "floor")) }));
   svc.setMode("guard");
   const asked = ok("Claude Code's card", await ag({ type: "agentLiveOrder", venue: "ex", symbol: "ETH/USDT", side: "buy", orderType: "market", qty: "", usd: "120", limitPrice: "" }));
@@ -279,7 +279,7 @@ export async function startStandin(o: StandinOptions): Promise<Standin> {
       reported = true;
       await ag({ type: "agentReport", intent: forAgent, status: "note", note: `My SOL limit filled: ${mine.filledQty} SOL at $${mine.avgPrice ?? mine.limitPrice}. I will wait for the next dip under $140.`, refs: mine.id });
     }
-    // a card that expired unanswered: the seed key closes it (what it held is freed), and the agent asks again — in Conservative only
+    // a card that expired unanswered: the seed key closes it (what it held is freed), and the agent asks again — in Guard only
     const c = engine.host.card(card);
     if (c?.status === "pending" && c.expiresAt && Date.now() >= Date.parse(c.expiresAt)) {
       await own({ type: "approveCard", card: c.id, action: cardHash(c), decision: "reject" });

@@ -5,7 +5,7 @@ import { isRefusal, type Refusal } from "../../src/core/errors.ts";
 import { exchangeTrader } from "../../src/portfolio/live/exchange-trade.ts";
 import { exchangeSource, type ExchangeClient } from "../../src/portfolio/live/exchange.ts";
 import { DONE, type Candle, type CandleInterval, type LiveTrader, type Market, type MarketStats, type OrderState } from "../../src/portfolio/live/trade.ts";
-import type { LiveSource } from "../../src/portfolio/live/types.ts";
+import type { LiveSource, MarketExtras } from "../../src/portfolio/live/types.ts";
 
 /** TRADING at an exchange through the unified exchange library. Each exchange here is the REAL installed library with its network call
  * replaced: every request it builds is recorded, and it is answered with what the test says (shaped like the exchange's docs, as in the
@@ -1336,7 +1336,7 @@ describe("reading the market: a market's last 24 hours and a perpetual's funding
     expect([m.price, m.volumeUsd24h, m.change24h, m.changePct24h]).toEqual([85600, 170201000, undefined, undefined]);
   });
 
-  it("Coinbase's one-product ticker says nothing of the 24 hours; an exchange the trader has not read says none either, whatever its ticker holds", async () => {
+  it("Coinbase's one-product ticker says nothing of the 24 hours; an exchange the trader has not read gives the library's unified reading, marked as the library's word", async () => {
     const { t, answer } = coinbase();
     answer({ body: { trades: [{ trade_id: "1", product_id: "BTC-USD", price: "85573.7", size: "1", time: "2026-10-05T19:53:19Z", side: "SELL", bid: "", ask: "" }], best_bid: "85573.6", best_ask: "85573.8" } });
     const m = ok(await t.market("BTC/USD"));
@@ -1356,9 +1356,13 @@ describe("reading the market: a market's last 24 hours and a perpetual's funding
       },
     } satisfies ExchangeClient;
     const other = exchangeTrader(x, "someex", "Someex", [], { can: [] });
-    const s = ok(await other.market("BTC/USDT"));
-    const p = ok(await other.market("BTC/USDT:USDT"));
-    expect([s.price, s.changePct24h, s.volumeUsd24h, p.fundingRate, p.nextFundingAt]).toEqual([85000, undefined, undefined, undefined, undefined]);
+    const s = ok(await other.market("BTC/USDT")) as Market & MarketExtras;
+    const p = ok(await other.market("BTC/USDT:USDT")) as Market & MarketExtras;
+    // the library's percentage, change and quoteVolume, said to be the library's: neither its 24-hour window nor its volume has been checked
+    // against this exchange's docs. Funding stays unsaid: only OKX's, Binance's and Bybit's is read
+    expect([s.price, s.changePct24h, s.change24h, s.volumeUsd24h, p.fundingRate, p.nextFundingAt]).toEqual([85000, 2.5, 2073.17, 1e9, undefined, undefined]);
+    expect(s.statsFrom).toBe("the exchange library's unified reading of Someex's ticker: its 24-hour window and its volume are the library's word, not checked against Someex's docs");
+    expect((m as Market & MarketExtras).statsFrom).toBeUndefined();
   });
 });
 
@@ -1459,7 +1463,7 @@ describe("reading the market: many markets at once (stats)", () => {
     expect(btc.change24h).toBeCloseTo(1056.4654, 3);
   });
 
-  it("an exchange the trader has not read: prices only; one with no call for many tickers is read one at a time; one with neither has no stats", async () => {
+  it("an exchange the trader has not read: the library's reading, marked; one with no call for many tickers is read one at a time; one with neither has no stats", async () => {
     const asked: string[] = [];
     const x = {
       id: "someex",
@@ -1474,7 +1478,8 @@ describe("reading the market: many markets at once (stats)", () => {
       },
     } satisfies ExchangeClient;
     const s = ok(await exchangeTrader(x, "someex", "Someex", [], { can: [] }).stats!());
-    expect([asked, Object.fromEntries(s)]).toEqual([["BTC/USDT", "ETH/USDT"], { "BTC/USDT": { price: 85000 }, "ETH/USDT": { price: 2400 } }]);
+    const FROM = "the exchange library's unified reading of Someex's ticker: its 24-hour window and its volume are the library's word, not checked against Someex's docs";
+    expect([asked, Object.fromEntries(s)]).toEqual([["BTC/USDT", "ETH/USDT"], { "BTC/USDT": { price: 85000, changePct24h: 2.5, volumeUsd24h: 1e9, statsFrom: FROM }, "ETH/USDT": { price: 2400, changePct24h: 2.5, volumeUsd24h: 1e9, statsFrom: FROM } }]);
     const bare = { id: "bareex", markets: {}, async loadMarkets() {}, async fetchBalance() { return {}; } } satisfies ExchangeClient;
     expect([exchangeTrader(bare, "bareex", "Bareex", [], { can: [] }).stats, exchangeTrader(bare, "bareex", "Bareex", [], { can: [] }).candles]).toEqual([undefined, undefined]);
   });
@@ -1549,5 +1554,73 @@ describe("reading the market: price history (candles)", () => {
 
   it("each exchange here reads the market — stats and price history — and lists no events (it has no event contracts)", () => {
     for (const t of [okx().t, binance().t, bybit(true).t, coinbase().t, kraken().t]) expect([typeof t.stats, typeof t.candles, t.events]).toEqual(["function", "function", undefined]);
+  });
+});
+
+// ---- 24 hours beyond the five families, and the margin modes a perpetual's leverage is set with ---------------------------------------------
+
+describe("the 24 hours of exchanges beyond the five families (review2 F14)", () => {
+  const KUCOIN = { apiKey: "made-up-kucoin-key-0001", secret: "made-up-kucoin-secret-0001", password: "made-up-kucoin-pass-0001" };
+  /** KuCoin's 24hr stats, as its docs show them (GET /api/v1/market/stats and the rows of /allTickers): every figure of the last 24 hours */
+  const kuStats = { symbol: "BTC-USDT", buy: "85573.7", sell: "85573.8", changeRate: "-0.0055", changePrice: "-473.4", high: "86994.3", low: "84979.5", vol: "303.6", volValue: "25984946.15779", last: "85573.7", averagePrice: "85600", takerFeeRate: "0.001", makerFeeRate: "0.001", takerCoefficient: "1", makerCoefficient: "1" };
+
+  it("KuCoin, read against its docs: changeRate and changePrice, volValue in the quote, high and low — one market from GET /api/v1/market/stats, many from /allTickers — and nothing marked as the library's word", async () => {
+    const v = venue("kucoin", KUCOIN, [spot("BTC-USDT", "BTC", "USDT", { precision: { amount: 1e-8, price: 0.1 }, info: { symbol: "BTC-USDT", enableTrading: true } })]);
+    const t = exchangeTrader(v.x, "kucoin", "KuCoin", Object.values(KUCOIN), { can: ["read", "trade spot"] }, { now: () => NOW });
+    v.answer({ body: { code: "200000", data: { time: 1791230000000, ...kuStats } } });
+    const m = ok(await t.market("BTC/USDT")) as Market & MarketExtras;
+    expect(v.seen.map((r) => r.url)).toEqual(["https://api.kucoin.com/api/v1/market/stats?symbol=BTC-USDT"]);
+    expect([m.price, m.change24h, m.changePct24h, m.volumeUsd24h, m.statsFrom]).toEqual([85573.7, -473.4, -0.55, 25984946.15779, undefined]);
+    v.answer({ body: { code: "200000", data: { time: 1791230000000, ticker: [{ symbolName: "BTC-USDT", ...kuStats }] } } });
+    const s = ok(await t.stats!(["BTC/USDT"]));
+    expect(v.seen[1]!.url).toBe("https://api.kucoin.com/api/v1/market/allTickers");
+    expect(Object.fromEntries(s)).toEqual({ "BTC/USDT": { price: 85573.7, change24h: -473.4, changePct24h: -0.55, volumeUsd24h: 25984946.15779, high24h: 86994.3, low24h: 84979.5 } });
+  });
+
+  it("Bitget, whose docs render only in a browser: the library's unified reading of its ticker, marked as the library's word, with baseVolume at the last price where it gives no quote volume", async () => {
+    const x = {
+      id: "bitget",
+      markets: { "BTC/USDT": spot("BTCUSDT", "BTC", "USDT"), "ETH/USDT": spot("ETHUSDT", "ETH", "USDT") },
+      async loadMarkets() {},
+      async fetchBalance() {
+        return {};
+      },
+      async fetchTicker(symbol: string) {
+        return symbol.startsWith("BTC") ? { last: 104823.8, open: 104332.5, percentage: 0.471, change: 491.3, baseVolume: 79089.5675, quoteVolume: 8274870921.80485, high: 105289.3, low: 103447.9 } : { last: 2400, percentage: -1.2, baseVolume: 1000, high: 2450, low: 2350 };
+      },
+    } satisfies ExchangeClient;
+    const t = exchangeTrader(x, "bitget", "Bitget", [], { can: [] });
+    const btc = ok(await t.market("BTC/USDT")) as Market & MarketExtras;
+    expect([btc.price, btc.changePct24h, btc.change24h, btc.volumeUsd24h]).toEqual([104823.8, 0.471, 491.3, 8274870921.80485]);
+    expect(btc.statsFrom).toBe("the exchange library's unified reading of Bitget's ticker: its 24-hour window and its volume are the library's word, not checked against Bitget's docs");
+    const eth = ok(await t.market("ETH/USDT")) as Market & MarketExtras;
+    expect([eth.changePct24h, eth.volumeUsd24h, eth.statsFrom !== undefined]).toEqual([-1.2, 2_400_000, true]);
+  });
+});
+
+describe("the margin modes a perpetual's leverage is set with here (review2 F16)", () => {
+  const bybitPerpTick = { symbol: "BTCUSDT", lastPrice: "86000", indexPrice: "85990", markPrice: "86001", prevPrice24h: "85000", price24hPcnt: "0.011765", highPrice24h: "86500", lowPrice24h: "84500", prevPrice1h: "85900", openInterest: "50000", openInterestValue: "4300000000", turnover24h: "5123456789.5", volume24h: "60000", fundingRate: "-0.001034", nextFundingTime: "1791273600000", predictedDeliveryPrice: "", basisRate: "", deliveryFeeRate: "", deliveryTime: "0", ask1Size: "1", bid1Price: "85999.9", ask1Price: "86000", bid1Size: "1" };
+  const modesOf = (m: Market) => (m as Market & MarketExtras).marginModes;
+
+  it("OKX: cross, as the account's orders there go in cross margin; Binance: either, per symbol; spot markets say nothing; Coinbase and Kraken set no leverage from the account", async () => {
+    const okxList = ok(await okxPerp().t.markets(""));
+    expect(modesOf(okxList.find((m) => m.kind === "perp")!)).toEqual(["cross"]);
+    expect(modesOf(okxList.find((m) => m.kind === "spot")!)).toBeUndefined();
+    const binList = ok(await binance().t.markets(""));
+    expect(modesOf(binList.find((m) => m.kind === "perp")!)).toEqual(["cross", "isolated"]);
+    expect(modesOf(binList.find((m) => m.kind === "spot")!)).toBeUndefined();
+    for (const t of [coinbase().t, kraken().t]) expect(ok(await t.markets("")).every((m) => modesOf(m) === undefined)).toBe(true);
+  });
+
+  it("Bybit: per symbol on a classic account, none on a unified one (the whole account's) — known only when the market is read with its price, from the account's kind", async () => {
+    const uni = bybitBoth(true);
+    uni.answer(bybitLinearList([bybitPerpTick]));
+    const u = ok(await uni.t.market("BTC/USDT:USDT"));
+    expect([modesOf(u), uni.seen.length]).toEqual([[], 1]);
+    const classic = bybitBoth(false);
+    classic.answer(bybitLinearList([bybitPerpTick]));
+    expect(modesOf(ok(await classic.t.market("BTC/USDT:USDT")))).toEqual(["cross", "isolated"]);
+    // the list says nothing of it: the account's kind is not asked for a list
+    expect(ok(await bybitBoth(true).t.markets("")).every((m) => modesOf(m) === undefined)).toBe(true);
   });
 });

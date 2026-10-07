@@ -148,14 +148,14 @@ describe("the whole order space, through one door", () => {
     expect(x.venue.v.placed.length).toBe(before);
   });
 
-  it("an amend: smaller goes at once and gives back; bigger is judged like a new order of the difference — a card in Conservative", async () => {
+  it("an amend: smaller goes at once and gives back; bigger is judged like a new order of the difference — a card in Guard", async () => {
     const x = await boot();
     await x.own({ type: "setPolicy", change: "mode", value: "open" });
     const o = placed(await x.order({ qty: "0.3" }));
     expect(x.spent().spentMicro).toBe(870_000_000);
     const smaller = placed(await x.ag({ type: "agentLiveAmend", venue: "ex", order: o.id, qty: "0.2", limitPrice: "", stopPrice: "" }));
     expect([smaller.qty, x.spent().spentMicro, x.venue.v.amended]).toEqual([0.2, 580_000_000, [{ ref: "x-1", change: { qty: 0.2 } }]]);
-    // Conservative now: a bigger order is a card that shows the order as it would be
+    // Guard now: a bigger order is a card that shows the order as it would be
     x.svc.setMode("guard");
     const bigger = await x.ag({ type: "agentLiveAmend", venue: "ex", order: o.id, qty: "", limitPrice: "2950", stopPrice: "" });
     if (isRefusal(bigger) || bigger.kind !== "card") throw new Error("expected a card");
@@ -184,9 +184,9 @@ describe("the whole order space, through one door", () => {
     expect([up.worstPrice, x.spent().spentMicro]).toEqual([3264, 326_400_000]);
   });
 
-  it("a close: not counted against the limit; Conservative a card, Aggressive at once inside the per-order line; reduce-only, or the venue's own", async () => {
+  it("a close of a derivative: not counted against the limit; Guard a card, Beast at once inside the per-order line; reduce-only, or the venue's own. A plain sell of what is held counts like the sell order it is", async () => {
     const x = await boot();
-    // Conservative: a card, and nothing at the venue until the owner approves what it shows — a position may be the owner's own
+    // Guard: a card, and nothing at the venue until the owner approves what it shows — a position may be the owner's own
     const asked = await x.ag({ type: "agentLiveClose", venue: "ex", symbol: PERP.symbol, qty: "" });
     if (isRefusal(asked) || asked.kind !== "card") throw new Error("expected a card");
     const before = x.venue.v.placed.length;
@@ -196,13 +196,14 @@ describe("the whole order space, through one door", () => {
     expect(x.venue.v.placed.at(-1)).toEqual({ symbol: PERP.symbol, side: "sell", type: "market", qty: 0.5, worstPrice: 2939.1, reduceOnly: true, clientId: c.clientId });
     expect([c.status, x.spent().spentMicro]).toEqual(["filled", 0]);
     expect(refusal(await x.ag({ type: "agentLiveClose", venue: "ex", symbol: PERP.symbol, qty: "0.9" })).message).toBe("a close is more than zero and at most the 0.5 held");
-    // Aggressive, inside the $1,000 line: shares that can only be sold as held go at once as a plain market sell; a perpetual with neither
-    // guarantee is not closed from here
+    // Beast, inside the $1,000 line: shares that can only be sold as held go at once as a plain market sell — a sell order, counted
+    // against the limit as one ($5.90 at the bid); a perpetual with neither guarantee is not closed from here
     await x.own({ type: "setPolicy", change: "mode", value: "open" });
     const ev = placed(await x.ag({ type: "agentLiveClose", venue: "ex", symbol: EVENT.symbol, qty: "" }));
     expect(x.venue.v.placed.at(-1)).toEqual({ symbol: EVENT.symbol, side: "sell", type: "market", qty: 10, worstPrice: 0.58, clientId: ev.clientId });
+    expect([ev.approval, ev.usd]).toEqual([undefined, 5.9]);
     expect(refusal(await x.ag({ type: "agentLiveClose", venue: "ex", symbol: BARE.symbol, qty: "" })).message).toBe("Exchange takes no reduce-only order in SOL perpetual, and has no close of its own: close it at the venue, so that nothing opens the other way");
-    // above the line, Aggressive too: a card
+    // above the line, Beast too: a card
     expect((await x.ag({ type: "agentLiveClose", venue: "ex", symbol: PERP.symbol, qty: "" }) as { kind?: string }).kind).toBe("card");
     const y = await boot({ nativeClose: true });
     await y.own({ type: "setPolicy", change: "mode", value: "open" });
@@ -212,14 +213,24 @@ describe("the whole order space, through one door", () => {
     expect(((await y.engine.trade.positions("ex")) as Position[])[0]).toMatchObject({ symbol: PERP.symbol, side: "long", qty: 0.5 });
   });
 
-  it("leverage: an agent up to what the owner signed for agents (1x until then), the owner up to the venue's own most", async () => {
+  it("leverage: an agent up to what the owner signed for agents (1x until then), a card where a position is open, the owner up to the venue's own most", async () => {
     const x = await boot();
     expect(refusal(await x.ag({ type: "agentLiveLeverage", venue: "ex", symbol: PERP.symbol, leverage: "5", marginMode: "isolated" })).message).toBe("the owner lets agents use at most 1x leverage: 5x is the owner's to set, or to allow");
     await x.own({ type: "setPolicy", change: "maxLeverage", value: "5" });
-    const r = await x.ag({ type: "agentLiveLeverage", venue: "ex", symbol: PERP.symbol, leverage: "5", marginMode: "isolated" });
+    // a position is open in ETH perpetual (0.5 ETH, $1,500 — over the $1,000 line in either mode): the change alters what it risks, and the
+    // position may be the owner's own, so the owner is asked; the yes sets exactly what the card showed
+    const asked = await x.ag({ type: "agentLiveLeverage", venue: "ex", symbol: PERP.symbol, leverage: "5", marginMode: "isolated" });
+    if (isRefusal(asked) || asked.kind !== "card") throw new Error(`expected a card, got ${isRefusal(asked) ? asked.message : asked.kind}`);
+    expect([asked.card.reason, x.venue.v.leverage]).toEqual(["Claude Code asks to set leverage to 5x on ETH perpetual — a position of 0.5 ETH is open there", []]);
+    const card = x.engine.host.card(asked.card.id)!;
+    const r = await x.own({ type: "approveCard", card: card.id, action: cardHash(card), decision: "approve" });
     expect(!isRefusal(r) && r.kind === "result" && r.result).toEqual({ venue: "ex", symbol: PERP.symbol, leverage: 5, marginMode: "isolated" });
+    // no position in the market: at once, in Guard too
+    x.venue.v.positions = x.venue.v.positions.filter((p) => p.symbol !== PERP.symbol);
+    const again = await x.ag({ type: "agentLiveLeverage", venue: "ex", symbol: PERP.symbol, leverage: "3", marginMode: "" });
+    expect(!isRefusal(again) && again.kind === "result" && again.result).toEqual({ venue: "ex", symbol: PERP.symbol, leverage: 3 });
     expect(refusal(await x.own({ type: "liveLeverage", venue: "ex", symbol: PERP.symbol, leverage: "75", marginMode: "" })).message).toBe("Exchange takes at most 50x in ETH perpetual");
     expect(refusal(await x.own({ type: "liveLeverage", venue: "ex", symbol: SPOT.symbol, leverage: "2", marginMode: "" })).message).toBe("leverage is set on a perpetual or a future; ETH/USDT is spot");
-    expect(x.venue.v.leverage).toEqual([{ symbol: PERP.symbol, leverage: 5, marginMode: "isolated" }]);
+    expect(x.venue.v.leverage).toEqual([{ symbol: PERP.symbol, leverage: 5, marginMode: "isolated" }, { symbol: PERP.symbol, leverage: 3, marginMode: undefined }]);
   });
 });

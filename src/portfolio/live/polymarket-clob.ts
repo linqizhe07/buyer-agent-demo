@@ -23,6 +23,18 @@
  *
  * The last two only read: like Gamma and the book, they need no credentials, and the location check stays where it is, before every order.
  *
+ * Money IN, for the owner's Receive (polymarketWriter; docs.polymarket.com/trading/bridge and /concepts/pusd, read 2026-10-06), keyless:
+ *   pUSD on Polygon                    straight to the wallet the orders are made by (`maker`): pUSD is "a standard ERC-20 token on Polygon",
+ *                                      and that wallet's pUSD is the cash the account reads here
+ *   POST bridge.polymarket.com/deposit {address: maker} → address.evm: the bridge address unique to that wallet, one for every EVM chain;
+ *                                      what is sent to it "is bridged and swapped to pUSD automatically" and credited to the wallet
+ *   GET  bridge.polymarket.com/supported-assets   the chains and tokens it takes, with the least it takes ("Deposits below the minimum will
+ *                                      not be processed"): asked before an address is given, and the token checked against the one the
+ *                                      account would send
+ * Money OUT is not made from here: the CLOB has no withdrawal call, and the bridge's withdrawal is a pUSD transfer the Polymarket wallet
+ * itself sends ("Send pUSD from your Polymarket wallet to the appropriate bridge address") — a transaction this account does not sign with
+ * the key file's key. The writer says so (`can.why.withdraw`).
+ *
  * What the CLOB does not have is not offered: no stop or trigger order, no reduce-only flag, no leverage, and no change to an open order in
  * place (/order takes POST and DELETE only: an order is signed, so another price or size is another order). Its GTD order, good until a
  * date the owner names, has no counterpart among the account's times in force.
@@ -41,10 +53,11 @@ import { privateKeyToAccount, type PrivateKeyAccount } from "viem/accounts";
 import { isRefusal, type Refusal } from "../../core/errors.ts";
 import { no } from "../refuse.ts";
 import { polymarketSource } from "./address.ts";
-import type { ChainReader } from "./chain.ts";
+import { CHAINS, type ChainName, type ChainReader } from "./chain.ts";
 import type { KeyFile, KeyShape } from "./credentials.ts";
 import { badOrder, ceilTo, floorTo, inDollars, pick, plain, type Candle, type CandleInterval, type LiveTrader, type Market, type OrderRequest, type OrderState, type OrderStatus, type Position, type TimeInForce } from "./trade.ts";
 import { asRefusal, num, REGION, redact, unreachable, type Http, type HttpReply, type LiveBalance, type LiveSource } from "./types.ts";
+import { tokenOn, type LiveWriter } from "./writes.ts";
 
 export const POLYMARKET_TRADE_KEY: KeyShape = {
   required: ["privateKey"],
@@ -419,6 +432,9 @@ export async function polymarketTradeSource(req: PolymarketTradeRequest): Promis
   if (isRefusal(read)) return read;
   const creds = await t.creds();
   if (isRefusal(creds)) return creds;
+  // the wallet the orders are made by is where money lands: the writer gives its address for pUSD on Polygon, and Polymarket's bridge address
+  // for the other chains. It is not the source's `address`: that field is a watched or proven wallet, and the service would ask a wallet
+  // proof for it; the key file's key signing Polymarket's orders is what shows the wallet is the owner's here
   const source: LiveSource = {
     name,
     kind: "prediction",
@@ -426,14 +442,106 @@ export async function polymarketTradeSource(req: PolymarketTradeRequest): Promis
     via: `Polymarket CLOB · orders signed by the account wallet's key (${SIG_NAME[w.type]})`,
     probe: {
       can: ["trade"],
-      note: `orders are made by ${w.maker}${w.maker === w.eoa ? "" : ` and signed by its owner key ${w.eoa}`}; Polymarket issued CLOB credentials for ${w.eoa}, kept in this process's memory only${w.type === 0 ? " · Polymarket says a plain address trades only once it has allowlisted it" : ""}`,
+      note: `orders are made by ${w.maker}${w.maker === w.eoa ? "" : ` and signed by its owner key ${w.eoa}`}; Polymarket issued CLOB credentials for ${w.eoa}, kept in this process's memory only${w.type === 0 ? " · Polymarket says a plain address trades only once it has allowlisted it" : ""} · money comes in to that wallet as pUSD on Polygon, or through Polymarket's bridge from the other chains; it leaves Polymarket at Polymarket`,
       native: { calls: ["GET polymarket.com/api/geoblock", "GET data-api /v2/positions?user=", "balanceOf pUSD on Polygon", "GET /auth/derive-api-key"], maker: w.maker, signer: w.eoa, signatureType: w.type },
     },
     read: read.source.read,
-    readOnlyBecause: "money goes in and out of Polymarket at Polymarket",
+    writer: polymarketWriter({ venue: req.venue, name, maker: w.maker, http: req.http, clock: req.clock }),
     trader: t.trader,
   };
   return { source, first: read.first };
+}
+
+// ---- money in: pUSD on Polygon, and Polymarket's bridge ------------------------------------------------
+
+const BRIDGE = "https://bridge.polymarket.com";
+/** the chains of this account's that Polymarket's bridge takes deposits from (its supported-assets page, read 2026-10-06, lists these six
+ * among others; every EVM chain goes through the one `evm` address the bridge gives a wallet). What each chain takes, and the least it takes,
+ * is asked of the bridge itself each time, kept ten minutes */
+const BRIDGE_CHAINS: ChainName[] = ["Ethereum", "Polygon", "Arbitrum", "Base", "Optimism", "BNB Chain"];
+const BRIDGE_MS = 10 * 60_000;
+
+/** Money INTO Polymarket, for the wallet the orders are made by. Nothing leaves from here: `can.why.withdraw` says how it does leave */
+function polymarketWriter(c: { venue: string; name: string; maker: Hex; http: Http; clock: () => number }): LiveWriter {
+  type Listed = { symbol: string; address: string; minUsd: number | undefined };
+  let listed: { at: number; byChain: Map<number, Listed[]> } | undefined;
+  let bridge: { at: number; evm: Hex; note: string | undefined } | undefined;
+  const call = async (path: string, init: { method?: string; headers?: Record<string, string>; body?: string } = {}): Promise<HttpReply> => {
+    try {
+      return await c.http(`${BRIDGE}${path}`, { method: init.method ?? "GET", headers: { accept: "application/json", ...(init.headers ?? {}) }, ...(init.body !== undefined ? { body: init.body } : {}) });
+    } catch (err) {
+      throw unreachable(c.venue, `${c.name}'s bridge`, err);
+    }
+  };
+  /** the bridge's no, in its words: its errors are `{"error": "…"}` */
+  const bridgeNo = (r: HttpReply, doing: string): Refusal => {
+    const b = isObj(r.body) ? r.body : {};
+    const said = String(typeof b.error === "string" ? b.error : r.text).replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 220);
+    const native = { status: r.status, said };
+    if (r.status === 429) return no("E_VENUE_UNREACHABLE", { venue: c.venue, message: `${c.name}'s bridge is rate-limiting this machine: try again in a minute`, native });
+    if (r.status >= 500 || r.status === 0) return no("E_VENUE_UNREACHABLE", { venue: c.venue, message: `${c.name}'s bridge did not answer`, native });
+    return no("E_VENUE_REJECTED", { venue: c.venue, message: `${c.name}'s bridge refused to ${doing}${said ? `: ${said}` : ` (HTTP ${r.status})`}`, native });
+  };
+  const supported = async (): Promise<Map<number, Listed[]> | Refusal> => {
+    if (listed && c.clock() - listed.at < BRIDGE_MS) return listed.byChain;
+    const r = await call("/supported-assets");
+    if (r.status !== 200 || !isObj(r.body)) return bridgeNo(r, "list what it takes");
+    const byChain = new Map<number, Listed[]>();
+    for (const row of (Array.isArray(r.body.supportedAssets) ? r.body.supportedAssets : []).filter(isObj)) {
+      const chainId = num(row.chainId);
+      const token = isObj(row.token) ? row.token : {};
+      const symbol = String(token.symbol ?? "").toUpperCase();
+      if (!chainId || !symbol) continue;
+      const here = byChain.get(chainId) ?? [];
+      here.push({ symbol, address: String(token.address ?? ""), minUsd: given(row.minCheckoutUsd) });
+      byChain.set(chainId, here);
+    }
+    listed = { at: c.clock(), byChain };
+    return byChain;
+  };
+  /** the bridge address of this wallet: POST /deposit answers one per kind of chain (evm, svm, btc, tron), "unique to your wallet" */
+  const bridgeAddress = async (): Promise<{ evm: Hex; note: string | undefined } | Refusal> => {
+    if (bridge && c.clock() - bridge.at < BRIDGE_MS) return bridge;
+    const r = await call("/deposit", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ address: c.maker }) });
+    if ((r.status !== 200 && r.status !== 201) || !isObj(r.body)) return bridgeNo(r, "give a deposit address for this wallet");
+    const addresses = isObj(r.body.address) ? r.body.address : {};
+    const evm = String(addresses.evm ?? "");
+    if (!isAddress(evm, { strict: false })) return no("E_VENUE_REJECTED", { venue: c.venue, message: `${c.name}'s bridge answered without an EVM deposit address`, native: { status: r.status, said: r.text.replace(/\s+/g, " ").slice(0, 200) } });
+    bridge = { at: c.clock(), evm: getAddress(evm), note: typeof r.body.note === "string" && r.body.note ? r.body.note.replace(/\s+/g, " ").slice(0, 200) : undefined };
+    return bridge;
+  };
+  return {
+    can: {
+      receive: true,
+      withdraw: false,
+      ledgers: [],
+      transfer: false,
+      swap: false,
+      send: false,
+      why: { withdraw: `money leaves ${c.name} by a pUSD transfer from the Polymarket wallet to one of its bridge addresses (POST bridge.polymarket.com/withdraw: "Send pUSD from your Polymarket wallet to the appropriate bridge address"), made at polymarket.com: the CLOB has no withdrawal call, and this account signs no transaction with the key file's key` },
+    },
+    async depositAddress(asset, network) {
+      const a = asset.trim().toUpperCase();
+      if (a === "PUSD") {
+        if (network !== "Polygon") return no("E_VENUE_RAIL_CLOSED", { venue: c.venue, message: `pUSD is a token on Polygon only (${c.name}'s collateral): from ${network}, send USDC or USDT to ${c.name}'s bridge address instead` });
+        return { address: c.maker, note: `the wallet ${c.name} trades from: pUSD on Polygon sent to it is the cash the account reads there (pUSD is a standard ERC-20 token on Polygon; ${c.name}'s docs describe deposits through its bridge and its Collateral Onramp, which both end as pUSD in this wallet)` };
+      }
+      if (!BRIDGE_CHAINS.includes(network)) return no("E_VENUE_RAIL_CLOSED", { venue: c.venue, message: `${c.name}'s bridge takes deposits from ${BRIDGE_CHAINS.join(", ")}, not ${network}` });
+      const chainId = CHAINS[network].chain.id;
+      const lists = await supported();
+      if (isRefusal(lists)) return lists;
+      const here = lists.get(chainId) ?? [];
+      const token = here.find((t) => t.symbol === a || (a === "USDC.E" && t.symbol === "USDCE"));
+      if (!token) return no("E_VENUE_RAIL_CLOSED", { venue: c.venue, message: `${c.name}'s bridge lists no ${asset} on ${network}: there it takes ${here.map((t) => t.symbol).join(", ") || "nothing it lists today"}`, detail: { takes: here.map((t) => t.symbol) } });
+      // a dollar this account knows is matched by its contract, not its name: the bridge lists pUSD on Polygon under the name USDC, and a
+      // transfer of the account's USDC to an address expecting that token is not the deposit the bridge describes
+      const mine = tokenOn(a, network);
+      if (mine && token.address && mine.address.toLowerCase() !== token.address.toLowerCase()) return no("E_VENUE_RAIL_CLOSED", { venue: c.venue, message: `${c.name}'s bridge lists ${asset} on ${network} at ${token.address}, not the ${mine.asset} this account sends (${mine.address})${network === "Polygon" ? ": that is pUSD, which goes straight to the wallet" : ""}`, detail: { bridge: token.address, account: mine.address } });
+      const b = await bridgeAddress();
+      if (isRefusal(b)) return b;
+      return { address: b.evm, note: `${c.name}'s bridge address, unique to this wallet: ${asset} sent to it on ${network} is bridged and credited as pUSD to ${c.maker}${token.minUsd !== undefined ? `. ${c.name} takes at least $${plain(token.minUsd)} a deposit there, and says deposits below the minimum are not processed` : ""}${b.note ? ` · ${c.name} says: ${b.note}` : ""}` };
+    },
+  };
 }
 
 // ---- the trader --------------------------------------------------------------------------------------

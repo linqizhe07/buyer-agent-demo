@@ -80,7 +80,8 @@ register({ kind: "standin-wallet-ex", label: "a stand-in exchange", needs: "key-
   return { source: { name: req.label || "Ex", kind: "cex", reference: "standin", via: "a stand-in", probe: { can: ["read", "trade"], note: "" }, read: async () => first, trader: exTrader, writer: exWriter }, first, summary: "connected" };
 } });
 
-// ---- the stand-in broker: shares; its well-known 24 hours do not include AAPL, asked by ticker they do; its positions do not answer ----
+// ---- the stand-in broker: shares; its well-known 24 hours do not include AAPL, asked by ticker they do; its positions it refuses to list
+// (a refusal about that read alone: a venue that did not ANSWER would be held back whole for twenty seconds, markets and all) ----
 const brokerTrader: LiveTrader = {
   can: true,
   what: "US stocks",
@@ -100,7 +101,7 @@ const brokerTrader: LiveTrader = {
     return { ref, status: "open", filledQty: 0, native: {} };
   },
   async positions() {
-    return no("E_VENUE_UNREACHABLE", { venue: "brk", message: "Broker did not answer" });
+    return no("E_VENUE_REJECTED", { venue: "brk", message: "Broker lists no positions for this key" });
   },
   async stats(symbols) {
     return symbols?.includes("AAPL") ? new Map<string, MarketStats>([["AAPL", { price: 230, change24h: 4.6 }]]) : new Map<string, MarketStats>([["SPY", { price: 600, changePct24h: 0.4 }]]);
@@ -236,14 +237,14 @@ describe("Portfolio: what is held", () => {
     const withCost = await get("/api/account/holdings?cost=1");
     expect(withCost.body.positions).toMatchObject([{ venue: "ex", symbol: PERP.symbol, qty: 3 }]);
     expect(withCost.body.cost.find((c: { key: string }) => c.key === `position:ex:${PERP.symbol}`)).toMatchObject({ source: "venue" });
-    expect(withCost.body.missing).toEqual(expect.arrayContaining([expect.objectContaining({ venue: "brk", part: "positions", code: "E_VENUE_UNREACHABLE" })]));
+    expect(withCost.body.missing).toEqual(expect.arrayContaining([expect.objectContaining({ venue: "brk", part: "positions", code: "E_VENUE_REJECTED" })]));
   });
 
   it("positions at every venue that lists them when none is named, and the venues that could not be read", async () => {
     const r = await get("/api/account/positions");
     expect(r.status).toBe(200);
     expect(r.body.positions.map((p: { venue: string; symbol: string }) => `${p.venue}|${p.symbol}`)).toEqual([`ex|${PERP.symbol}`]);
-    expect(r.body.missing).toMatchObject([{ venue: "brk", why: "Broker did not answer" }]);
+    expect(r.body.missing).toMatchObject([{ venue: "brk", why: "Broker lists no positions for this key" }]);
     expect((await get("/api/account/positions?venue=ex")).body.positions).toHaveLength(1);
   });
 
@@ -275,11 +276,12 @@ describe("Receive, quotes, Sell many", () => {
     expect((await get("/api/account/receive?venue=nope&asset=USDC&network=Base")).body.refusal.code).toBe("E_WALLET_ACCOUNT_UNKNOWN");
   });
 
-  it("fresh prices for a few markets, each answered on its own; more than twelve is refused", async () => {
+  it("fresh prices for a few markets, each answered on its own; more than twelve is the service's refusal, a market without its venue a malformed request", async () => {
     const r = await get(`/api/account/quotes?pairs=${encodeURIComponent("ex|BTC/USDT,ex|NOPE/USDT")}&pair=${encodeURIComponent("brk|AAPL")}`);
     expect(r.status).toBe(200);
     expect(r.body.quotes.map((q: { symbol: string; market?: { price: number }; refusal?: { code: string } }) => [q.symbol, q.market?.price ?? q.refusal?.code])).toEqual([["BTC/USDT", 60_000], ["NOPE/USDT", "E_VENUE_REJECTED"], ["AAPL", 230]]);
-    expect((await get(`/api/account/quotes?pairs=${Array.from({ length: 13 }, () => "ex|BTC/USDT").join(",")}`)).status).toBe(400);
+    const many = await get(`/api/account/quotes?pairs=${Array.from({ length: 13 }, () => "ex|BTC/USDT").join(",")}`);
+    expect([many.status, many.body.refusal?.code]).toEqual([409, "E_ACCOUNT_BAD_ACTION"]);
     expect((await get("/api/account/quotes?pairs=BTC/USDT")).status).toBe(400);
   });
 
@@ -301,7 +303,7 @@ describe("the agents, one by one", () => {
     ok(await own({ type: "approveSpend", agent: cc.address, scope: "trade", allow: "ex", perPayment: "500", budget: "2000", windowHours: 0, validUntil: Date.now() + 7 * DAY }));
     ok(await own({ type: "setIntent", id: "", agent: "*", venue: "ex", symbol: "BTC/USDT", side: "buy", usd: "100", text: "Buy a little BTC on dips", validUntil: Date.now() + DAY }));
     ok(await ag({ type: "agentAsk", kind: "limit", venue: "ex", usd: "5000", text: "a bigger budget" }));
-    // Conservative: the agent's order is a card, and its worth is held against the limit
+    // Guard: the agent's order is a card, and its worth is held against the limit
     const card = ok(await ag({ type: "agentLiveOrder", venue: "ex", symbol: "BTC/USDT", side: "buy", orderType: "limit", qty: "0.001", usd: "", limitPrice: "59000" }));
     expect(card.kind).toBe("card");
     const r = await get("/api/account/agents");
@@ -312,7 +314,8 @@ describe("the agents, one by one", () => {
     expect(a.intents.map((i: { text: string }) => i.text)).toEqual(["Buy a little BTC on dips"]);
     expect(a.asks.map((x: { kind: string }) => x.kind)).toEqual(["limit"]);
     expect(a.flights[0].request).toMatch(/BTC/);
-    expect(r.body.mode).toBe("Conservative");
+    // the mode as every read wires it: guard (Guard) or open (Beast)
+    expect(r.body.mode).toBe("guard");
   });
 });
 

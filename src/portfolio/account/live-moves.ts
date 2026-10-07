@@ -6,8 +6,8 @@
  *
  *   1. the server was started with real-money writes on (`--live-writes`); otherwise nothing here moves anything;
  *   2. the OWNER signed it: the exact destination address, the most the venue may charge, and the moment after which it is void. An agent
- *      asks: in Conservative mode (the dial at Guard, a real account's default) its request is a card, every time; in Aggressive mode (the
- *      dial at Open, which only the owner's signature sets) a request inside its spending approval runs without one;
+ *      asks: in Guard (the dial at `guard`, a real account's default) its request is a card, every time; in Beast (the dial at `open`,
+ *      which only the owner's signature sets) a request inside its spending approval runs without one;
  *   3. it is no more than the most one movement may be on this server (`--live-cap`, $100 unless the server was started otherwise);
  *   4. money leaves for the user's own places only: an exchange's own deposit address (asked of that exchange when the owner signs, and
  *      asked again when it runs), or a wallet that signed the account's sentence to show it is the user's. Never an address someone typed;
@@ -29,6 +29,7 @@ import { randomBytes } from "node:crypto";
 import type { CardLike, Outcome } from "./exchange.ts";
 import { paymentLine } from "./statement.ts";
 import type { Payment, PaymentKind } from "./payments.ts";
+import { CARD_TTL_MS } from "./mode-rules.ts";
 import { micro, type AgentAction, type Envelope, type OwnerAction } from "./sign.ts";
 import { covers, spendFor, type AgentKey, type SpendApproval } from "./state.ts";
 import { isExpired, type Openness } from "../openness.ts";
@@ -72,7 +73,7 @@ export interface LiveEngine {
     raiseCard: (flight: string, card: Parameters<import("./exchange.ts").Host["raiseCard"]>[1]) => CardLike;
     openFlight(agent: { id: string; name: string; code: string }, request: string): { no: string };
     say(flight: string, text: string, mark?: "ok" | "no" | "wait" | "note"): void;
-    /** the dial: `guard` is Conservative, `open` is Aggressive; and the agents' session, the venues switched off, what is opened where */
+    /** the dial: `guard` is Guard, `open` is Beast; and the agents' session, the venues switched off, what is opened where */
     policy(): Openness;
   };
   /** does a spending approval's own owner signature still check out against the owners now */
@@ -171,8 +172,9 @@ export class LiveMoves {
     if (kind === "bridge") return this.planBridge(f, from, f.network as ChainName, amount);
     if (!(NETWORKS as string[]).includes(f.network)) return no("E_ACCOUNT_BAD_ACTION", { message: `a network is one of ${NETWORKS.join(", ")}` });
     const network = f.network as ChainName;
-    if (kind === "withdraw" && (!from.writer.withdraw || from.writer.can.withdraw === false)) return no("E_VENUE_RAIL_CLOSED", { venue: src.id, message: `${src.name}: this key may not withdraw. That is set on the key at the exchange` });
-    if (kind === "send" && !from.writer.can.send) return no("E_VENUE_RAIL_CLOSED", { venue: src.id, message: `${src.name}: money leaves it at the venue, not from here` });
+    // the venue's own reason when it gave one (Polymarket: money leaves by a transfer made at Polymarket; Alpaca: its withdrawal call is sunset)
+    if (kind === "withdraw" && (!from.writer.withdraw || from.writer.can.withdraw === false)) return no("E_VENUE_RAIL_CLOSED", { venue: src.id, message: `${src.name}: ${from.writer.can.why?.withdraw ?? "this key may not withdraw. That is set on the key at the exchange"}` });
+    if (kind === "send" && !from.writer.can.send) return no("E_VENUE_RAIL_CLOSED", { venue: src.id, message: `${src.name}: ${from.writer.can.why?.send ?? "money leaves it at the venue, not from here"}` });
     // a pasted address is only watched: the account sends nothing from it, as it sends nothing to it
     if (kind === "send" && from.address !== undefined && !from.proven) return no("E_VENUE_RAIL_CLOSED", { venue: src.id, message: `${src.name} is watched, not proven yours: nothing is sent from it here. Connect it again from the wallet itself` });
     if (f.from === f.to) return no("E_ACCOUNT_BAD_ACTION", { message: "the money leaves for another venue" });
@@ -264,7 +266,7 @@ export class LiveMoves {
     return null;
   }
 
-  /** An agent asks. Conservative: the owner sees the exact address and fee on a card, and signs that. Aggressive: inside its spending
+  /** An agent asks. Guard: the owner sees the exact address and fee on a card, and signs that. Beast: inside its spending
    * approval it runs at once — still only to the user's own places, under the server's cap and the venue's own checks */
   /** the agent's spending approval as it stands now: its owner signature still good, the dial open at both ends, both ends named, the
    * amount inside its lines. Asked when the agent asks, and again when the owner answers its card */
@@ -299,15 +301,15 @@ export class LiveMoves {
       const out = await this.run(p, { signer: who.signer, authority: "agent", agent: who.agent.address, action: who.hash });
       if (isRefusal(out)) return out;
       this.e.patchSpend(spend.id, (x) => ({ ...x, spentMicro: x.spentMicro + amountMicro }));
-      this.e.host.log({ kind: "action", venue: a.from, tool: a.type, signer: who.signer, envelope: who.envelope, outcome: "accepted", notionalUsd: p.amount, reason: `aggressive mode: ${this.words(p)}, inside the approval`, flight: flight.no });
-      this.e.host.say(flight.no, `${who.agent.name} ${this.words(p)}: inside its limit, so it went without a card (Aggressive)`, "ok");
+      this.e.host.log({ kind: "action", venue: a.from, tool: a.type, signer: who.signer, envelope: who.envelope, outcome: "accepted", notionalUsd: p.amount, reason: `Beast: ${this.words(p)}, inside the approval`, flight: flight.no });
+      this.e.host.say(flight.no, `${who.agent.name} ${this.words(p)}: inside its limit, so it went without a card (Beast)`, "ok");
       return out.kind === "payment" || out.kind === "result" ? { ...out, flight: flight.no } : out;
     }
     // the fee on the card is the most the owner's yes lets it cost, rounded up to the cent
     const offer = { payee: p.dst.name, payTo: p.toAddress ?? `${p.f.fromLedger} → ${p.f.toLedger}`, amount: `${a.amount} ${a.asset}${a.kind === "swap" ? ` → ${a.toAsset}` : ""}`, protocol: `real money · ${this.protocol(p)}`, network: p.toNetwork ? `${p.network} → ${p.toNetwork}` : (p.network ?? p.src.name), fee: `${(Math.ceil(p.fee * 100 - 1e-6) / 100).toFixed(2)} ${a.asset}` };
     // the owner's answer signs the card's hash: here that hash covers the agent's request AND the address and fee the owner is shown
     const actionHash = keccak256(stringToHex(canonical({ action: who.hash, offer })));
-    const card = this.e.host.raiseCard(flight.no, { account: a.from, intent: { kind: "move", asset: a.asset, amount: p.amount, to: p.toAddress ?? a.to }, usd: p.amount, reason: `${who.agent.name} asks to ${this.words(p)}`, why: "live", action: a, actionHash, signer: who.signer, expiresAt: new Date(now + 30 * 60_000).toISOString(), offer: { payee: offer.payee, payTo: offer.payTo, amount: offer.amount, protocol: offer.protocol, network: offer.network, fee: offer.fee }, approval: spend.id });
+    const card = this.e.host.raiseCard(flight.no, { account: a.from, intent: { kind: "move", asset: a.asset, amount: p.amount, to: p.toAddress ?? a.to }, usd: p.amount, reason: `${who.agent.name} asks to ${this.words(p)}`, why: "live", action: a, actionHash, signer: who.signer, expiresAt: new Date(now + CARD_TTL_MS).toISOString(), offer: { payee: offer.payee, payTo: offer.payTo, amount: offer.amount, protocol: offer.protocol, network: offer.network, fee: offer.fee }, approval: spend.id });
     this.e.patchSpend(spend.id, (x) => ({ ...x, reservedMicro: x.reservedMicro + amountMicro }));
     this.e.host.log({ kind: "action", venue: a.from, tool: a.type, signer: who.signer, envelope: who.envelope, outcome: "card", notionalUsd: p.amount, reason: `${card.id} · ${this.words(p)}`, flight: flight.no, intentId: card.id });
     return { ok: true, kind: "card", pending: true, card, flight: flight.no };

@@ -18,7 +18,7 @@
  *   3. the payee's ask  its price against `maxAmount`; its receiving address against the one pinned for it; USDC on a chain the account
  *                       knows, at Circle's own address there — never a token the payee names
  *   4. the limits       per payment, budget, the agents' session, the server's cap, what the agent wallet holds on that chain
- *   5. the owner        Conservative: every payment is a card. Aggressive: the first payment to a host is a card — unless the owner
+ *   5. the owner        Guard: every payment is a card. Beast: the first payment to a host is a card — unless the owner
  *                       signed `*`, any host — and later ones go at once. Approving pins the address; a different one later is refused
  *   6. the payment      signed by the agent wallet's key, good for a minute at most. What happened is what the CHAIN says — the token's
  *                       own record of the authorisation's nonce, the transfer in the payee's receipt — not what the payee says. An
@@ -296,9 +296,9 @@ export class RealPayer implements Payer {
       if (c.released.actionHash !== hash) return no("E_ACCOUNT_REQUOTE", { venue: c.host, message: `what ${c.host} asks changed while the card waited: the approval was for something else`, detail: { card: c.released.id } });
       return null;
     }
-    const aggressive = e.host.policy().mode === "open";
+    const beast = e.host.policy().mode === "open";
     const first = pinned === undefined;
-    if (aggressive && (!first || spend.allow.includes("*"))) return null;
+    if (beast && (!first || spend.allow.includes("*"))) return null;
     const offer: CardOffer = { payee: c.host, payTo: o.payTo.toLowerCase(), amount: `${unmicro(o.amountMicro)} USDC`, protocol: LABEL[o.protocol], network: o.chain };
     const reason = `${c.who.agent.name} asks to pay ${c.host} ${usd(o.amountMicro)} in USDC on ${o.chain}, to ${short(o.payTo)}, over ${LABEL[o.protocol]}, from the agent wallet "${c.sub.name}"${first ? `. A first payment to ${c.host}: approving it pins that address for it` : ""}`;
     const card = e.host.raiseCard(c.flight, { account: agentWalletVenue(c.sub.name), intent: { kind: "pay", merchant: c.host, mcc: "4816", amountUsd: o.amountMicro / 1e6 }, usd: o.amountMicro / 1e6, reason, why: "live", action: c.action, actionHash: hash, signer: c.who.signer, expiresAt: new Date(Date.parse(e.host.now()) + CARD_TTL_MS).toISOString(), offer, approval: spend.id });

@@ -26,20 +26,37 @@
  *   GET data.alpaca.markets/v1beta3/crypto/us/snapshots   many coin pairs at once, under `snapshots`
  *   GET data.alpaca.markets/v2/stocks/bars, …/v1beta3/crypto/us/bars   price history (bars keyed by symbol)
  *
+ * and, for crypto coming in (Alpaca's Crypto Wallets API, docs.alpaca.markets/us/docs/crypto-wallets-api and
+ * /us/reference/listcryptofundingwallets, read 2026-10-06; Alpaca enables it per account — "you have to reach out to Alpaca to enable Crypto
+ * Wallets API access" — so it is asked once at connect, and its answer is the answer):
+ *
+ *   GET /v2/wallets                                  the account's deposit wallets (200: enabled; 403 or 404: not for this account)
+ *   GET /v2/wallets?asset=USDC&chain=ETH             one wallet's address, made on the spot when there is none ("If specified and no wallet
+ *                                                    exists, one will be created"); its chains are ETH, ARB, SOL, BTC and XRP
+ *
  * Two headers carry the key (APCA-API-KEY-ID, APCA-API-SECRET-KEY); nothing is signed. An individual key has no scopes: any key can place
- * orders, and none can move cash — deposits and withdrawals are not in this API at all, which is why the account's door for this venue says
- * "at the venue". An order moves money only inside the Alpaca account: dollars into shares or coins, and back.
+ * orders. Cash moves by ACH at Alpaca, not through this API. Crypto leaves Alpaca in the Alpaca app: its Trading API withdrawal (POST
+ * /v2/wallets/transfers) is deprecated — "Use the Alpaca web application to initiate withdrawals. Since: 2026-07-09 / Sunset: 2026-10-09" —
+ * so none is made from here. An order moves money only inside the Alpaca account: dollars into shares or coins, and back.
  */
+import { getAddress, isAddress } from "viem";
 import { isRefusal, type Refusal } from "../../core/errors.ts";
 import { no } from "../refuse.ts";
+import type { ChainName } from "./chain.ts";
 import type { KeyFile, KeyShape } from "./credentials.ts";
 import { badOrder, ceilTo, CANDLE_INTERVALS, DONE, floorTo, inDollars, pick, plain, type Candle, type CandleInterval, type LiveTrader, type Market, type MarketStats, type OrderRequest, type OrderState, type OrderStatus, type Position, type TimeInForce } from "./trade.ts";
 import { asRefusal, num, REGION, redact, unreachable, venueSaidNo, type Http, type HttpReply, type LiveBalance, type LiveSource } from "./types.ts";
+import type { LiveWriter } from "./writes.ts";
 
 export const ALPACA_KEY: KeyShape = { required: ["keyId", "secret"], optional: ["paper"], example: '{"keyId": "…", "secret": "…"} (add "paper": "true" for a paper-trading account)' };
 
 const LIVE = "https://api.alpaca.markets";
 const PAPER = "https://paper-api.alpaca.markets";
+
+/** the chains of this account's that Alpaca's wallets are on, by Alpaca's own code for each (its others, SOL, BTC and XRP, are not read here) */
+const WALLET_CHAIN: Partial<Record<ChainName, string>> = { Ethereum: "ETH", Arbitrum: "ARB" };
+/** why no withdrawal is made from here, in Alpaca's words: its reference page for POST /v2/wallets/transfers */
+const NO_WITHDRAWAL = 'Alpaca retired crypto withdrawals through its Trading API ("This endpoint is deprecated. Use the Alpaca web application to initiate withdrawals." Sunset: 2026-10-09): crypto leaves Alpaca in the Alpaca app, to an address whitelisted there first; cash moves by ACH at Alpaca';
 
 export async function alpacaSource(req: { venue: string; label: string; reference: string; key: KeyFile; http: Http; clock?: (() => number) | undefined }): Promise<{ source: LiveSource; first: LiveBalance[] } | Refusal> {
   const paper = req.key.paper === "true";
@@ -80,14 +97,80 @@ export async function alpacaSource(req: { venue: string; label: string; referenc
       ...(Array.isArray(positions) ? positions : []).map(balanceOf),
     ];
   };
+  /** Alpaca's own answer to a wallets call that was not a 200, in its words and without the key */
+  const walletWords = (r: HttpReply): string => {
+    const b = r.body && typeof r.body === "object" ? (r.body as Record<string, unknown>) : {};
+    const said = redact(String(typeof b.message === "string" ? b.message : r.text), secrets).replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 160);
+    return `HTTP ${r.status}${said ? `, "${said}"` : ""}`;
+  };
+  /** whether Alpaca has crypto wallets for this account: asked once, softly — a no is Alpaca's own answer, and the connection goes on */
+  const wallets = async (): Promise<{ on: true } | { on: false; why: string }> => {
+    let r: HttpReply;
+    try {
+      r = await req.http(`${base}/v2/wallets`, { headers: { "APCA-API-KEY-ID": req.key.keyId!, "APCA-API-SECRET-KEY": req.key.secret!, accept: "application/json" } });
+    } catch (err) {
+      return { on: false, why: `Alpaca did not answer whether this account has crypto wallets (${unreachable(req.venue, name, err, secrets).message}): nothing is sent to it from here until it is connected again. Cash moves by ACH at Alpaca` };
+    }
+    if (r.status === 200) return { on: true };
+    if (r.status === 403 || r.status === 404) return { on: false, why: `Alpaca has not enabled the Crypto Wallets API for this account (GET /v2/wallets: ${walletWords(r)}): cash moves by ACH at Alpaca, and crypto wallets are enabled by Alpaca on request` };
+    return { on: false, why: `Alpaca did not say whether this account has crypto wallets (GET /v2/wallets: ${walletWords(r)}): nothing is sent to it from here until it is connected again. Cash moves by ACH at Alpaca` };
+  };
   try {
     const first = await read();
     const trader = alpacaTrader({ venue: req.venue, name, base, keyId: req.key.keyId!, secret: req.key.secret!, http: req.http, clock: req.clock ?? Date.now });
-    const source: LiveSource = { name, kind: "broker", reference: req.reference, via: `Alpaca Trading API${paper ? " · paper" : ""}`, probe: { can: ["read", "trade"], note: "an Alpaca key has no scopes: any key can place orders, and no key can move cash", native: { calls: ["GET /v2/account", "GET /v2/positions"], paper } }, read, readOnlyBecause: "Alpaca's API moves no cash: deposits and withdrawals are made at Alpaca", trader };
+    const w = await wallets();
+    const writer = w.on ? alpacaWriter({ venue: req.venue, name, base, keyId: req.key.keyId!, secret: req.key.secret!, http: req.http }) : undefined;
+    const note = `an Alpaca key has no scopes: any key can place orders. ${w.on ? "Crypto comes in to Alpaca's wallets for this account (GET /v2/wallets: enabled), on Ethereum or Arbitrum; it leaves Alpaca in the Alpaca app (the Trading API's withdrawal is deprecated, sunset 2026-10-09). Cash moves by ACH at Alpaca" : w.why}`;
+    const source: LiveSource = { name, kind: "broker", reference: req.reference, via: `Alpaca Trading API${paper ? " · paper" : ""}`, probe: { can: ["read", "trade"], note, native: { calls: ["GET /v2/account", "GET /v2/positions", "GET /v2/wallets"], paper, wallets: w.on } }, read, ...(writer ? { writer } : { readOnlyBecause: (w as { why: string }).why }), trader };
     return { source, first };
   } catch (err) {
     return asRefusal(req.venue, name, err, secrets);
   }
+}
+
+// ---- crypto coming in: Alpaca's wallets --------------------------------------------------------------
+
+/** Money INTO Alpaca: the account's own deposit wallet at Alpaca for an asset on a chain, as Alpaca gives it (GET /v2/wallets?asset=&chain=,
+ * one wallet, made on the spot when there is none). Nothing leaves Alpaca from here: its Trading API withdrawal is deprecated (sunset
+ * 2026-10-09), and `can.why.withdraw` says so in Alpaca's words. The shape of one wallet is `address`, `chain`, `created_at` (its OpenAPI
+ * definition); an answer in another shape is read for an `address` and refused when none is there */
+function alpacaWriter(c: { venue: string; name: string; base: string; keyId: string; secret: string; http: Http }): LiveWriter {
+  const secrets = [c.keyId, c.secret];
+  const headers = { "APCA-API-KEY-ID": c.keyId, "APCA-API-SECRET-KEY": c.secret, accept: "application/json" };
+  const said = (r: HttpReply): { said: string; native: Record<string, unknown> } => {
+    const b = r.body && typeof r.body === "object" && !Array.isArray(r.body) ? (r.body as Record<string, unknown>) : {};
+    const text = redact(String(typeof b.message === "string" ? b.message : r.text), secrets).replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 220);
+    return { said: text, native: { status: r.status, ...(num(b.code) ? { code: num(b.code) } : {}), said: text } };
+  };
+  return {
+    can: { withdraw: false, ledgers: [], transfer: false, swap: false, receive: true, send: false, why: { withdraw: NO_WITHDRAWAL } },
+    async depositAddress(asset, chain) {
+      const code = WALLET_CHAIN[chain];
+      if (!code) return no("E_VENUE_RAIL_CLOSED", { venue: c.venue, message: `${c.name}'s crypto wallets are on Ethereum and Arbitrum (Alpaca's chains: ETH, ARB, SOL, BTC, XRP): not on ${chain}` });
+      const a = asset.trim().toUpperCase();
+      let r: HttpReply;
+      try {
+        r = await c.http(`${c.base}/v2/wallets?asset=${encodeURIComponent(a)}&chain=${code}`, { headers });
+      } catch (err) {
+        return unreachable(c.venue, c.name, err, secrets);
+      }
+      if (r.status !== 200) {
+        const { said: words, native } = said(r);
+        if (r.status === 401) return no("E_VENUE_UNAUTHORIZED", { venue: c.venue, message: `${c.name} does not accept this key`, native });
+        if (r.status === 403) return no("E_VENUE_PERMISSION", { venue: c.venue, message: `${c.name} refused the wallet: ${words || "the Crypto Wallets API is not enabled for this account"}`, native });
+        if (r.status === 404) return no("E_VENUE_RAIL_CLOSED", { venue: c.venue, message: `${c.name} has no ${a} wallet on ${chain} for this account${words ? ` (it says: ${words})` : ""}`, native });
+        if (r.status === 429) return no("E_VENUE_UNREACHABLE", { venue: c.venue, message: `${c.name} is rate-limiting this machine: try again in a minute`, native });
+        if (r.status >= 500) return no("E_VENUE_UNREACHABLE", { venue: c.venue, message: `${c.name} did not answer`, native });
+        return no("E_VENUE_RAIL_CLOSED", { venue: c.venue, message: `${c.name} gives no ${a} wallet on ${chain}${words ? `: ${words}` : ` (HTTP ${r.status})`}`, native });
+      }
+      // one wallet when the asset is named; a list is read for the one on this chain, or its first
+      const rows = (Array.isArray(r.body) ? r.body : r.body && typeof r.body === "object" ? [r.body] : []).filter((x): x is Record<string, unknown> => !!x && typeof x === "object");
+      const row = rows.find((x) => String(x.chain ?? "").toUpperCase() === code) ?? rows[0];
+      const address = String(row?.address ?? "");
+      if (!row || !isAddress(address, { strict: false })) return no("E_VENUE_REJECTED", { venue: c.venue, message: `${c.name} answered the ${a} wallet on ${chain} without an EVM address in it`, native: { status: r.status, said: redact(r.text, secrets).slice(0, 200) } });
+      return { address: getAddress(address), note: `${c.name}'s own ${a} wallet for this account on ${chain}${row.chain ? ` (its chain code: ${String(row.chain)})` : ""}: what lands there trades at ${c.name}. Crypto leaves ${c.name} in the Alpaca app` };
+    },
+  };
 }
 
 // ---- trading ---------------------------------------------------------------------------------------

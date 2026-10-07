@@ -101,7 +101,7 @@ function page() {
   };
   const ctx = createContext(sandbox);
   sandbox.window = runInContext("globalThis", ctx);
-  for (const f of ["ui/core.js", "ui/connect.js", "ui/markets.js"]) new Script(readFileSync(join(PUBLIC, f), "utf8"), { filename: f }).runInContext(ctx);
+  for (const f of ["ui/core.js", "ui/connect.js", "ui/money.js", "ui/portfolio.js"]) new Script(readFileSync(join(PUBLIC, f), "utf8"), { filename: f }).runInContext(ctx);
   const run = <T = unknown>(code: string) => runInContext(code, ctx) as T;
   run("load = async () => {}; confirmSheet = async (t) => (CONFIRMS.push(t), true); own = async (d) => (ACTS.push(d), { status: 200, body: { ok: true, kind: 'account', summary: 'done' } })");
   sandbox.CONFIRMS = confirms;
@@ -119,7 +119,7 @@ describe("Connect a new key, for a second account at an exchange", () => {
   it("starts from that account's own file, names it in the confirm, and signs the connection with it", async () => {
     const p = page();
     p.run(`A = ${JSON.stringify(account([first, venue("okx-trading", "OKX Trading", { keyFile: "credentials/okx2/key.json", trade: { can: false, what: "spot", kinds: ["spot"] } })]))}`);
-    await p.run("mkRekey('okx-trading')");
+    await p.run("pfRekey('okx-trading')");
     await p.settle();
     expect(p.confirms[0]).toContain("Save the new key in the same file, /home/x/credentials/okx2/key.json, then");
     expect(p.acts).toEqual([{ type: "disconnectVenue", venue: "okx-trading" }]);
@@ -132,7 +132,7 @@ describe("Connect a new key, for a second account at an exchange", () => {
   it("on an account that names no file: the venue's own default, credentials/okx-trading/api-key.json — never the first account's", async () => {
     const p = page();
     p.run(`A = ${JSON.stringify(account([first, venue("okx-trading", "OKX Trading", { trade: { can: false, what: "spot", kinds: ["spot"] } })]))}`);
-    await p.run("mkRekey('okx-trading')");
+    await p.run("pfRekey('okx-trading')");
     await p.settle();
     expect(p.confirms[0]).toContain("Save the new key in the same file, then");
     expect(p.form.elements.ref.value).toBe("credentials/okx-trading/api-key.json");

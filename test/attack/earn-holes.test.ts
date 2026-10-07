@@ -22,7 +22,7 @@ import { PortfolioService } from "../../src/portfolio/service.ts";
  *   the destination    a withdrawal names none: a field that would carry one is not part of what is signed, a `lands` that is not the
  *                      product's own is refused, another venue's product is not this venue's, and no adapter is handed one
  *   replay             the same signed request is one request, in this run and the next
- *   Conservative       an agent's request is a card, every time
+ *   Guard       an agent's request is a card, every time
  *   MetaMask's switch  mm's earn moves nothing unless PORTFOLIO_MM_WRITES is 1 — held here in an env object, never in the shell
  *   Hyperliquid        a perpetual's order, close or leverage from a place Hyperliquid's terms close is refused before anything is sent
  *   a status blip      Kraken's status call failing for its own reasons (a nonce, the key) is not the request failing: it stays under way,
@@ -258,8 +258,8 @@ describe("ATTACK: replaying a signed earn request", () => {
   });
 });
 
-describe("ATTACK: an agent that hopes Conservative lets it through", () => {
-  it("in Conservative every request inside the limit is a card, a supply and a withdrawal alike; nothing reaches the venue until the owner signs", async () => {
+describe("ATTACK: an agent that hopes Guard lets it through", () => {
+  it("in Guard every request inside the limit is a card, a supply and a withdrawal alike; nothing reaches the venue until the owner signs", async () => {
     const x = await boot();
     await x.letIn();
     expect(carded(await x.ag(ask({ amount: "5" }))).usd).toBe(5);
@@ -274,7 +274,7 @@ describe("ATTACK: MetaMask's own switch", () => {
     const r = refusal(await x.own({ type: "liveEarn", venue: "mmw", kind: "supply", product: `8453:${VAULT}`, asset: "USDC", amount: "10", maxUsd: "10.00", lands: "your MetaMask Agent Wallet on Base", deadline: 5_600_000 }));
     expect([r.code, (r.detail as { commands: string[] }).commands]).toEqual(["E_WALLET_LIVE_WRITES_OFF", [`mm earn supply --vault ${VAULT} --amount 10 --chain-id 8453 --wallet-timeout 600 --json`]]);
     expect(mm.calls.some((a) => a[0] === "earn" && (a[1] === "supply" || a[1] === "withdraw"))).toBe(false);
-    // an agent inside its limit, Aggressive: the same switch
+    // an agent inside its limit, Beast: the same switch
     await x.letIn({ allow: "mmw" });
     await x.own({ type: "setPolicy", change: "mode", value: "open" });
     expect(refusal(await x.ag(ask({ venue: "mmw", product: `8453:${VAULT}`, asset: "USDC", amount: "5" }))).code).toBe("E_WALLET_LIVE_WRITES_OFF");
@@ -295,7 +295,7 @@ describe("ATTACK: a perpetual from a place Hyperliquid's terms close", () => {
     expect(r.message).toContain("does not look for a way around it");
     expect(refusal(await x.own({ type: "liveClose", venue: "mmw", symbol: "BTC-PERP", qty: "" })).code).toBe("E_VENUE_GEOBLOCKED");
     expect(refusal(await x.own({ type: "liveLeverage", venue: "mmw", symbol: "BTC-PERP", leverage: "2", marginMode: "" })).code).toBe("E_VENUE_GEOBLOCKED");
-    // an agent inside its trading limit, Aggressive: the same line, and its limit is not used
+    // an agent inside its trading limit, Beast: the same line, and its limit is not used
     await x.letIn({ scope: "trade", allow: "mmw", per: "100", budget: "100" });
     await x.own({ type: "setPolicy", change: "mode", value: "open" });
     expect(refusal(await x.ag({ type: "agentLiveOrder", venue: "mmw", symbol: "BTC-PERP", side: "buy", orderType: "market", qty: "0.001", usd: "", limitPrice: "" })).code).toBe("E_VENUE_GEOBLOCKED");

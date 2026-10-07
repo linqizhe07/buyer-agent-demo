@@ -420,15 +420,15 @@ describe("tokenised shares on the Markets screen", () => {
     };
     const x = await exploreAcross({ connected: [{ id: "wallet-1", name: "OKX Wallet", trader: wallet, connector: "live:wallet" }], public: [stockTokens] }, { tab: "rwas", clock: () => T });
     const row = (key: string) => x.items.find((i) => i.key === key);
-    expect(row("rwa:TSLAON")).toMatchObject({ kind: "rwa", name: "Tesla · Ondo Stock on Ethereum", tabs: ["rwas"], category: "RWA" });
+    expect(row("rwa:TSLAON")).toMatchObject({ kind: "rwa", name: "Tesla · Ondo Stock on Ethereum", tabs: ["all", "rwas"], category: "RWA" });
     expect(row("rwa:TSLAON")!.at).toEqual([{ venue: "wallet-1", venueName: "OKX Wallet", symbol: "TSLAon/USDC@Ethereum", connected: true, canTrade: true, public: false, price: 380, open: true, note: expect.stringContaining("Ondo: U.S. persons"), issuer: "Ondo Global Markets", eligibility: expect.stringContaining("Ondo: U.S. persons") }]);
     // the row carries the issuer and its words too, from the venue that says them
     expect(row("rwa:TSLAON")).toMatchObject({ issuer: "Ondo Global Markets", eligibility: expect.stringContaining("Ondo: U.S. persons") });
     expect(row("rwa:NVDAX")!.at[0]).toMatchObject({ venue: "wallet-1", canTrade: true });
     // the public Stock Token list stays beside them, to connect
     expect(row("rwa:AAPL")!.at[0]).toMatchObject({ venue: "robinhood-stock-tokens", connected: false, canTrade: false });
-    // the RWAs tab holds them, and they are in no other tab
-    expect(x.items.every((i) => i.kind === "rwa" && i.tabs.join() === "rwas")).toBe(true);
+    // the RWAs tab holds them, and (All apart, which holds every row) they are in no other tab
+    expect(x.items.every((i) => i.kind === "rwa" && i.tabs.join() === "all,rwas")).toBe(true);
     const fund = await exploreAcross({ connected: [{ id: "wallet-1", name: "OKX Wallet", trader: wallet, connector: "live:wallet" }] }, { q: "OUSG", clock: () => T });
     expect(fund.items.find((i) => i.key === "rwa:OUSG")!.at[0]).toMatchObject({ connected: true, canTrade: false, open: false, note: expect.stringContaining("OndoIDRegistry") });
   });

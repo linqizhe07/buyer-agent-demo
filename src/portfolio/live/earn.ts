@@ -18,6 +18,17 @@
  *                             POST /0/private/Earn/Allocations                    what is allocated, and earned (Query Funds)
  *                             POST /0/private/Earn/Allocate · Deallocate          in or out (Earn Funds); asynchronous: Earn/AllocateStatus
  *                                                                                 and Earn/DeallocateStatus say when it is done
+ *   KuCoin                  KuCoin Earn, through its own API with the account's own key (www.kucoin.com/docs-new/rest/earn, read
+ *                           2026-10-06; every call under /api/v1/earn):
+ *                             GET  earn/saving/products · promotion/products ·    what is offered (the key's General permission): flexible
+ *                                  staking/products · kcs-staking/products ·      savings (type DEMAND, out at any time) and fixed terms
+ *                                  eth-staking/products                           (type TIME), each with its annualized returnRate
+ *                             GET  earn/hold-assets                               what is held, holding by holding (General)
+ *                             POST earn/orders                                    in, from the trading account (the key's Earn permission)
+ *                             GET  earn/redeem-preview                            what a redemption would do: a penalty on an early one
+ *                             DELETE earn/orders                                  out, back to the trading account (Earn); PENDING until
+ *                                                                                 KuCoin delivers it, which hold-assets shows
+ *                           Binance's Simple Earn has an interface too, and is not offered: Binance answers this machine 451
  *
  * A withdrawal lands where the money came from, at the same venue, always: none of these calls takes a destination, and the account
  * sends none. Nothing here decides WHETHER money goes in or out: the account's earn door does (account/live-earn.ts) — the server's
@@ -167,10 +178,11 @@ export interface ExchangeEarnDeps {
   now?: (() => number) | undefined;
 }
 
-/** OKX's Simple Earn Flexible and Kraken Earn, where the exchange is one of them; nothing for any other exchange */
+/** OKX's Simple Earn Flexible, Kraken Earn and KuCoin Earn, where the exchange is one of them; nothing for any other exchange */
 export function exchangeEarner(d: ExchangeEarnDeps): LiveEarner | undefined {
   if (isOkx(d.client.id)) return okxEarner(d);
   if (d.client.id === "kraken") return krakenEarner(d);
+  if (d.client.id === "kucoin") return kucoinEarner(d);
   return undefined;
 }
 
@@ -435,6 +447,213 @@ export function krakenEarner(d: ExchangeEarnDeps): LiveEarner {
         const failed = said.code === "E_VENUE_INSUFFICIENT" || said.code === "E_VENUE_ORDER_INVALID" || (/EEarnings:/i.test(words) && !/EEarnings:(Busy|Permission denied)/i.test(words));
         return failed ? { ref, status: "rejected", native: { refusal: { code: said.code, message: said.message }, said: words } } : said;
       }
+    },
+  };
+}
+
+/** KuCoin Earn: flexible savings (out at any time) and fixed terms (promotions, staking), each as KuCoin lists it. Money goes in from the
+ * account's KuCoin trading account — the balance the account reads there — and comes back to it. Product ids are KuCoin's own */
+export function kucoinEarner(d: ExchangeEarnDeps): LiveEarner {
+  const { client, venue, name } = d;
+  const now = d.now ?? Date.now;
+  const LANDS = `your ${name} trading account`;
+  /** KuCoin's name for the spot trading account, where money goes in from and comes back to */
+  const ACCOUNT = "TRADE";
+  const PAGE = 100;
+  const say = (err: unknown, doing: string): Refusal => {
+    const r = exchangeSaidNo(venue, name, err, d.key);
+    const said = str(rec(r.native).said);
+    // a key without the Earn permission: KuCoin's 400007 "Access denied, require more permission", which the library files as a bad key
+    if (r.code === "E_VENUE_PERMISSION" || /400007|require more permission|access denied/i.test(said)) return no("E_VENUE_PERMISSION", { venue, message: `${name} refused to ${doing}: purchase and redemption need the key's Earn permission (set on the key at KuCoin)`, native: r.native });
+    if (r.code === "E_VENUE_REJECTED" && said) return no("E_VENUE_REJECTED", { venue, message: `${name} refused to ${doing}: ${said}`, native: r.native });
+    return r;
+  };
+  const day = (ms: number | undefined): string => (ms !== undefined && ms > 0 ? new Date(ms).toISOString().slice(0, 10) : "");
+  /** the five product lists KuCoin keeps, and what each is called */
+  const LISTS: Array<{ call: string; what: string }> = [
+    { call: "earnGetEarnSavingProducts", what: "Savings" },
+    { call: "earnGetEarnPromotionProducts", what: "Promotion" },
+    { call: "earnGetEarnStakingProducts", what: "Staking" },
+    { call: "earnGetEarnKcsStakingProducts", what: "KCS Staking" },
+    { call: "earnGetEarnEthStakingProducts", what: "ETH Staking" },
+  ];
+  /** one of KuCoin's products as the account offers it; none where its income is in another currency than what goes in (the shape here is one
+   * asset in and out), or where it has no id */
+  const productOf = async (row: Record<string, unknown>, what: string): Promise<EarnProduct | undefined> => {
+    const id = str(row.id);
+    const ccy = str(row.currency).toUpperCase();
+    const income = str(row.incomeCurrency).toUpperCase();
+    if (!id || !ccy || (income && income !== ccy)) return undefined;
+    const fixed = str(row.type) === "TIME";
+    const status = str(row.status);
+    const rate = known(row.returnRate);
+    const min = known(row.userLowerLimit);
+    const remain = known(row.productRemainAmount);
+    const redeemDays = known(row.redeemPeriod);
+    const lockEnd = known(row.lockEndTime);
+    const applyEnd = known(row.applyEndTime);
+    const duration = known(row.duration);
+    const early = row.earlyRedeemSupported === 1 || row.earlyRedeemSupported === "1" || row.earlyRedeemSupported === true;
+    const price = await priceOf(d.price, ccy);
+    const why = status !== "ONGOING" ? `${name} lists it as ${status || "not open"}` : remain !== undefined && remain <= 0 ? `${name} says it is full` : applyEnd !== undefined && applyEnd > 0 && applyEnd <= now() ? `${name} says its subscription window has closed` : undefined;
+    return {
+      id,
+      asset: ccy,
+      name: `${ccy} · ${what}${fixed ? ` (${duration !== undefined ? `${duration} days` : "fixed term"})` : " (flexible)"}`,
+      ...(rate !== undefined ? { apy: rate, rateKind: "apr" as const } : {}),
+      protocol: "KuCoin Earn",
+      ...(min !== undefined ? { minAmount: min } : {}),
+      ...(redeemDays !== undefined ? { lockDays: redeemDays } : {}),
+      ...(price !== undefined ? { priceUsd: price } : {}),
+      lands: LANDS,
+      canSupply: why === undefined,
+      // a fixed term is delivered at its end; before that it is redeemed only where KuCoin allows an early redemption
+      canWithdraw: !fixed || early,
+      ...(why ? { why } : {}),
+      note: `KuCoin Earn ${what}: ${fixed ? `a fixed term${day(lockEnd) ? ` to ${day(lockEnd)}` : ""}${early ? ", redeemable early where KuCoin allows it — an early redemption may forfeit interest, which KuCoin asks you to confirm, at KuCoin, not from here" : ", delivered at its end"}` : "flexible, out at any time"}${redeemDays ? `; what is redeemed is back in ${redeemDays} day${redeemDays === 1 ? "" : "s"}` : ""}. The rate is KuCoin's annualized return rate. Money goes in from ${LANDS} and comes back to it`,
+    };
+  };
+  let seen: { at: number; key: string; items: EarnProduct[] } | undefined;
+  /** every product KuCoin lists (in one currency when asked), kept five minutes; a list that does not answer is left out, and when none
+   * answers the first refusal is the answer */
+  const listed = async (asset?: string, fresh = false): Promise<EarnProduct[] | Refusal> => {
+    const key = asset ?? "";
+    if (!fresh && seen && seen.key === key && now() - seen.at < KEPT_MS) return seen.items;
+    const items: EarnProduct[] = [];
+    let refused: Refusal | undefined;
+    let answered = 0;
+    for (const l of LISTS) {
+      const call = method(client, l.call);
+      if (!call) continue;
+      try {
+        const rows = list(rec(await call(asset ? { currency: asset } : {})).data).map(rec);
+        answered++;
+        for (const row of rows) {
+          const p = await productOf(row, l.what);
+          if (p && (!asset || p.asset === asset)) items.push(p);
+        }
+      } catch (err) {
+        refused ??= say(err, `list its ${l.what} products`);
+      }
+    }
+    if (!answered) return refused ?? no("E_VENUE_RAIL_CLOSED", { venue, message: `the exchange library does not reach ${name}'s Earn` });
+    seen = { at: now(), key, items };
+    return items;
+  };
+  type Hold = { orderId: string; productId: string; currency: string; holdAmount: number; redeemingAmount: number; status: string; lockEndTime: number | undefined; returnRate: number | undefined; category: string };
+  /** what is held, holding by holding (hold-assets is paged); in one product when asked */
+  const holds = async (productId?: string): Promise<Hold[] | Refusal> => {
+    const call = method(client, "earnGetEarnHoldAssets");
+    if (!call) return no("E_VENUE_RAIL_CLOSED", { venue, message: `the exchange library does not reach ${name}'s Earn` });
+    const out: Hold[] = [];
+    for (let page = 1; page <= 5; page++) {
+      let data: Record<string, unknown>;
+      try {
+        data = rec(rec(await call({ ...(productId ? { productId } : {}), currentPage: page, pageSize: PAGE })).data);
+      } catch (err) {
+        return say(err, "list what is in Earn");
+      }
+      for (const it of list(data.items).map(rec)) out.push({ orderId: str(it.orderId), productId: str(it.productId), currency: str(it.currency).toUpperCase(), holdAmount: num(it.holdAmount), redeemingAmount: num(it.redeemingAmount), status: str(it.status), lockEndTime: known(it.lockEndTime), returnRate: known(it.returnRate), category: str(it.productCategory) });
+      if (page >= num(data.totalPage)) break;
+    }
+    return out;
+  };
+  const can = d.can.length === 0 ? "unknown" : d.can.includes("earn");
+  const submit = once<EarnState>();
+  return {
+    can,
+    ...(can === false ? { whyNot: `this ${name} key lacks the Earn permission: purchase and redemption need it (set on the key at KuCoin)` } : {}),
+    what: "KuCoin Earn: flexible savings, fixed terms and staking",
+    products: (asset) => listed(asset ? asset.trim().toUpperCase() : undefined),
+    async product(id) {
+      const pid = id.trim();
+      if (!/^\d{1,20}$/.test(pid)) return no("E_ACCOUNT_BAD_ACTION", { venue, message: `a product at ${name} is KuCoin's own product id (digits, for example 2611), not "${id.slice(0, 40)}"` });
+      const items = await listed(undefined, true);
+      if (isRefusal(items)) return items;
+      return items.find((p) => p.id === pid) ?? no("E_VENUE_REJECTED", { venue, message: `${name} lists no Earn product ${pid} now` });
+    },
+    async positions() {
+      const held = await holds();
+      if (isRefusal(held)) return held;
+      const out: EarnPosition[] = [];
+      for (const h of held) {
+        if (!(h.holdAmount > 0) || !h.currency) continue;
+        const price = await priceOf(d.price, h.currency);
+        out.push({ product: h.productId, id: h.orderId, asset: h.currency, amount: h.holdAmount, ...(price !== undefined ? { usd: Number((h.holdAmount * price).toFixed(2)) } : {}), ...(h.returnRate !== undefined ? { apy: h.returnRate } : {}), ...(h.redeemingAmount > 0 ? { pending: h.redeemingAmount } : {}), name: `${h.currency} · KuCoin Earn${h.category ? ` (${h.category.toLowerCase().replace(/_/g, " ")})` : ""}`, protocol: "KuCoin Earn" });
+      }
+      return out;
+    },
+    supply: (p, amount, clientId) =>
+      submit(clientId, async () => {
+        const call = method(client, "earnPostEarnOrders");
+        if (!call) return no("E_VENUE_RAIL_CLOSED", { venue, message: `the exchange library does not reach ${name}'s Earn` });
+        const body = { productId: p.id, amount: plain(amount), accountType: ACCOUNT };
+        try {
+          const r = rec(rec(await call(body)).data);
+          return { ref: `purchase:${p.id}:${clientId}`, status: "done", native: { request: body, answer: { orderId: str(r.orderId), orderTxId: str(r.orderTxId) } } };
+        } catch (err) {
+          return say(err, `put ${plain(amount)} ${p.asset} into ${p.name}`);
+        }
+      }),
+    // out: holding by holding, each previewed first. KuCoin asks for an early redemption's penalty to be confirmed (confirmPunishRedeem), and
+    // the account never confirms it: a redemption that would forfeit interest is refused with the figure, for the owner to make at KuCoin
+    withdraw: (p, amount, clientId, all) =>
+      submit(clientId, async () => {
+        const preview = method(client, "earnGetEarnRedeemPreview");
+        const redeem = method(client, "earnDeleteEarnOrders");
+        if (!preview || !redeem) return no("E_VENUE_RAIL_CLOSED", { venue, message: `the exchange library does not reach ${name}'s Earn` });
+        const held = await holds(p.id);
+        if (isRefusal(held)) return held;
+        const mine = held.filter((h) => h.holdAmount > 0);
+        if (!mine.length) return no("E_VENUE_REJECTED", { venue, message: `nothing of yours is in ${p.name} at ${name}` });
+        const total = mine.reduce((s, h) => s + h.holdAmount, 0);
+        if (!all && amount > total + 1e-9) return no("E_VENUE_INSUFFICIENT", { venue, message: `${name}: ${plain(total)} ${p.asset} is in ${p.name}, not ${plain(amount)}` });
+        // what each holding gives: all of it, or what is still wanted of it
+        const takes: Array<{ h: Hold; take: number }> = [];
+        let left = all ? total : amount;
+        for (const h of mine) {
+          if (left <= 1e-12) break;
+          const take = Math.min(left, h.holdAmount);
+          takes.push({ h, take });
+          left -= take;
+        }
+        for (const { h, take } of takes) {
+          let pv: Record<string, unknown>;
+          try {
+            pv = rec(rec(await preview({ orderId: h.orderId, fromAccountType: ACCOUNT })).data);
+          } catch (err) {
+            return say(err, `preview redeeming ${plain(take)} ${p.asset}`);
+          }
+          const until = day(h.lockEndTime) || day(known(pv.deliverTime));
+          if (pv.manualRedeemable === false) return no("E_VENUE_RAIL_CLOSED", { venue, message: `${name} says this holding in ${p.name} is not redeemed by hand now${until ? `: it is delivered on ${until}` : ""}`, native: pv });
+          const penalty = num(pv.penaltyInterestAmount);
+          if (penalty > 0) return no("E_VENUE_REJECTED", { venue, message: `${name} says redeeming ${plain(take)} ${p.asset} from ${p.name} now forfeits ${plain(penalty)} ${str(pv.currency) || p.asset} of interest, and asks for that to be confirmed: the account does not confirm it for you. Redeem it at KuCoin if you mean to${until ? `, or after ${until}` : ""}`, native: pv });
+        }
+        const answers: Array<Record<string, unknown>> = [];
+        const requests: Array<Record<string, unknown>> = [];
+        for (const { h, take } of takes) {
+          const body = { orderId: h.orderId, amount: plain(take), fromAccountType: ACCOUNT };
+          requests.push(body);
+          try {
+            const r = rec(rec(await redeem(body)).data);
+            answers.push({ orderTxId: str(r.orderTxId), deliverTime: known(r.deliverTime) ?? null, status: str(r.status), amount: str(r.amount) });
+          } catch (err) {
+            const refused = say(err, `redeem ${plain(take)} ${p.asset} from ${p.name}`);
+            // a holding redeemed before this one failed is money on its way: the request stands as pending, and what stopped it is said
+            if (answers.length) return { ref: `redeem:${p.id}:${clientId}`, status: "pending", native: { requests, answers, stopped: { code: refused.code, message: refused.message } } };
+            return refused;
+          }
+        }
+        return { ref: `redeem:${p.id}:${clientId}`, status: answers.every((a) => a.status === "SUCCESS") ? "done" : "pending", native: { requests, answers } };
+      }),
+    // a purchase is credited at once; a redemption is PENDING until KuCoin delivers it, and hold-assets shows the amount still redeeming
+    async status(ref, p, kind) {
+      if (kind === "supply") return { ref, status: "done", native: { said: `${name} credits a purchase at once` } };
+      const held = await holds(p.id);
+      if (isRefusal(held)) return held;
+      const redeeming = held.reduce((s, h) => s + h.redeemingAmount, 0);
+      const pending = redeeming > 0 || held.some((h) => h.status === "REDEEMING");
+      return { ref, status: pending ? "pending" : "done", native: { redeeming } };
     },
   };
 }

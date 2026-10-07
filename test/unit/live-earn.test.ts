@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { isRefusal, type Refusal } from "../../src/core/errors.ts";
-import { exchangeEarner, krakenEarner, okxEarner, type EarnProduct, type LiveEarner } from "../../src/portfolio/live/earn.ts";
+import { exchangeEarner, krakenEarner, kucoinEarner, okxEarner, type EarnProduct, type LiveEarner } from "../../src/portfolio/live/earn.ts";
 import type { ExchangeClient } from "../../src/portfolio/live/exchange.ts";
 import { metamaskSource, MmError, type MmNotice, type RunMm } from "../../src/portfolio/live/metamask.ts";
 
@@ -265,10 +265,131 @@ describe("Kraken Earn: /0/private/Earn with the account's own key", () => {
     expect(refusal(await e.supply(p, 1, "3".repeat(32))).code).toBe("E_VENUE_UNREACHABLE");
   });
 
-  it("only OKX and Kraken have earn through their keys here: any other exchange has none", () => {
+  it("OKX, Kraken and KuCoin have earn through their keys here: any other exchange has none (Binance's Simple Earn answers this machine 451)", () => {
     const none = exchangeEarner({ client: client("binance", [], {}), venue: "binance", name: "Binance", key: KEY, can: ["read"] });
     expect(none).toBeUndefined();
     expect(exchangeEarner({ client: client("okx", [], {}), venue: "okx", name: "OKX", key: KEY, can: [] })).toBeDefined();
     expect(exchangeEarner({ client: client("kraken", [], {}), venue: "kraken", name: "Kraken", key: KEY, can: [] })).toBeDefined();
+    expect(exchangeEarner({ client: client("kucoin", [], {}), venue: "kucoin", name: "KuCoin", key: KEY, can: [] })?.what).toBe("KuCoin Earn: flexible savings, fixed terms and staking");
+  });
+});
+
+describe("KuCoin Earn: /api/v1/earn with the account's own key, through the library's implicit calls", () => {
+  const NOW_MS = NOW;
+  /** KuCoin's product rows, shaped as its docs' schema (get-savings-products, get-promotion-products): returnRate an annualized fraction,
+   * redeemPeriod in days, times in milliseconds */
+  const SAVINGS = { code: "200000", data: [
+    { id: "2152", currency: "USDT", category: "DEMAND", type: "DEMAND", precision: 8, productUpperLimit: "1000000", productRemainAmount: "500000", userUpperLimit: "10000", userLowerLimit: "1", redeemPeriod: 0, lockStartTime: 1791100000000, lockEndTime: null, applyStartTime: 1791100000000, applyEndTime: null, returnRate: "0.0432", incomeCurrency: "USDT", earlyRedeemSupported: 0, status: "ONGOING", redeemType: "MANUAL", incomeReleaseType: "DAILY", interestDate: 1791200000000, duration: 0, newUserOnly: 0 },
+    { id: "2153", currency: "KCS", category: "DEMAND", type: "DEMAND", precision: 8, productUpperLimit: "100000", productRemainAmount: "0", userUpperLimit: "100", userLowerLimit: "1", redeemPeriod: 1, lockStartTime: 1791100000000, lockEndTime: null, applyStartTime: 1791100000000, applyEndTime: null, returnRate: "0.02", incomeCurrency: "KCS", earlyRedeemSupported: 0, status: "ONGOING", redeemType: "MANUAL", incomeReleaseType: "DAILY", interestDate: 1791200000000, duration: 0, newUserOnly: 0 },
+  ] };
+  const PROMOTION = { code: "200000", data: [
+    { id: "2611", currency: "USDC", category: "ACTIVITY", type: "TIME", precision: 6, productUpperLimit: "200000", productRemainAmount: "150000", userUpperLimit: "5000", userLowerLimit: "10", redeemPeriod: 1, lockStartTime: 1791300000000, lockEndTime: 1793892000000, applyStartTime: 1791100000000, applyEndTime: 1791300000000, returnRate: "0.12", incomeCurrency: "USDC", earlyRedeemSupported: 1, status: "ONGOING", redeemType: "AUTO", incomeReleaseType: "AFTER", interestDate: 1791300000000, duration: 30, newUserOnly: 0 },
+    // income in another currency than what goes in: not one asset in and out, so not offered
+    { id: "2612", currency: "BTC", category: "ACTIVITY", type: "TIME", precision: 8, productRemainAmount: "10", userLowerLimit: "0.001", redeemPeriod: 1, lockEndTime: 1793892000000, returnRate: "0.05", incomeCurrency: "USDT", earlyRedeemSupported: 0, status: "ONGOING", redeemType: "AUTO", incomeReleaseType: "AFTER", duration: 30 },
+    { id: "2613", currency: "ETH", category: "ACTIVITY", type: "TIME", precision: 8, productRemainAmount: "0", userLowerLimit: "0.01", redeemPeriod: 1, lockEndTime: 1793892000000, returnRate: "0.03", incomeCurrency: "ETH", earlyRedeemSupported: 0, status: "FULL", redeemType: "AUTO", incomeReleaseType: "AFTER", duration: 30 },
+  ] };
+  const EMPTY = { code: "200000", data: [] };
+  const LISTS = { earnGetEarnSavingProducts: SAVINGS, earnGetEarnPromotionProducts: PROMOTION, earnGetEarnStakingProducts: EMPTY, earnGetEarnKcsStakingProducts: EMPTY, earnGetEarnEthStakingProducts: EMPTY };
+  /** one page of hold-assets (get-account-holding): the holding's orderId is what a redemption names */
+  const holding = (over: Record<string, unknown> = {}) => ({ orderId: "2767291", productId: "2152", productCategory: "DEMAND", productType: "DEMAND", currency: "USDT", incomeCurrency: "USDT", returnRate: "0.0432", holdAmount: "110.5", redeemedAmount: "0", redeemingAmount: "0", lockStartTime: 1791100000000, lockEndTime: null, purchaseTime: 1791150000000, redeemPeriod: 0, status: "LOCKED", earlyRedeemSupported: 0, ...over });
+  const page = (items: unknown[]) => ({ code: "200000", data: { totalNum: items.length, totalPage: 1, currentPage: 1, pageSize: 100, items } });
+
+  it("the products: savings (flexible) and promotions (fixed terms) as KuCoin lists them, the rate its annualized fraction, the least that goes in, where money lands; a full one says so, and one paying in another currency is not offered", async () => {
+    const calls: Array<[string, Record<string, unknown>]> = [];
+    const e = kucoinEarner({ client: client("kucoin", calls, LISTS), venue: "kucoin", name: "KuCoin", key: KEY, can: ["read", "trade spot", "earn"], now: () => NOW_MS, price: async (a) => (a === "KCS" ? 10 : undefined) });
+    expect(e.can).toBe(true);
+    const list = ok(await e.products());
+    expect(calls.map(([n, p]) => [n, p])).toEqual([["earnGetEarnSavingProducts", {}], ["earnGetEarnPromotionProducts", {}], ["earnGetEarnStakingProducts", {}], ["earnGetEarnKcsStakingProducts", {}], ["earnGetEarnEthStakingProducts", {}]]);
+    expect(list.map((p) => p.id)).toEqual(["2152", "2153", "2611", "2613"]);
+    expect(list[0]).toMatchObject({ id: "2152", asset: "USDT", name: "USDT · Savings (flexible)", apy: 0.0432, rateKind: "apr", protocol: "KuCoin Earn", minAmount: 1, lockDays: 0, priceUsd: 1, lands: "your KuCoin trading account", canSupply: true, canWithdraw: true });
+    expect(list[0]!.why).toBeUndefined();
+    expect(list[1]).toMatchObject({ asset: "KCS", priceUsd: 10, canSupply: false, why: "KuCoin says it is full", lockDays: 1 });
+    expect(list[2]).toMatchObject({ id: "2611", asset: "USDC", name: "USDC · Promotion (30 days)", apy: 0.12, minAmount: 10, lockDays: 1, canSupply: true, canWithdraw: true });
+    expect(list[2]!.note).toContain("a fixed term to 2026-11-05, redeemable early where KuCoin allows it");
+    expect(list[3]).toMatchObject({ id: "2613", asset: "ETH", canSupply: false, canWithdraw: false, why: "KuCoin lists it as FULL" });
+    // one asset when asked: KuCoin is asked for that currency, and only its products come back
+    calls.splice(0);
+    expect(ok(await e.products("usdt")).map((p) => p.id)).toEqual(["2152"]);
+    expect(calls[0]).toEqual(["earnGetEarnSavingProducts", { currency: "USDT" }]);
+    // a key without KuCoin's Earn permission may only read
+    const readOnly = kucoinEarner({ client: client("kucoin", [], LISTS), venue: "kucoin", name: "KuCoin", key: KEY, can: ["read", "trade spot"], now: () => NOW_MS });
+    expect([readOnly.can, readOnly.whyNot]).toEqual([false, "this KuCoin key lacks the Earn permission: purchase and redemption need it (set on the key at KuCoin)"]);
+    expect(kucoinEarner({ client: client("kucoin", [], LISTS), venue: "kucoin", name: "KuCoin", key: KEY, can: [] }).can).toBe("unknown");
+  });
+
+  it("one product is read afresh by KuCoin's id; what is held comes holding by holding; money in is POST earn/orders from the trading account, credited at once", async () => {
+    const calls: Array<[string, Record<string, unknown>]> = [];
+    const c = client("kucoin", calls, { ...LISTS, earnGetEarnHoldAssets: page([holding(), holding({ orderId: "2767292", productId: "2611", productCategory: "ACTIVITY", productType: "TIME", currency: "USDC", incomeCurrency: "USDC", returnRate: "0.12", holdAmount: "50", redeemingAmount: "20", status: "REDEEMING", lockEndTime: 1793892000000 }), holding({ orderId: "2767293", holdAmount: "0" })]), earnPostEarnOrders: { code: "200000", data: { orderId: "2767299", orderTxId: "6603694" } } });
+    const e = kucoinEarner({ client: c, venue: "kucoin", name: "KuCoin", key: KEY, can: ["read", "earn"], now: () => NOW_MS });
+    const p = ok(await e.product("2152"));
+    expect(p.id).toBe("2152");
+    expect(refusal(await e.product("savings:USDT")).code).toBe("E_ACCOUNT_BAD_ACTION");
+    expect(refusal(await e.product("9999")).message).toBe("KuCoin lists no Earn product 9999 now");
+    const held = ok(await e.positions());
+    expect(calls.find(([n]) => n === "earnGetEarnHoldAssets")![1]).toEqual({ currentPage: 1, pageSize: 100 });
+    expect(held).toEqual([
+      { product: "2152", id: "2767291", asset: "USDT", amount: 110.5, usd: 110.5, apy: 0.0432, name: "USDT · KuCoin Earn (demand)", protocol: "KuCoin Earn" },
+      { product: "2611", id: "2767292", asset: "USDC", amount: 50, usd: 50, apy: 0.12, pending: 20, name: "USDC · KuCoin Earn (activity)", protocol: "KuCoin Earn" },
+    ]);
+    const s = ok(await e.supply(p, 25, CLIENT));
+    expect([s.ref, s.status, s.native]).toEqual([`purchase:2152:${CLIENT}`, "done", { request: { productId: "2152", amount: "25", accountType: "TRADE" }, answer: { orderId: "2767299", orderTxId: "6603694" } }]);
+    // the same client id again is the same request: nothing is bought twice
+    ok(await e.supply(p, 25, CLIENT));
+    expect(calls.filter(([n]) => n === "earnPostEarnOrders")).toHaveLength(1);
+    expect(ok(await e.status!(s.ref, p, "supply")).status).toBe("done");
+  });
+
+  it("money out: each holding previewed (GET earn/redeem-preview), then DELETE earn/orders back to the trading account, PENDING until hold-assets shows nothing redeeming; all of it takes every holding", async () => {
+    const calls: Array<[string, Record<string, unknown>]> = [];
+    let redeeming = "0";
+    const c = client("kucoin", calls, {
+      ...LISTS,
+      earnGetEarnHoldAssets: (params: Record<string, unknown>) => page(params.productId === "2152" ? [holding({ orderId: "A1", holdAmount: "60", redeemingAmount: redeeming }), holding({ orderId: "A2", holdAmount: "50.5" })] : []),
+      earnGetEarnRedeemPreview: (params: Record<string, unknown>) => ({ code: "200000", data: { currency: "USDT", redeemAmount: params.orderId === "A1" ? "60" : "50.5", penaltyInterestAmount: "0", redeemPeriod: 0, deliverTime: 1791230000000, manualRedeemable: true, redeemAll: true } }),
+      earnDeleteEarnOrders: (params: Record<string, unknown>) => ({ code: "200000", data: { orderTxId: `tx-${String(params.orderId)}`, deliverTime: 1791230000000, status: "PENDING", amount: params.amount } }),
+    });
+    const e = kucoinEarner({ client: c, venue: "kucoin", name: "KuCoin", key: KEY, can: ["read", "earn"], now: () => NOW_MS });
+    const p = ok(await e.product("2152"));
+    // a part: the first holding gives it
+    const part = ok(await e.withdraw(p, 10, CLIENT, false));
+    expect([part.ref, part.status]).toEqual([`redeem:2152:${CLIENT}`, "pending"]);
+    expect(calls.filter(([n]) => n === "earnGetEarnRedeemPreview").map(([, q]) => q)).toEqual([{ orderId: "A1", fromAccountType: "TRADE" }]);
+    expect(calls.filter(([n]) => n === "earnDeleteEarnOrders").map(([, q]) => q)).toEqual([{ orderId: "A1", amount: "10", fromAccountType: "TRADE" }]);
+    expect((part.native as { answers: unknown[] }).answers).toEqual([{ orderTxId: "tx-A1", deliverTime: 1791230000000, status: "PENDING", amount: "10" }]);
+    // while KuCoin shows the amount still redeeming the request is under way; once it does not, it is done
+    redeeming = "10";
+    expect(ok(await e.status!(part.ref, p, "withdraw")).status).toBe("pending");
+    redeeming = "0";
+    expect(ok(await e.status!(part.ref, p, "withdraw")).status).toBe("done");
+    // all of it: every holding, each its whole amount
+    calls.splice(0);
+    ok(await e.withdraw(p, 0, "e".repeat(32), true));
+    expect(calls.filter(([n]) => n === "earnDeleteEarnOrders").map(([, q]) => q)).toEqual([{ orderId: "A1", amount: "60", fromAccountType: "TRADE" }, { orderId: "A2", amount: "50.5", fromAccountType: "TRADE" }]);
+    // more than is held is refused before anything is asked; nothing held, the same
+    expect(refusal(await e.withdraw(p, 500, "d".repeat(32), false)).code).toBe("E_VENUE_INSUFFICIENT");
+    const other = refusal(await e.withdraw({ ...p, id: "2611", name: "USDC · Promotion (30 days)" }, 1, "c".repeat(32), false));
+    expect([other.code, other.message]).toEqual(["E_VENUE_REJECTED", "nothing of yours is in USDC · Promotion (30 days) at KuCoin"]);
+  });
+
+  it("an early redemption KuCoin would penalise is refused with its figure, for the owner to confirm at KuCoin; one KuCoin does not redeem by hand is refused with when it is delivered; KuCoin's permission no says what the owner can do", async () => {
+    const calls: Array<[string, Record<string, unknown>]> = [];
+    const c = client("kucoin", calls, {
+      ...LISTS,
+      earnGetEarnHoldAssets: page([holding({ orderId: "P1", productId: "2611", productCategory: "ACTIVITY", productType: "TIME", currency: "USDC", holdAmount: "100", lockEndTime: 1793892000000, earlyRedeemSupported: 1 })]),
+      earnGetEarnRedeemPreview: [{ code: "200000", data: { currency: "USDC", redeemAmount: "100", penaltyInterestAmount: "0.75", redeemPeriod: 1, deliverTime: 1791316400000, manualRedeemable: true, redeemAll: true } }, { code: "200000", data: { currency: "USDC", redeemAmount: "100", penaltyInterestAmount: "0", redeemPeriod: 1, deliverTime: 1793978400000, manualRedeemable: false, redeemAll: true } }],
+      // the redemption call is there, and never reached
+      earnDeleteEarnOrders: { code: "200000", data: { orderTxId: "never", deliverTime: 0, status: "PENDING", amount: "0" } },
+      earnPostEarnOrders: named("AuthenticationError", `kucoin {"code":"400007","msg":"Access denied, require more permission (key ${KEY.apiKey})"}`),
+    });
+    const e = kucoinEarner({ client: c, venue: "kucoin", name: "KuCoin", key: KEY, can: [], now: () => NOW_MS });
+    const p = { id: "2611", asset: "USDC", name: "USDC · Promotion (30 days)", lands: "your KuCoin trading account", canSupply: true, canWithdraw: true };
+    const penalty = refusal(await e.withdraw(p, 100, "1".repeat(32), false));
+    expect([penalty.code, penalty.message]).toEqual(["E_VENUE_REJECTED", "KuCoin says redeeming 100 USDC from USDC · Promotion (30 days) now forfeits 0.75 USDC of interest, and asks for that to be confirmed: the account does not confirm it for you. Redeem it at KuCoin if you mean to, or after 2026-11-05"]);
+    const auto = refusal(await e.withdraw(p, 100, "2".repeat(32), false));
+    expect([auto.code, auto.message]).toEqual(["E_VENUE_RAIL_CLOSED", "KuCoin says this holding in USDC · Promotion (30 days) is not redeemed by hand now: it is delivered on 2026-11-05"]);
+    expect(calls.some(([n]) => n === "earnDeleteEarnOrders")).toBe(false);
+    const perm = refusal(await e.supply(p, 10, "3".repeat(32)));
+    expect([perm.code, perm.message]).toEqual(["E_VENUE_PERMISSION", "KuCoin refused to put 10 USDC into USDC · Promotion (30 days): purchase and redemption need the key's Earn permission (set on the key at KuCoin)"]);
+    expect(JSON.stringify(perm)).not.toContain(KEY.apiKey);
   });
 });

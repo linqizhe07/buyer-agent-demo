@@ -1,26 +1,32 @@
 /* Handing something to an agent: the owner's words (an intent) — to which agent, where, which way, about how much, until when — signed, which
    agents read over MCP and report on; and, when asked, a trading limit to do it with. An intent grants nothing: an agent acts only inside its
-   limits, and in Conservative every order it asks for comes to the owner as a card first. The open intents are listed with what the agents
-   reported, each to change or withdraw. */
+   limits, and in Guard every order it asks for comes to the owner as a card first. The open intents are listed (Portfolio › Agents at work,
+   through htaIntents) with what the agents reported, each to change or withdraw. */
 
 const HTA_DAYS = [["1", "1 day"], ["3", "3 days"], ["7", "7 days"], ["30", "30 days"]];
 const HTA_TEXT = 200;
 /* what an agent says of an intent, in a word */
 const HTA_REPORT = { taking: "Taking it on", done: "Done", cannot: "Can't do it", note: "Note" };
-/* what the words box suggests, by what is being handed over */
+/* what the words box suggests, by the kind of market being handed over (the Trade pane's six kinds, and earning) */
 const HTA_HINT = {
-  trade: "e.g. Build a SOL position under $140, a little at a time",
+  crypto: "e.g. Build a SOL position under $140, a little at a time",
+  stocks: "e.g. Buy about $200 of NVDA on a down day, in the regular session",
+  rwas: "e.g. Hold up to $300 of a tokenised Treasury fund, in USDC",
   perps: "e.g. Keep a small BTC long; close it if it falls 5%",
+  preipo: "e.g. A small Anthropic long under a $2T implied valuation",
   predictions: "e.g. Buy Yes on a Fed cut in December, under 60¢",
-  swap: "e.g. Turn my WETH into USDC if ETH falls under $2,000",
   earn: "e.g. Keep idle USDC earning, never more than $500 in",
 };
+/* the kind's word for the composer's tag: the Trade pane's own names where its table is on the page */
+const htaKindWord = (kind) => (kind === "earn" ? "Earn" : typeof tkKindSpec === "function" && kind ? tkKindSpec(kind).label : "");
 
 /** The owner's words, and when asked a limit for them, as the account signs them. `v` is the composer's fields: agent ("*" for every agent),
  * venue, symbol, side, usd, text, days (or `until`, a moment: words being changed keep the end of the limit given with them), and
  * withLimit with perOrder, budget and scope ("trade", or "earn" when what is handed over is earning). A limit is for one agent, at the
  * venue named — when none is, every venue on the account for trading, and for earning the venues that earn (`earnAt`, comma-separated: an
- * earn limit names its venues) — and it ends when the words do: the same moment, and withdrawing the words ends it too (htaWithdrawDrafts) */
+ * earn limit names its venues) — and it ends when the words do: the same moment, and withdrawing the words ends it too (htaWithdrawDrafts).
+ * It names the words it was given with (`intentId`, the open intent's id) when they have one: new words get theirs as the account takes
+ * them, so the limit for them is prepared again with it before it is signed (the field is left out, never sent empty) */
 function htaDrafts(v, now) {
   const until = Number(v.until) > now ? Number(v.until) : now + Number(v.days || 7) * DAY;
   const agent = v.agent && v.agent !== "*" ? String(v.agent).toLowerCase() : "*";
@@ -28,15 +34,23 @@ function htaDrafts(v, now) {
   const budget = String(v.budget || "").trim();
   const scope = v.scope === "earn" ? "earn" : "trade";
   const allow = intent.venue || (scope === "earn" ? String(v.earnAt || "").trim() : "*");
-  const limit = v.withLimit && agent !== "*" && allow ? { type: "approveSpend", agent, scope, allow, perPayment: String(v.perOrder || "").trim() || budget, budget, windowHours: 0, validUntil: until } : null;
+  const intentId = String(v.intentId || "").trim();
+  const limit = v.withLimit && agent !== "*" && allow ? { type: "approveSpend", agent, scope, allow, perPayment: String(v.perOrder || "").trim() || budget, budget, windowHours: 0, validUntil: until, ...(intentId ? { intent: intentId } : {}) } : null;
   return { intent, limit };
 }
 
-/** the limit given with an open intent: the agent's limit of the kind the composer gives (trading or earning) that ends the same moment as
- * the words — signed together, they end together */
+/** the limit given with an open intent: the agent's trading or earn limit that names the words (spend[].intent); for a limit signed before
+ * limits named their words, the one of that kind that ends the same moment as the words — signed together, they end together */
 function htaLimitOf(x) {
   if (!x || x.agent === "*" || !A) return null;
-  return A.spend.find((s) => (s.scope === "trade" || s.scope === "earn") && s.agent === x.agent.toLowerCase() && s.validUntil === x.validUntil && !s.expired) || null;
+  const mine = A.spend.filter((s) => (s.scope === "trade" || s.scope === "earn") && s.agent === x.agent.toLowerCase() && !s.expired);
+  return mine.find((s) => s.intent === x.id) || mine.find((s) => !s.intent && s.validUntil === x.validUntil) || null;
+}
+/* the id the account gave the words just signed: the open intent with the same agent, words and end (the last one, when they were said
+   twice); "" when none is found */
+function htaIdOf(page, action) {
+  const list = ((page && page.intents) || []).filter((x) => x.agent === action.agent && x.text === action.text.trim() && Date.parse(x.validUntil) === action.validUntil);
+  return list.length ? list[list.length - 1].id : "";
 }
 
 /** withdrawing an intent, as the account signs it: the words, and the limit given with them (its end, a budget of nothing), so the agent's
@@ -47,22 +61,14 @@ function htaWithdrawDrafts(x, now) {
   return lim ? [words, { type: "approveSpend", agent: lim.agent, scope: lim.scope, allow: lim.allow.join(","), perPayment: "0", budget: "0", windowHours: 0, validUntil: now + DAY }] : [words];
 }
 
-/** Hand something to an agent. preset { agent, venue, symbol, side, usd, text, kind ("trade" · "perps" · "predictions" · "swap" · "earn"),
- * intent (an open one, to change its words) }. On the Trade pane the composer takes the panel; anywhere else it opens in a sheet, with the
- * open intents under it */
+/** Hand something to an agent. preset { agent, venue, symbol, side, outcome, usd, text, kind (the Trade pane's six kinds or "earn"; an old
+ * name — "trade", "swap" — is read too), intent (an open one, to change its words) }. On the Trade pane the composer takes the panel;
+ * anywhere else it opens in a sheet. The open intents are listed once, under Portfolio › Agents at work */
 function openHandToAgent(preset = {}) {
   if (!A) return;
   if (typeof tkHandInPanel === "function" && tkHandInPanel(preset)) return;
-  const change = (x) => htaMount($("sheet").querySelector("[data-hta]"), { intent: x }, { inSheet: true });
-  const body = openSheet('<div data-hta></div><section class="sheet-sec hta-open" aria-labelledby="hta-open-h"><h3 class="h2" id="hta-open-h">Your words to agents</h3><div data-hta-list></div></section>', {
-    title: "Hand to agent",
-    redraw: () => {
-      const l = $("sheet").querySelector("[data-hta-list]");
-      if (l) htaIntents(l, owns(), { change });
-    },
-  });
+  const body = openSheet('<div data-hta></div>', { title: preset.intent ? "Change your words" : "Hand to agent" });
   htaMount(body.querySelector("[data-hta]"), preset, { inSheet: true });
-  htaIntents(body.querySelector("[data-hta-list]"), owns(), { change });
 }
 
 /** the composer, drawn into `el`: in the Trade pane's panel (with its own head and a close) or in a sheet. The account prepares the words
@@ -74,7 +80,8 @@ function htaMount(el, preset = {}, { inSheet = false, close } = {}) {
   const keys = A.keys.filter((k) => k.status === "ok");
   const lens = lensNow();
   const agent0 = (was && was.agent) || preset.agent || (lens.kind === "agent" ? lens.id.toLowerCase() : keys.length === 1 ? keys[0].address : "*");
-  const kind = preset.kind || "trade";
+  // the kind of market handed over (a tag on the composer; nothing signed names it — the words do): the Trade pane's names, an old one read
+  const kind = preset.kind === "earn" ? "earn" : typeof tkKindOf === "function" ? tkKindOf(preset) : preset.kind || "crypto";
   // what the limit is for: earning has its own; everything else trades
   const scope = kind === "earn" ? "earn" : "trade";
   // where: the accounts that do what is handed over; an earn limit names the venues that earn (never every account)
@@ -86,8 +93,9 @@ function htaMount(el, preset = {}, { inSheet = false, close } = {}) {
   // words being changed that a limit was given with keep its end: the two end together
   const tied = was ? htaLimitOf(was) : null;
   const untilField = tied ? `<label class="fld">Until<input name="untilShown" value="${esc(nyDay(was.validUntil))}, with its limit" disabled /><input type="hidden" name="until" value="${esc(String(Date.parse(was.validUntil)))}" /></label>` : `<label class="fld">Until${select("days", HTA_DAYS, "7")}</label>`;
-  el.innerHTML = `${inSheet ? "" : `<div class="tk-h"><h2 class="tk-title">${was ? "Change your words" : "Hand to agent"}</h2><button type="button" class="icon-btn" data-hta-close aria-label="Close">${icon("x")}</button></div>`}
-    <p class="dim small hta-lead">${was ? `Changing ${esc(was.id)}: what agents said about the old words goes with them.` : "Your words go to the agent; it reads them over MCP and reports back."} They grant nothing: it still acts only inside its limits${A.mode === "open" ? ", and in Aggressive it trades inside them without asking" : ", and in Conservative every order it asks for comes to you first"}.</p>
+  const kindTag = !was && htaKindWord(kind) ? `<span class="tag tk-ktag">${esc(htaKindWord(kind))}</span>` : "";
+  el.innerHTML = `${inSheet ? (kindTag ? `<div class="hta-kind">${kindTag}</div>` : "") : `<div class="tk-h"><div class="tk-h-l">${kindTag}<h2 class="tk-title">${was ? "Change your words" : "Hand to agent"}</h2></div><button type="button" class="icon-btn" data-hta-close aria-label="Close">${icon("x")}</button></div>`}
+    <p class="dim small hta-lead">${was ? `Changing ${esc(was.id)}: what agents said about the old words goes with them.` : "Your words go to the agent; it reads them over MCP and reports back."} They grant nothing: it still acts only inside its limits${modeOf(A.mode) === "open" ? ", and in Beast it trades inside them without asking" : ", and in Guard every order it asks for comes to you first"}.</p>
     ${keys.length ? "" : `<div class="callout"><b>No agent is let in yet</b><span class="dim small">Words to every agent wait for the first one. Run the agent setup command where your agent runs, then let it in under Agents.</span><div class="acts hta-acts"><button type="button" class="btn btn-sm" data-hta-setup>${icon("copy", "sm")}Copy setup command</button><button type="button" class="btn btn-sm" data-hta-agents>${icon("agent", "sm")}Agents</button></div></div>`}
     ${A.dial && A.dial.sessionEnded ? '<p class="msg no">The agents\' session has ended: they can do nothing until you start a new one in Settings.</p>' : ""}
     <form class="tk-form hta-form" novalidate autocomplete="off">
@@ -98,7 +106,7 @@ function htaMount(el, preset = {}, { inSheet = false, close } = {}) {
       <div><div class="label">Which way</div><div data-hta-side></div></div>
       <div class="row2"><label class="fld">About how much ($)<input name="usd" inputmode="decimal" placeholder="Let it decide" value="${esc((was ? was.usd : preset.usd) || "")}" /></label>${untilField}</div>
       ${tied ? `<p class="dim small">${esc(keyName(tied.agent))}'s ${tied.scope === "earn" ? "earn" : "trading"} limit was given with these words (${esc(fine(tied.spentUsd))} of ${esc(fine(tied.budgetUsd))} used): the new words end when it does. To change how long, withdraw them and hand over again.</p>` : ""}
-      <label class="fld">Your words<textarea name="text" maxlength="${HTA_TEXT}" rows="3" placeholder="${esc(HTA_HINT[kind] || HTA_HINT.trade)}">${esc((was ? was.text : preset.text) || "")}</textarea><span class="hta-count" data-count aria-live="polite"></span></label>
+      <label class="fld">Your words<textarea name="text" maxlength="${HTA_TEXT}" rows="3" placeholder="${esc(HTA_HINT[kind] || HTA_HINT.trade)}">${esc((was ? was.text : preset.text) || "")}</textarea><span class="hta-count" data-count></span></label>
       <input type="hidden" name="scope" value="${scope}" />
       <fieldset class="hta-limit"${keys.length ? "" : " hidden"}><legend class="sr">A limit</legend><label class="chk1"><input type="checkbox" name="withLimit" /> Also give it ${scope === "earn" ? "an earn limit" : "a trading limit"} for this</label><div data-limit hidden><div class="row2"><label class="fld">${scope === "earn" ? "Each time ($)" : "Per order ($)"}<input name="perOrder" inputmode="decimal" placeholder="25" /></label><label class="fld">In all ($)<input name="budget" inputmode="decimal" placeholder="100" /></label></div><p class="dim small" data-limit-now></p></div></fieldset>
       <div class="quote" data-q><span class="dim">Say what you'd like, in your own words.</span></div>
@@ -125,8 +133,8 @@ function htaMount(el, preset = {}, { inSheet = false, close } = {}) {
   if (agentsBtn) agentsBtn.addEventListener("click", () => typeof openAgents === "function" && openAgents());
   const selfBtn = el.querySelector("[data-hta-self]");
   if (selfBtn) selfBtn.addEventListener("click", () => {
-    const f = Object.fromEntries(new FormData(form).entries());
-    if (typeof openTicket === "function") openTicket({ venue: f.venue || "", symbol: f.venue ? String(f.symbol || "").trim() : "", side: f.side === "sell" ? "sell" : "buy", ...(Number(f.usd) > 0 ? { amount: f.usd, unit: "usd" } : {}) });
+    const f = formFields(form);
+    if (typeof openTicket === "function") openTicket({ ...(kind !== "earn" ? { kind } : {}), venue: f.venue || "", symbol: f.venue ? String(f.symbol || "").trim() : "", side: f.side === "sell" ? "sell" : "buy", ...(Number(f.usd) > 0 ? { amount: f.usd, unit: "usd" } : {}) });
   });
   q("[data-hta-side]").innerHTML = seg([["", "Either"], ["buy", "Buy"], ["sell", "Sell"]], side0, (v) => {
     form.elements.side.value = v;
@@ -162,18 +170,21 @@ function htaMount(el, preset = {}, { inSheet = false, close } = {}) {
     q("[data-limit-now]").textContent = now ? `It replaces ${keyName(a)}'s ${what} now: ${fine(now.spentUsd)} of ${fine(now.budgetUsd)} used, up to ${fine(now.perPaymentUsd)} ${scope === "earn" ? "each time" : "an order"} at ${now.allow.map(nameOf).join(", ")}${now.expired ? " (ran out)" : `, until ${nyDay(now.validUntil)}`}.` : `${a === "*" ? "" : `${keyName(a)} has no ${what} yet: without one it can ${scope === "earn" ? "put nothing to earn" : "place nothing"}.`}`;
   };
   let prepared = [];
+  // the drafts the prepared ones came from: the limit's is prepared again, naming the new words, once they have their id
+  let drafts = null;
   let seq = 0;
-  let timer = 0;
   const requote = async () => {
     if (!form.isConnected) return;
     const my = ++seq;
     prepared = [];
+    drafts = null;
     btn.disabled = true;
     btn.textContent = was && form.elements.id.value ? "Sign the new words" : "Sign and hand over";
     sign.innerHTML = "";
     limitShape();
-    const f = Object.fromEntries(new FormData(form).entries());
-    const d = htaDrafts({ ...f, withLimit: !!f.withLimit, earnAt: earners.map((v) => v.id).join(",") }, nowMs());
+    const f = formFields(form);
+    // words being changed are known by their id, and the limit for them names it; new words have none until they are signed
+    const d = htaDrafts({ ...f, withLimit: !!f.withLimit, earnAt: earners.map((v) => v.id).join(","), intentId: was && f.id ? f.id : "" }, nowMs());
     if (!d.intent.text) return void (box.innerHTML = `<span class="dim">Say what you'd like, in your own words (up to ${HTA_TEXT} characters).</span>`);
     if (d.limit && !(Number(d.limit.budget) > 0)) return void (box.innerHTML = '<span class="dim">Type the limit: how much in all, and per order.</span>');
     box.innerHTML = '<span class="dim">Preparing…</span>';
@@ -183,18 +194,16 @@ function htaMount(el, preset = {}, { inSheet = false, close } = {}) {
     if (r1.status !== 200) return void (box.innerHTML = `<div class="msg no">${esc(Owner.why(r1) || "Refused")}</div>`);
     if (r2 && r2.status !== 200) return void (box.innerHTML = `<div class="msg no">${esc(Owner.why(r2) || "Refused")}</div>`);
     prepared = [r1.body, ...(r2 ? [r2.body] : [])];
+    drafts = d;
     const i = d.intent;
     const who = i.agent === "*" ? "every agent" : keyName(i.agent);
     const where = [i.side ? (i.side === "buy" ? "buy" : "sell") : "", i.symbol || "", i.venue ? `at ${nameOf(i.venue)}` : "", i.usd ? `about ${money(Number(i.usd))}` : ""].filter(Boolean).join(" ");
-    box.innerHTML = `<div class="big"><span>${prepared.length > 1 ? "1 · " : ""}Your words to ${esc(who)}</span><span>until ${esc(nyDay(new Date(i.validUntil).toISOString()))}</span></div><div class="path">“${esc(i.text)}”${where ? ` · ${esc(where)}` : ""}</div>${d.limit ? `<div class="big"><span>2 · Its ${d.limit.scope === "earn" ? "earn" : "trading"} limit</span><span>${money(Number(d.limit.budget))} in all</span></div><div class="path">Up to ${money(Number(d.limit.perPayment))} ${d.limit.scope === "earn" ? "each time it puts money in" : "an order"} at ${esc(d.limit.allow === "*" ? "every account on the account now" : d.limit.allow.split(",").map(nameOf).join(", "))}, until ${esc(nyDay(new Date(d.limit.validUntil).toISOString()))}, when your words end; withdrawing them ends it too. ${A.mode === "open" ? "Aggressive: it goes inside it without asking." : "Conservative: each one still waits for you."}</div>` : ""}`;
+    box.innerHTML = `<div class="big"><span>${prepared.length > 1 ? "1 · " : ""}Your words to ${esc(who)}</span><span>until ${esc(nyDay(i.validUntil))}</span></div><div class="path">“${esc(i.text)}”${where ? ` · ${esc(where)}` : ""}</div>${d.limit ? `<div class="big"><span>2 · Its ${d.limit.scope === "earn" ? "earn" : "trading"} limit</span><span>${money(Number(d.limit.budget))} in all</span></div><div class="path">Up to ${money(Number(d.limit.perPayment))} ${d.limit.scope === "earn" ? "each time it puts money in" : "an order"} at ${esc(d.limit.allow === "*" ? "every account on the account now" : d.limit.allow.split(",").map(nameOf).join(", "))}, until ${esc(nyDay(d.limit.validUntil))}, when your words end. It names these words${d.limit.intent ? ` (${esc(d.limit.intent)})` : ", by the id the account gives them as they are signed"}, and withdrawing them ends it too. ${modeOf(A.mode) === "open" ? "Beast: it goes inside it without asking." : "Guard: each one still waits for you."}</div>` : ""}`;
     sign.innerHTML = prepared.length > 1 ? `${whatYouSign(prepared[0]).replace("What you sign", "What you sign · 1 your words")}${whatYouSign(prepared[1]).replace("What you sign", "What you sign · 2 its limit")}` : whatYouSign(prepared[0]);
     btn.textContent = prepared.length > 1 ? "Sign both and hand over" : was ? "Sign the new words" : "Sign and hand over";
     btn.disabled = !owns();
   };
-  const later = (ms = 400) => {
-    clearTimeout(timer);
-    timer = setTimeout(requote, ms);
-  };
+  const later = debounce(requote, 400);
   form.addEventListener("input", (e) => {
     if (e.target.name === "text") count();
     later();
@@ -206,7 +215,8 @@ function htaMount(el, preset = {}, { inSheet = false, close } = {}) {
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     if (!prepared.length || busy || !owns()) return;
-    const all = prepared;
+    const [words, preview] = prepared;
+    const d = drafts;
     btn.disabled = true;
     say("Signing…", "wait");
     busy = true;
@@ -214,14 +224,35 @@ function htaMount(el, preset = {}, { inSheet = false, close } = {}) {
     const done = [];
     let refusal = "";
     try {
-      for (const p of all) {
-        const r = await Owner.submit(p);
-        if (refusedAt(r)) {
-          refusal = Owner.why(r) || "Refused";
-          break;
+      const r = await Owner.submit(words);
+      if (refusedAt(r)) refusal = Owner.why(r) || "Refused";
+      else done.push(saidOf(r.body) || words.action.type);
+      if (!refusal && preview && d && d.limit) {
+        /* the limit names the words it was given with. Words being changed were known by their id and the limit is as it was shown; new
+           words got their id as the account took them: it is read back, and the limit prepared again with it and shown before its
+           signature (the one field that differs from the preview) */
+        let lim = preview;
+        if (!d.limit.intent) {
+          const page = await api("/api/account");
+          const id = htaIdOf(page, words.action);
+          if (!id) refusal = "Your words were signed, but the id the account gave them could not be read back: give the limit under Agents.";
+          else {
+            const again = await Owner.prepare({ ...d.limit, intent: id });
+            if (again.status !== 200) refusal = Owner.why(again) || "Refused";
+            else {
+              lim = again.body;
+              sign.innerHTML = `${whatYouSign(words).replace("What you sign", "What you sign · 1 your words")}${whatYouSign(lim, { open: true }).replace("What you sign", "What you sign · 2 its limit")}`;
+            }
+          }
         }
-        done.push(saidOf(r.body) || p.action.type);
+        if (!refusal) {
+          const r2 = await Owner.submit(lim);
+          if (refusedAt(r2)) refusal = Owner.why(r2) || "Refused";
+          else done.push(saidOf(r2.body) || lim.action.type);
+        }
       }
+    } catch (err) {
+      refusal = String((err && err.message) || err).slice(0, 240) || "The account did not answer. Try again.";
     } finally {
       busy = false;
       document.body.classList.remove("busy");
@@ -260,7 +291,7 @@ function htaIntents(el, owner, { change } = {}) {
     const meta = [x.agent === "*" ? "every agent" : x.agentName, x.side, x.symbol, x.venue ? `at ${nameOf(x.venue)}` : "", x.usd ? `about ${money(Number(x.usd))}` : "", `until ${nyDay(x.validUntil)}`].filter(Boolean).join(" · ");
     const others = (x.byAgent || []).filter((r) => !x.report || r.by !== x.report.by || r.at !== x.report.at);
     const lim = htaLimitOf(x);
-    const limLine = lim ? `<div class="dim small">With its ${lim.scope === "earn" ? "earn" : "trading"} limit: ${esc(fine(lim.spentUsd))} of ${esc(fine(lim.budgetUsd))} used, up to ${esc(fine(lim.perPaymentUsd))} ${lim.scope === "earn" ? "each time" : "an order"} at ${esc(lim.allow.map(nameOf).join(", "))}. It ends with these words.</div>` : "";
+    const limLine = lim ? `<div class="dim small">With its ${lim.scope === "earn" ? "earn" : "trading"} limit${lim.intent ? ` (for ${esc(lim.intent)})` : ""}: ${esc(fine(lim.spentUsd))} of ${esc(fine(lim.budgetUsd))} used, up to ${esc(fine(lim.perPaymentUsd))} ${lim.scope === "earn" ? "each time" : "an order"} at ${esc(lim.allow.map(nameOf).join(", "))}. It ends with these words.</div>` : "";
     return `<li class="hta-it"><div class="hta-top"><b>“${esc(x.text)}”</b><span class="dim small">${esc(meta)} · ${esc(x.id)}</span></div>${limLine}${x.report ? rep(x.report) : '<div class="dim small">No report yet.</div>'}${others.map(rep).join("")}${x.reports > 1 ? `<div class="dim small">${esc(plural(x.reports, "report"))} on these words</div>` : ""}${owner ? `<div class="acts hta-acts"><button type="button" class="btn btn-sm" data-hta-change="${esc(x.id)}">Change words</button><button type="button" class="btn btn-sm" data-hta-withdraw="${esc(x.id)}">Withdraw</button></div>` : ""}</li>`;
   }).join("")}</ul>`;
   for (const b of el.querySelectorAll("button[data-hta-withdraw]")) b.addEventListener("click", async () => {

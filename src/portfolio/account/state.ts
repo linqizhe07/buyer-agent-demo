@@ -104,6 +104,8 @@ export interface SpendApproval {
   envelope: Envelope;
   at: string;
   revokedAt?: string | undefined;
+  /** the open intent this limit was signed to answer (its id), when the owner named one: words tying the two together, not a limit on either */
+  intent?: string | undefined;
 }
 
 export interface SubAccount {
@@ -285,7 +287,7 @@ export const refsOf = (text: string): string[] => text.split(",").map((x) => x.t
 export function askProblem(a: { kind: string; venue: string; usd: string; text: string }): string | null {
   if (!(ASK_KINDS as readonly string[]).includes(a.kind)) return `an ask is one of ${ASK_KINDS.join(", ")}`;
   if (a.venue !== "" && !VENUE_ID.test(a.venue)) return "an ask's venue is a venue id (lower-case letters, digits and dashes), or none";
-  if (a.kind === "venue" && a.venue === "") return "an ask for a venue names it";
+  if (a.kind === "venue" && a.venue === "") return "an ask about a venue says which venue: `venue` is its id";
   if (a.usd !== "" && Number.isNaN(micro(a.usd))) return "an ask's dollars are a plain decimal, or none";
   return wordsProblem(a.text, AGENT_TEXT, "an ask's text");
 }
@@ -382,6 +384,10 @@ export function applyOwner(state: AccountState, action: OwnerAction, envelope: E
         return { ...s, spends: s.spends.map((x) => (standing.includes(x) ? { ...x, revokedAt: at } : x)) };
       }
       if (agentStatus(s, agent, nowMs) !== "ok") return bad("a spending approval is for an agent key that is authorised now");
+      // a limit may name the intent it answers: one that is open now and addressed to this agent (or to every agent). The tie is words — the
+      // limit is judged by its own lines, the intent grants nothing — but a limit cannot claim to answer an intent that is not there
+      const intent = (action.intent ?? "").trim();
+      if (intent !== "" && !s.intents.some((x) => x.id === intent && nowMs < x.validUntil && (x.agent === "*" || x.agent === agent))) return bad(`there is no open intent "${intent}" addressed to this agent: a limit answers an intent the owner set for the agent (or for every agent), or names none`);
       if (!allow.length) return bad("a spending approval names where the money may go");
       // an earn limit names venues, or one product at a venue: plain text an agent reads, nothing hidden in it — and never "every account",
       // which would name accounts that earn nothing (and agent wallets)
@@ -391,7 +397,7 @@ export function applyOwner(state: AccountState, action: OwnerAction, envelope: E
       if (!(perPayment > 0) || perPayment > budget) return bad("the per-payment maximum is more than zero and no more than the budget");
       if (!(action.validUntil > nowMs) || action.validUntil > nowMs + MAX_AGENT_DAYS * DAY) return limit(`a spending approval ends in the future, at most ${MAX_AGENT_DAYS} days away`, { maxDays: MAX_AGENT_DAYS });
       const seq = s.seq + 1;
-      const spend: SpendApproval = { id: `spend-${String(seq).padStart(4, "0")}`, agent, scope: action.scope, allow, perPaymentMicro: perPayment, budgetMicro: budget, windowHours: Math.max(0, Math.trunc(action.windowHours)), validUntil: action.validUntil, spentMicro: 0, reservedMicro: 0, last: {}, payTo: {}, envelope, at };
+      const spend: SpendApproval = { id: `spend-${String(seq).padStart(4, "0")}`, agent, scope: action.scope, allow, perPaymentMicro: perPayment, budgetMicro: budget, windowHours: Math.max(0, Math.trunc(action.windowHours)), validUntil: action.validUntil, spentMicro: 0, reservedMicro: 0, last: {}, payTo: {}, envelope, at, ...(intent ? { intent } : {}) };
       // one standing approval per agent and scope: a new one replaces the old
       return { ...s, seq, spends: [...s.spends.map((x) => (standing.includes(x) ? { ...x, revokedAt: at } : x)), spend] };
     }
@@ -399,7 +405,10 @@ export function applyOwner(state: AccountState, action: OwnerAction, envelope: E
       const name = action.name.trim();
       const agent = action.agent.toLowerCase() as Hex;
       const cap = micro(action.float);
-      if (!name || name.length > 16) return bad("a sub-account's name is 1 to 16 characters");
+      // a name as a person counts and reads it: at most 16 characters of plain text, like an agent key's name
+      if (!name) return bad("a sub-account's name is 1 to 16 characters");
+      const unplain = wordsProblem(name, 16, "a sub-account's name");
+      if (unplain) return bad(unplain);
       if (!nameKey(name)) return bad("a sub-account's name has a letter or a digit in it");
       if (Number.isNaN(cap) || !(cap > 0)) return bad("a sub-account's float is more than zero");
       if (agentStatus(s, agent, nowMs) !== "ok") return bad("a sub-account belongs to an agent key that is authorised now");
@@ -442,7 +451,9 @@ export function applyOwner(state: AccountState, action: OwnerAction, envelope: E
     }
     case "setDestination": {
       const label = action.label.trim();
-      if (!label || label.length > 32) return bad("a destination needs a label of 1 to 32 characters");
+      if (!label) return bad("a destination needs a label of 1 to 32 characters");
+      const unplainLabel = wordsProblem(label, 32, "a destination's label");
+      if (unplainLabel) return bad(unplainLabel);
       if (action.address === "") return { ...s, destinations: s.destinations.filter((d) => d.label !== label) };
       if (!isAddress(action.address)) return no("E_ACCOUNT_DESTINATION", { message: "a destination's address is 0x and 40 hex digits; anything else is not an address", detail: { address: action.address } });
       if (!action.chain.trim() || !action.token.trim()) return bad("a destination is an address ON A CHAIN, for one token");
@@ -508,13 +519,19 @@ export function spendFor(s: AccountState, agent: string, scope: SpendApproval["s
   return live;
 }
 
-/** Does this approval cover a payment of `amount` to `target` now? The answer names the limit that said no. */
-export function covers(a: SpendApproval, target: string, amountMicro: number, nowMs: number): Refusal | null {
+/** Does this approval cover a payment of `amount` to `target` now? The answer names the limit that said no. The window (`windowHours`) is
+ * one refill, one order, one supply per window at each target; `window: false` leaves it unjudged — a change to an order already placed
+ * is not a second order */
+export function covers(a: SpendApproval, target: string, amountMicro: number, nowMs: number, opts: { window?: boolean | undefined } = {}): Refusal | null {
   if (!a.allow.includes(target) && !((a.scope === "venues" || a.scope === "payees") && a.allow.includes("*"))) return no("E_MANDATE_RECIPIENT", { message: a.scope === "trade" ? `the trading limit does not cover "${target}" (it covers ${a.allow.join(", ")})` : a.scope === "earn" ? `the earn limit does not cover "${target}" (it covers ${a.allow.join(", ")})` : `"${target}" is not in the spending approval (${a.allow.join(", ")})`, detail: { approval: a.id, allow: a.allow, target } });
   if (amountMicro > a.perPaymentMicro) return no("E_MANDATE_PER_ORDER_CAP", { ...(a.scope === "trade" ? { message: `an order of $${(amountMicro / 1e6).toFixed(2)} is more than the $${(a.perPaymentMicro / 1e6).toFixed(2)} an order the trading limit allows` } : {}), detail: { approval: a.id, perPayment: a.perPaymentMicro / 1e6, amount: amountMicro / 1e6 } });
   const left = a.budgetMicro - a.spentMicro - a.reservedMicro;
   if (amountMicro > left) return no("E_MANDATE_BUDGET", { message: `the spending approval has $${(left / 1e6).toFixed(2)} left of $${(a.budgetMicro / 1e6).toFixed(2)}; $${(amountMicro / 1e6).toFixed(2)} is more than that`, detail: { approval: a.id, budget: a.budgetMicro / 1e6, spent: a.spentMicro / 1e6, reserved: a.reservedMicro / 1e6, amount: amountMicro / 1e6 } });
   const last = a.last[target];
-  if (a.windowHours > 0 && last !== undefined && nowMs - last < a.windowHours * 3_600_000) return no("E_MANDATE_RATE", { message: `"${target}" was refilled ${Math.round((nowMs - last) / 60_000)} min ago; the approval allows one every ${a.windowHours} h`, detail: { approval: a.id, windowHours: a.windowHours, lastAt: new Date(last).toISOString() } });
+  if (opts.window !== false && a.windowHours > 0 && last !== undefined && nowMs - last < a.windowHours * 3_600_000) {
+    const ago = Math.round((nowMs - last) / 60_000);
+    const message = a.scope === "trade" ? `an order was placed at "${target}" ${ago} min ago; the trading limit allows one order every ${a.windowHours} h at each venue` : a.scope === "earn" ? `money was put to earn at "${target}" ${ago} min ago; the earn limit allows one supply every ${a.windowHours} h there` : `"${target}" was refilled ${ago} min ago; the approval allows one every ${a.windowHours} h`;
+    return no("E_MANDATE_RATE", { message, detail: { approval: a.id, windowHours: a.windowHours, lastAt: new Date(last).toISOString() } });
+  }
   return null;
 }

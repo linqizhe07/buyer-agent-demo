@@ -69,7 +69,7 @@ export async function agentWalletSource(req: AgentWalletRequest): Promise<{ sour
       via: "a wallet this account holds the key of · read from the chains",
       address,
       writer,
-      noTradeBecause: "an agent wallet pays for things; agents trade at the venues",
+      noTradeBecause: "An agent wallet pays for things; agents trade at the venues it funds.",
       probe: { can: ["pay", "send"], note: `this account holds its key: agents pay from it inside their payees limit, and a send out pays its gas in each chain's own coin · dollar stablecoins and gas on ${AGENT_CHAINS.join(", ")}`, native: { address, chains: AGENT_CHAINS } },
       read,
     };

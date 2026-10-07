@@ -1,7 +1,7 @@
 /** The Statement (ui/statement.js), run as the page runs it — every page script in account.html's order, in one global scope — over a
  * stand-in for the browser: money put into or taken out of an earn product is a line of its own kind beside trades and transfers, filtered,
- * added up and downloaded like them, and shown as it is (it stays the owner's, so it is neither money in nor money out); the Trade pane's
- * Recent fills stay trades only. */
+ * added up and downloaded like them, and shown as it is (it stays the owner's, so it is neither money in nor money out). The Statement is
+ * the one history: what is under way is the Trade pane's, and the Trade pane keeps no fills of its own. */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,6 +11,7 @@ import { describe, expect, it } from "vitest";
 const PUBLIC = fileURLToPath(new URL("../../src/portfolio/public/", import.meta.url));
 const html = readFileSync(join(PUBLIC, "account.html"), "utf8");
 const scripts = [...html.matchAll(/<script\b[^>]*\bsrc="([^"]+)"/g)].map((m) => m[1] ?? "");
+const source = (f: string) => readFileSync(join(PUBLIC, f), "utf8");
 
 /** the page's scripts in a stand-in browser: elements take listeners and report nothing; the device key never answers, so nothing is drawn */
 function page() {
@@ -87,20 +88,25 @@ describe("money into and out of earn, on the Statement", () => {
     expect(rows).toHaveLength(LINES.length + 1);
     expect(rows[4]).toEqual(["2026-10-05T17:00:00.000Z", "earn-0001", "earn", "supply", "Exchange", "", "Supply 100 USDT · USDT Flexible · 5.2% APY", 100, "", "done", "Claude Code, inside its limit", AGENT, "purchase:USDT:abc"]);
     // the filter and the CSV are one: the Statement downloads what it shows
-    const src = readFileSync(join(PUBLIC, "ui/statement.js"), "utf8");
-    expect(src).toContain('select("type", stmtKinds(S, view.type), view.type)');
+    const src = source("ui/statement.js");
+    expect(src).toContain("type: [stmtKinds(S, view.type), view.type]");
     expect(src).toContain("stmtCsv(lines)");
   });
+});
 
-  it("leaves the Trade pane's Recent fills to trades: an earn line done is not a fill", () => {
+describe("the Statement is the one history", () => {
+  it("keeps the filters, the lines, the totals, Download CSV and Print — and no Under way table or Cancel all of its own (Trade › Under way is the working list)", () => {
     const p = page();
-    p.set("A", { now: "2026-10-06T12:00:00.000Z", venues: [], keys: [] });
-    p.set("S", LINES);
-    p.run("var SEC = { hidden: true, innerHTML: '', querySelector: () => ({ addEventListener() {} }) }; tkDrawFills(SEC)");
-    const drawn = p.run<string>("SEC.innerHTML");
-    expect(drawn).toContain("Buy 0.01 BTC");
-    expect(drawn).toContain("Sell 0.1 ETH");
-    expect(drawn).not.toContain("USDT Flexible");
-    expect(drawn).not.toContain("Withdraw 50 USDC");
+    const src = source("ui/statement.js");
+    expect(p.run("typeof renderOpen")).toBe("undefined");
+    for (const gone of ["Under way", "cancel-all", "open-now", "Cancel all"]) expect(src, gone).not.toContain(gone);
+    for (const kept of ["Download CSV", "Print", "Show all", 'id="statement-filters"', "stmtTotals(lines)", 'month: "Month", account: "Account", type: "Kind", agent: "Who"']) expect(src, kept).toContain(kept);
+    // the Trade pane keeps no fills of its own: a trade that filled is a Statement line (Kind · Trades)
+    const trade = source("ui/trade.js");
+    expect(p.run("typeof tkDrawFills")).toBe("undefined");
+    expect(trade).not.toContain("Recent fills");
+    expect(p.out(`stmtKinds(${JSON.stringify(LINES)}).map((x) => x[0])`)).toContain("trade");
+    // what the Trade pane's Under way still reads from here: a payment in words
+    expect(p.run("typeof whatOf")).toBe("function");
   });
 });

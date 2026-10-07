@@ -216,7 +216,7 @@ describe("earn at venues connected live: an agent, inside the earn limit the own
     expect(x.venue.supplied).toHaveLength(0);
   });
 
-  it("Conservative: a card every time, showing the product, its yield, the amount and where money lands; the owner's yes sends exactly it and counts it", async () => {
+  it("Guard: a card every time, showing the product, its yield, the amount and where money lands; the owner's yes sends exactly it and counts it", async () => {
     const x = await boot();
     await x.letIn();
     const card = carded(await x.ag(ask()));
@@ -233,7 +233,7 @@ describe("earn at venues connected live: an agent, inside the earn limit the own
     expect([x.venue.supplied.length, x.limit().reservedMicro, x.limit().spentMicro]).toEqual([1, 0, 25_000_000]);
   });
 
-  it("Aggressive: a supply inside the limit goes at once, nothing past the per-supply line or the budget; a withdrawal inside the line at once, counting nothing", async () => {
+  it("Beast: a supply inside the limit goes at once, nothing past the per-supply line or the budget; a withdrawal inside the line at once, counting nothing", async () => {
     const x = await boot();
     await x.letIn({ perSupply: "30", budget: "40" });
     await x.own({ type: "setPolicy", change: "mode", value: "open" });
@@ -243,7 +243,7 @@ describe("earn at venues connected live: an agent, inside the earn limit the own
     expect(refusal(await x.ag(ask({ amount: "20" }))).code).toBe("E_MANDATE_BUDGET");
     const w = sent(await x.ag(ask({ kind: "withdraw", amount: "20" })));
     expect([w.kind, x.limit().spentMicro, x.venue.withdrawn.length]).toEqual(["withdraw", 25_000_000, 1]);
-    // above the line, a withdrawal is the owner's card even in Aggressive
+    // above the line, a withdrawal is the owner's card even in Beast
     expect(carded(await x.ag(ask({ kind: "withdraw", amount: "all" }))).usd).toBe(40);
     // a supply the venue later rejects gives its count back
     x.venue.sendAs = "pending";

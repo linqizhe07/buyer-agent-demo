@@ -63,7 +63,8 @@ export function orderLine(o: LiveOrder, agentName: (address: string) => string):
     amountUsd: Number((sign * filled).toFixed(2)) || 0,
     worthUsd: Number(notionalOf(o, o.qty, o.limitPrice ?? o.price).toFixed(2)),
     ...(o.feeUsd !== undefined ? { feeUsd: o.feeUsd } : {}),
-    status: o.walletTxs && !o.ref && o.status === "pending" ? "waiting for wallet" : o.status,
+    // an order the account stopped following (its venue did not come back after a restart, and the owner asked to cancel it) says so
+    status: o.unfollowed ? "not followed since a restart" : o.walletTxs && !o.ref && o.status === "pending" ? "waiting for wallet" : o.status,
     by: o.authority === "agent" ? `${agentName(o.agent ?? "")}, ${o.card ? "approved by you" : "inside its limit"}` : "You",
     ...(o.authority === "agent" && o.agent ? { agent: o.agent, agentName: agentName(o.agent) } : {}),
     ...(o.ref ? { ref: o.ref } : {}),

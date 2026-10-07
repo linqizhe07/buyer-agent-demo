@@ -22,6 +22,12 @@
  * What is one row:
  *   · a coin, by normalBase (compare.ts): BTC/USDT at an exchange, BTC-USD at Robinhood Crypto, WBTC from a wallet are one BTC. A stablecoin
  *     is not a row of its own. A dated future is not listed; a perpetual is a row of its own (Perps), by its base;
+ *   · a PRE-IPO perpetual — a contract on a venue's estimate of a private company's valuation (live/preipo.ts), category "Pre-IPO" — by its
+ *     company (`group.id` preipo:<slug>): one row per company (Pre-IPO, not Perps), each venue's line carrying the venue's own contract price
+ *     and the valuation it implies in the venue's own unit (OKX's ANTHROPIC at 214 in its $10B unit and Gate's at 2,140 in the $1B unit are
+ *     one Anthropic). The median guard below runs on the implied valuation, never on the contract price; the row's `implied.usd` is the
+ *     median of its venues' and its `price` that median in the $1-per-$1,000,000,000 convention most venues quote in. No `change24h` on the
+ *     row (the units differ); the percent change stands;
  *   · a stock, by its ticker; a token that stands for a share or a fund (an RWA), by its symbol: an AAPL Stock Token is not an AAPL share.
  *     A token is an RWA when its source lists such tokens (Robinhood's public Stock Token list) or its market carries the RWA category (a
  *     wallet's tokens an issuer stands behind, dex.ts): a Stock Token from a wallet and from Robinhood's public list is one row (`rwa:NVDA`),
@@ -39,19 +45,37 @@
  * exchange's public listing of the same thing redundant — it trades there already — so the public line is left out of the row. No figure is
  * estimated: a venue that does not say a 24-hour change gives none (Kraken), and
  * Kalshi's volume, which it counts in contracts, is `contracts24h`, never dollars. Only to ORDER the busiest is a Kalshi contract counted at
- * the dollar it pays at settlement.
+ * the dollar it pays at settlement, and a Polymarket market counted at its whole event's dollars (`eventVolumeUsd24h`, what Polymarket
+ * itself orders by: the Fed decision is one hot question spread over five markets).
  *
  * What is made of the rows:
- *   · tabs: Crypto, Stocks, RWAs, Predictions, Perps, and Macro and Sports from the venues' own categories (categories.ts); Now is what
- *     closes within a day (busiest first), the biggest movers and the most traded. A tab is there only when something is in it;
+ *   · tabs (categories.ts TABS): All — every row, as one table; every row's `tabs` starts with it — then Crypto, Stocks, RWAs, Perps,
+ *     Pre-IPO, Predictions. A tab is there only when something is in it. What closes within a day (busiest first), the biggest movers and
+ *     the most traded are still worked out for the body (`closing`, `movers`, `mostTraded`), for agents. A row's `category` is the venue's
+ *     own word for it (categories.ts picks which of several), shown on the card: "Economics", "Fed Rates", "Politics";
+ *   · Predictions, when nothing is searched for, is a few of the busiest event markets and not every market the venues have (the owner
+ *     asked for a few hot ones, not every bet): each venue's event rows by its own volume measure — contracts for Kalshi, dollars for
+ *     Polymarket — then the venues in turn, the venue with the busiest row first, at most PREDICTIONS_MAX rows; an event under an excluded
+ *     category (sports, weather, entertainment, mentions — categories.ts) is not one of them whatever venue lists it; the other event rows
+ *     are not shown anywhere, so what closes soon is drawn from the same few. The IPO questions (category "IPO" or "IPOs", categories.ts
+ *     isIpoCategory) stay beside the few whatever their volume, so the Pre-IPO company drawer can name them: they are Predictions, not
+ *     Pre-IPO. With a search, every event row that matches is shown;
  *   · movers: coins, stocks, perpetuals and tokens by the size of their 24-hour change, only those whose 24-hour dollar volume is at least
- *     `moversMinUsd` ($1M by default), so that a thin market's jump is not news — one chip per asset: a coin's perpetual is the same asset
- *     as the coin, and the coin's own market is the one shown when it moves enough;
- *   · closing: the busiest events that close within the window (a day by default), the soonest first.
+ *     `moversMinUsd` ($1M by default; $10M for a perpetual, since Hyperliquid lists hundreds of thin ones), so that a thin market's jump is
+ *     not news — one chip per asset: a coin's perpetual is the same asset as the coin, and the coin's own market is the one shown when it
+ *     moves enough;
+ *   · closing: the busiest events that close within the window (a day by default), the soonest first;
+ *   · notes: what the sources say their lists are made of, in plain sentences for under the list ("Kalshi: the busiest market in each of
+ *     10 series — …", "Robinhood Stock Tokens: 40 of 194 shown · search for the rest"), and this file's own about Predictions.
+ *
+ * An event past its close: Kalshi's close_time is the real close, so a Kalshi leg whose closeTime has passed is `open: false` whatever the
+ * listing still says; Polymarket's endDate is Gamma's estimate and a market trades on past it, so a Polymarket leg keeps `open` as Gamma
+ * says. Either way the row and its legs carry `pastEnd: true`, so the page can say "past its end date, still trading" rather than "closed".
  */
 import { isRefusal, type Refusal } from "../../core/errors.ts";
-import { isRwaMarket, TABS, tabsOfCategories, type TabId } from "./categories.ts";
+import { isExcludedCategory, isIpoCategory, isRwaMarket, TABS, type TabId } from "./categories.ts";
 import { normalBase, type CompareMissing } from "./compare.ts";
+import { impliedUsd, PRE_IPO_CATEGORY, PRE_IPO_GROUP, PRE_IPO_PER_POINT } from "./preipo.ts";
 import type { EventsQuery, Listing, PublicSource } from "./public-markets.ts";
 import { inDollars, type LiveTrader, type Market, type MarketStats } from "./trade.ts";
 import { isStable } from "./types.ts";
@@ -76,9 +100,9 @@ export type ExploreSort = "volume" | "movers" | "closing";
 export interface ExploreOptions {
   /** a few letters of a symbol or a name: only the rows that match */
   q?: string | undefined;
-  /** only this tab's rows in `items` (absent: every row) */
+  /** only this tab's rows in `items` (absent, or `all`: every row) */
   tab?: TabId | undefined;
-  /** `items` by volume (the default; Now keeps its own order), by the size of the 24-hour change, or by how soon they close */
+  /** `items` by volume (the default; the curated Predictions keep their own order), by the size of the 24-hour change, or by how soon they close */
   sort?: ExploreSort | undefined;
   /** at most this many rows in `items` (60) */
   limit?: number | undefined;
@@ -88,7 +112,7 @@ export interface ExploreOptions {
   perSource?: number | undefined;
   /** how many movers, closing events and parts of Now (8 each) */
   top?: number | undefined;
-  /** the least 24-hour dollar volume a mover must have: one figure for every kind, or by kind ($1,000,000) */
+  /** the least 24-hour dollar volume a mover must have: one figure for every kind, or by kind ($1,000,000; a perpetual $10,000,000) */
   moversMinUsd?: number | Partial<Record<Exclude<ExploreKind, "event">, number>> | undefined;
   /** what "closing soon" means, in milliseconds from now (a day) */
   closingWithinMs?: number | undefined;
@@ -109,9 +133,15 @@ export interface ExploreAt {
   /** read from the venue's public market data, without a key */
   public: boolean;
   price?: number | undefined;
-  /** the market takes orders now, as the venue says */
+  /** the venue's book for it, where its listing gives one (an event's: the lead outcome's) */
+  bid?: number | undefined;
+  ask?: number | undefined;
+  /** the market takes orders now, as the venue says — except a Kalshi event past its close, which is closed whatever the listing says */
   open?: boolean | undefined;
-  /** a public listing: the venue to connect to trade it, and the connection that does */
+  /** an event whose close time has passed: a Polymarket market may still trade then (Gamma's endDate is an estimate), a Kalshi one is closed */
+  pastEnd?: boolean | undefined;
+  /** a public listing: the venue to connect to trade it, and the connection that does. Left out of a read-only listing's line (Stock
+   * Tokens) when the row already trades at a connected venue: the line is then a price, not a connection to make */
   connectTo?: string | undefined;
   connector?: string | undefined;
   /** why it cannot be traded there (the venue's words), or what the venue says of the market; for a token an issuer stands behind, whom the
@@ -120,6 +150,8 @@ export interface ExploreAt {
   /** a token an issuer stands behind: who issues it, and whom the issuer says it is not for, in the issuer's own words */
   issuer?: string | undefined;
   eligibility?: string | undefined;
+  /** a pre-IPO perpetual: the company valuation this venue's contract price implies, in dollars, and the venue's unit in words (live/preipo.ts) */
+  implied?: { usd: number; unit: string } | undefined;
 }
 
 export interface ExploreOutcome {
@@ -152,19 +184,30 @@ export interface ExploreItem {
   volumeUsd24h?: number | undefined;
   /** the event contracts traded in 24 hours, where a venue counts contracts instead of dollars (Kalshi) */
   contracts24h?: number | undefined;
+  /** an event market's whole event, all its markets together, in dollars over 24 hours, where the venue reports it (Polymarket): how hot the
+   * question is. Only to order the busiest; the row's volume stays the market's */
+  eventVolumeUsd24h?: number | undefined;
   /** the venue's own words */
   category?: string | undefined;
   closeTime?: string | undefined;
+  /** an event whose `closeTime` has passed (see the top of this file: a Polymarket market may still trade then) */
+  pastEnd?: boolean | undefined;
   /** the venue's event an event market belongs to, where an event holds several */
   event?: { id: string; title: string } | undefined;
   /** a perpetual's funding rate per interval and when it is next paid, from its most traded venue that says */
   fundingRate?: number | undefined;
   nextFundingAt?: string | undefined;
   outcomes?: ExploreOutcome[] | undefined;
-  /** a token an issuer stands behind (kind rwa): who issues it and whom the issuer says it is not for, from the first venue that says */
+  /** a token an issuer stands behind (kind rwa), or a pre-IPO perpetual whose issuer has spoken: who issues it and what the issuer says, in
+   * the issuer's own words, from the first venue that says */
   issuer?: string | undefined;
   eligibility?: string | undefined;
-  /** the tabs it is in */
+  /** a pre-IPO perpetual's company (`preipo:<slug>`, its name), or an event's question where the venue gives one (see `event`) */
+  group?: { id: string; title: string } | undefined;
+  /** a pre-IPO perpetual: the median of its venues' implied company valuations, in dollars, and what that figure is (each venue's own is on
+   * its line, in the venue's own unit) */
+  implied?: { usd: number; unit: string } | undefined;
+  /** the tabs it is in: `all` first, then its own */
   tabs: TabId[];
   at: ExploreAt[];
 }
@@ -191,7 +234,13 @@ export interface Exploration {
   /** coins, stocks, perpetuals and tokens by their 24-hour dollar volume */
   mostTraded: ExploreItem[];
   missing: ExploreMissing[];
+  /** plain sentences for under the list, each under 160 characters: what the lists are made of (the sources' own words, and this file's
+   * about Predictions) */
+  notes: string[];
 }
+
+/** the most event rows Predictions shows when nothing is searched for */
+export const PREDICTIONS_MAX = 12;
 
 /** a source, connected or public, as the aggregator asks it */
 interface Reader {
@@ -215,6 +264,8 @@ interface Reader {
   events?: ((o: EventsQuery) => Promise<Market[] | Refusal>) | undefined;
   /** its busiest events are asked apart from its listing (a trader's few markets to start from may hold none) */
   eventsAlso: boolean;
+  /** what it says of the list asked for, once it has answered (a public source's `notes`) */
+  notes?: ((o: { q: string }) => string[]) | undefined;
 }
 
 type Part = "markets" | "stats" | "events";
@@ -227,7 +278,9 @@ const LATE = Symbol("late");
 /** the longest a timer waits: setTimeout fires at once for anything longer */
 const MAX_MS = 2_147_483_647;
 const DAY_MS = 86_400_000;
-const FLOOR_USD = 1_000_000;
+/** the least a mover trades in a day, by kind: a perpetual ten times a coin, since Hyperliquid alone lists hundreds of thin perpetuals whose
+ * jumps are not news */
+const FLOOR_USD: Record<Exclude<ExploreKind, "event">, number> = { coin: 1_000_000, stock: 1_000_000, rwa: 1_000_000, perp: 10_000_000 };
 const HEX_ID = /^0x[0-9a-f]{64}$/i;
 
 /** a call as an answer, never a throw */
@@ -289,14 +342,24 @@ function fromPublic(s: PublicSource, perSource: number): Reader {
     events: s.events ? (o) => s.events!(o) : undefined,
     // a public source's listing is already its busiest events
     eventsAlso: false,
+    notes: s.notes ? (o) => s.notes!(o) : undefined,
   };
 }
 
 const isMarket = (m: unknown): m is Listing => !!m && typeof m === "object" && typeof (m as Market).symbol === "string" && (m as Market).symbol !== "" && typeof (m as Market).kind === "string";
 const noDay = (m: Market): boolean => m.kind !== "event" && m.changePct24h === undefined && m.volumeUsd24h === undefined;
 
-/** one source's markets, inside its time limit; what failed or did not answer in time, said */
-async function atSource(r: Reader, o: { q: string; ms: number; perSource: number; closingWithinMs: number }): Promise<{ got: Got[]; missing: ExploreMissing[] }> {
+/** what a source says of the list asked for, once it has answered; a source whose sentences cannot be read says nothing */
+function notesOf(r: Reader, q: string): string[] {
+  try {
+    return (r.notes?.({ q }) ?? []).filter((n): n is string => typeof n === "string" && n.trim() !== "").map((n) => n.trim().slice(0, 160));
+  } catch {
+    return [];
+  }
+}
+
+/** one source's markets, inside its time limit; what failed or did not answer in time, said; and what the source says of its list */
+async function atSource(r: Reader, o: { q: string; ms: number; perSource: number; closingWithinMs: number }): Promise<{ got: Got[]; missing: ExploreMissing[]; notes: string[] }> {
   const slots: Array<{ part: Part; v?: unknown; done: boolean }> = [];
   const run = <T>(part: Part, call: () => Promise<T | Refusal>): Promise<T | Refusal | Error> => {
     const s: { part: Part; v?: unknown; done: boolean } = { part, done: false };
@@ -356,12 +419,13 @@ async function atSource(r: Reader, o: { q: string; ms: number; perSource: number
       failed.push(gone(s.v.message, { code: s.v.code, part: s.part, ...(said ? { said } : {}) }));
     } else if (s.v instanceof Error || (s.part === "stats" ? !(s.v instanceof Map) : !Array.isArray(s.v))) failed.push(gone("answered in a way this could not read", { part: s.part }));
   }
-  if (got.length) return { got, missing: dedupe(failed) };
+  const notes = notesOf(r, o.q);
+  if (got.length) return { got, missing: dedupe(failed), notes };
   // nothing to show: the source is missing as a whole, for its listing's reason first
   const first = failed.find((f) => f.part === "markets") ?? failed[0];
-  if (!first) return { got, missing: [] };
+  if (!first) return { got, missing: [], notes };
   const { part: _part, ...whole } = first;
-  return { got, missing: [whole] };
+  return { got, missing: [whole], notes };
 }
 
 const dedupe = (list: ExploreMissing[]): ExploreMissing[] => {
@@ -431,16 +495,22 @@ function keyOf(m: Market, kind: ExploreKind, r: Reader): string | undefined {
     const t = String(m.base || m.symbol).trim().toUpperCase();
     return t ? `rwa:${t}` : undefined;
   }
+  // a pre-IPO perpetual is one row per company, whatever each venue calls the contract (ANTHROPIC, ANTH, ANTHROPICx)
+  if (kind === "perp" && m.category === PRE_IPO_CATEGORY && m.group?.id.startsWith(PRE_IPO_GROUP)) return m.group.id;
   const b = normalBase(String(m.base || m.symbol), m.kind);
   if (!b || isStable(b)) return undefined;
   return `${kind}:${b}`;
 }
 
 const priceOf = (m: Market): number | undefined => pos(m.price) ?? (pos(m.bid) !== undefined && pos(m.ask) !== undefined ? (m.bid! + m.ask!) / 2 : undefined);
-const volumeOf = (i: { volumeUsd24h?: number | undefined; contracts24h?: number | undefined }): number => i.volumeUsd24h ?? i.contracts24h ?? -1;
+/** how busy a row is, only to order: an event's whole event where the venue reports it, else the market's dollars, else its contracts counted
+ * at the dollar each pays at settlement */
+const volumeOf = (i: { volumeUsd24h?: number | undefined; contracts24h?: number | undefined; eventVolumeUsd24h?: number | undefined }): number => i.eventVolumeUsd24h ?? i.volumeUsd24h ?? i.contracts24h ?? -1;
 const closeMs = (i: { closeTime?: string | undefined }): number => (i.closeTime ? Date.parse(i.closeTime) : NaN);
 
-function atOf(r: Reader, m: Market, symbol = m.symbol, price = priceOf(m), open = m.open): ExploreAt {
+/** one venue's line of a row. `offer`: whether a public line names the venue to connect (not when the row trades at a connected venue
+ * already and this listing is read-only — then it is a price and nothing more) */
+function atOf(r: Reader, m: Market, symbol = m.symbol, price = priceOf(m), open = m.open, offer = true): ExploreAt {
   // a token an issuer stands behind, at a connected venue: the issuer's own words go with it, and one whose contract moves it only between
   // wallets the issuer approved takes no order there (dex.ts lists it with no order types), whatever the venue may trade
   const rwa = r.connected && isRwaMarket(m) ? m : undefined;
@@ -457,9 +527,11 @@ function atOf(r: Reader, m: Market, symbol = m.symbol, price = priceOf(m), open 
     canTrade: r.connected ? (ordersTaken ? r.canTrade : false) : false,
     public: !r.connected,
     ...(price !== undefined ? { price } : {}),
+    ...(pos(m.bid) !== undefined ? { bid: m.bid } : {}),
+    ...(pos(m.ask) !== undefined ? { ask: m.ask } : {}),
     ...(typeof open === "boolean" ? { open } : {}),
-    ...(!r.connected && r.connectTo ? { connectTo: r.connectTo } : {}),
-    ...(!r.connected && r.connector ? { connector: r.connector } : {}),
+    ...(!r.connected && offer && r.connectTo ? { connectTo: r.connectTo } : {}),
+    ...(!r.connected && offer && r.connector ? { connector: r.connector } : {}),
     ...(note ? { note } : {}),
     ...(issuer ? { issuer } : {}),
     ...(eligibility ? { eligibility } : {}),
@@ -470,14 +542,15 @@ const TAB_OF: Record<Exclude<ExploreKind, "event">, TabId> = { coin: "crypto", s
 const displayLabel = (label: string): string => (/^yes$/i.test(label) ? "Yes" : /^no$/i.test(label) ? "No" : label);
 
 /** one row from a thing's markets, venue by venue (connected venues first); markets set aside by the median guard go to `aside` */
-function rowOf(key: string, kind: ExploreKind, venues: Map<string, Got[]>, aside: ExploreMissing[]): ExploreItem | undefined {
+function rowOf(key: string, kind: ExploreKind, venues: Map<string, Got[]>, aside: ExploreMissing[], now: number): ExploreItem | undefined {
   const all = [...venues.values()].sort((a, b) => Number(b[0]!.r.connected) - Number(a[0]!.r.connected));
-  if (kind === "event") return eventRow(key, all);
+  if (kind === "event") return eventRow(key, all, now);
   // a public listing of an exchange a connected venue reads already is the same market again: the connected venue speaks for it
   const reads = new Set(all.filter((l) => l[0]!.r.connected).map((l) => l[0]!.r.family));
   const order = all.filter((l) => l[0]!.r.connected || !reads.has(l[0]!.r.family));
   // each venue once, by its most traded market for the thing (an open one before a closed one, then the venue's own order)
   let entries = order.map((list) => [...list].sort((a, b) => (b.m.volumeUsd24h ?? -1) - (a.m.volumeUsd24h ?? -1) || Number(b.m.open !== false) - Number(a.m.open !== false))[0]!);
+  if (key.startsWith(PRE_IPO_GROUP)) return preIpoRow(key, entries, aside);
   const priced = entries.filter((e) => priceOf(e.m) !== undefined);
   if (priced.length >= 3) {
     const prices = priced.map((e) => priceOf(e.m)!).sort((x, y) => x - y);
@@ -504,6 +577,8 @@ function rowOf(key: string, kind: ExploreKind, venues: Map<string, Got[]>, aside
   const category = entries.map((e) => e.m.category).find((c): c is string => typeof c === "string" && c !== "");
   const issued = kind === "rwa" ? entries.find((e) => typeof e.m.issuer === "string" && e.m.issuer !== "") : undefined;
   const eligible = kind === "rwa" ? entries.find((e) => typeof e.m.eligibility === "string" && e.m.eligibility !== "") : undefined;
+  // the row trades at a venue the owner connected: a read-only listing's line (Stock Tokens) is then its price, with no connection to offer
+  const trades = entries.some((e) => e.r.connected && e.r.canTrade !== false);
   return {
     key,
     kind,
@@ -516,14 +591,73 @@ function rowOf(key: string, kind: ExploreKind, venues: Map<string, Got[]>, aside
     ...(funded ? { fundingRate: funded.m.fundingRate, ...(funded.m.nextFundingAt ? { nextFundingAt: funded.m.nextFundingAt } : {}) } : {}),
     ...(issued ? { issuer: issued.m.issuer } : {}),
     ...(eligible ? { eligibility: eligible.m.eligibility } : {}),
-    tabs: [TAB_OF[kind as Exclude<ExploreKind, "event">]],
-    at: entries.map((e) => atOf(e.r, e.m)),
+    tabs: ["all", TAB_OF[kind as Exclude<ExploreKind, "event">]],
+    at: entries.map((e) => atOf(e.r, e.m, e.m.symbol, priceOf(e.m), e.m.open, !(trades && e.r.readOnly !== undefined))),
+  };
+}
+
+/** the valuation a venue's pre-IPO contract implies: the listing's own figure, or its price in the venue's unit (a connected key's market
+ * carries the unit from its list and a price from its stats) */
+function impliedOf(m: Market): { usd: number; unit: string } | undefined {
+  if (!m.implied) return undefined;
+  const usd = pos(m.implied.usd) ?? (priceOf(m) !== undefined ? impliedUsd(priceOf(m)!, m.implied.perPoint) : undefined);
+  return usd === undefined ? undefined : { usd, unit: m.implied.unit };
+}
+
+/** a pre-IPO company's row (see the top of this file): one line per venue, each with the venue's own contract price and the valuation it
+ * implies in the venue's own unit; the median guard on the implied valuation; the row's `implied.usd` the median of the venues', its `price`
+ * that median in the $1-per-$1,000,000,000 convention. The row is Pre-IPO, not Perps */
+function preIpoRow(key: string, every: Got[], aside: ExploreMissing[]): ExploreItem | undefined {
+  let entries = every.filter((e) => impliedOf(e.m) !== undefined || priceOf(e.m) === undefined);
+  const title = every.map((e) => e.m.group?.title).find((t): t is string => typeof t === "string" && t !== "") ?? key.slice(PRE_IPO_GROUP.length);
+  const valued = entries.filter((e) => impliedOf(e.m) !== undefined);
+  if (valued.length >= 3) {
+    const usds = valued.map((e) => impliedOf(e.m)!.usd).sort((x, y) => x - y);
+    const middle = usds[Math.floor(usds.length / 2)]!;
+    const far = new Set(valued.filter((e) => Math.abs(impliedOf(e.m)!.usd - middle) / middle > 0.1));
+    for (const e of far) aside.push({ venue: e.r.id, venueName: e.r.name, connected: e.r.connected, symbol: e.m.symbol, why: `lists ${e.m.symbol} at ${priceOf(e.m)}, an implied ${impliedOf(e.m)!.usd} in its unit, more than 10% from the other venues' ${middle} for ${title}: it may be another thing under the same name, so it is left out of that row` });
+    entries = entries.filter((e) => !far.has(e));
+  }
+  if (!entries.length) return undefined;
+  entries.sort((a, b) => (b.m.volumeUsd24h ?? -1) - (a.m.volumeUsd24h ?? -1) || Number(b.r.connected) - Number(a.r.connected));
+  const usds = entries.map((e) => impliedOf(e.m)?.usd).filter((u): u is number => u !== undefined).sort((x, y) => x - y);
+  const median = usds.length ? (usds.length % 2 ? usds[(usds.length - 1) / 2]! : Math.round((usds[usds.length / 2 - 1]! + usds[usds.length / 2]!) / 2)) : undefined;
+  const moved = entries.find((e) => fin(e.m.changePct24h) !== undefined);
+  const byFamily = new Map<string, number>();
+  for (const e of entries) {
+    const v = fin(e.m.volumeUsd24h);
+    if (v !== undefined && v >= 0) byFamily.set(e.r.family, Math.max(byFamily.get(e.r.family) ?? 0, v));
+  }
+  const vols = [...byFamily.values()];
+  const funded = entries.find((e) => fin(e.m.fundingRate) !== undefined);
+  const issued = entries.find((e) => typeof e.m.issuer === "string" && e.m.issuer !== "");
+  const eligible = entries.find((e) => typeof e.m.eligibility === "string" && e.m.eligibility !== "");
+  const unit = usds.length === 1 ? impliedOf(entries.find((e) => impliedOf(e.m) !== undefined)!.m)!.unit : `the median of ${usds.length} venues' implied valuations (each venue's own contract price and unit are on its line)`;
+  return {
+    key,
+    kind: "perp",
+    name: title,
+    base: key.slice(PRE_IPO_GROUP.length).toUpperCase(),
+    ...(median !== undefined ? { price: Number((median / PRE_IPO_PER_POINT).toFixed(2)), implied: { usd: median, unit } } : {}),
+    ...(moved ? { changePct24h: moved.m.changePct24h, changeFrom: { venue: moved.r.id, venueName: moved.r.name } } : {}),
+    ...(vols.length ? { volumeUsd24h: vols.reduce((s, v) => s + v, 0) } : {}),
+    category: PRE_IPO_CATEGORY,
+    group: { id: key, title },
+    ...(funded ? { fundingRate: funded.m.fundingRate, ...(funded.m.nextFundingAt ? { nextFundingAt: funded.m.nextFundingAt } : {}) } : {}),
+    ...(issued ? { issuer: issued.m.issuer } : {}),
+    ...(eligible ? { eligibility: eligible.m.eligibility } : {}),
+    tabs: ["all", "preipo"],
+    at: entries.map((e) => {
+      const implied = impliedOf(e.m);
+      return { ...atOf(e.r, e.m, e.m.symbol, priceOf(e.m), e.m.open), ...(implied ? { implied } : {}) };
+    }),
   };
 }
 
 /** an event's row: its legs at every venue folded into its outcomes, YES and NO first. A `pm:` or `kalshi:` row is one market at one
- * exchange, so a venue the owner connected that lists it trades it already: the public listing of it is left out */
-function eventRow(key: string, every: Got[][]): ExploreItem | undefined {
+ * exchange, so a venue the owner connected that lists it trades it already: the public listing of it is left out. Past its close the row
+ * and its legs say so (`pastEnd`), and a Kalshi leg is closed (see the top of this file) */
+function eventRow(key: string, every: Got[][], now: number): ExploreItem | undefined {
   const order = every.some((l) => l[0]!.r.connected) ? every.filter((l) => l[0]!.r.connected) : every;
   const outcomes = new Map<string, ExploreOutcome>();
   let changeFrom: { venue: string; venueName: string } | undefined;
@@ -556,13 +690,15 @@ function eventRow(key: string, every: Got[][]): ExploreItem | undefined {
   const legs = every.flat();
   const v = Math.max(...legs.map((g) => fin(g.m.volumeUsd24h) ?? -1));
   const c = Math.max(...legs.map((g) => fin(g.m.contracts24h) ?? -1));
+  const ev = Math.max(...legs.map((g) => fin((g.m as Listing).eventVolumeUsd24h) ?? -1));
   const usd = v >= 0 ? v : undefined;
   const contracts = c >= 0 ? c : undefined;
+  const eventUsd = ev >= 0 ? ev : undefined;
   const g0 = firstLegs[0]!.m;
-  const words = firstLegs.flatMap((g) => [g.m.category, ...(g.m.tags ?? [])]);
   const category = firstLegs.map((g) => g.m.category).find((c): c is string => typeof c === "string" && c !== "");
   const closeTime = firstLegs.map((g) => g.m.closeTime).find((c): c is string => typeof c === "string" && c !== "");
   const event = firstLegs.map((g) => g.m.event).find((e) => e !== undefined);
+  const past = closeTime !== undefined && closeMs({ closeTime }) <= now;
   return {
     key,
     kind: "event",
@@ -572,14 +708,18 @@ function eventRow(key: string, every: Got[][]): ExploreItem | undefined {
     ...(changeFrom ? { changeFrom } : {}),
     ...(usd !== undefined ? { volumeUsd24h: usd } : {}),
     ...(contracts !== undefined ? { contracts24h: contracts } : {}),
+    ...(eventUsd !== undefined ? { eventVolumeUsd24h: eventUsd } : {}),
     ...(category ? { category } : {}),
     ...(closeTime ? { closeTime } : {}),
+    ...(past ? { pastEnd: true } : {}),
     ...(event ? { event } : {}),
     outcomes: out,
-    tabs: ["predictions", ...tabsOfCategories(words)],
+    tabs: ["all", "predictions"],
     at: order.map((list) => {
       const lead0 = list.find((g) => outcomeOf(g.m).toLowerCase() === lead.label.toLowerCase()) ?? list[0]!;
-      return atOf(lead0.r, lead0.m, lead0.m.symbol, priceOf(lead0.m), list.some((g) => g.m.open === true) ? true : lead0.m.open);
+      const open = list.some((g) => g.m.open === true) ? true : lead0.m.open;
+      const line = atOf(lead0.r, lead0.m, lead0.m.symbol, priceOf(lead0.m), past && lead0.r.kalshi ? false : open);
+      return past ? { ...line, pastEnd: true } : line;
     }),
   };
 }
@@ -587,7 +727,8 @@ function eventRow(key: string, every: Got[][]): ExploreItem | undefined {
 /** a row matches a query by its own words or by any of its markets' symbols and names at any venue */
 const matches = (i: ExploreItem, words: string[], q: string): boolean => [i.name, i.base, i.category, i.event?.title, ...words].some((f) => typeof f === "string" && f.toLowerCase().includes(q));
 
-const byVolume = (a: ExploreItem, b: ExploreItem): number => volumeOf(b) - volumeOf(a) || a.name.localeCompare(b.name);
+/** the busier first; rows that trade the same (or report no volume) keep the order they came in, which is each source's own */
+const byVolume = (a: ExploreItem, b: ExploreItem): number => volumeOf(b) - volumeOf(a);
 const size = (i: ExploreItem): number => (fin(i.changePct24h) !== undefined ? Math.abs(i.changePct24h!) : -1);
 const byMove = (a: ExploreItem, b: ExploreItem): number => size(b) - size(a) || byVolume(a, b);
 function byClose(now: number): (a: ExploreItem, b: ExploreItem) => number {
@@ -610,6 +751,21 @@ function oneEach(movers: Mover[]): Mover[] {
   return [...byAsset.values()];
 }
 
+/** The Predictions rows when nothing is searched for: each venue's event rows by its own volume measure, then the venues in turn — the
+ * venue with the busiest row first, its busiest, the next venue's busiest, and so on — at most PREDICTIONS_MAX. A venue is the row's first
+ * line (a connected venue before a public one) */
+function inTurn(events: ExploreItem[]): ExploreItem[] {
+  const byVenue = new Map<string, ExploreItem[]>();
+  for (const i of events) {
+    const v = i.at[0]?.venue ?? "";
+    byVenue.set(v, [...(byVenue.get(v) ?? []), i]);
+  }
+  const lists = [...byVenue.values()].map((l) => [...l].sort(byVolume)).sort((a, b) => volumeOf(b[0]!) - volumeOf(a[0]!));
+  const out: ExploreItem[] = [];
+  for (let k = 0; out.length < PREDICTIONS_MAX && lists.some((l) => k < l.length); k++) for (const l of lists) if (k < l.length && out.length < PREDICTIONS_MAX) out.push(l[k]!);
+  return out;
+}
+
 /** Every market the sources list, as one list of rows, with its tabs, its movers and what closes soon. Every source is asked at once, each
  * inside its own time limit; what failed is in `missing`, with why. See the top of this file for what is one row and what is made of them */
 export async function exploreAcross(sources: ExploreSources, opts: ExploreOptions = {}): Promise<Exploration> {
@@ -620,7 +776,7 @@ export async function exploreAcross(sources: ExploreSources, opts: ExploreOption
   const limit = Math.max(1, Math.floor(pos(opts.limit) ?? 60));
   const window = pos(opts.closingWithinMs) ?? DAY_MS;
   const q = (opts.q ?? "").trim();
-  const floor = (k: Exclude<ExploreKind, "event">): number => (typeof opts.moversMinUsd === "number" ? opts.moversMinUsd : (opts.moversMinUsd?.[k] ?? FLOOR_USD));
+  const floor = (k: Exclude<ExploreKind, "event">): number => (typeof opts.moversMinUsd === "number" ? opts.moversMinUsd : (opts.moversMinUsd?.[k] ?? FLOOR_USD[k]));
 
   const connected = sources.connected ?? [];
   // a source nothing is ever traded through (Stock Tokens) is the public side of no connection: it is always asked
@@ -628,6 +784,7 @@ export async function exploreAcross(sources: ExploreSources, opts: ExploreOption
   const readers = [...connected.map(fromVenue), ...(sources.public ?? []).filter((s) => !covered(s)).map((s) => fromPublic(s, perSource))];
   const answers = await Promise.all(readers.map((r) => atSource(r, { q, ms, perSource, closingWithinMs: window })));
   const missing: ExploreMissing[] = answers.flatMap((a) => a.missing);
+  const now = clock();
 
   // every market to its row, and within its row to its venue
   const rows = new Map<string, { kind: ExploreKind; venues: Map<string, Got[]>; words: string[] }>();
@@ -642,27 +799,38 @@ export async function exploreAcross(sources: ExploreSources, opts: ExploreOption
     row.words.push(g.m.symbol, g.m.name, String(g.m.base ?? ""));
     rows.set(key, row);
   }
-  const all: ExploreItem[] = [];
+  const made: ExploreItem[] = [];
   for (const [key, row] of rows) {
     const aside: ExploreMissing[] = [];
-    const item = rowOf(key, row.kind, row.venues, aside);
+    const item = rowOf(key, row.kind, row.venues, aside, now);
     if (!item || (q && !matches(item, row.words, q.toLowerCase()))) continue;
-    all.push(item);
+    made.push(item);
     missing.push(...aside);
   }
+  // Predictions is a few of the busiest when nothing is searched for: the other event rows are not shown anywhere. An event under an
+  // excluded category (sports, weather, entertainment, what someone says — categories.ts) is not one of the few, whatever venue lists it,
+  // connected or not: the owner asked for a few hot markets, not every bet. A search still finds it, and a position in it is still a position.
+  // The IPO questions stay beside the few whatever their volume (the Pre-IPO company drawer names them), after the interleaved rows
+  const events = made.filter((i) => i.kind === "event" && !isExcludedCategory([i.category]));
+  const ipo = events.filter((i) => isIpoCategory([i.category]));
+  const curated = q ? undefined : [...inTurn(events.filter((i) => !ipo.includes(i))), ...ipo.sort(byVolume)];
+  const kept = curated ? new Set(curated) : undefined;
+  const all = kept ? made.filter((i) => i.kind !== "event" || kept.has(i)) : made;
+  const notes = [...new Set(answers.flatMap((a) => a.notes))];
+  if (curated?.length) notes.push(`Predictions: at most ${PREDICTIONS_MAX} rows, each venue's busiest in turn, without sports, weather and entertainment; a search reaches everything the venues' listings loaded.`);
+  if (curated && ipo.length) notes.push("Predictions: and the IPO questions at Kalshi and Polymarket, beside the busiest few.");
+  if (all.some((i) => i.tabs.includes("preipo"))) notes.push("Pre-IPO perpetuals are contracts on a venue's estimate of a private company's valuation, not shares; each venue says who may trade them once a key connects.");
 
-  const now = clock();
   const traded = all.filter((i) => i.kind !== "event" && i.volumeUsd24h !== undefined).sort(byVolume);
   const movers = oneEach(all.filter((i): i is Mover => i.kind !== "event" && fin(i.changePct24h) !== undefined && (i.volumeUsd24h ?? -1) >= floor(i.kind as Exclude<ExploreKind, "event">))).sort(byMove).slice(0, top);
   const soon = all.filter((i) => i.kind === "event" && closeMs(i) > now && closeMs(i) <= now + window).sort(byVolume).slice(0, top);
   const closing = [...soon].sort(byClose(now));
   const mostTraded = traded.slice(0, top);
-  const nowKeys = new Set<string>();
-  const nowList = [...soon, ...movers, ...mostTraded].filter((i) => !nowKeys.has(i.key) && nowKeys.add(i.key) !== undefined);
-  for (const i of nowList) i.tabs = ["now", ...i.tabs];
 
-  const tabs = TABS.map((t) => ({ id: t.id, label: t.label, count: t.id === "now" ? nowList.length : all.filter((i) => i.tabs.includes(t.id)).length })).filter((t) => t.count > 0);
+  // All holds every row (each row's tabs start with it), so every tab's count is the rows that carry it
+  const tabs = TABS.map((t) => ({ id: t.id, label: t.label, count: all.filter((i) => i.tabs.includes(t.id)).length })).filter((t) => t.count > 0);
   const sorter = opts.sort === "movers" ? byMove : opts.sort === "closing" ? byClose(now) : byVolume;
-  const chosen = opts.tab === "now" ? (opts.sort ? [...nowList].sort(sorter) : nowList) : (opts.tab ? all.filter((i) => i.tabs.includes(opts.tab!)) : all).sort(sorter);
-  return { asOf: new Date(now).toISOString(), tabs, items: chosen.slice(0, limit), movers, closing, mostTraded, missing: dedupe(missing) };
+  // the curated Predictions list keeps its own order (the venues in turn, then the IPO questions), unless a sort is asked for
+  const chosen = opts.tab === "predictions" && curated && !opts.sort ? curated : (opts.tab && opts.tab !== "all" ? all.filter((i) => i.tabs.includes(opts.tab!)) : all).sort(sorter);
+  return { asOf: new Date(now).toISOString(), tabs, items: chosen.slice(0, limit), movers, closing, mostTraded, missing: dedupe(missing), notes };
 }

@@ -7,9 +7,8 @@
 <script>/* the background before the first paint: Cream, unless this browser chose Black */
 (function () { var t = "cream"; try { t = localStorage.getItem("account.theme") || t; } catch (e) {}
 document.documentElement.setAttribute("data-theme", t === "black" ? "black" : "cream"); })();</script>
-<link rel="preconnect" href="https://fonts.googleapis.com" />
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500&display=swap" />
+<!-- the page's face, from this account (ui/tokens.css names every file): asked for at once, so the first paint is already in it -->
+<link rel="preload" href="/fonts/manrope-v20-latin.woff2" as="font" type="font/woff2" crossorigin />
 <link rel="stylesheet" href="/ui/tokens.css" />
 <link rel="stylesheet" href="/ui/shell.css" />
 <link rel="stylesheet" href="/account.css" />
@@ -26,7 +25,6 @@ document.documentElement.setAttribute("data-theme", t === "black" ? "black" : "c
   <symbol id="i-trade" viewBox="0 0 24 24"><path d="M7 4v16M7 4 4 7M7 4l3 3M17 20V4M17 20l-3-3M17 20l3-3" /></symbol>
   <symbol id="i-agent" viewBox="0 0 24 24"><rect x="4" y="7" width="16" height="12" rx="3" /><path d="M12 3v4M9 12h.01M15 12h.01M9 16h6" /></symbol>
   <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h4M12 17h8" /><circle cx="16" cy="7" r="2" /><circle cx="10" cy="17" r="2" /></symbol>
-  <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16" /></symbol>
   <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></symbol>
   <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2" /><path d="M5 15V6a2 2 0 0 1 2-2h8" /></symbol>
   <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5" /></symbol>
@@ -48,32 +46,32 @@ document.documentElement.setAttribute("data-theme", t === "black" ? "black" : "c
   <symbol id="i-wallet" viewBox="0 0 24 24"><rect x="3" y="6" width="18" height="13" rx="2" /><path d="M3 10h18M16 14h2" /></symbol>
   <symbol id="i-plug" viewBox="0 0 24 24"><path d="M9 7V3M15 7V3M7 7h10v4a5 5 0 0 1-10 0z" /><path d="M12 16v5" /></symbol>
   <symbol id="i-chart" viewBox="0 0 24 24"><path d="M4 4v16h16" /><path d="m7 15 4-4 3 3 5-6" /></symbol>
+  <symbol id="i-stock" viewBox="0 0 24 24"><path d="M4 20h16" /><path d="M6 17v-4M11 17V9M16 17v-6" /><path d="m5 8 5-4 4 3 5-4" /></symbol>
+  <symbol id="i-rwa" viewBox="0 0 24 24"><path d="M9 11V4.5A1.5 1.5 0 0 1 10.5 3H19a1.5 1.5 0 0 1 1.5 1.5v10A1.5 1.5 0 0 1 19 16h-5" /><path d="M13 7h4M13 10h4" /><circle cx="8" cy="16" r="5" /><path d="M8 13.5v5M6.5 15h3" /></symbol>
+  <symbol id="i-preipo" viewBox="0 0 24 24"><path d="M4 16 9 11l3 3 7-8" /><path d="M15 6h4v4" /><path d="M4 20h2M9 20h2M14 20h2M19 20h1" /></symbol>
 </svg>
 <a class="skip" href="#main">Skip to the page</a>
 <div class="app">
   <nav class="rail" aria-label="Main">
     <div class="brand">Account</div>
-    <button type="button" class="btn btn-primary rail-trade" id="rail-trade"><svg class="ico" aria-hidden="true"><use href="#i-plus"></use></svg>Trade</button>
     <div class="rail-nav">
+      <span class="rail-pill" aria-hidden="true" hidden></span>
       <a href="#/portfolio" data-tab="portfolio"><svg class="ico" aria-hidden="true"><use href="#i-home"></use></svg>Portfolio<span class="count" id="count-portfolio" hidden></span></a>
       <a href="#/markets" data-tab="markets"><svg class="ico" aria-hidden="true"><use href="#i-compass"></use></svg>Markets</a>
       <a href="#/trade" data-tab="trade"><svg class="ico" aria-hidden="true"><use href="#i-trade"></use></svg>Trade</a>
     </div>
     <div class="rail-foot">
       <div class="group">
-        <div class="label" id="bg-label">Background</div>
-        <div class="seg" role="group" aria-labelledby="bg-label"><button type="button" data-set-theme="cream" aria-pressed="true"><span class="swatch" style="background:#f6f4ef" aria-hidden="true"></span>Cream</button><button type="button" data-set-theme="black" aria-pressed="false"><span class="swatch" style="background:#0e0f11" aria-hidden="true"></span>Black</button></div>
-      </div>
-      <div class="group">
         <div class="label" id="mode-label">Mode</div>
-        <div class="seg" role="group" aria-labelledby="mode-label" id="mode"><button type="button" data-set-mode="guard" aria-pressed="false">Conservative</button><button type="button" data-set-mode="open" aria-pressed="false">Aggressive</button></div>
+        <div class="seg" role="group" aria-labelledby="mode-label" id="mode"><button type="button" data-set-mode="guard" aria-pressed="false">Guard</button><button type="button" data-set-mode="open" aria-pressed="false">Beast</button></div>
         <div class="note-s" id="mode-note"></div>
+        <button type="button" class="link dim" id="mode-more">What changes ›</button>
       </div>
       <div class="rail-links">
         <button type="button" id="open-agents"><svg class="ico" aria-hidden="true"><use href="#i-agent"></use></svg>Agents<span class="count" id="count-agents" hidden></span></button>
         <button type="button" id="open-settings"><svg class="ico" aria-hidden="true"><use href="#i-sliders"></use></svg>Settings</button>
       </div>
-      <div class="rail-status"><div id="writes"></div><div class="dim stamp" id="stamp"></div></div>
+      <div class="rail-status"><div id="writes"></div><div id="reach" hidden></div><div class="dim stamp" id="stamp"></div></div>
     </div>
   </nav>
 
@@ -84,23 +82,23 @@ document.documentElement.setAttribute("data-theme", t === "black" ? "black" : "c
       <div class="top-tools">
         <form class="search" id="search-form" role="search" data-live><svg class="ico" aria-hidden="true"><use href="#i-search"></use></svg><label class="sr" for="search">Search markets, assets, agents</label><input type="search" id="search" placeholder="Search markets, assets, agents" autocomplete="off" spellcheck="false" /><kbd aria-hidden="true">/</kbd></form>
         <button type="button" class="icon-btn" id="open-statement" aria-label="Statement" title="Statement"><svg class="ico lg" aria-hidden="true"><use href="#i-clock"></use></svg></button>
-        <button type="button" class="icon-btn" id="copy-setup" aria-label="Copy agent setup command" title="Copy agent setup command"><svg class="ico lg" aria-hidden="true"><use href="#i-copy"></use></svg></button>
-        <button type="button" class="icon-btn" id="open-menu" aria-label="Menu" title="Menu" aria-haspopup="dialog"><svg class="ico lg" aria-hidden="true"><use href="#i-menu"></use></svg></button>
       </div>
     </header>
     <div class="banner" id="banner" hidden></div>
     <div class="notice" id="restored" hidden></div>
 
+    <div class="panes">
     <section class="pane" data-pane="portfolio" aria-labelledby="h-portfolio"><h1 class="sr" id="h-portfolio">Portfolio</h1><div id="pane-portfolio"><div class="skel-rows" aria-hidden="true"><span class="skel big"></span><span class="skel"></span><span class="skel"></span><span class="skel" style="width:60%"></span></div></div></section>
     <section class="pane" data-pane="markets" aria-labelledby="h-markets" hidden><h1 class="sr" id="h-markets">Markets</h1><div id="pane-markets"><div class="skel-rows" aria-hidden="true"><span class="skel"></span><span class="skel"></span><span class="skel" style="width:60%"></span></div></div></section>
     <section class="pane" data-pane="trade" aria-labelledby="h-trade" hidden><h1 class="sr" id="h-trade">Trade</h1><div id="pane-trade"><div class="skel-rows" aria-hidden="true"><span class="skel"></span><span class="skel"></span><span class="skel" style="width:60%"></span></div></div></section>
+    </div>
   </main>
 </div>
 
 <!-- the one sheet (openSheet draws into #sheet; an earlier dialog draws straight into #modal-form), the drawer on the right, the small asking dialog -->
 <dialog id="modal"><div id="sheet"></div><form method="dialog" id="modal-form"></form></dialog>
 <dialog id="drawer"></dialog>
-<dialog id="ask"></dialog>
+<dialog id="ask" aria-labelledby="ask-title"></dialog>
 <div class="toast-stack" popover="manual"><div id="toasts" role="status" aria-live="polite"></div><div id="alerts" role="alert" aria-live="assertive"></div></div>
 
 <script src="/owner.js"></script>
@@ -111,6 +109,7 @@ document.documentElement.setAttribute("data-theme", t === "black" ? "black" : "c
 <script defer src="/ui/asset.js"></script>
 <script defer src="/ui/intent.js"></script>
 <script defer src="/ui/portfolio.js"></script>
+<script defer src="/ui/earn.js"></script>
 <script defer src="/ui/markets.js"></script>
 <script defer src="/ui/trade.js"></script>
 <script defer src="/ui/statement.js"></script>

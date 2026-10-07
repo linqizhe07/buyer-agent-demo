@@ -1,16 +1,19 @@
-/* Where the owner steers the agents: the two modes (also in the rail), the agents' session and leverage, the agents and their limits, the
-   agent wallets, the devices that sign. Two sheets: Agents and Settings. Another team's Agent module mounts in the Agents sheet later
-   (openAgents is its mount point); until then its sections render as they always have, and behave the same. */
+/* Where the owner steers the agents: the two modes (the switch is in the rail; the Mode sheet says what each does, door by door, from the
+   account), the agents' session and leverage, the agents and their limits, the agent wallets, the devices that sign. Three sheets: Agents,
+   Settings and Mode. Another team's Agent module mounts in the Agents sheet later (openAgents is its mount point); until then its sections
+   render as they always have, and behave the same. */
 
-/** the mode: loosening (Aggressive) is the owner's to sign; tightening (Conservative) needs no signature */
+/** the mode: loosening (Beast) is the owner's to sign; tightening (Guard) needs no signature. Either is said done only when the account
+ * took it; a refusal, or no answer, is shown as such */
 async function setMode(mode) {
-  if (!A || mode === A.mode || !owns()) return;
+  if (!A || mode === modeOf(A.mode) || !owns()) return;
   if (mode === "open") return void own({ type: "setPolicy", change: "mode", value: "open" });
-  await postJson("/api/mode", { mode: "guard" });
-  said = "Conservative: every agent order waits for you.";
+  const r = await postJson("/api/mode", { mode: "guard" });
+  if (refusedAt(r)) flash = Owner.why(r) || "Refused";
+  else said = "Guard: what agents ask for waits for you on a card.";
   await load();
 }
-const modeNote = () => (A.mode === "open" ? "Agents trade inside their limits without asking." : "Every agent order waits for you.");
+const modeNote = () => (modeOf(A.mode) === "open" ? "Inside their limits, agents act at once." : "What agents ask for waits for you on a card.");
 
 /* the agents' session and the most leverage they may set: what the owner opens to agents beyond their limits */
 function renderDial(L, owner) {
@@ -32,9 +35,11 @@ function renderDial(L, owner) {
 
 // ---- the sheets -----------------------------------------------------------------------------
 
-/** the Agents sheet: the agents and their limits, the wallets they pay from, the devices that sign. The other team's module mounts here */
+/** the Agents sheet: the agents and their limits, the wallets they pay from, and the command that brings a new agent to the door. The other
+ * team's module mounts here. The devices that sign are the owner's, under Settings */
 function openAgents() {
-  openSheet('<div class="old"><section class="sheet-sec" aria-labelledby="agents-h"><h3 class="h2" id="agents-h">Agents</h3><div id="agents"></div></section><section class="sheet-sec" id="wallets-sec" aria-labelledby="wallets-h"><h3 class="h2" id="wallets-h">Agent wallets</h3><div id="wallets"></div></section><section class="sheet-sec" aria-labelledby="devices-h"><h3 class="h2" id="devices-h">Devices</h3><div id="devices"></div></section></div>', { title: "Agents", wide: true, redraw: drawAgents });
+  openSheet(`<div class="old"><section class="sheet-sec" aria-labelledby="agents-h"><h3 class="h2" id="agents-h">Agents</h3><div id="agents"></div></section><section class="sheet-sec" id="wallets-sec" aria-labelledby="wallets-h"><h3 class="h2" id="wallets-h">Agent wallets</h3><div id="wallets"></div></section><section class="sheet-sec"><div class="set"><div><b>Add an agent</b><span class="note-s">Run the command where your agent runs; it knocks here, and you let it in above.</span></div><button type="button" class="btn btn-sm" id="agents-setup">${icon("copy", "sm")}Copy agent setup command</button></div></section></div>`, { title: "Agents", wide: true, redraw: drawAgents });
+  $("agents-setup").addEventListener("click", copySetup);
   drawAgents();
 }
 function drawAgents() {
@@ -44,24 +49,43 @@ function drawAgents() {
   // the agent wallets are drawn by money.js, which holds what moves money
   $("wallets-sec").hidden = typeof renderWallets !== "function";
   if (typeof renderWallets === "function") renderWallets(owner);
-  renderDevices(owner);
 }
 
-/** the Settings sheet: the mode, trading on or off, the agents' session and leverage, the background, the devices */
+/** the Settings sheet: trading on or off (and the cap), the agents' session and leverage, the background, the devices. The mode is the
+ * rail's: its seg, and the Mode sheet behind "What changes ›" */
 function openSettings() {
-  openSheet('<section class="sheet-sec"><div class="set"><div><b>Mode</b><span class="note-s" id="set-mode-note"></span></div><div id="set-mode"></div></div><div class="set"><div><b>Trading</b><span class="note-s" id="set-writes"></span></div></div><div id="dial"></div><div class="set"><div><b>Background</b><span class="note-s">Kept in this browser.</span></div><div id="set-theme"></div></div></section><section class="sheet-sec old" aria-labelledby="set-devices-h"><h3 class="h2" id="set-devices-h">Devices</h3><div id="devices"></div></section>', { title: "Settings", redraw: drawSettings });
+  openSheet('<section class="sheet-sec"><div class="set"><div><b>Trading</b><span class="note-s" id="set-writes"></span></div></div><div id="dial"></div><div class="set"><div><b>Background</b><span class="note-s">Kept in this browser.</span></div><div id="set-theme"></div></div></section><section class="sheet-sec old" aria-labelledby="set-devices-h"><h3 class="h2" id="set-devices-h">Devices</h3><div id="devices"></div></section>', { title: "Settings", redraw: drawSettings });
   drawSettings();
 }
 function drawSettings() {
-  if (!$("set-mode")) return;
+  if (!$("set-writes")) return;
   const owner = owns();
-  $("set-mode").innerHTML = seg([["guard", "Conservative"], ["open", "Aggressive"]], A.mode, setMode, { label: "Mode" });
-  for (const b of $("set-mode").querySelectorAll("button")) b.disabled = !owner;
-  $("set-mode-note").textContent = `${modeNote()}${owner ? "" : " Only a browser that signs for you changes it."}`;
   $("set-writes").textContent = writesOn() ? `On: an order or a move goes through only when you sign it, or inside a limit you gave an agent, and is worth up to ${money(A.connectLive.writes.capUsd)} each (set when the account was started).` : "Off: this server was started read-only, so it places no orders and moves no money.";
   $("set-theme").innerHTML = seg([["cream", "Cream"], ["black", "Black"]], document.documentElement.dataset.theme || "cream", setTheme, { label: "Background" });
   renderDial(connected(), owner);
   renderDevices(owner);
+}
+
+/** the Mode sheet: the switch itself, one sentence, and — door by door, as the account itself has it (A.modeRules, account/mode-rules.ts) —
+ * what Guard and Beast do with an agent's request, the mode in force marked. Only the rail's "What changes ›" opens it */
+function openMode() {
+  openSheet('<div id="mode-sheet"></div>', { title: "Mode", redraw: drawMode });
+  drawMode();
+}
+function drawMode() {
+  const el = $("mode-sheet");
+  if (!el || !A) return;
+  const owner = owns();
+  const mode = modeOf(A.mode);
+  const rules = A.modeRules;
+  // the same buttons as the rail's (data-set-mode): one click handler in the shell, and renderChrome keeps both in step after each read
+  const sw = `<div class="seg" role="group" aria-label="Mode">${[["guard", "Guard"], ["open", "Beast"]].map(([v, l]) => `<button type="button" data-set-mode="${v}" aria-pressed="${String(mode === v)}"${owner ? "" : " disabled"}>${l}</button>`).join("")}</div>`;
+  const now = (m) => (mode === m ? ' class="now"' : "");
+  const head = (m, label) => `<th scope="col"${now(m)}>${label}${mode === m ? ' <span class="tag up">Now</span>' : ""}</th>`;
+  const rows = rules && Array.isArray(rules.rows) && rules.rows.length ? `<div class="t-wrap"><table class="t mode-t"><thead><tr><th scope="col">An agent, inside its limit</th>${head("guard", "Guard")}${head("open", "Beast")}</tr></thead><tbody>${rules.rows.map((r) => `<tr><td>${esc(r.door)}</td><td${now("guard")}>${esc(r.guard)}</td><td${now("open")}>${esc(r.beast)}</td></tr>`).join("")}</tbody></table></div>` : '<p class="empty">The account did not say what each mode does.</p>';
+  const yours = writesOn() ? `your own actions are yours to sign, up to ${money(A.connectLive.writes.capUsd)} each` : "this server was started read-only, so nothing is placed or moved";
+  const card = rules && Number(rules.cardMinutes) > 0 ? ` · a card nobody answers in ${plural(Number(rules.cardMinutes), "minute")} expires` : "";
+  paint(el, `<div class="mode-head">${sw}<p class="mode-lead">Guard: what agents ask for waits for you on a card. Beast: inside the limits you signed, it goes at once. Guard is one click; Beast is signed.${owner ? "" : " Only a browser that signs for you changes it."}</p></div>${rows}<p class="path mode-foot">In both modes: anything over a limit is refused · ${yours}${card}.</p>`);
 }
 
 // ---- agents -----------------------------------------------------------------------------
@@ -89,13 +113,14 @@ function renderAgents(L, owner) {
     const earnsAt = n ? n.allow.map(earnPlace).join(", ") : "";
     const earns = n ? (s === n ? `puts money to earn at ${earnsAt}` : `puts money to earn at ${earnsAt} up to ${fine(n.perPaymentUsd)} each time (${fine(n.spentUsd)} of ${fine(n.budgetUsd)}${n.reservedUsd ? `, ${fine(n.reservedUsd)} waiting` : ""}${n.expired ? ", expired" : `, until ${nyDay(n.validUntil)}`})`) : "";
     const where = [t ? `trades at ${t.allow.map(nameOf).join(", ")}` : "", m ? `moves money between ${m.allow.map(nameOf).join(", ")}` : "", t || m ? pays : y ? `pays ${y.allow.includes("*") ? "any payee" : y.allow.join(", ")}` : "", earns].filter(Boolean).join(" · ");
-    const limit = s ? `${fine(s.spentUsd)} of ${fine(s.budgetUsd)} used · up to ${fine(s.perPaymentUsd)} ${t ? "an order" : m ? "a move" : y ? "a payment" : "each time"}<span class="why">${esc(where)}${s.reservedUsd ? ` · ${fine(s.reservedUsd)} waiting` : ""}${s.expired ? " · limit expired" : ` · until ${nyDay(s.validUntil)}`}</span>` : '<span class="dim">No limit yet: it can do nothing</span>';
+    // a limit given with the owner's words to the agent names them (spend[].intent): it ends with them
+    const limit = s ? `${fine(s.spentUsd)} of ${fine(s.budgetUsd)} used · up to ${fine(s.perPaymentUsd)} ${t ? "an order" : m ? "a move" : y ? "a payment" : "each time"}<span class="why">${esc(where)}${s.intent ? ` · for ${esc(s.intent)}` : ""}${s.reservedUsd ? ` · ${fine(s.reservedUsd)} waiting` : ""}${s.expired ? " · limit expired" : ` · until ${nyDay(s.validUntil)}`}</span>` : '<span class="dim">No limit yet: it can do nothing</span>';
     const endEarn = n && owner && k.status === "ok" ? ` · <button type="button" class="link dim" data-end-earn="${esc(k.address)}">End earn limit</button>` : "";
     return `<tr><td>${esc(k.name)}<span class="why"><span class="mono">${esc(short(k.address))}</span>${k.status === "expired" ? " · expired" : ` · until ${nyDay(k.validUntil)}`}</span></td><td>${limit}</td><td class="r">${owner && k.status === "ok" ? `<button type="button" class="link dim" data-limit="${esc(k.address)}">Change limit</button>${endEarn} · <button type="button" class="link dim" data-revoke="${esc(k.name)}">Revoke</button>` : ""}</td></tr>`;
   }).join("");
   const T = L.filter(canTrade);
   const M = L.filter(canMove);
-  const form = owner && A.connectLive ? `<form class="add" id="agent-form">${field("Agent", select("agent", [["", "New agent…"], ...keys.filter((k) => k.status === "ok").map((k) => [k.address, k.name])]))}<span class="newonly">${field("Name", '<input class="m" name="name" placeholder="Claude Code" maxlength="32" />')}${field("Key address", '<input class="l" name="address" placeholder="0x…" pattern="0x[0-9a-fA-F]{40}" />')}</span>${T.length ? `<fieldset class="chk"><legend>May trade at</legend>${T.map((v) => `<label><input type="checkbox" name="allow" value="${esc(v.id)}" checked /> ${esc(v.name)}</label>`).join("")}${M.length > 1 ? '<label class="also"><input type="checkbox" name="move" /> and move money between my accounts</label>' : ""}</fieldset>${field("Per order", '<input class="s" name="perPayment" inputmode="decimal" placeholder="25" />')}${field("Budget", '<input class="s" name="budget" inputmode="decimal" placeholder="100" />')}` : ""}<details class="pay"${A.spend.some((x) => x.scope === "payees") ? " open" : ""}><summary>Payments from an agent wallet</summary><div class="row">${field("May pay", '<input class="l" name="payees" placeholder="api.example.com, data.example.com" />')}<label class="chk1"><input type="checkbox" name="anyPayee" /> any payee</label></div><div class="row">${field("Per payment", '<input class="s" name="payPer" inputmode="decimal" placeholder="1" />')}${field("Budget", '<input class="s" name="payBudget" inputmode="decimal" placeholder="20" />')}</div></details>${field("For", select("days", [["1", "1 day"], ["7", "7 days"], ["30", "30 days"], ["90", "90 days"]], "30"))}<button type="button" class="link" id="everything">Everything</button><button type="submit" class="ink">Save</button></form><p class="dim small hint">${T.length ? "An agent trades only inside its limit. Conservative: each order waits for you. Aggressive: it goes at once." : "Connect an account that trades to give an agent a limit."}</p>` : "";
+  const form = owner && A.connectLive ? `<form class="add" id="agent-form">${field("Agent", select("agent", [["", "New agent…"], ...keys.filter((k) => k.status === "ok").map((k) => [k.address, k.name])]))}<span class="newonly">${field("Name", '<input class="m" name="name" placeholder="Claude Code" maxlength="32" />')}${field("Key address", '<input class="l" name="address" placeholder="0x…" pattern="0x[0-9a-fA-F]{40}" />')}</span>${T.length ? `<fieldset class="chk"><legend>May trade at</legend>${T.map((v) => `<label><input type="checkbox" name="allow" value="${esc(v.id)}" checked /> ${esc(v.name)}</label>`).join("")}${M.length > 1 ? '<label class="also"><input type="checkbox" name="move" /> and move money between my accounts</label>' : ""}</fieldset>${field("Per order", '<input class="s" name="perPayment" inputmode="decimal" placeholder="25" />')}${field("Budget", '<input class="s" name="budget" inputmode="decimal" placeholder="100" />')}` : ""}<details class="pay"${A.spend.some((x) => x.scope === "payees") ? " open" : ""}><summary>Payments from an agent wallet</summary><div class="row">${field("May pay", '<input class="l" name="payees" placeholder="api.example.com, data.example.com" />')}<label class="chk1"><input type="checkbox" name="anyPayee" /> any payee</label></div><div class="row">${field("Per payment", '<input class="s" name="payPer" inputmode="decimal" placeholder="1" />')}${field("Budget", '<input class="s" name="payBudget" inputmode="decimal" placeholder="20" />')}</div></details>${field("For", select("days", [["1", "1 day"], ["7", "7 days"], ["30", "30 days"], ["90", "90 days"]], "30"))}<button type="button" class="link" id="everything">Everything</button><button type="submit" class="ink">Save</button></form><p class="dim small hint">${T.length ? "An agent trades only inside its limit. Guard: each order waits for you on a card. Beast: it goes at once." : "Connect an account that trades to give an agent a limit."}</p>` : "";
   $("agents").innerHTML = `${keys.length || asking ? `<table><tbody>${asking}${rows}</tbody></table>` : '<p class="empty">No agents yet.</p>'}${form}`;
   const f = $("agent-form");
   if (!f) return;
@@ -116,7 +141,8 @@ function renderAgents(L, owner) {
   });
   for (const b of $("agents").querySelectorAll("button[data-fill]")) b.addEventListener("click", () => { f.elements.agent.value = ""; sync(); f.elements.address.value = b.dataset.fill; f.elements.name.focus(); });
   for (const b of $("agents").querySelectorAll("button[data-limit]")) b.addEventListener("click", () => { f.elements.agent.value = b.dataset.limit; sync(); if (f.elements.perPayment) f.elements.perPayment.focus(); });
-  for (const b of $("agents").querySelectorAll("button[data-revoke]")) b.addEventListener("click", () => own({ type: "approveAgent", agentAddress: ZERO, agentName: b.dataset.revoke, validUntil: 0 }));
+  // revoking is for good (the key is tombstoned): asked first
+  for (const b of $("agents").querySelectorAll("button[data-revoke]")) b.addEventListener("click", async () => { if (await confirmSheet(`Revoke ${b.dataset.revoke}? Its key can do nothing on this account from then on, and cannot be let in again under the same key: a new key is needed. Its limits end with it.`, { title: "Revoke an agent", yes: "Revoke", no: "Keep it", danger: true })) own({ type: "approveAgent", agentAddress: ZERO, agentName: b.dataset.revoke, validUntil: 0 }); });
   // the earn limit alone ends (a budget of nothing): its trading and other limits stand
   for (const b of $("agents").querySelectorAll("button[data-end-earn]")) b.addEventListener("click", () => {
     const n = A.spend.find((x) => x.scope === "earn" && x.agent === b.dataset.endEarn);
@@ -124,7 +150,7 @@ function renderAgents(L, owner) {
   });
   f.addEventListener("submit", async (e) => {
     e.preventDefault();
-    const v = Object.fromEntries(new FormData(f).entries());
+    const v = formFields(f);
     const allow = new FormData(f).getAll("allow").map(String);
     const until = nowMs() + Number(v.days) * DAY;
     const budget = String(v.budget || "").trim();
@@ -162,13 +188,15 @@ function renderAgents(L, owner) {
 
 // ---- devices ----------------------------------------------------------------------------
 
+/* the devices that sign: this browser, the owner's others, and the browsers asking to. A device let in signs alone, beside the others:
+   the page sends one signature per action, so a threshold above one is not offered until there is a way to add the second signature */
 function renderDevices(owner) {
   if (!$("devices")) return;
-  $("devices").innerHTML = `<table><tbody>${A.signers.owners.map((o) => `<tr><td>${o.id === `device:${Owner.kid}` ? "This browser" : o.kind === "device" ? "Another browser" : "Wallet key"}</td><td class="num2 mono dim">${esc(short(o.id.replace("device:", "")))}</td><td class="r dim">${A.signers.threshold} of ${A.signers.owners.length} must sign</td></tr>`).join("")}${A.signers.pendingDevices.map((d) => `<tr><td>A browser asked to sign</td><td class="num2 mono dim">${esc(d.kid)}</td><td class="r">${owner ? `<button type="button" class="link" data-signer="${esc(d.kid)}" data-both="0">Let it sign</button> · <button type="button" class="link" data-signer="${esc(d.kid)}" data-both="1">Require both</button>` : ""}</td></tr>`).join("")}</tbody></table>`;
+  $("devices").innerHTML = `<table><tbody>${A.signers.owners.map((o) => `<tr><td>${o.id === `device:${Owner.kid}` ? "This browser" : o.kind === "device" ? "Another browser" : "Wallet key"}</td><td class="num2 mono dim">${esc(short(o.id.replace("device:", "")))}</td><td class="r dim">${A.signers.threshold} of ${A.signers.owners.length} must sign</td></tr>`).join("")}${A.signers.pendingDevices.map((d) => `<tr><td>A browser asked to sign</td><td class="num2 mono dim">${esc(d.kid)}</td><td class="r">${owner ? `<button type="button" class="link" data-signer="${esc(d.kid)}">Let it sign</button>` : ""}</td></tr>`).join("")}</tbody></table><p class="dim small hint">Every device signs alone: a device let in is a key beside yours, and one signature is enough. Requiring two signatures on each action waits for a way to give the second one.</p>`;
   for (const b of $("devices").querySelectorAll("button[data-signer]")) {
     b.addEventListener("click", () => {
       const users = [...A.signers.owners.map((o) => o.id), `device:${b.dataset.signer}`].sort();
-      own({ type: "convertToMultiSigUser", signers: JSON.stringify({ authorizedUsers: users, threshold: b.dataset.both === "1" ? users.length : A.signers.threshold }) });
+      own({ type: "convertToMultiSigUser", signers: JSON.stringify({ authorizedUsers: users, threshold: A.signers.threshold }) });
     });
   }
 }

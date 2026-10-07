@@ -27,7 +27,8 @@ function renderChrome(L, owner) {
   const waiting = A.cards.length + (A.asks || []).length;
   document.title = `${waiting ? `(${waiting}) ` : ""}Account`;
   $("stamp").textContent = `${ny(A.now, { weekday: "short", day: "numeric", month: "short" }).replace(",", "")} · ${nyTime(A.now)} New York`;
-  $("writes").innerHTML = writesOn() ? `<span class="pill warm" title="Orders and moves go through only when you sign them, or inside a limit you gave an agent">Trading on · up to ${money(A.connectLive.writes.capUsd)} an order</span>` : '<span class="pill" title="Started with --read-only">Read-only</span>';
+  // the cap is said in the Settings sheet's Trading sentence, and when an action goes over it: not here
+  paint($("writes"), writesOn() ? '<span class="pill warm" title="Orders and moves go through only when you sign them, or inside a limit you gave an agent">Trading on</span>' : '<span class="pill" title="Started with --read-only">Read-only</span>');
   for (const b of document.querySelectorAll("button[data-set-mode]")) {
     b.setAttribute("aria-pressed", String(b.dataset.setMode === A.mode));
     b.disabled = !owner;
@@ -77,7 +78,7 @@ function drawRestoreNotice() {
   const back = r.venues.filter((v) => v.ok);
   const missed = r.venues.filter((v) => !v.ok && v.why !== "connecting again");
   el.hidden = false;
-  el.innerHTML = `${r.state === "restoring" ? "Restoring after a restart…" : `Continued after a restart: ${back.length} of ${plural(r.venues.length, "account")} connected again`}${r.orders + r.payments ? ` · ${plural(r.orders + r.payments, "transaction")} followed again` : ""}${missed.length || r.skipped.length ? `<details class="inl"><summary>details</summary>${[...missed.map((v) => `${nameOf(v.venue) || v.venue}: ${v.why}`), ...r.skipped].map((x) => `<div>${esc(x)}</div>`).join("")}</details>` : ""}`;
+  paint(el, `${r.state === "restoring" ? "Restoring after a restart…" : `Continued after a restart: ${back.length} of ${plural(r.venues.length, "account")} connected again`}${r.orders + r.payments ? ` · ${plural(r.orders + r.payments, "transaction")} followed again` : ""}${missed.length || r.skipped.length ? `<details class="inl"><summary>details</summary>${[...missed.map((v) => `${nameOf(v.venue) || v.venue}: ${v.why}`), ...r.skipped].map((x) => `<div>${esc(x)}</div>`).join("")}</details>` : ""}`);
 }
 
 /* what was done, or refused, said once: as a toast, and in the open sheet when it came from there */
@@ -112,18 +113,89 @@ function drawPane(L, owner) {
   }
 }
 
-/* the route: the pane it names is shown, the rail marks it, the search shows what Markets is searching for */
+/* the route: the pane it names is shown, the rail marks it, the search shows what Markets is searching for. Moving between panes, the one
+   named comes in drawn — it rises 8 px as it fades in (180 ms) — over the one going out, which fades (120 ms); both stand in one grid cell
+   meanwhile (shell.css .panes), so nothing under them moves. The rail's pill slides to the tab. Under reduced motion it is a cut */
 onRoute((tab, params, moved) => {
-  for (const s of document.querySelectorAll("section[data-pane]")) s.hidden = s.dataset.pane !== tab;
+  // the page's first route (a link straight to a pane) is drawn as it is: motion is for moving between panes
+  const motion = moved && !still() && RAIL.routed;
+  RAIL.routed = true;
+  for (const s of document.querySelectorAll("section[data-pane]")) {
+    if (s.dataset.pane === tab) paneIn(s, motion);
+    else if (motion && !s.hidden && !s.paneGoing) paneOut(s);
+    else if (!s.paneGoing) s.hidden = true;
+  }
   for (const a of document.querySelectorAll(".rail-nav a[data-tab]")) {
     if (a.dataset.tab === tab) a.setAttribute("aria-current", "page");
     else a.removeAttribute("aria-current");
   }
+  railPill(motion);
   if (document.activeElement !== $("search")) $("search").value = tab === "markets" ? params.q || "" : "";
   if (moved) window.scrollTo(0, 0);
   if (A) drawPane(connected(), owns());
 });
 window.addEventListener("hashchange", routed);
+const PANE_EASE = "cubic-bezier(.2, .8, .2, 1)";
+/* a pane coming in: shown at once, and — moving — rising 8 px as it fades in, from the frame its content is drawn in */
+function paneIn(s, motion) {
+  if (s.paneGoing) {
+    s.paneGoing.cancel();
+    s.paneGoing = null;
+  }
+  s.classList.remove("pane-out");
+  s.inert = false;
+  s.hidden = false;
+  if (!motion || typeof s.animate !== "function") return;
+  const a = s.animate([{ opacity: 0, transform: "translateY(8px)" }, { opacity: 1, transform: "none" }], { duration: 180, easing: PANE_EASE });
+  // what its reads bring meanwhile is drawn once it has come in (core paneLater)
+  const coming = { later: [] };
+  PANE_IN.set(s.dataset.pane, coming);
+  const done = () => {
+    if (PANE_IN.get(s.dataset.pane) === coming) PANE_IN.delete(s.dataset.pane);
+    for (const fn of coming.later.splice(0)) fn();
+  };
+  a.finished.then(done, done);
+}
+/* a pane going out: it fades (120 ms) under the one coming in, deaf to the pointer and out of the reading order, then it is hidden */
+function paneOut(s) {
+  if (typeof s.animate !== "function") return void (s.hidden = true);
+  s.classList.add("pane-out");
+  s.inert = true;
+  const a = s.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 120, easing: "ease-out", fill: "forwards" });
+  s.paneGoing = a;
+  a.finished.then(() => {
+    if (s.paneGoing !== a) return;
+    s.paneGoing = null;
+    s.hidden = true;
+    s.classList.remove("pane-out");
+    s.inert = false;
+    a.cancel();
+  }, () => {});
+}
+/* the rail's pill under the tab that is shown: where each tab stands is read after layout (a ResizeObserver), never forced; it slides
+   (transform) when the pane moves */
+const RAIL = { at: null, routed: false };
+function railPill(motion) {
+  const nav = document.querySelector(".rail-nav");
+  const pill = nav && nav.querySelector(".rail-pill");
+  if (!pill || !RAIL.at || !pill.style) return;
+  const i = [...nav.querySelectorAll("a[data-tab]")].findIndex((a) => a.dataset.tab === ROUTE.tab);
+  const at = RAIL.at[i];
+  if (!at) return;
+  nav.classList.toggle("moves", !!motion);
+  const t = `translateY(${at.top}px)`;
+  if (pill.style.transform !== t) pill.style.transform = t;
+  const h = `${at.height}px`;
+  if (pill.style.height !== h) pill.style.height = h;
+  pill.hidden = false;
+}
+if (typeof ResizeObserver === "function" && document.querySelector(".rail-nav")) {
+  new ResizeObserver(() => {
+    const links = [...document.querySelectorAll(".rail-nav a[data-tab]")];
+    RAIL.at = links.map((a) => ({ top: a.offsetTop, height: a.offsetHeight }));
+    railPill(false);
+  }).observe(document.querySelector(".rail-nav"));
+}
 
 // ---- the top bar ------------------------------------------------------------------------------
 
@@ -190,23 +262,7 @@ async function copySetup() {
 function downloadBalances() {
   download(`balances-${A.now.slice(0, 10)}.csv`, [["account", "asset", "amount", "usd", "where", "as_of"], ...connected().flatMap((v) => (v.holdings || []).map((h) => [v.name, h.asset, h.amount, h.usd, h.note || "", v.asOf || A.now]))]);
 }
-/* the menu, in the drawer: everything the rail's foot holds, for a window too narrow to show it, and the rest */
-function openMenu() {
-  if (!A) return;
-  const item = (act, ic, label) => `<button type="button" data-menu="${act}">${icon(ic)}${esc(label)}</button>`;
-  const body = openDrawer(`<nav class="menu-list" aria-label="Menu">${A.connectLive ? item("connect", "plug", "Connect an account") : ""}${item("agents", "agent", "Agents")}${item("settings", "sliders", "Settings")}${item("statement", "clock", "Statement")}${item("setup", "copy", "Copy agent setup command")}${connected().length ? item("csv", "download", "Download balances (CSV)") : ""}</nav><div class="group"><div class="label">Background</div>${seg([["cream", "Cream"], ["black", "Black"]], document.documentElement.dataset.theme || "cream", setTheme, { label: "Background" })}</div><div class="group"><div class="label">Mode</div>${seg([["guard", "Conservative"], ["open", "Aggressive"]], A.mode, setMode, { label: "Mode" })}<span class="note-s">${esc(modeNote())}</span></div>`, { title: "Menu" });
-  if (!owns()) for (const b of body.querySelectorAll('[data-v="guard"], [data-v="open"]')) b.disabled = true;
-  const acts = { connect: openPicker, agents: openAgents, settings: openSettings, statement: openStatement, setup: copySetup, csv: downloadBalances };
-  body.addEventListener("click", (e) => {
-    const b = e.target.closest("button[data-menu]");
-    if (!b) return;
-    closeDrawer();
-    acts[b.dataset.menu]();
-  });
-}
 $("open-statement").addEventListener("click", () => A && openStatement());
-$("copy-setup").addEventListener("click", copySetup);
-$("open-menu").addEventListener("click", openMenu);
 
 // ---- the rail ---------------------------------------------------------------------------------
 
@@ -219,15 +275,15 @@ function setTheme(t) {
   } catch {
     // a private window: the choice holds for this visit only
   }
-  for (const b of document.querySelectorAll("button[data-set-theme]")) b.setAttribute("aria-pressed", String(b.dataset.setTheme === v));
 }
 setTheme(document.documentElement.dataset.theme);
-$("rail-trade").addEventListener("click", () => go("trade"));
+/* the Mode sheet: what each mode does, door by door — opened from here and nowhere else */
+$("mode-more").addEventListener("click", () => A && openMode());
 $("open-agents").addEventListener("click", () => A && openAgents());
 $("open-settings").addEventListener("click", () => A && openSettings());
 
-/* one click handler for what is drawn over and over: a toggle (seg), the background, the mode, a sheet's or the drawer's close button, and a
-   click outside the lens's menu */
+/* one click handler for what is drawn over and over: a toggle (seg), the mode (the rail's seg and the Mode sheet's), a sheet's or the
+   drawer's close button, and a click outside the lens's menu */
 document.addEventListener("click", (e) => {
   const t = e.target;
   if (!t || !t.closest) return;
@@ -241,8 +297,6 @@ document.addEventListener("click", (e) => {
     if (fn) fn(sb.dataset.v);
     return;
   }
-  const th = t.closest("button[data-set-theme]");
-  if (th) return void setTheme(th.dataset.setTheme);
   const md = t.closest("button[data-set-mode]");
   if (md && !md.disabled) return void setMode(md.dataset.setMode);
   if (t.closest("[data-sheet-close]")) return void closeSheet();
@@ -251,24 +305,34 @@ document.addEventListener("click", (e) => {
 
 // ---- the sheet, the drawer, the keys --------------------------------------------------------------
 
+/* a sheet (120 ms) and the drawer (160 ms) fade out (shell.css): what they showed stays until the fade is over, then goes — unless the
+   same dialog opened again meanwhile, in which case it drew its own content already */
+const FADE_MS = 200;
 $("modal").addEventListener("close", () => {
   SHEET = null;
-  $("sheet").replaceChildren();
-  $("modal").classList.remove("wide");
-  $("modal").removeAttribute("aria-labelledby");
+  // the close event comes a moment after close(): a dialog that opened again meanwhile keeps its own name
+  if (!$("modal").open) $("modal").removeAttribute("aria-labelledby");
+  setTimeout(() => {
+    if ($("modal").open) return;
+    $("sheet").replaceChildren();
+    $("modal").classList.remove("wide");
+  }, FADE_MS);
 });
-/* an earlier dialog (connect, move, trade, change an order) draws straight into #modal-form: it replaces whatever sheet was open */
+/* an earlier dialog (connect, move, trade, change an order) draws straight into #modal-form: it replaces whatever sheet was open — or was
+   still fading out — and the dialog is then named by that form's own heading (connect.js gives it #modal-form-title) */
 new MutationObserver(() => {
-  if (!$("modal-form").childElementCount || !SHEET) return;
+  if (!$("modal-form").childElementCount) return;
+  $("modal").setAttribute("aria-labelledby", "modal-form-title");
   SHEET = null;
   $("sheet").replaceChildren();
   $("modal").classList.remove("wide");
-  $("modal").removeAttribute("aria-labelledby");
 }).observe($("modal-form"), { childList: true });
 $("drawer").addEventListener("close", () => {
   const back = DRAWER && DRAWER.back;
   DRAWER = null;
-  $("drawer").replaceChildren();
+  setTimeout(() => {
+    if (!$("drawer").open) $("drawer").replaceChildren();
+  }, FADE_MS);
   if (back && back.isConnected && back.focus) back.focus();
 });
 
@@ -297,24 +361,36 @@ document.addEventListener("keydown", (e) => {
 // ---- reading again, and the start ---------------------------------------------------------------
 
 const REFRESH_MS = 20_000;
-/* a fresh read may come now: nothing is being signed, no sheet or question is open, the page is in view, and nothing is being typed
-   but the search */
+/* a fresh read may come now: nothing is being signed, no sheet or question is open, the page is in view, and nothing is being typed but
+   the search. A button or a toggle with the focus (Buy | Sell, a Where row) holds nothing half-typed, so it does not hold the read back */
+const TYPING = "input:not([type=checkbox]):not([type=radio]), textarea, select, [contenteditable]";
 function quiet() {
   if (busy || document.hidden || $("modal").open || $("ask").open) return false;
   const f = document.activeElement;
-  return !(f && f.closest && f.closest("form, [contenteditable]") && !f.closest("[data-live]"));
+  return !(f && f.matches && f.matches(TYPING) && !(f.closest && f.closest("[data-live]")));
 }
-/* the account went away (a restart): said once, and asked again on the next turn */
+/* the account went away (a restart): said once as a toast, and shown in the rail — since when — until it answers again */
 let unreachable = false;
+let unreachableSince = 0;
+function drawReach() {
+  const el = $("reach");
+  if (!el) return;
+  el.hidden = !unreachable;
+  paint(el, unreachable ? `<span class="chip bad" role="status">Not answering since ${esc(nyTime(unreachableSince))}</span>` : "");
+}
 async function refresh() {
   try {
     await load();
     if (unreachable) toast("The account answers again.", "ok");
     unreachable = false;
   } catch {
-    if (!unreachable) toast(`The account did not answer. Trying again every ${REFRESH_MS / 1000} seconds.`, "no");
+    if (!unreachable) {
+      unreachableSince = Date.now();
+      toast(`The account did not answer. Trying again every ${REFRESH_MS / 1000} seconds.`, "no");
+    }
     unreachable = true;
   }
+  drawReach();
 }
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden && A && Date.now() - loadedAt > REFRESH_MS && quiet()) refresh();
@@ -324,7 +400,8 @@ routed();
 (async () => {
   await Owner.ready();
   await refresh();
+  // a refresh due in the middle of a scroll waits for it to rest (its drawing is main-thread work the scroll's frames would wait for)
   setInterval(() => {
-    if (A && quiet()) refresh();
+    if (A && quiet()) whenStill(() => quiet() && refresh());
   }, REFRESH_MS);
 })();

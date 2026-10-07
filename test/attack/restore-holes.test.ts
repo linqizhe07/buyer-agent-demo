@@ -6,7 +6,7 @@
  *   R3  an ended session came back after a restart; any restart lengthened a session
  *   R4  an owner's real-money move, signed once, ran again after a restart (its envelope was not on the record)
  *   R8  one instruction skipped on restore shifted every later limit's id: usage landed on the wrong limit
- *   R13 a signed row copied in again was taken again (Aggressive re-opened); an unsigned dial row raised the agents' leverage
+ *   R13 a signed row copied in again was taken again (Beast re-opened); an unsigned dial row raised the agents' leverage
  *   R14 the newest run was the newest file NAME: after the clock was set back, later runs were left out of the restore */
 import { chmodSync, readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -183,7 +183,7 @@ describe("R8 · a skipped instruction does not shift the ids after it", () => {
 });
 
 describe("R13 · rows written into the ledger", () => {
-  it("a signed row copied in again is taken once: the owner's Conservative stands", async () => {
+  it("a signed row copied in again is taken once: the owner's Guard stands", async () => {
     const home = fresh();
     const a = await run(home, 0, { seedOwner: true });
     ok(await a.own({ type: "setPolicy", change: "mode", value: "open" }));

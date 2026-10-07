@@ -14,7 +14,7 @@
  *   the owner's steering      the watchlist and the intents, replayed and verified again like the limits; on each intent, each
  *                             agent's latest report (and how many it made), its signature checked again. What agents ASKED is not brought
  *                             back: an ask lives a day in memory, and an agent that still wants something asks again
- *   the dial                  the last snapshot; Aggressive only if the owner's signature that opened it is in the chain and nothing has
+ *   the dial                  the last snapshot; Beast only if the owner's signature that opened it is in the chain and nothing has
  *                             closed it since
  *   orders and payments       the last state written of each; the ones not finished are followed again — and so is money put into
  *                             or taken out of a venue's earn product (account/live-earn.ts) that the venue had not finished
@@ -195,7 +195,7 @@ export async function rebuild(rows: readonly LedgerRow[], base: AccountState, op
   const earns = new Map<string, LiveEarn>();
   const ids = { order: 0, payment: 0, card: 0, earn: 0 };
   let dial: DialSnapshot | undefined;
-  // Aggressive needs the owner's signature: the row of the last verified `setPolicy mode open`, and of the last snapshot that said Conservative
+  // Beast needs the owner's signature: the row of the last verified `setPolicy mode open`, and of the last snapshot that said Guard
   let openedAt = -1;
   let closedAt = -1;
   let owner = base.owners.length > 0;
@@ -351,9 +351,10 @@ export async function rebuild(rows: readonly LedgerRow[], base: AccountState, op
   }
   if (dial?.mode === "open" && !(openedAt >= 0 && openedAt > closedAt)) {
     dial = { ...dial, mode: "guard" };
-    skipped.push("the dial was open, and the owner's signature that opened it is not in the chain: it starts Conservative");
+    skipped.push("the dial was open, and the owner's signature that opened it is not in the chain: it starts Guard");
   }
-  const unfinishedOrder = (o: LiveOrder) => !DONE.has(o.status) || (!!o.walletTxs && !o.ref && o.status === "pending");
+  // an order the account stopped following (account/live-orders.ts: canceled while its venue was not connected) is not followed again
+  const unfinishedOrder = (o: LiveOrder) => !o.unfollowed && (!DONE.has(o.status) || (!!o.walletTxs && !o.ref && o.status === "pending"));
   const unfinishedPayment = (p: Payment) => !!p.live && (p.status === "pending" || (p.status === "authorized" && !p.live.expired));
   return { state: s, dial, authorisations: [...kept.values()], connections: [...connections.values()], orders: [...orders.values()].filter(unfinishedOrder), payments: [...payments.values()].filter(unfinishedPayment), earns: [...earns.values()].filter((e) => e.status === "pending"), ids, skipped, owner };
 }

@@ -222,7 +222,7 @@ describe("orders at venues connected live", () => {
     expect(x.venue.placed).toHaveLength(0);
   });
 
-  it("Conservative: an agent's order is a card every time; the owner's yes places it, and it counts against the limit", async () => {
+  it("Guard: an agent's order is a card every time; the owner's yes places it, and it counts against the limit", async () => {
     const x = await boot();
     await x.letIn();
     const r = await x.ag(ask());
@@ -242,7 +242,7 @@ describe("orders at venues connected live", () => {
     expect([x.venue.placed.length, x.trade().reservedMicro]).toEqual([1, 0]);
   });
 
-  it("Aggressive: inside its limit an agent's order is placed at once, and nothing outside it is", async () => {
+  it("Beast: inside its limit an agent's order is placed at once, and nothing outside it is", async () => {
     const x = await boot();
     await x.letIn({ perOrder: "50", budget: "60" });
     await x.own({ type: "setPolicy", change: "mode", value: "open" });
@@ -250,12 +250,12 @@ describe("orders at venues connected live", () => {
     expect([o.status, o.authority, o.card, o.usd, x.trade().spentMicro]).toEqual(["open", "agent", undefined, 29, 29_000_000]);
     expect(code(await x.ag(ask({ orderType: "limit", usd: "", qty: "0.0006", limitPrice: "58000" })))).toBe("E_MANDATE_BUDGET");
     expect(x.venue.placed).toHaveLength(1);
-    // back to Conservative needs no signature, and from then on it is a card again
+    // back to Guard needs no signature, and from then on it is a card again
     x.svc.setMode("guard");
     expect(code(await x.ag(ask({ usd: "10" })))).toBe("card");
   });
 
-  it("cancelling: an agent its own orders, without a card even in Conservative; the owner any; what never filled goes back to the limit", async () => {
+  it("cancelling: an agent its own orders, without a card even in Guard; the owner any; what never filled goes back to the limit", async () => {
     const x = await boot();
     await x.letIn({ perOrder: "50", budget: "100" });
     await x.own({ type: "setPolicy", change: "mode", value: "open" });

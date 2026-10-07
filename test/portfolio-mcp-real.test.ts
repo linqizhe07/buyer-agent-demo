@@ -121,7 +121,7 @@ describe("an agent harness on the real account, through the MCP seat", () => {
     const key = (await tool("portfolio_account")).body.seat.key as `0x${string}`;
     await own({ type: "approveAgent", agentAddress: key, agentName: "DeepSeek Harness", validUntil: Date.now() + 30 * DAY });
     await own({ type: "approveSpend", agent: key, scope: "trade", allow: "ex", perPayment: "2000", budget: "4000", windowHours: 0, validUntil: Date.now() + 7 * DAY });
-    // Conservative: a card; the harness waits on it while the owner answers
+    // Guard: a card; the harness waits on it while the owner answers
     const asked = await tool("portfolio_live_order", { venue: "ex", symbol: PERP.symbol, side: "sell", orderType: "stop", stopPrice: 2800, qty: 0.2, reduceOnly: true });
     expect(asked.body).toMatchObject({ ok: true, pending: true });
     const id = asked.body.card.id as string;
@@ -130,7 +130,7 @@ describe("an agent harness on the real account, through the MCP seat", () => {
     expect(waited.body).toMatchObject({ ok: true, changed: true, done: true, now: { status: "approved" } });
     const order = (waited.body.now as { outcome: { order: { id: string; type: string; stopPrice: number; reduceOnly: boolean; status: string } } }).outcome.order;
     expect([order.type, order.stopPrice, order.reduceOnly, order.status]).toEqual(["stop", 2800, true, "open"]);
-    // positions, and a close: in Conservative a card like any order (the position may be the owner's own), which the harness waits on
+    // positions, and a close: in Guard a card like any order (the position may be the owner's own), which the harness waits on
     expect((await tool("portfolio_live_positions", { venue: "ex" })).body.positions).toMatchObject([{ symbol: PERP.symbol, side: "long", qty: 0.4 }]);
     const closing = await tool("portfolio_live_close", { venue: "ex", symbol: PERP.symbol });
     expect(closing.body).toMatchObject({ ok: true, pending: true });
@@ -178,7 +178,8 @@ describe("the wallet through the MCP seat: what the page reads, steering, a prev
   it("previews an order without placing it: the price, what is left of its limit, and that it would be a card — or why it would be refused", async () => {
     const before = { placed, orders: svc.account!.orders.length, cards: svc.account!.host.cards().length };
     const p = await tool("portfolio_live_preview", { order: { venue: "ex", symbol: PERP.symbol, side: "buy", orderType: "limit", limitPrice: 2900, qty: 0.1 } });
-    expect(p.body).toMatchObject({ ok: true, placed: "nothing", worthUpToUsd: 290, mode: "Conservative", wouldBe: "card", limit: { scope: "trade", perOrderUsd: 2000 } });
+    // the mode as every read wires it: guard (Guard) or open (Beast)
+    expect(p.body).toMatchObject({ ok: true, placed: "nothing", worthUpToUsd: 290, mode: "guard", wouldBe: "card", limit: { scope: "trade", perOrderUsd: 2000 } });
     expect(typeof p.body.limit.leftUsd).toBe("number");
     const big = await tool("portfolio_live_preview", { order: { venue: "ex", symbol: PERP.symbol, side: "buy", orderType: "limit", limitPrice: 2900, qty: 1 } });
     expect(big.body).toMatchObject({ wouldBe: "refused" });
@@ -232,7 +233,7 @@ describe("the wallet through the MCP seat: what the page reads, steering, a prev
 });
 
 describe("earn through the MCP seat", () => {
-  it("reads what is offered and held with the same answers as over HTTP; puts money in only inside its earn limit, on the owner's card in Conservative", async () => {
+  it("reads what is offered and held with the same answers as over HTTP; puts money in only inside its earn limit, on the owner's card in Guard", async () => {
     const names = (await client.listTools()).tools.map((x) => x.name);
     expect(names).toEqual(expect.arrayContaining(["portfolio_earn", "portfolio_live_earn"]));
     const http = async (path: string) => (await fetch(`${server.url}${path}`)).json() as Promise<Record<string, any>>;

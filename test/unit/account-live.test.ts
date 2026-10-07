@@ -416,8 +416,10 @@ describe("a brokerage account at Alpaca", () => {
     };
     const x = await boot({ http });
     x.keyFile("credentials/alpaca/api-key.json", { keyId: "made-up-id", secret: "made-up-secret-0002" });
-    expect(summary(await x.connect("alpaca", "live:alpaca"))).toBe("Alpaca connected live · $9,120.25 there now · the venue says this credential can read, trade · an Alpaca key has no scopes: any key can place orders, and no key can move cash · read only: Alpaca's API moves no cash: deposits and withdrawals are made at Alpaca · it stands in for the simulated one until it is unplugged");
-    expect(seen.map((r) => r.url)).toEqual(["https://api.alpaca.markets/v2/account", "https://api.alpaca.markets/v2/positions"]);
+    // Alpaca is asked once, softly, whether this account has crypto wallets (GET /v2/wallets); its 404 is its answer, in its words
+    const WALLETS = 'Alpaca has not enabled the Crypto Wallets API for this account (GET /v2/wallets: HTTP 404, "not found"): cash moves by ACH at Alpaca, and crypto wallets are enabled by Alpaca on request';
+    expect(summary(await x.connect("alpaca", "live:alpaca"))).toBe(`Alpaca connected live · $9,120.25 there now · the venue says this credential can read, trade · an Alpaca key has no scopes: any key can place orders. ${WALLETS} · read only: ${WALLETS} · it stands in for the simulated one until it is unplugged`);
+    expect(seen.map((r) => r.url)).toEqual(["https://api.alpaca.markets/v2/account", "https://api.alpaca.markets/v2/positions", "https://api.alpaca.markets/v2/wallets"]);
     expect(seen[0]!.headers).toMatchObject({ "APCA-API-KEY-ID": "made-up-id", "APCA-API-SECRET-KEY": "made-up-secret-0002" });
     const v = (await x.venue("alpaca"))!;
     expect([v.frontLine, v.live, v.watchOnly]).toEqual(["Stocks", true, "Live · read-only"]);

@@ -9,8 +9,8 @@
  *   3. it is worth no more than the most one movement may be on this server (`--live-cap`), valued at the asset's price now;
  *   4. the OWNER signed it — the venue, the product, the exact amount, what it is worth, where money taken out lands, and ten minutes — or an
  *      AGENT asked inside the earn limit the owner signed for it (which venues or products, how much one supply, how much in all, until
- *      when), with the dial open to it (the session, the venue switched on, `subscribe` / `redeem` reach). Conservative mode: the agent's
- *      request is a card the owner signs, and the owner's yes runs exactly the card; Aggressive: a supply inside its limit runs at once, and
+ *      when), with the dial open to it (the session, the venue switched on, `subscribe` / `redeem` reach). Guard mode: the agent's
+ *      request is a card the owner signs, and the owner's yes runs exactly the card; Beast: a supply inside its limit runs at once, and
  *      a withdrawal inside its per-supply line;
  *   5. the venue itself agrees: its own key permissions, tiers, minimums and region rules still apply, and its refusal is the answer.
  *
@@ -31,6 +31,7 @@ import { isStable } from "../live/types.ts";
 import type { CardLike, Outcome } from "./exchange.ts";
 import type { LiveEngine, LiveVenue } from "./live-moves.ts";
 import type { StatementLine } from "./statement.ts";
+import { CARD_TTL_MS } from "./mode-rules.ts";
 import { micro, type AgentAction, type Envelope, type OwnerAction } from "./sign.ts";
 import { covers, spendFor, type AgentKey, type SpendApproval } from "./state.ts";
 
@@ -232,8 +233,13 @@ export class LiveEarns {
     if (o.revoked.includes(venue)) return no("E_WALLET_ACCOUNT_REVOKED", { venue, message: `${venue} is switched off for agents: reads only`, detail: { revoked: o.revoked } });
     const reach = o.reach[venue];
     const cap = kind === "supply" ? "subscribe" : "redeem";
-    if (reach && !reach.includes(cap)) return no("E_WALLET_REACH", { venue, message: `the owner did not open ${kind === "supply" ? "putting money to earn" : "taking money out of earn"} at ${venue} to agents`, detail: { reach } });
+    if (reach && !reach.includes(cap)) return no("E_WALLET_REACH", { venue, message: `the owner did not open ${kind === "supply" ? "putting money to earn" : "taking money out of earn"} at ${this.money()?.venue(venue)?.name ?? venue} to agents`, detail: { reach } });
     return null;
+  }
+
+  /** a card closed without an answer (it expired): what it showed is not kept for a yes that cannot come */
+  forget(card: string): void {
+    this.shown.delete(card);
   }
 
   /** the agent's earn limit as it stands now, its owner signature still good, the venue (or the product there) in it, the dial open */
@@ -281,7 +287,7 @@ export class LiveEarns {
     return null;
   }
 
-  /** An agent's request. Its earn limit and the dial first; then Conservative: a card the owner signs; Aggressive: a supply inside its
+  /** An agent's request. Its earn limit and the dial first; then Guard: a card the owner signs; Beast: a supply inside its
    * limit at once, a withdrawal inside its per-supply line at once */
   async agent(a: AgentLiveEarnAction, who: { signer: string; envelope: Envelope; hash: Hex; agent: AgentKey }): Promise<Outcome> {
     const now = Date.parse(this.e.host.now());
@@ -299,14 +305,14 @@ export class LiveEarns {
         if (c) return c;
         const out = await this.charged(spend.id, target, p, { signer: who.signer, authority: "agent", agent: who.agent.address, action: who.hash, approval: spend.id });
         if (isRefusal(out)) return out;
-        this.e.host.log({ kind: "action", venue: p.v.id, tool: a.type, signer: who.signer, envelope: who.envelope, outcome: "accepted", notionalUsd: p.usd, reason: `aggressive mode: ${this.words(p)}, inside the earn limit`, flight: flight.no });
-        this.e.host.say(flight.no, `${who.agent.name} ${this.words(p)}: inside its limit, so it went without a card (Aggressive)`, "ok");
+        this.e.host.log({ kind: "action", venue: p.v.id, tool: a.type, signer: who.signer, envelope: who.envelope, outcome: "accepted", notionalUsd: p.usd, reason: `Beast: ${this.words(p)}, inside the earn limit`, flight: flight.no });
+        this.e.host.say(flight.no, `${who.agent.name} ${this.words(p)}: inside its limit, so it went without a card (Beast)`, "ok");
         return { ...out, flight: flight.no } as Outcome;
       }
       // a withdrawal brings the user's money back where it was: it counts nothing, and goes at once inside the per-supply line
       if (amount <= spend.perPaymentMicro) {
         const out = await this.send(p, { signer: who.signer, authority: "agent", agent: who.agent.address, action: who.hash, envelope: who.envelope });
-        if (!isRefusal(out)) this.e.host.say(flight.no, `${who.agent.name} ${this.words(p)}: inside its line, so it went without a card (Aggressive)`, "ok");
+        if (!isRefusal(out)) this.e.host.say(flight.no, `${who.agent.name} ${this.words(p)}: inside its line, so it went without a card (Beast)`, "ok");
         return isRefusal(out) ? out : ({ ...out, flight: flight.no } as Outcome);
       }
     }
@@ -319,7 +325,7 @@ export class LiveEarns {
     const offer = { payee: p.v.name, payTo: p.p.name, amount: `${p.kind} ${p.all && p.kind === "withdraw" ? "all of the" : qtyText(p.amount)} ${p.p.asset}`, protocol: `earn${p.p.apy !== undefined ? ` · ${pct(p.p.apy)} ${(p.p.rateKind ?? "apy").toUpperCase()}` : ""}${p.p.lockDays ? ` · out after ${p.p.lockDays} days` : ""}`, network: `worth about ${usd(worth)} · money taken out lands in ${p.p.lands}` };
     // the owner's answer signs the card's hash: the agent's request AND the product, the amount and the worth the owner is shown
     const actionHash = keccak256(stringToHex(canonical({ action: who.hash, offer, product: p.p.id, amount: plain(p.amount), all: p.all, worth: worth.toFixed(2) })));
-    const card = this.e.host.raiseCard(flight.no, { account: p.v.id, intent: p.kind === "supply" ? { kind: "subscribe", fund: `${p.v.id}:${p.p.id}`, amountUsd: worth } : { kind: "redeem", fund: `${p.v.id}:${p.p.id}`, amountUsd: worth }, usd: worth, reason: `${who.agent.name} asks to ${this.words(p)}`, why: "live", action: a, actionHash, signer: who.signer, expiresAt: new Date(now + 30 * 60_000).toISOString(), offer, ...(p.kind === "supply" ? { approval: spend.id } : {}) });
+    const card = this.e.host.raiseCard(flight.no, { account: p.v.id, intent: p.kind === "supply" ? { kind: "subscribe", fund: `${p.v.id}:${p.p.id}`, amountUsd: worth } : { kind: "redeem", fund: `${p.v.id}:${p.p.id}`, amountUsd: worth }, usd: worth, reason: `${who.agent.name} asks to ${this.words(p)}`, why: "live", action: a, actionHash, signer: who.signer, expiresAt: new Date(now + CARD_TTL_MS).toISOString(), offer, ...(p.kind === "supply" ? { approval: spend.id } : {}) });
     this.shown.set(card.id, { product: p.p.id, amount: p.amount, all: p.all, usd: worth, target });
     if (p.kind === "supply") this.e.patchSpend(spend.id, (x) => ({ ...x, reservedMicro: x.reservedMicro + micro(worth.toFixed(2)) }));
     this.e.host.log({ kind: "action", venue: p.v.id, tool: a.type, signer: who.signer, envelope: who.envelope, outcome: "card", notionalUsd: worth, reason: `${card.id} · ${this.words(p)}`, flight: flight.no, intentId: card.id });

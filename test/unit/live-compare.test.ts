@@ -263,6 +263,16 @@ describe("compareAcross: where the same thing is cheapest", () => {
     expect(trust.rows.map((r) => [r.symbol, r.kind, r.price])).toEqual([["BTC", "stock", 45.02]]);
   });
 
+  it("a row carries the venue's own category for the market where it says one, so the ticket tells a tokenised share from a coin", async () => {
+    const wallet = stand([mk("NVDA/USDG@Robinhood Chain", "token", "NVDA", "USDG", { types: ["market"], category: "RWA", issuer: "Robinhood" })], { "NVDA/USDG@Robinhood Chain": { bid: 180.9, ask: 181.1 } });
+    const ex = stand([mk("BTC/USDT", "spot", "BTC", "USDT")], { "BTC/USDT": { bid: 100_000, ask: 100_010 } });
+    const tokens = await compareAcross([venue("wallet", "Browser wallet", wallet)], "NVDA", "buy");
+    expect(tokens.rows.map((r) => [r.venue, r.category])).toEqual([["wallet", "RWA"]]);
+    const coins = await compareAcross([venue("binance", "Binance", ex)], "BTC", "buy");
+    expect(coins.rows).toHaveLength(1);
+    expect(coins.rows[0]!.category).toBeUndefined();
+  });
+
   it("stocks compare by their ticker across brokers", async () => {
     const alpaca = stand([mk("AAPL", "stock", "AAPL", "USD"), mk("AAPLX/USD", "spot", "AAPLX", "USD")], { AAPL: { bid: 229.9, ask: 230.05 } });
     const rh = stand([mk("AAPL", "stock", "AAPL", "USD")], { AAPL: { bid: 229.95, ask: 230.0 } });

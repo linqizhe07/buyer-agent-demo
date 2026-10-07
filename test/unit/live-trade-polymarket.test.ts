@@ -894,3 +894,68 @@ describe("candles(): an outcome's price history at Polymarket", () => {
     expect(h.seen.filter((r) => r.url.includes("/prices-history")).map((r) => r.url)).toEqual([hourly]);
   });
 });
+
+// ---- money in: pUSD on Polygon to the wallet, Polymarket's bridge from the other chains (review2 F3) --------------------------------------
+
+describe("money into Polymarket: pUSD on Polygon to the wallet the orders are made by, Polymarket's bridge from the other chains", () => {
+  const BRIDGE = "https://bridge.polymarket.com";
+  /** GET /supported-assets, as Polymarket's docs show it: on Polygon the bridge lists pUSD's own contract under the name USDC */
+  const SUPPORTED = json({ supportedAssets: [
+    { chainId: "137", chainName: "Polygon", token: { name: "USD Coin", symbol: "USDC", address: "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB", decimals: 6 }, minCheckoutUsd: 2 },
+    { chainId: "1", chainName: "Ethereum", token: { name: "USD Coin", symbol: "USDC", address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", decimals: 6 }, minCheckoutUsd: 7 },
+    { chainId: "42161", chainName: "Arbitrum", token: { name: "Tether USD", symbol: "USDT", address: "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9", decimals: 6 }, minCheckoutUsd: 2 },
+    { chainId: "8453", chainName: "Base", token: { name: "Ether", symbol: "ETH", address: "0x0000000000000000000000000000000000000000", decimals: 18 }, minCheckoutUsd: 2 },
+  ] });
+  const BRIDGE_EVM = "0x9999999999999999999999999999999999999999";
+  /** POST /deposit (201): one address per kind of chain, unique to the wallet */
+  const DEPOSIT = json({ address: { evm: BRIDGE_EVM.toLowerCase(), svm: "So11111111111111111111111111111111111111112", btc: "bc1qmadeup", tron: "TMadeUp" }, note: "Send only supported assets." }, 201);
+
+  it("the writer receives and never withdraws (the CLOB has no withdrawal call: the words say how money does leave); pUSD on Polygon goes to the wallet the orders are made by — the key's own address, or the funder wallet the key file names", async () => {
+    const { source } = await pm();
+    const w = source.writer!;
+    expect(w.can).toMatchObject({ receive: true, withdraw: false, transfer: false, swap: false, send: false, ledgers: [] });
+    expect(w.can.why?.withdraw).toBe('money leaves Polymarket by a pUSD transfer from the Polymarket wallet to one of its bridge addresses (POST bridge.polymarket.com/withdraw: "Send pUSD from your Polymarket wallet to the appropriate bridge address"), made at polymarket.com: the CLOB has no withdrawal call, and this account signs no transaction with the key file\'s key');
+    expect([w.withdraw, w.send, w.walletTx, w.transfer, w.swap]).toEqual([undefined, undefined, undefined, undefined, undefined]);
+    expect(source.readOnlyBecause).toBeUndefined();
+    expect(source.probe.note).toContain("money comes in to that wallet as pUSD on Polygon, or through Polymarket's bridge from the other chains; it leaves Polymarket at Polymarket");
+    const here = ok(await w.depositAddress("pUSD", "Polygon"));
+    expect(here.address).toBe(EOA);
+    expect(here.note).toContain("the wallet Polymarket trades from: pUSD on Polygon sent to it is the cash the account reads there");
+    const proxy = await pm({ key: { privateKey: HARDHAT_0, funderAddress: WALLET.toLowerCase(), signatureType: "1" } });
+    expect(ok(await proxy.source.writer!.depositAddress("PUSD", "Polygon")).address.toLowerCase()).toBe(WALLET.toLowerCase());
+    const elsewhere = refusal(await w.depositAddress("pUSD", "Ethereum"));
+    expect([elsewhere.code, elsewhere.message]).toEqual(["E_VENUE_RAIL_CLOSED", "pUSD is a token on Polygon only (Polymarket's collateral): from Ethereum, send USDC or USDT to Polymarket's bridge address instead"]);
+  });
+
+  it("from another chain: GET /supported-assets says what the bridge takes there and the least it takes, POST /deposit gives this wallet's bridge address, kept ten minutes; a token the bridge names at another contract than the account's is refused", async () => {
+    const { source, seen } = await pm({ answers: { [`GET ${BRIDGE}/supported-assets`]: SUPPORTED, [`POST ${BRIDGE}/deposit`]: DEPOSIT } });
+    const w = source.writer!;
+    const eth = ok(await w.depositAddress("USDC", "Ethereum"));
+    expect(eth.address).toBe(BRIDGE_EVM);
+    expect(eth.note).toBe(`Polymarket's bridge address, unique to this wallet: USDC sent to it on Ethereum is bridged and credited as pUSD to ${EOA}. Polymarket takes at least $7 a deposit there, and says deposits below the minimum are not processed · Polymarket says: Send only supported assets.`);
+    expect(calls(seen)).toEqual([`GET ${BRIDGE}/supported-assets`, `POST ${BRIDGE}/deposit`]);
+    expect([seen[1]!.headers["content-type"], JSON.parse(seen[1]!.body!)]).toEqual(["application/json", { address: EOA }]);
+    // the answers are kept: the next asks nothing of the bridge. USDT on Arbitrum is USDT0 there, at the contract the bridge lists
+    const arb = ok(await w.depositAddress("USDT", "Arbitrum"));
+    expect([arb.address, seen.length]).toEqual([BRIDGE_EVM, 2]);
+    // a coin the account has no contract for is taken on the bridge's word
+    expect(ok(await w.depositAddress("ETH", "Base")).address).toBe(BRIDGE_EVM);
+    // USDC on Polygon: the bridge lists it at pUSD's contract, not the USDC this account sends
+    const poly = refusal(await w.depositAddress("USDC", "Polygon"));
+    expect([poly.code, poly.message]).toEqual(["E_VENUE_RAIL_CLOSED", "Polymarket's bridge lists USDC on Polygon at 0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB, not the USDC this account sends (0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359): that is pUSD, which goes straight to the wallet"]);
+    // what the bridge does not list there, and a chain it does not take from
+    expect(refusal(await w.depositAddress("DAI", "Ethereum")).message).toBe("Polymarket's bridge lists no DAI on Ethereum: there it takes USDC");
+    expect(refusal(await w.depositAddress("USDC", "Robinhood Chain")).message).toBe("Polymarket's bridge takes deposits from Ethereum, Polygon, Arbitrum, Base, Optimism, BNB Chain, not Robinhood Chain");
+    expect(seen.length).toBe(2);
+  });
+
+  it("the bridge's no is its own: its error words; a 500 is not answering; an answer without an EVM address is said so", async () => {
+    const a = await pm({ answers: { [`GET ${BRIDGE}/supported-assets`]: SUPPORTED, [`POST ${BRIDGE}/deposit`]: json({ error: "invalid address" }, 400) } });
+    const r = refusal(await a.source.writer!.depositAddress("USDC", "Ethereum"));
+    expect([r.code, r.message]).toEqual(["E_VENUE_REJECTED", "Polymarket's bridge refused to give a deposit address for this wallet: invalid address"]);
+    const b = await pm({ answers: { [`GET ${BRIDGE}/supported-assets`]: json({ error: "boom" }, 500) } });
+    expect(refusal(await b.source.writer!.depositAddress("USDC", "Ethereum")).code).toBe("E_VENUE_UNREACHABLE");
+    const c = await pm({ answers: { [`GET ${BRIDGE}/supported-assets`]: SUPPORTED, [`POST ${BRIDGE}/deposit`]: json({ address: { svm: "x" } }, 201) } });
+    expect(refusal(await c.source.writer!.depositAddress("USDC", "Ethereum")).message).toBe("Polymarket's bridge answered without an EVM deposit address");
+  });
+});

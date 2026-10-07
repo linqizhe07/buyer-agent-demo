@@ -78,7 +78,24 @@ describe("the stand-in account", () => {
     expect(row("rwa:NVDA").at[0]).toMatchObject({ public: true, canTrade: false, note: expect.stringMatching(/only read/) });
     // the wallet's tokenised fund is an RWA row too, traded at the wallet, with its issuer's words
     expect(row("rwa:USDY")).toMatchObject({ kind: "rwa", issuer: expect.any(String), at: [expect.objectContaining({ venue: "wallet", connected: true, canTrade: true })] });
-    expect(e.tabs.map((t: { id: string }) => t.id)).toEqual(expect.arrayContaining(["now", "crypto", "rwas", "predictions", "perps", "macro", "sports"]));
+    // the tabs are the Markets lens's own (live/categories.ts): these six are on every stand-in run, whatever else that lens adds; All is first
+    expect(e.tabs.map((t: { id: string }) => t.id)).toEqual(expect.arrayContaining(["all", "crypto", "rwas", "perps", "preipo", "predictions"]));
+    expect(e.tabs[0].id).toBe("all");
+    // the pre-IPO perpetual: one Anthropic row, Trade at the connected exchange and Connect to trade at the public perp exchange, each line
+    // with its own contract price and implied valuation, the row's the median; it is Pre-IPO, not Perps
+    const anthropic = row("preipo:anthropic");
+    expect(anthropic).toMatchObject({ kind: "perp", name: "Anthropic", category: "Pre-IPO", group: { id: "preipo:anthropic", title: "Anthropic" }, tabs: ["all", "preipo"], issuer: "Anthropic" });
+    expect(anthropic.at.map((a: { venue: string; connected: boolean; canTrade: unknown; connectTo?: string }) => [a.venue, a.connected, a.canTrade, a.connectTo]).sort()).toEqual([
+      ["ex", true, true, undefined],
+      ["standin-pubperps-public", false, false, "standin-pubperps"],
+    ]);
+    expect(anthropic.implied.usd).toBeGreaterThan(1.9e12);
+    expect(anthropic.implied.usd).toBeLessThan(2.3e12);
+    expect(anthropic.at.every((a: { implied?: { usd: number; unit: string } }) => a.implied && a.implied.usd > 1.9e12 && typeof a.implied.unit === "string")).toBe(true);
+    expect(row("perp:ANTHROPIC")).toBeUndefined();
+    // the IPO question is Predictions, under the venue's own word, and stays beside the busiest few
+    expect(row("event:predict:SI-IPO-ANTHROPIC")).toMatchObject({ kind: "event", category: "IPO", tabs: ["all", "predictions"] });
+    expect(e.notes).toContain("Pre-IPO perpetuals are contracts on a venue's estimate of a private company's valuation, not shares; each venue says who may trade them once a key connects.");
     expect(e.movers.map((m: { key: string }) => m.key)).toContain("coin:DOGE");
     expect(e.closing.length).toBeGreaterThan(0);
     expect(e.missing).toEqual([expect.objectContaining({ venue: "standin-geo", code: "E_VENUE_GEOBLOCKED", said: "Service unavailable from a restricted location (stand-in)." })]);
@@ -120,7 +137,7 @@ describe("the stand-in account", () => {
     expect(a.wallets.map((w: { venue: string }) => w.venue)).toEqual([s.seeded.agent.wallet]);
     expect(a.intents).toHaveLength(2);
     expect(a.asks).toHaveLength(2);
-    expect(body.mode).toBe("Conservative");
+    expect(body.mode).toBe("guard");
   });
 
   it("the browser pairs only with the printed code, then signs as an owner beside the seed key: it answers the agent's card", async () => {

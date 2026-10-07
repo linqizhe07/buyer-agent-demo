@@ -89,8 +89,10 @@ export type OwnerAction =
   /** an explicit `validUntil` (ms): Hyperliquid carries the expiry inside the agent's NAME, which is not copied here */
   | { type: "approveAgent"; agentAddress: Hex; agentName: string; validUntil: number; nonce: number }
   | { type: "approveBuilderFee"; builder: Hex; maxFeeRate: string; nonce: number }
-  /** a spending approval: which venues or payees, how much per payment, how much in all, how often, until when. A budget of "0" revokes */
-  | { type: "approveSpend"; agent: Hex; scope: string; allow: string; perPayment: string; budget: string; windowHours: number; validUntil: number; nonce: number }
+  /** a spending approval: which venues or payees, how much per payment, how much in all, how often, until when. A budget of "0" revokes.
+   * `intent`, when given, is the id of the open intent this limit answers (`intent-0003`): it is signed with the rest, and an approval
+   * without it signs exactly as it always has */
+  | { type: "approveSpend"; agent: Hex; scope: string; allow: string; perPayment: string; budget: string; windowHours: number; validUntil: number; intent?: string | undefined; nonce: number }
   | { type: "createSubAccount"; name: string; agent: Hex; float: string; nonce: number }
   | { type: "userSetAbstraction"; abstraction: string; nonce: number }
   | { type: "convertToMultiSigUser"; signers: string; nonce: number }
@@ -145,10 +147,12 @@ export type AgentAction =
   /** the older single-account write (trade · subscribe · redeem), now under the agent's key */
   | { type: "agentExecute"; account: string; intent: Record<string, unknown>; nonce: number }
   | { type: "agentOrder"; base: string; side: string; qty: number; nonce: number }
-  /** an agent asking for real money to move at venues connected live: it is never done on the agent's word — the owner is asked, every time */
+  /** an agent asking for real money to move at venues connected live, inside the `venues` limit the owner signed for it. Guard:
+   * the owner sees the exact address and fee on a card and signs that; Beast: inside that limit it runs at once — still only to the
+   * user's own places, under the server's cap and the venue's own checks (account/live-moves.ts) */
   | { type: "agentLiveMove"; kind: string; from: string; fromLedger: string; to: string; toLedger: string; asset: string; toAsset: string; network: string; amount: string; maxFee: string; nonce: number }
   /** an agent's ORDER at a venue connected live: a size in the market's units (`qty`) or in dollars (`usd`), one of the two; a limit price, or
-   * "" for a market order. Inside its trading limit: Aggressive places it at once, Conservative asks the owner on a card */
+   * "" for a market order. Inside its trading limit: Beast places it at once, Guard asks the owner on a card */
   | { type: "agentLiveOrder"; venue: string; symbol: string; side: string; orderType: string; qty: string; usd: string; limitPrice: string; /** optional: a stop's trigger, the time in force, post-only, reduce-only ("true") */ stopPrice?: string | undefined; tif?: string | undefined; postOnly?: string | undefined; reduceOnly?: string | undefined; nonce: number }
   /** an agent cancels an order it placed itself */
   | { type: "agentLiveCancel"; venue: string; order: string; nonce: number }
@@ -165,16 +169,17 @@ export type AgentAction =
    * session · leverage · mode. Asking grants nothing: the owner's own signed action is the answer, and it closes the ask */
   | { type: "agentAsk"; kind: string; venue: string; usd: string; text: string; nonce: number }
   /** an agent puts money into a venue's earn product (`kind` supply) or takes it back out (withdraw: `amount` "all" is all of it), inside
-   * the earn limit the owner signed for it. It names no destination: what comes out lands where it came from. Conservative: a card;
-   * Aggressive: inside its limit, at once */
+   * the earn limit the owner signed for it. It names no destination: what comes out lands where it came from. Guard: a card;
+   * Beast: inside its limit, at once */
   | { type: "agentLiveEarn"; venue: string; kind: string; product: string; asset: string; amount: string; nonce: number };
 
 export type Action = OwnerAction | AgentAction;
 
 export const OWNER_TYPES = ["sendAsset", "swap", "approveAgent", "approveBuilderFee", "approveSpend", "createSubAccount", "userSetAbstraction", "convertToMultiSigUser", "setDestination", "approveCard", "setPolicy", "connectVenue", "disconnectVenue", "liveMove", "liveOrder", "liveCancel", "liveAmend", "liveClose", "liveLeverage", "setWatch", "setIntent", "liveEarn", "answerAsk"] as const;
 export const AGENT_TYPES = ["agentSendAsset", "agentSwap", "agentPay", "agentExecute", "agentOrder", "agentLiveMove", "agentLiveOrder", "agentLiveCancel", "agentLiveAmend", "agentLiveClose", "agentLiveLeverage", "agentReport", "agentAsk", "agentLiveEarn"] as const;
-/** an instruction that moves money is good for minutes after it is signed, not for the two days of the nonce window */
-export const MONEY_TYPES: ReadonlySet<string> = new Set(["sendAsset", "swap", "approveCard", "agentSendAsset", "agentSwap", "agentPay", "agentExecute", "agentOrder", "liveMove", "agentLiveMove", "liveOrder", "agentLiveOrder", "liveAmend", "agentLiveAmend", "liveClose", "agentLiveClose", "liveEarn", "agentLiveEarn"]);
+/** an instruction that moves money — or, like a leverage change, changes what a position risks — is good for minutes after it is signed,
+ * not for the two days of the nonce window */
+export const MONEY_TYPES: ReadonlySet<string> = new Set(["sendAsset", "swap", "approveCard", "agentSendAsset", "agentSwap", "agentPay", "agentExecute", "agentOrder", "liveMove", "agentLiveMove", "liveOrder", "agentLiveOrder", "liveAmend", "agentLiveAmend", "liveClose", "agentLiveClose", "liveLeverage", "agentLiveLeverage", "liveEarn", "agentLiveEarn"]);
 /** how the owner steers and the agents answer: a watchlist, intents, reports, asks. None moves money and none is read by a limit (state.ts
  * covers, spendFor): they are words between the owner and the agents, and authority still comes only from limits, cards and the cap */
 export const STEER_TYPES: ReadonlySet<string> = new Set(["setWatch", "setIntent", "answerAsk", "agentReport", "agentAsk"]);
@@ -235,6 +240,16 @@ const OWNER_FIELDS: Record<OwnerAction["type"], { primary: string; fields: Field
   liveEarn: { primary: "AccountTransaction:LiveEarn", fields: [{ name: "venue", type: "string" }, { name: "kind", type: "string" }, { name: "product", type: "string" }, { name: "asset", type: "string" }, { name: "amount", type: "string" }, { name: "maxUsd", type: "string" }, { name: "lands", type: "string" }, { name: "deadline", type: "uint64" }, NONCE] },
   answerAsk: { primary: "AccountTransaction:AnswerAsk", fields: [{ name: "ask", type: "string" }, { name: "decision", type: "string" }, NONCE] },
 };
+/** a spending approval that answers an intent names it: one more signed field, before the nonce */
+const INTENT_FIELD: Field = { name: "intent", type: "string" };
+
+/** the fields an owner action signs: its type's — and, on a spending approval that names the intent it answers, the intent's id before the
+ * nonce. An approval that names none signs as it always has, so every limit signed before there was an `intent` field still verifies */
+function fieldsOf(action: OwnerAction): Field[] {
+  const fields = OWNER_FIELDS[action.type].fields;
+  return action.type === "approveSpend" && action.intent !== undefined ? [...fields.slice(0, -1), INTENT_FIELD, NONCE] : fields;
+}
+
 /** what reaches a real venue: its signed text says "real money" */
 const LIVE_TYPES: ReadonlySet<string> = new Set(["liveMove", "liveOrder", "liveCancel", "liveAmend", "liveClose", "liveLeverage", "liveEarn"]);
 /** what the owner's signature says about the money: a live move is real money, and the signed text says so */
@@ -291,7 +306,7 @@ export function malformed(action: Action): string | null {
     const extra = Object.keys(have).find((k) => k !== "type" && k !== "nonce" && !names.includes(k) && !optional.includes(k));
     return extra === undefined ? null : `"${extra}" is not part of "${action.type}"`;
   }
-  const fields = OWNER_FIELDS[action.type].fields;
+  const fields = fieldsOf(action);
   const have = action as unknown as Record<string, unknown>;
   for (const f of fields) {
     const v = have[f.name];
@@ -304,7 +319,7 @@ export function malformed(action: Action): string | null {
 /** the typed data an owner signs for an action — and what a card shows, field for field */
 export function ownerTypedData(action: OwnerAction): TypedData {
   const def = OWNER_FIELDS[action.type];
-  const fields = [CHAIN_FIELD, ...def.fields];
+  const fields = [CHAIN_FIELD, ...fieldsOf(action)];
   return { domain: ACCOUNT_DOMAIN, types: { [def.primary]: fields }, primaryType: def.primary, message: messageOf(fields, { ...action, accountChain: LIVE_TYPES.has(action.type) ? LIVE_CHAIN : ACCOUNT_CHAIN }) };
 }
 
@@ -474,12 +489,15 @@ export function isJwk(v: unknown): v is Jwk {
 
 // ---- amounts ----------------------------------------------------------------------
 
-/** amounts travel as decimal strings (as Hyperliquid's do) and are added up as integers of one millionth: no float ever decides a limit */
+/** amounts travel as decimal strings (as Hyperliquid's do) and are added up as integers of one millionth: no float ever decides a limit.
+ * An amount a double cannot count exactly — a whole part of more than fifteen digits, or millionths past the safe integers — is not a
+ * plain decimal here: it is NaN, never Infinity, which no limit would ever use up */
 export function micro(amount: string | number): number {
   const s = typeof amount === "number" ? amount.toFixed(6) : amount.trim();
   const m = /^(\d+)(?:\.(\d{1,18}))?$/.exec(s);
-  if (!m) return Number.NaN;
-  return Number(m[1]) * 1_000_000 + Number((m[2] ?? "").padEnd(6, "0").slice(0, 6));
+  if (!m || m[1]!.length > 15) return Number.NaN;
+  const units = Number(m[1]) * 1_000_000 + Number((m[2] ?? "").padEnd(6, "0").slice(0, 6));
+  return Number.isSafeInteger(units) ? units : Number.NaN;
 }
 
 export function unmicro(units: number): string {

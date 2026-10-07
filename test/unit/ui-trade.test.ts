@@ -1,9 +1,11 @@
 /** The Trade pane's own logic (ui/trade.js) and the Hand-to-agent composer's (ui/intent.js), run as the page runs them — every page script in
- * account.html's order, in one global scope — over a stand-in for the browser: which tiles a set of venues gives, an order's draft from the
- * ticket's fields (an event contract's prices typed in cents), where a market is listed (yours ranked, yours that cannot with how to fix it,
- * public ones "Connect to trade"), how a swap goes at one venue, Sell many's legs, the owner's words and the limit for them. Then the same
- * drafts go through the real account's door on the stand-in account (test/standin): each is prepared, the owner's browser signs them, and the
- * account does what they say — a coin-for-coin swap in two signatures, the second sized by what the first sale brought. Nothing leaves the
+ * account.html's order, in one global scope — over a stand-in for the browser: the six kinds (Crypto · Stocks · RWAs · Perps · Pre-IPO ·
+ * Predictions) and which face a preset, a Markets row or a venue opens; which kinds the seg shows; an order's draft from the ticket's fields
+ * (an event contract's prices typed in cents); where a market is listed, kept to the face's kind (yours ranked, yours that cannot with how
+ * to fix it, public ones "Connect to trade"); each face's block; Advanced's one line; paying with a coin held (two steps); Under way's rows
+ * (an agent's card → Review); what left the pane (tiles, the mode switch, Positions, Recent fills, Swap, Earn, Sell many). Then the same
+ * drafts go through the real account's door on the stand-in account (test/standin): each is prepared, the owner's browser signs them, and
+ * the account does what they say — a coin for a coin in two signatures, the second sized by what the first sale brought. Nothing leaves the
  * process. */
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -16,15 +18,16 @@ import { startStandin, type Standin } from "../standin/ui-standin.ts";
 const PUBLIC = fileURLToPath(new URL("../../src/portfolio/public/", import.meta.url));
 const html = readFileSync(join(PUBLIC, "account.html"), "utf8");
 const scripts = [...html.matchAll(/<script\b[^>]*\bsrc="([^"]+)"/g)].map((m) => m[1] ?? "");
+const source = (f: string) => readFileSync(join(PUBLIC, f), "utf8");
 
 /** the page's scripts in a stand-in browser: elements take listeners and report nothing; the device key never answers, so nothing is drawn */
 function page() {
-  const element = (): Record<string, unknown> => ({ addEventListener() {}, removeAttribute() {}, setAttribute() {}, querySelectorAll: () => [], querySelector: () => null, classList: { add() {}, remove() {}, toggle() {} }, dataset: {}, style: {}, hidden: false, value: "", textContent: "", innerHTML: "" });
+  const element = (): Record<string, unknown> => ({ addEventListener() {}, removeAttribute() {}, setAttribute() {}, querySelectorAll: () => [], querySelector: () => null, classList: { add() {}, remove() {}, toggle() {}, contains: () => false }, dataset: {}, style: {}, hidden: false, value: "", textContent: "", innerHTML: "" });
   const sandbox: Record<string, unknown> = {
     document: { getElementById: element, querySelector: () => null, querySelectorAll: () => [], addEventListener() {}, body: element(), documentElement: { dataset: { theme: "cream" }, setAttribute() {} }, hidden: false, activeElement: null },
     location: { hash: "", origin: "http://127.0.0.1:4821" },
     history: { replaceState() {} },
-    localStorage: { getItem: () => null, setItem() {} },
+    localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
     MutationObserver: class {
       observe() {}
     },
@@ -69,29 +72,51 @@ const EX = venue("ex", "Exchange", { trade: { can: true, what: "spot and perpetu
 const PRED = venue("predict", "Predictions", { trade: { can: true, what: "event contracts", kinds: ["event"], positions: true } });
 const WALLET = venue("wallet", "Wallet", { trade: { can: true, what: "tokens", kinds: ["token"] }, address: "0x1111111111111111111111111111111111111111", proven: "MetaMask" });
 const READONLY = venue("okx", "OKX", { trade: { can: false, what: "spot", kinds: ["spot"] }, noTradeBecause: "this API key has no Trade permission" });
-const EARNER = venue("mm", "MetaMask Agent Wallet", { trade: { can: true, what: "tokens", kinds: ["token", "event", "perp"] }, earn: { can: true, what: "DeFi vaults through mm" } });
+const HL = venue("hl", "Hyperliquid", { trade: { can: true, what: "perpetuals", kinds: ["perp"] } });
 const pageOf = (venues: unknown[], writes = true) => ({ now: "2026-10-06T12:00:00.000Z", venues, keys: [], spend: [], cards: [], orders: [], payments: [], intents: [], asks: [], connectLive: { writes: { on: writes, capUsd: 250 }, options: [] } });
+/* rows as /api/account/explore gives them, cut to what the pane reads */
+const ROW = (kind: string, base: string, more: Record<string, unknown> = {}) => ({ key: `${kind}:${base}`, kind, name: base, base, price: 10, tabs: [], at: [{ venue: "ex", venueName: "Exchange", symbol: `${base}/USDT`, connected: true, canTrade: true, public: false, price: 10 }], ...more });
+const ANTH = { key: "preipo:anthropic", kind: "perp", name: "Anthropic", base: "ANTHROPIC", category: "Pre-IPO", price: 2080, implied: { perPoint: 1e9, unit: "1 contract = 1/1,000,000,000 of the implied company valuation", usd: 2.08e12 }, group: { id: "preipo:anthropic", title: "Anthropic" }, issuer: "Anthropic", eligibility: "Anthropic, 29 June 2026: transfers of its shares it has not approved are void", tabs: ["all", "preipo"], at: [{ venue: "okx-preipo", venueName: "OKX", symbol: "ANTHROPIC/USDT:USDT", connected: false, canTrade: false, public: true, price: 214.5, implied: { perPoint: 1e10, unit: "OKX: 1/10,000,000,000 since its 30 June 2026 rebase", usd: 2.145e12 }, connectTo: "okx", connector: "live:exchange:okx" }, { venue: "ex", venueName: "Exchange", symbol: "ANTHROPIC/USDT:USDT", connected: true, canTrade: true, public: false, price: 2080, implied: { perPoint: 1e9, unit: "1 contract = 1/1,000,000,000 of the implied company valuation", usd: 2.08e12 } }] };
 
-describe("the Trade pane's logic, as the page runs it", () => {
+describe("the six kinds, as the page runs them", () => {
   const p = page();
 
-  it("draws a tile for each thing a connected venue really does; a tile whose venues all refuse says so in their words; none when the server is read-only", () => {
+  it("names the six faces in Markets' order, each with its icon, and tells which face a preset, a Markets row, a market or a venue opens", () => {
+    expect(p.out("TK_KINDS.map((k) => k.id)")).toEqual(["crypto", "stocks", "rwas", "perps", "preipo", "predictions"]);
+    expect(p.out("TK_KINDS.map((k) => k.icon)")).toEqual(["trade", "stock", "rwa", "perps", "preipo", "prediction"]);
+    // a Markets row's kind, a market's kind, the old tile and variant names, the six words themselves
+    expect(p.out('[{ kind: "coin" }, { kind: "stock" }, { kind: "rwa" }, { kind: "perp" }, { kind: "event" }, { kind: "token" }, { kind: "spot" }, { kind: "future" }].map(tkKindOf)')).toEqual(["crypto", "stocks", "rwas", "perps", "predictions", "crypto", "crypto", "perps"]);
+    expect(p.out('[{ variant: "trade" }, { variant: "perps" }, { variant: "predictions" }, { tile: "swap" }, { kind: "stocks" }, { kind: "preipo" }, {}].map(tkKindOf)')).toEqual(["crypto", "perps", "predictions", "crypto", "stocks", "preipo", "crypto"]);
+    // a perpetual on a company's implied valuation is Pre-IPO, whatever it is called
+    expect(p.out(`[tkKindOf({ kind: "perp", category: "Pre-IPO" }), tkKindOf({ item: ${JSON.stringify(ANTH)} }), tkKindOf({ kind: "perps", implied: { usd: 1 } }), tkKindOf({ item: { kind: "perp", group: { id: "preipo:openai" } } })]`)).toEqual(["preipo", "preipo", "preipo", "preipo"]);
+    // a venue named without a kind: what that venue trades; one that trades several kinds opens Crypto
+    p.set("A", pageOf([EX, PRED, HL]));
+    expect(p.out('[tkKindOf({ venue: "predict" }), tkKindOf({ venue: "hl" }), tkKindOf({ venue: "ex" })]')).toEqual(["predictions", "perps", "crypto"]);
+    // the variant words the page before this one used map to kinds (no alias function remains)
+    expect(p.out('[tkKindOf({ venue: "predict", kind: "event" }), tkKindOf({ variant: "swap", venue: "predict" }), tkKindOf({ variant: "perps" }), tkKindOf({ tile: "predictions" }), tkKindOf({})]')).toEqual(["predictions", "crypto", "perps", "predictions", "crypto"]);
+    expect(p.out("typeof tkVariantOf")).toBe("undefined");
+  });
+
+  it("shows a kind when a connected venue trades it or a read of it has rows — and hides one with nothing; a venue's lens hides public-only kinds", () => {
     p.set("A", pageOf([EX, PRED, WALLET]));
-    const tiles = p.out<Array<{ id: string; sub: string; able: string[]; venues: string[] }>>("tkTilesFor(connected())");
-    expect(tiles.map((t) => t.id)).toEqual(["trade", "swap", "perps", "predictions", "sellmany", "move"]);
-    expect(tiles.find((t) => t.id === "trade")!.sub).toBe("Coins");
-    expect(tiles.find((t) => t.id === "swap")!.sub).toBe("Tokens on-chain");
-    expect(tiles.find((t) => t.id === "perps")).toMatchObject({ sub: "At Exchange", able: ["ex"] });
-    expect(tiles.find((t) => t.id === "predictions")).toMatchObject({ sub: "Predictions", able: ["predict"] });
-    // a key that may not trade: the tile is there, with the venue's own words, and nothing can be done from it
-    p.set("A", pageOf([READONLY]));
-    const ro = p.out<Array<{ id: string; sub: string; able: string[] }>>("tkTilesFor(connected())");
-    expect(ro.find((t) => t.id === "trade")).toMatchObject({ able: [], sub: "OKX: this API key has no Trade permission" });
-    // earn only where a venue earns
-    p.set("A", pageOf([EARNER]));
-    expect(p.out<Array<{ id: string }>>("tkTilesFor(connected())").map((t) => t.id)).toEqual(["trade", "swap", "perps", "predictions", "sellmany", "earn"]);
+    expect(p.out("tkKindsFor(connected(), {}, lensNow())")).toEqual(["crypto", "perps", "predictions"]);
+    const got = { rwas: { items: [ROW("rwa", "NVDA", { at: [{ venue: "wallet", venueName: "Wallet", symbol: "NVDA/USDG@Robinhood Chain", connected: true, canTrade: true, public: false }] })] }, stocks: { items: [ROW("stock", "AAPL", { at: [{ venue: "alpaca-public", venueName: "Alpaca", symbol: "AAPL", connected: false, canTrade: false, public: true }] })] }, preipo: { items: [ANTH] } };
+    expect(p.out(`tkKindsFor(connected(), ${JSON.stringify(got)}, lensNow())`)).toEqual(["crypto", "stocks", "rwas", "perps", "preipo", "predictions"]);
+    // under a venue's lens: that venue's kinds and the rows it lists; Stocks (public only) and Pre-IPO (the exchange's row) part ways
+    expect(p.out(`tkKindsFor([${JSON.stringify(EX)}], ${JSON.stringify(got)}, { kind: "venue", id: "ex", name: "Exchange" })`)).toEqual(["crypto", "perps", "preipo"]);
+    // a read-only server still shows the kinds: prices show, the sign button says why nothing is placed
     p.set("A", pageOf([EX, PRED], false));
-    expect(p.out("tkTilesFor(connected())")).toEqual([]);
+    expect(p.out("tkKindsFor(connected(), {}, lensNow())")).toEqual(["crypto", "perps", "predictions"]);
+    // the pane is one seg + a picker + Under way: no tiles, no mode switch, no Positions, no Recent fills, no Swap/Earn/Sell many panels
+    for (const gone of ["TK_TILES", "tkTilesFor", "tkTile", "tkRefusal", "tkSetMode", "TK_VARIANTS", "tkDrawPositions", "tkDrawFills", "tkSwap", "tkSwapHow2", "tkStableSwap", "tkSellMany", "tkSellDraft", "tkLegName", "tkEarn", "tkEarnList", "tkEarnDraft", "tkRate", "tkInVenue", "renderOpen"]) expect(p.run(`typeof ${gone}`), gone).toBe("undefined");
+    expect(p.out("Object.keys(TK).sort()")).not.toEqual(expect.arrayContaining(["mode", "pos", "tileDone", "legs"]));
+    const src = source("ui/trade.js");
+    for (const words of ["Do it myself", "account.tradeMode", "Recent fills", "Your words to agents", "Earning now", "data-tp-pos", "data-tp-fills", "data-tp-intents", "Up to ${money(cap)}"]) expect(src, words).not.toContain(words);
+    // the seg is drawn by hand (icons on its buttons) and never collides with core seg()'s click delegation
+    expect(src).toContain('data-kind="${esc(id)}" aria-pressed=');
+    expect(src).not.toMatch(/class="seg tk-seg"[^>]*data-seg/);
+    // `later` lives inside the functions that debounce, never at the top level (ui-fixes forbids it)
+    expect(src).not.toMatch(/^(const|function) later\b/m);
   });
 
   it("drafts an order from the ticket: in dollars or in the market's units, an event contract's limit typed in cents, only the flags the type takes", () => {
@@ -102,17 +127,39 @@ describe("the Trade pane's logic, as the page runs it", () => {
     expect(p.out('[tkPriceIn("62", true), tkPriceIn("62", false), tkPriceIn("", true), tkCents(0.625), tkCents(undefined)]')).toEqual(["0.62", "62", "", "62.5¢", "—"]);
   });
 
-  it("lists where a market is: yours that trade it (best first), yours that cannot with what to change, and public venues to connect — not one already connected", () => {
+  it("lists where a market is, kept to the face's kind: yours that trade it (best first), yours that cannot with what to change, public venues to connect — not one already connected, none on a read-only server", () => {
     p.set("A", pageOf([EX, WALLET, READONLY]));
     const item = { kind: "coin", base: "BTC", at: [{ venue: "okx", venueName: "OKX", symbol: "BTC/USDT", connected: true, canTrade: false }, { venue: "kraken-public", venueName: "Kraken", symbol: "BTC/USD", connected: false, canTrade: false, public: true, price: 62000, connectTo: "kraken", connector: "live:exchange:kraken" }, { venue: "wallet", venueName: "Wallet", symbol: "cbBTC/USDC@Base", connected: true, canTrade: true, price: 62100 }] };
-    const ranked = [{ venue: "ex", venueName: "Exchange", symbol: "BTC/USDT", price: 61990, best: true, open: true, canTrade: true, ready: true }, { venue: "wallet", venueName: "Wallet", symbol: "cbBTC/USDC@Base", price: 62100, worse: 0.18, open: true, canTrade: true, ready: true }];
+    const ranked = [{ venue: "ex", venueName: "Exchange", symbol: "BTC/USDT", kind: "spot", price: 61990, best: true, open: true, canTrade: true, ready: true }, { venue: "wallet", venueName: "Wallet", symbol: "cbBTC/USDC@Base", kind: "token", price: 62100, worse: 0.18, open: true, canTrade: true, ready: true }];
     const rows = p.out<Array<Record<string, unknown>>>(`tkWhereRows(${JSON.stringify(item)}, ${JSON.stringify(ranked)})`);
     expect(rows.map((r) => [r.state, r.venue])).toEqual([["able", "ex"], ["able", "wallet"], ["off", "okx"], ["public", "kraken-public"]]);
     expect(rows[0]).toMatchObject({ best: true, price: 61990 });
     expect(rows[2]).toMatchObject({ why: "this API key has no Trade permission", how: expect.stringMatching(/Trade.*Then connect it again\./) });
+    // a perpetual standing in for the coin, or an RWA token of the same name, is not one of a coin's places (compare rows carry their kind)
+    const mixed = [...ranked, { venue: "ex", venueName: "Exchange", symbol: "BTC/USDT:USDT", kind: "perp", price: 61995, open: true, canTrade: true, ready: true }, { venue: "wallet", venueName: "Wallet", symbol: "BTCx/USDC@Base", kind: "token", category: "RWA", price: 62050, open: true, canTrade: true, ready: true }];
+    expect(p.out<Array<{ symbol?: string }>>(`tkWhereRows(${JSON.stringify(item)}, ${JSON.stringify(mixed)}, "crypto")`).map((r) => r.symbol)).toEqual(["BTC/USDT", "cbBTC/USDC@Base", undefined, "BTC/USD"]);
+    // a stock's places are brokers: an RWA token of the same name is a line to RWAs, not a place to buy shares
+    const nvda = { kind: "stock", base: "NVDA", at: [{ venue: "alpaca", venueName: "Alpaca", symbol: "NVDA", connected: true, canTrade: true, price: 180 }] };
+    const stockRanked = [{ venue: "alpaca", venueName: "Alpaca", symbol: "NVDA", kind: "stock", price: 180, best: true, open: true, canTrade: true, ready: true }, { venue: "wallet", venueName: "Wallet", symbol: "NVDA/USDG@Robinhood Chain", kind: "token", category: "RWA", price: 181, open: true, canTrade: true, ready: true }];
+    p.set("A", pageOf([EX, WALLET, venue("alpaca", "Alpaca", { trade: { can: true, what: "US stocks", kinds: ["stock"] } })]));
+    expect(p.out<Array<{ venue: string }>>(`tkWhereRows(${JSON.stringify(nvda)}, ${JSON.stringify(stockRanked)}, "stocks")`).map((r) => r.venue)).toEqual(["alpaca"]);
+    expect(p.out("[tkOfFace({ kind: 'token', category: 'RWA' }, 'rwas'), tkOfFace({ kind: 'token' }, 'rwas'), tkOfFace({ kind: 'token', category: 'RWA' }, 'crypto'), tkOfFace({ kind: 'perp' }, 'preipo'), tkOfFace({}, 'stocks')]")).toEqual([true, true, false, true, true]);
+    // a pre-IPO venue carries its implied valuation and its unit (they differ by venue); the public one is a price while a connected venue
+    // trades the row, and a connection to make when none does
+    p.set("A", pageOf([EX]));
+    const pre = p.out<Array<Record<string, any>>>(`tkWhereRows(${JSON.stringify(ANTH)}, null, "preipo")`);
+    expect(pre.map((r) => [r.state, r.venue])).toEqual([["able", "ex"], ["public", "okx-preipo"]]);
+    expect(pre[0]!.implied).toMatchObject({ usd: 2.08e12 });
+    expect(pre[1]!.implied.unit).toMatch(/OKX: 1\/10,000,000,000/);
+    expect(pre[1]!.connector).toBe("");
+    p.set("A", pageOf([PRED]));
+    expect(p.out<Array<Record<string, any>>>(`tkWhereRows(${JSON.stringify({ ...ANTH, at: [ANTH.at[0]] })}, null, "preipo")`)).toEqual([expect.objectContaining({ state: "public", venue: "okx-preipo", connector: "live:exchange:okx" })]);
     // the public listing of a venue the owner has since connected is not offered again
     p.set("A", pageOf([EX, venue("kraken", "Kraken", { trade: { can: true, kinds: ["spot"] } })]));
     expect(p.out<Array<{ state: string }>>(`tkWhereRows(${JSON.stringify(item)}, [])`).map((r) => r.state)).not.toContain("public");
+    // a read-only server: the public line is a price, there is nothing to connect for
+    p.set("A", pageOf([EX], false));
+    expect(p.out<Array<{ state: string; connector?: string }>>(`tkWhereRows(${JSON.stringify(item)}, [])`).find((r) => r.state === "public")?.connector).toBe("");
     // Connect to trade opens the connection the row names, through connect.js's own door (connectVia); one this server does not offer says so
     p.set("A", { ...pageOf([EX]), connectLive: { writes: { on: true, capUsd: 250 }, options: [{ kind: "exchange", connector: "live:exchange", needs: "key-file", venues: ["kraken"] }, { kind: "kalshi", connector: "live:kalshi", needs: "key-file" }] } });
     p.run('Object.defineProperty(Owner, "role", { get: () => "owner", configurable: true }); var CONNECTED = []; openConnect = (o, opts) => CONNECTED.push([o.kind, opts.exchange, opts.name]); var TOASTS = []; toast = (t) => TOASTS.push(t)');
@@ -121,42 +168,128 @@ describe("the Trade pane's logic, as the page runs it", () => {
     expect(p.out("TOASTS")).toEqual(["Nowhere can't be connected from this server."]);
   });
 
-  it("plans a swap at one venue: a stablecoin by the venue's convert, a dollar for a coin or back in one order, a coin for a coin in two through the dollar both share", () => {
+  it("says each face's own block from the market, the place and the row: hours and whole shares, the issuer once, a perpetual's facts and margin, a pre-IPO valuation and notice, an event's payout", () => {
+    p.set("A", pageOf([EX, WALLET]));
+    p.run("TK.cross = null");
+    const kb = (kind: string, m: unknown, at: unknown, item: unknown, c: unknown = {}) => p.run<string>(`tkKindBlock(${JSON.stringify(kind)}, ${JSON.stringify(m)}, ${JSON.stringify(at)}, ${JSON.stringify(item)}, ${JSON.stringify(c)})`);
+    // Stocks: open or closed with the venue's note verbatim; whole shares where the step is one
+    const aapl = kb("stocks", { symbol: "AAPL", kind: "stock", base: "AAPL", quote: "USD", open: false, note: "A market order waits for 09:30 New York", qtyStep: 1, types: ["limit"] }, null, null);
+    expect(aapl).toContain("<b>Closed</b> · A market order waits for 09:30 New York");
+    expect(aapl).toContain("Whole shares only here.");
+    expect(kb("stocks", { symbol: "AAPL", kind: "stock", base: "AAPL", quote: "USD", open: true, qtyStep: 0.001, types: ["market"] }, null, null)).toContain("<b>Open now</b>");
+    // RWAs: the issuer's words once, the pay token and the chain, the route's own line
+    const ousg = kb("rwas", { symbol: "OUSG/USDC@Ethereum", kind: "token", base: "OUSG", quote: "USDC", open: true, note: "LI.FI: 0.25% fee, 0.5% slippage, gas paid by the wallet", types: ["market"] }, null, { kind: "rwa", base: "OUSG", issuer: "Ondo Finance", eligibility: "OUSG moves only between wallets Ondo has approved", at: [] });
+    expect(ousg).toContain("Issued by <b>Ondo Finance</b>.");
+    expect(ousg).toContain("OUSG moves only between wallets Ondo has approved");
+    expect(ousg).toContain("Paid in <b>USDC</b> on Ethereum.");
+    expect(ousg).toContain("LI.FI: 0.25% fee, 0.5% slippage, gas paid by the wallet");
+    expect((ousg.match(/Ondo Finance/g) ?? []).length).toBe(1);
+    // with chains to choose from, a Chain field
+    expect(kb("rwas", { symbol: "OUSG/USDC@Ethereum", kind: "token", base: "OUSG", quote: "USDC", open: true, types: ["market"] }, null, null, { chains: [{ symbol: "OUSG/USDC@Ethereum", chain: "Ethereum", quote: "USDC" }, { symbol: "OUSG/USDG@Robinhood Chain", chain: "Robinhood Chain", quote: "USDG" }] })).toContain('<select name="chain">');
+    // Perps: mark, funding and its next payment, the leverage the venue takes, the margin the amount needs, what is held
+    const perp = { symbol: "ETH/USDT:USDT", kind: "perp", base: "ETH", quote: "USDT", price: 2500, open: true, fundingRate: 0.0001, nextFundingAt: "2026-10-06T16:00:00.000Z", maxLeverage: 20, types: ["market", "limit"] };
+    const facts = kb("perps", perp, { venue: "ex", venueName: "Exchange" }, null, { amount: "100", unit: "usd", leverage: "5", held: { side: "long", qty: 0.05, leverage: 5, liquidationPrice: 2100, entryPrice: 2480 }, positions: [] });
+    expect(facts).toContain("Mark 2,500 USDT");
+    expect(facts).toContain("Funding 0.0100% a period, next paid 12:00 New York · up to 20x here.");
+    expect(facts).toContain("Margin ≈ $20.00 for $100.00 at 5x.");
+    expect(facts).toContain("You hold long 0.05 at 5x · liquidation at 2,100 · entry 2,480.");
+    expect(kb("perps", perp, { venue: "ex", venueName: "Exchange" }, null, { positions: [] })).toContain("Nothing held here yet");
+    // Pre-IPO: from the row alone when no market is picked — the valuation, the unit, the conversion, the company's notice, what it is not
+    const pre = kb("preipo", null, null, ANTH, {});
+    // Markets' own figure for a valuation (mkValuation), the same one its rows show
+    expect(pre).toContain("Implied valuation ≈ $2.08T");
+    expect(pre).toContain("a contract 2,080");
+    expect(pre).toContain("1 contract = 1/1,000,000,000 of the implied company valuation");
+    expect(pre).toContain("Becomes a stock perpetual at the IPO; the venue rebases when the share count is public.");
+    expect(pre).toContain("Anthropic, 29 June 2026: transfers of its shares it has not approved are void");
+    expect(pre).toContain("This is a contract on a valuation, not a share.");
+    // …and with the venue's market, the venue's own implied figure and the perpetual's facts too
+    const preAt = kb("preipo", { symbol: "ANTHROPIC/USDT:USDT", kind: "perp", base: "ANTHROPIC", quote: "USDT", price: 2080, open: true, maxLeverage: 20, types: ["market"] }, ANTH.at[1], ANTH, { positions: [] });
+    expect(preAt).toContain("a contract 2,080 USDT");
+    expect(preAt).toContain("Up to 20x here.");
+    // Predictions: the payout line from the amount, the close counted down, sells only what you hold
+    const fed = { symbol: "SI-FEDCUT-DEC:YES", kind: "event", base: "SI-FEDCUT-DEC", quote: "USD", price: 0.62, ask: 0.62, bid: 0.6, outcome: "Yes", open: true, closeTime: "2026-12-10T19:00:00.000Z", sellsReduce: true, types: ["market", "limit"] };
+    const pay = kb("predictions", fed, null, null, { side: "buy", outcome: "Yes", amount: "10", unit: "usd", held: { qty: 50 }, positions: [] });
+    expect(pay).toContain("<b>16 contracts pay $16.00</b> if Yes · cost ≈ $9.92 · the market gives it 62%");
+    expect(pay).toContain('data-tk-close="2026-12-10T19:00:00.000Z"');
+    expect(pay).toContain("Sells only what you hold · 50 held.");
+    expect(kb("predictions", fed, null, null, { side: "buy", outcome: "Yes", positions: [] })).toContain("<b>Yes</b> at 62¢ — the market gives it 62%. Each contract pays $1.00 if it happens, nothing if not.");
+    // Crypto at a wallet: the venue's own line (route, slippage, gas); paid with a coin held: the two steps said
+    expect(kb("crypto", { symbol: "WETH/USDC@Base", kind: "token", base: "WETH", quote: "USDC", open: true, bid: 2499, ask: 2501, note: "Route by LI.FI · 0.3% slippage · gas ≈ $0.02", types: ["market"] }, null, null, { pay: { asset: "cbBTC" } })).toMatch(/Route by LI\.FI[\s\S]*Paid with <b>cbBTC<\/b>: sold first, then WETH bought/);
+  });
+
+  it("speaks the venue's rule on Advanced's one line — what is set, else what the market takes — never invented", () => {
+    const adv = (m: unknown, f: unknown) => p.run<string>(`tkAdvSummary(${JSON.stringify(m)}, ${JSON.stringify(f)})`);
+    // Kalshi: a market order fills now or is cancelled
+    expect(adv({ tifs: ["ioc", "fok", "gtc"], tifsByType: { market: ["ioc", "fok"] } }, { orderType: "market" })).toBe("A market order here fills now or is cancelled (ioc/fok)");
+    // Polymarket: never rests until cancelled
+    expect(adv({ tifs: ["fok", "day"] }, { orderType: "limit" })).toBe("Never rests until cancelled here: all now or nothing or today only");
+    // mm Hyperliquid: nothing to set from here
+    expect(adv({}, { orderType: "limit" })).toBe("The venue's defaults: no time in force, post-only or reduce-only is set from here");
+    // an exchange: the default and what it takes; once something is set, that
+    expect(adv({ tifs: ["gtc", "day"], postOnly: true, reduceOnly: true }, { orderType: "limit" })).toBe("The venue's default · until canceled · today only · post-only possible · reduce-only possible");
+    expect(adv({ tifs: ["gtc", "day"], postOnly: true }, { orderType: "limit", tif: "gtc", postOnly: "on" })).toBe("Until canceled · post-only");
+    // the disclosure is folded and holds exactly the time in force and the flags; the leverage of a perpetual stays in view above it
+    const src = source("ui/trade.js");
+    const details = src.indexOf('<details class="tk-adv" data-adv hidden>');
+    expect(details).toBeGreaterThan(0);
+    const inside = src.slice(details, src.indexOf("</details>", details));
+    for (const f of ["data-more", "data-tif", 'name="postOnly"', 'name="reduceOnly"', "data-adv-sum"]) expect(inside, f).toContain(f);
+    expect(inside).not.toContain("data-lev");
+    expect(src.indexOf('<div class="tk-lev" data-lev hidden>')).toBeLessThan(details);
+    expect(src).toContain('q("[data-adv]").hidden = more.hidden;');
+    // the quote and what is signed are written through paint: a refresh never takes the focus from What you sign
+    expect(src).toContain("const show = (html) => paint(box, html);");
+    expect(src).toContain("const signed = (html) => paint(sign, html);");
+  });
+
+  it("plans paying with a coin held: a dollar for a coin or back in one order, a coin for a coin in two through the dollar both share; one dollar for another is a Move", () => {
     const markets = [{ symbol: "WETH/USDC@Base", kind: "token", base: "WETH", quote: "USDC", open: true }, { symbol: "cbBTC/USDC@Base", kind: "token", base: "cbBTC", quote: "USDC", open: true }, { symbol: "USDY/USDC@Ethereum", kind: "token", base: "USDY", quote: "USDC", open: true }, { symbol: "BTC/USDT", kind: "spot", base: "BTC", quote: "USDT", open: true }, { symbol: "SOL/USDT", kind: "spot", base: "SOL", quote: "USDT", open: true }];
     const plan = (o: Record<string, unknown>) => p.out<any>(`tkSwapPlan(${JSON.stringify({ markets, ...o })})`);
-    expect(plan({ venue: "ex", from: "USDC", to: "USDT", amount: "50", stableSwap: true })).toMatchObject({ mode: "convert", legs: [{ type: "liveMove", kind: "swap", from: "ex", to: "ex", asset: "USDC", toAsset: "USDT", amount: "50", network: "" }] });
-    expect(plan({ venue: "wallet", from: "USDC", to: "USDT", amount: "50", stableSwap: false })).toMatchObject({ mode: "", why: expect.stringMatching(/doesn't swap one stablecoin/) });
+    expect(plan({ venue: "ex", from: "USDC", to: "USDT", amount: "50" })).toMatchObject({ mode: "", why: expect.stringMatching(/Move › Swap stablecoins/) });
     expect(plan({ venue: "wallet", from: "USDC", to: "WETH", amount: "25", chain: "Base" }).legs).toEqual([{ type: "liveOrder", venue: "wallet", symbol: "WETH/USDC@Base", side: "buy", orderType: "market", usd: "25", limitPrice: "", stopPrice: "", tif: "", postOnly: "", reduceOnly: "" }]);
     expect(plan({ venue: "wallet", from: "WETH", to: "USDC", amount: "0.1", chain: "Base" }).legs[0]).toMatchObject({ symbol: "WETH/USDC@Base", side: "sell", qty: "0.1" });
     // a coin held on one chain is sold there, and only a coin listed against the same dollar on that chain can be bought with it
-    expect(plan({ venue: "wallet", from: "WETH", to: "cbBTC", amount: "0.1", chain: "Base" })).toMatchObject({ mode: "two", via: "USDC", legs: [{ symbol: "WETH/USDC@Base", side: "sell", qty: "0.1" }, { symbol: "cbBTC/USDC@Base", side: "buy", usd: "" }] });
+    const two = plan({ venue: "wallet", from: "WETH", to: "cbBTC", amount: "0.1", chain: "Base" });
+    expect(two).toMatchObject({ mode: "two", from: "WETH", to: "CBBTC", via: "USDC", legs: [{ symbol: "WETH/USDC@Base", side: "sell", qty: "0.1" }, { symbol: "cbBTC/USDC@Base", side: "buy", usd: "" }] });
+    expect(p.run(`tkSwapHow(${JSON.stringify(two)})`)).toBe("Two orders: sells WETH for USDC (WETH/USDC@Base), then buys CBBTC with what that brings (cbBTC/USDC@Base) — two signatures.");
     expect(plan({ venue: "wallet", from: "WETH", to: "USDY", amount: "0.1", chain: "Base" })).toMatchObject({ mode: "", why: expect.stringMatching(/USDY isn't listed against USDC/) });
     expect(plan({ venue: "ex", from: "BTC", to: "SOL", amount: "0.001" })).toMatchObject({ mode: "two", via: "USDT" });
     expect(plan({ venue: "ex", from: "USDC", to: "BTC", amount: "10" })).toMatchObject({ mode: "", why: "BTC isn't listed against USDC here (it trades against USDT)." });
     expect(plan({ venue: "ex", from: "BTC", to: "BTC" }).why).toBe("Pick two different assets.");
     // what the sale brought, less its fee, down to the cent: what the second leg spends
-    expect(p.out('tkProceeds({ filledQty: 0.001, avgPrice: 62523.2, feeUsd: 0.04 })')).toBe(62.48);
-    expect(p.out('tkProceeds({ filledQty: 0, price: 10 })')).toBe(0);
+    expect(p.out("tkProceeds({ filledQty: 0.001, avgPrice: 62523.2, feeUsd: 0.04 })")).toBe(62.48);
+    expect(p.out("tkProceeds({ filledQty: 0, price: 10 })")).toBe(0);
+    // the ticket's own words for the two steps and its buttons
+    const src = source("ui/trade.js");
+    for (const words of ["Two steps, two signatures.", "Sign the sale (1 of 2)", "Sign the buy (2 of 2)", "tkFilled(o, live)", "tkProceeds(o)"]) expect(src, words).toContain(words);
   });
 
-  it("drafts Sell many's legs: a market sell of what is held (or less), a position's close (all, or part)", () => {
-    expect(p.out('tkSellDraft({ action: "sell", venue: "ex", symbol: "ETH/USDT", held: 1.8, sellQty: 1.8 }, "")')).toEqual({ type: "liveOrder", venue: "ex", symbol: "ETH/USDT", side: "sell", orderType: "market", qty: "1.8", limitPrice: "", stopPrice: "", tif: "", postOnly: "", reduceOnly: "" });
-    expect(p.out('tkSellDraft({ action: "sell", venue: "ex", symbol: "ETH/USDT", held: 1.8, sellQty: 1.8 }, "0.01")')).toMatchObject({ qty: "0.01" });
-    expect(p.out('tkSellDraft({ action: "close", venue: "ex", symbol: "ETH/USDT:USDT", held: 0.05, sellQty: 0.05 }, "0.05")')).toEqual({ type: "liveClose", venue: "ex", symbol: "ETH/USDT:USDT", qty: "" });
-    expect(p.out('tkSellDraft({ action: "close", venue: "ex", symbol: "ETH/USDT:USDT", held: 0.05, sellQty: 0.05 }, "0.02")')).toMatchObject({ qty: "0.02" });
-    expect(p.out('[tkLegName({ action: "close", side: "long", asset: "ETH" }), tkLegName({ action: "sell", asset: "SOL" })]')).toEqual(["Close long ETH", "SOL"]);
+  it("Under way: an agent's card is a status row whose one action is Review (answered under Portfolio); an order has Change, Cancel, Send from wallet…", () => {
+    p.set("A", pageOf([EX, WALLET]));
+    const card = { id: "card-7", kind: "order", reason: "Buy about $120 of ETH", agentName: "Claude Code", expiresAt: "2026-10-06T12:29:00.000Z", shown: [{ name: "venue", value: "ex" }] };
+    const acts = p.run<string>(`tkOpenActs({ c: ${JSON.stringify(card)} })`);
+    expect(acts).toContain('data-review="card-7"');
+    expect(acts).not.toMatch(/Approve|Reject|data-card/);
+    expect(p.run<string>(`tkOpenStatus({ c: ${JSON.stringify(card)} })`)).toContain("Waiting for you");
+    expect(p.run<string>(`tkOpenWhat({ c: ${JSON.stringify(card)} })`)).toContain("Buy about $120 of ETH");
+    const order = { id: "ord-9", venue: "ex", venueName: "Exchange", side: "buy", qty: 0.5, base: "SOL", type: "limit", limitPrice: 140, status: "open", clientId: "c9" };
+    const oacts = p.run<string>(`tkOpenActs({ o: ${JSON.stringify(order)} })`);
+    expect(oacts).toContain('data-amend="ord-9"');
+    expect(oacts).toContain('data-cancel="ord-9"');
+    expect(p.run<string>(`tkOpenActs({ o: ${JSON.stringify({ ...order, venue: "wallet", venueName: "Wallet", walletTxs: [{}], ref: "" })} })`)).toContain("Send from wallet…");
+    const src = source("ui/trade.js");
+    expect(src).toContain('if (d.review) return void go("portfolio", { card: d.review });');
+    expect(src).not.toContain('type: "approveCard"');
+    // drawn through paint (in place: the focused button keeps its focus), its buttons heard once, on the section itself; the empty words
+    // say where a card is answered
+    const body = src.slice(src.indexOf("function tkDrawOpen"), src.indexOf("function tkOpenWhat"));
+    expect(body).toContain("paint(sec, html);");
+    expect(body).toMatch(/if \(sec\.tkHeard\) return;\s*sec\.tkHeard = true;\s*sec\.addEventListener\("click"/);
+    expect(body).toContain("data-cancel-all");
   });
 
-  it("lists Earn's products — to put in, the ones taking money first; to take out, the ones something is in — and drafts money in or out in the product's own asset", () => {
-    const view = { products: [{ venue: "okx", id: "savings:BTC", asset: "BTC", canSupply: false, why: "closed to new money" }, { venue: "okx", id: "savings:USDT", asset: "USDT", canSupply: true }, { venue: "mm", id: "8453:0xvault", asset: "USDC", canSupply: true }], positions: [{ venue: "mm", product: "8453:0xvault", asset: "mUSDC", amount: 12 }, { venue: "okx", product: "savings:USDT", asset: "USDT", amount: 0 }] };
-    expect(p.out<Array<{ id: string }>>(`tkEarnList(${JSON.stringify(view)}, "supply")`).map((x) => x.id)).toEqual(["savings:USDT", "8453:0xvault", "savings:BTC"]);
-    expect(p.out<Array<{ id: string }>>(`tkEarnList(${JSON.stringify(view)}, "withdraw")`).map((x) => x.id)).toEqual(["8453:0xvault"]);
-    expect(p.out('tkEarnDraft({ venue: "mm", id: "8453:0xvault", asset: "USDC" }, "withdraw", " 5 ")')).toEqual({ type: "liveEarn", venue: "mm", kind: "withdraw", product: "8453:0xvault", asset: "USDC", amount: "5" });
-    expect(p.out('tkEarnDraft({ venue: "okx", id: "savings:USDT", asset: "USDT" }, "anything", "10").kind')).toBe("supply");
-    expect(p.out('[tkRate({ apy: 0.0534 }), tkRate({ apy: 0.02, apyHigh: 0.05, rateKind: "apr" }), tkRate({})]')).toEqual(["5.34% APY", "2.00%–5.00% APR", ""]);
-  });
-
-  it("drafts the owner's words to an agent and, when asked, its trading limit for them — exactly the fields the door signs", () => {
+  it("drafts the owner's words to an agent and, when asked, its trading limit for them — exactly the fields the door signs; the composer suggests by the six kinds", () => {
     const now = Date.parse("2026-10-06T12:00:00.000Z");
     const d = p.out<any>(`htaDrafts({ agent: "0xABCDEF0000000000000000000000000000000001", venue: "ex", symbol: " ETH/USDT ", side: "sell", usd: "100", text: "  Sell about $100 of ETH under $2,300  ", days: "7", withLimit: true, perOrder: "", budget: "200" }, ${now})`);
     expect(d.intent).toEqual({ type: "setIntent", id: "", agent: "0xabcdef0000000000000000000000000000000001", venue: "ex", symbol: "ETH/USDT", side: "sell", usd: "100", text: "Sell about $100 of ETH under $2,300", validUntil: now + 7 * 86_400_000 });
@@ -174,25 +307,45 @@ describe("the Trade pane's logic, as the page runs it", () => {
     const kept = p.out<any>(`htaDrafts({ id: "intent-0002", agent: "0xabcdef0000000000000000000000000000000001", text: "slower", days: "1", until: ${now + 5 * 86_400_000}, withLimit: true, budget: "50" }, ${now})`);
     expect([kept.intent.validUntil, kept.limit.validUntil]).toEqual([now + 5 * 86_400_000, now + 5 * 86_400_000]);
     // what the door signs, field for field, once the account adds its nonce
-    for (const a of [d.intent, d.limit, p.out('tkSellDraft({ action: "close", venue: "ex", symbol: "X", held: 1, sellQty: 1 }, "")'), { type: "setIntent", id: "intent-0001", agent: "*", venue: "", symbol: "", side: "", usd: "", text: "", validUntil: 0 }]) expect(malformed({ ...a, nonce: now } as OwnerAction), a.type).toBeNull();
+    for (const a of [d.intent, d.limit, { type: "setIntent", id: "intent-0001", agent: "*", venue: "", symbol: "", side: "", usd: "", text: "", validUntil: 0 }]) expect(malformed({ ...a, nonce: now } as OwnerAction), a.type).toBeNull();
+    // the composer: a hint for each of the six kinds and for earning; a kind tag; the sheet variant lists no intents (Portfolio does)
+    expect(p.out("Object.keys(HTA_HINT)")).toEqual(["crypto", "stocks", "rwas", "perps", "preipo", "predictions", "earn"]);
+    expect(p.out('[htaKindWord("perps"), htaKindWord("earn"), htaKindWord("")]')).toEqual(["Perps", "Earn", ""]);
+    const intent = source("ui/intent.js");
+    expect(intent).not.toContain("Your words to agents");
+    expect(intent).not.toMatch(/Conservative|Aggressive/);
+    expect(intent).toContain("openSheet('<div data-hta></div>'");
+    expect(intent).toContain("openTicket({ ...(kind !== \"earn\" ? { kind } : {}),");
+    expect(p.run("typeof htaIntents")).toBe("function");
   });
 });
 
 describe("the ticket at rest leaves the page refreshing", () => {
-  it("opens the resting ticket without taking the focus, and its search counts as the page's own (data-live), so a cursor in it does not stop the refresh", () => {
+  it("opens the resting ticket on the kind showing without taking the focus, and its search counts as the page's own (data-live), so a cursor in it does not stop the refresh", () => {
     const p = page();
     p.set("A", pageOf([EX]));
-    // what the panel is asked to open, captured: at rest, after its close, and on purpose
-    p.run("TK.mode = 'self'; ROUTE.tab = 'trade'; render = () => {}; OPENED = []; tkTicket = (panel, variant, preset) => OPENED.push(preset);");
+    // what the panel is asked to open, captured: at rest, after its close, and on purpose (the shell's own route and render are stubbed:
+    // this stand-in browser has no panes to draw)
+    p.run("ROUTE.tab = 'trade'; TK.kind = 'crypto'; render = () => {}; routed = () => {}; OPENED = []; tkTicket = (panel, kind, preset) => OPENED.push([kind, preset]);");
     p.run("tkRest()");
     p.run("openTicket({})");
-    expect(p.out("OPENED")).toEqual([{ rest: true }, {}]);
-    // the shell keeps refreshing while focus is inside [data-live]: the ticket's search is marked so
-    const src = readFileSync(join(PUBLIC, "ui/trade.js"), "utf8");
+    p.run("openTicket({ kind: 'perp', venue: 'ex', symbol: 'ETH/USDT:USDT' })");
+    expect(p.out("OPENED")).toEqual([["crypto", { kind: "crypto", rest: true }], ["crypto", {}], ["perps", { kind: "perp", venue: "ex", symbol: "ETH/USDT:USDT" }]]);
+    // a ticket of another kind moves the seg to it
+    expect(p.run("TK.kind")).toBe("perps");
+    // off the Trade pane, the ticket waits and the page goes to Trade on the market's kind
+    p.run("ROUTE.tab = 'portfolio'; var WENT = []; go = (tab, params) => WENT.push([tab, params]); openTicket({ kind: 'event', venue: 'predict', symbol: 'X' })");
+    expect(p.out("[WENT, TK.pending]")).toEqual([[["trade", { kind: "predictions" }]], { kind: "event", venue: "predict", symbol: "X" }]);
+    // the shell keeps refreshing while focus is inside [data-live]: the ticket's search and the picker's are marked so
+    const src = source("ui/trade.js");
     expect(src).toContain('<div class="tk-find" data-find data-live>');
+    expect(src).toContain('<form class="tk-pfind" role="search" data-live>');
     expect(src).toContain("if (!preset.symbol && !preset.venue && !preset.rest) setTimeout(() => live() && form.elements.q.focus(");
-    // its close puts the panel back at rest, and drops the ticket kept in this browser
-    expect(src).toContain('b.addEventListener("click", () => {\n    tkDraftKeep(null);\n    tkOpen({ rest: true });');
+    // its close puts the panel back at rest on the kind showing, and drops the ticket kept in this browser
+    expect(src).toContain('b.addEventListener("click", () => {\n    tkDraftKeep(null);\n    tkOpen({ kind: TK.kind, rest: true });');
+    // earn and selling many are Portfolio's sheets now: an old preset goes there when they are on the page
+    p.run("ROUTE.tab = 'trade'; var SHEETS = []; openEarn = (x) => SHEETS.push(['earn', x]); openSellMany = (x) => SHEETS.push(['sellmany', x]); OPENED = []; tkOpen({ variant: 'earn', venue: 'ex' }); tkOpen({ tile: 'sellmany' })");
+    expect(p.out("[SHEETS, OPENED]")).toEqual([[["earn", { variant: "earn", venue: "ex" }], ["sellmany", { tile: "sellmany" }]], []]);
   });
 });
 
@@ -200,7 +353,7 @@ describe("closing a position, from whichever pane", () => {
   const POS = { venue: "ex", venueName: "Exchange", symbol: "BTC/USDT:USDT", name: "BTC perpetual", kind: "perp", side: "long", qty: 0.5, usd: 31000, markPrice: 62000, unrealizedUsd: 120 };
   const prep = (close?: Record<string, unknown>) => ({ action: { type: "liveClose", venue: "ex", symbol: "BTC/USDT:USDT", qty: "" }, quote: { words: "close", ...(close ? { close } : {}) } });
 
-  it("says what the prepared close is worth at the worst price it may fill at, and refuses one over the cap before the sign button — with a part that fits one click away", () => {
+  it("says what the prepared close is worth at the worst price it may fill at, and refuses one over the cap before the sign button — with a part that fits one click away; inside the cap, no standing cap sentence", () => {
     const p = page();
     p.set("A", pageOf([EX]));
     p.run("var QD = null; quoteDialog = (o) => { QD = o; return { form: { addEventListener() {}, elements: {} }, requote() {} }; }");
@@ -219,10 +372,10 @@ describe("closing a position, from whichever pane", () => {
     expect(p.run(`QD.block(${JSON.stringify(over)})`)).toBe("Worth about $30,900.00: more than the $250.00 one order may be on this server, so the account would refuse it. Close part of it.");
     // in the account's own words, where it gave them
     expect(p.run(`QD.block(${JSON.stringify(prep({ worthUsd: 30900, capUsd: 250, overCap: true, side: "sell", qty: 0.5, why: "$30,900.00 is more than the most one order may be on this server ($250.00): close part of it, or start the server with a higher --live-cap" }))})`)).toBe("$30,900.00 is more than the most one order may be on this server ($250.00): close part of it, or start the server with a higher --live-cap.");
-    // inside the cap: nothing refused, the cap said
+    // inside the cap: nothing refused, and the cap not said (it belongs to the block message and Settings)
     const inside = prep({ worthUsd: 198.2, capUsd: 250, overCap: false, side: "sell", qty: 0.0032, worstPrice: 61500 });
     expect(p.run(`QD.block(${JSON.stringify(inside)})`)).toBe("");
-    expect(p.run<string>(`QD.show(${JSON.stringify(inside)})`)).toContain("Up to $250.00 an order on this server.");
+    expect(p.run<string>(`QD.show(${JSON.stringify(inside)})`)).not.toContain("$250.00");
     // a short is bought back
     expect(p.run<string>(`QD.show(${JSON.stringify(prep({ worthUsd: 100, capUsd: 250, overCap: false, side: "buy", qty: 1, worstPrice: 101 }))})`)).toContain("Buy back 1");
     // an account that does not say what a close is worth: shown as before, and nothing refused here (the door still holds it to the cap)
@@ -241,24 +394,23 @@ describe("closing a position, from whichever pane", () => {
     expect(p.run<string>(`QD.show(${JSON.stringify(prep({ worthUsd: 540, capUsd: 250, overCap: true, side: "sell", qty: 900, worstPrice: 0.6 }))})`)).toContain('data-close-part="408"');
   });
 
-  it("is the one close every pane opens: the Portfolio's and the Asset drawer's go through it, and the sheet holds the sign button off while a refusal stands", () => {
-    const src = (f: string) => readFileSync(join(PUBLIC, `ui/${f}`), "utf8");
-    expect(src("portfolio.js")).toContain("if (p && typeof openClose === \"function\") openClose(p);");
-    expect(src("asset.js")).toContain("if (p && typeof openClose === \"function\") openClose(p);");
-    expect(src("trade.js")).toContain("b.addEventListener(\"click\", () => openClose(rows.find(");
-    const core = src("core.js");
+  it("is the one close every pane opens: Portfolio's and the market drawer's go through it, and the sheet holds the sign button off while a refusal stands", () => {
+    expect(source("ui/portfolio.js")).toContain("if (p && typeof openClose === \"function\") openClose(p);");
+    // the one drawer (markets.js; asset.js opens it by key) closes through the same door
+    expect(source("ui/markets.js") + source("ui/asset.js")).toMatch(/typeof openClose === "function"/);
+    const core = source("ui/core.js");
     expect(core).toContain("btn.disabled = !owns() || !!no;");
     expect(core).toContain("if (!prepared || busy || !stop.hidden) return;");
   });
 });
 
 describe("a ticket kept in this browser", () => {
-  const DRAFT = { variant: "trade", venue: "ex", venueName: "Exchange", symbol: "BTC/USDT", side: "buy", kind: "coin", key: "coin:BTC", base: "BTC", name: "Bitcoin", amount: "25", unit: "usd", orderType: "limit", limitPrice: "60000" };
+  const DRAFT = { kind: "crypto", venue: "ex", venueName: "Exchange", symbol: "BTC/USDT", side: "buy", key: "coin:BTC", base: "BTC", name: "Bitcoin", amount: "25", unit: "usd", orderType: "limit", limitPrice: "60000" };
   const kept = () => {
     const p = page();
     p.set("A", pageOf([EX, PRED]));
     p.run("var STORE = {}; localStorage.getItem = (k) => (k in STORE ? STORE[k] : null); localStorage.setItem = (k, v) => { STORE[k] = String(v); }; localStorage.removeItem = (k) => { delete STORE[k]; }");
-    p.run('var OPENED = []; tkOpen = (preset) => OPENED.push(preset); var ASKED = []; var MARKET = { ok: true, market: { symbol: "BTC/USDT", open: true } }; api = async (path) => { ASKED.push(path); return MARKET; }; TK.mode = "self"');
+    p.run('var OPENED = []; tkOpen = (preset) => OPENED.push(preset); var ASKED = []; var MARKET = { ok: true, market: { symbol: "BTC/USDT", open: true } }; api = async (path) => { ASKED.push(path); return MARKET; }');
     return p;
   };
   const again = async (p: ReturnType<typeof page>) => {
@@ -266,16 +418,21 @@ describe("a ticket kept in this browser", () => {
     await p.run("tkReopenDraft()");
   };
 
-  it("opens again, at rest, while its venue is connected and still lists its market", async () => {
+  it("opens again, at rest and on its kind, while its venue is connected and still lists its market", async () => {
     const p = kept();
     p.run(`tkDraftKeep(${JSON.stringify(DRAFT)})`);
     expect(p.out("Object.keys(JSON.parse(STORE['account.ticket'])).sort()")).toEqual([...Object.keys(DRAFT), "at"].sort());
     await again(p);
     expect(p.out("ASKED")).toEqual(["/api/account/market?venue=ex&symbol=BTC%2FUSDT"]);
     expect(p.out("OPENED")).toEqual([{ ...DRAFT, rest: true }]);
+    expect(p.run("TK.kind")).toBe("crypto");
     // looked at once a visit
     await p.run("tkReopenDraft()");
     expect(p.out("OPENED.length")).toBe(1);
+    // a draft of the page before this one named a ticket variant: it opens on the kind that variant was
+    p.run(`OPENED = []; STORE['account.ticket'] = JSON.stringify({ ...${JSON.stringify({ ...DRAFT, kind: undefined, variant: "perps", symbol: "ETH/USDT:USDT" })}, at: Date.now() })`);
+    await again(p);
+    expect(p.out("OPENED[0].kind")).toBe("perps");
   });
 
   it("is dropped without a word when its venue is gone, its market is gone, it is a day old, or it was never a ticket", async () => {
@@ -295,19 +452,25 @@ describe("a ticket kept in this browser", () => {
     p.run('MARKET = { ok: true, market: { symbol: "BTC/USDT" } }');
     // a day old
     expect(await dropped("STORE['account.ticket'] = JSON.stringify({ ...JSON.parse(STORE['account.ticket']), at: Date.now() - 25 * 3600000 })")).toEqual([0, false]);
-    // not a ticket the page keeps
-    expect(await dropped(`STORE['account.ticket'] = JSON.stringify({ ...${JSON.stringify(DRAFT)}, variant: "earn", at: Date.now() })`)).toEqual([0, false]);
+    // not a ticket the page keeps: an earn draft of the page before this one, no kind at all, not JSON
+    expect(await dropped(`STORE['account.ticket'] = JSON.stringify({ ...${JSON.stringify({ ...DRAFT, kind: undefined })}, variant: "earn", at: Date.now() })`)).toEqual([0, false]);
+    expect(await dropped(`STORE['account.ticket'] = JSON.stringify({ ...${JSON.stringify({ ...DRAFT, kind: "nothing" })}, at: Date.now() })`)).toEqual([0, false]);
     expect(await dropped("STORE['account.ticket'] = '{not json'")).toEqual([0, false]);
   });
 
-  it("gives way to a ticket opened meanwhile, and is kept for later; storage that is off opens nothing and breaks nothing", async () => {
+  it("gives way to a ticket opened meanwhile, and is kept for later; storage that is off opens nothing and breaks nothing; the markets picked are remembered per kind", async () => {
     const p = kept();
     p.run(`tkDraftKeep(${JSON.stringify(DRAFT)}); api = async (path) => { TK.gen++; return MARKET; }`);
     await again(p);
     expect([p.out("OPENED.length"), p.out("'account.ticket' in STORE")]).toEqual([0, true]);
+    // Recent: the last markets picked, per kind, newest first, one entry a market
+    p.run('tkRecentAdd({ kind: "crypto", key: "coin:BTC", name: "Bitcoin", base: "BTC", venue: "ex", venueName: "Exchange", symbol: "BTC/USDT" }); tkRecentAdd({ kind: "perps", key: "perp:ETH", name: "ETH perpetual", base: "ETH", venue: "ex", venueName: "Exchange", symbol: "ETH/USDT:USDT" }); tkRecentAdd({ kind: "crypto", key: "coin:SOL", name: "Solana", base: "SOL", venue: "ex", venueName: "Exchange", symbol: "SOL/USDT" }); tkRecentAdd({ kind: "crypto", key: "coin:BTC", name: "Bitcoin", base: "BTC", venue: "ex", venueName: "Exchange", symbol: "BTC/USDT" })');
+    expect(p.out('tkRecent("crypto").map((r) => r.symbol)')).toEqual(["BTC/USDT", "SOL/USDT"]);
+    expect(p.out('tkRecent("perps").map((r) => r.symbol)')).toEqual(["ETH/USDT:USDT"]);
     p.run("localStorage.getItem = () => { throw new Error('storage is off'); }; localStorage.removeItem = () => { throw new Error('storage is off'); }");
     await again(p);
     expect(p.out("OPENED.length")).toBe(0);
+    expect(p.out('tkRecent("crypto")')).toEqual([]);
   });
 });
 
@@ -354,12 +517,27 @@ describe("the same drafts through the real account's door, on the stand-in accou
     await s?.close();
   });
 
-  it("gives the tiles the stand-in's venues really offer", async () => {
+  it("shows the kinds the stand-in's venues and public listings really have, each kind's rows read as the picker reads them", async () => {
     const { body } = await get("/api/account");
     p.set("A", body);
-    // Earn too, where a stand-in venue offers earn products
-    const earns = body.venues.some((v: { live?: boolean; earn?: unknown }) => v.live && v.earn);
-    expect(p.out<Array<{ id: string }>>("tkTilesFor(connected())").map((t) => t.id)).toEqual(["trade", "swap", "perps", "predictions", "sellmany", "move", ...(earns ? ["earn"] : [])]);
+    const got: Record<string, unknown> = {};
+    for (const kind of ["crypto", "stocks", "rwas", "perps", "preipo", "predictions"]) {
+      const r = await get(`/api/account/explore?tab=${kind}&limit=12`);
+      // a kind this server does not know yet answers with a refusal: the picker reads it as an empty list, without a toast
+      got[kind] = { at: Date.now(), items: r.status === 200 ? r.body.items : [], missing: [] };
+    }
+    const kinds = p.out<string[]>(`tkKindsFor(connected(), ${JSON.stringify(got)}, lensNow())`);
+    for (const k of ["crypto", "perps", "predictions"]) expect(kinds).toContain(k);
+    // the Pre-IPO face lists the company's row — its implied valuation, the stand-in venue's Trade and the public venue's Connect to trade
+    const pre = (got.preipo as { items: Array<Record<string, any>> }).items.filter((x) => p.run(`tkPre(${JSON.stringify(x)})`));
+    if (pre.length) {
+      expect(kinds).toContain("preipo");
+      const rows = p.out<Array<{ state: string; implied?: { usd: number } }>>(`tkWhereRows(${JSON.stringify(pre[0])}, null, "preipo")`);
+      expect(rows.some((r) => r.state === "able")).toBe(true);
+      expect(p.run<string>(`tkKindBlock("preipo", null, null, ${JSON.stringify(pre[0])}, {})`)).toContain("Implied valuation ≈");
+      // a pre-IPO row never shows under Perps
+      expect((got.perps as { items: Array<{ key: string }> }).items.some((x) => x.key === pre[0]!.key)).toBe(false);
+    }
   });
 
   it("places the ticket's order — an event contract's limit typed in cents rests at the venue at that price", async () => {
@@ -369,9 +547,9 @@ describe("the same drafts through the real account's door, on the stand-in accou
     expect(r.body.order).toMatchObject({ venue: "predict", symbol: "SI-FEDCUT-DEC:NO", type: "limit", limitPrice: 0.3, status: "open" });
   });
 
-  it("swaps a coin for a coin in two signatures: the sale, then the buy sized by what the sale brought", async () => {
+  it("pays with a coin held in two signatures: the sale, then the buy sized by what the sale brought", async () => {
     const markets = (await get("/api/account/markets?venue=ex&q=")).body.markets;
-    const plan = p.out<any>(`tkSwapPlan(${JSON.stringify({ venue: "ex", from: "BTC", to: "SOL", amount: "0.001", markets, stableSwap: true })})`);
+    const plan = p.out<any>(`tkSwapPlan(${JSON.stringify({ venue: "ex", from: "BTC", to: "SOL", amount: "0.001", markets })})`);
     expect(plan.mode).toBe("two");
     const sold = await act(plan.legs[0]);
     expect(sold.body.order).toMatchObject({ side: "sell", status: "filled" });
@@ -380,17 +558,6 @@ describe("the same drafts through the real account's door, on the stand-in accou
     const bought = await act({ ...plan.legs[1], usd: String(usd) });
     expect(bought.body.order).toMatchObject({ symbol: "SOL/USDT", side: "buy", status: "filled" });
     expect(bought.body.order.qty * bought.body.order.avgPrice).toBeLessThanOrEqual(usd + 0.01);
-    // and a stablecoin for another, by the exchange's own convert
-    const convert = p.out<any>(`tkSwapPlan(${JSON.stringify({ venue: "ex", from: "USDC", to: "USDT", amount: "20", markets, stableSwap: true })})`);
-    expect((await act(convert.legs[0])).status).toBe(200);
-  });
-
-  it("sells many: each leg Sell many drafts is one signature — a spot sale and a perpetual's close", async () => {
-    const { body } = await get("/api/account/sellable");
-    const eth = body.items.find((x: { venue: string; asset: string; action: string }) => x.venue === "ex" && x.asset === "ETH" && x.action === "sell");
-    const perp = body.items.find((x: { action: string; symbol: string }) => x.action === "close" && x.symbol === "ETH/USDT:USDT");
-    expect((await act(p.out(`tkSellDraft(${JSON.stringify(eth)}, "0.01")`))).body.order).toMatchObject({ side: "sell", qty: 0.01 });
-    expect((await act(p.out(`tkSellDraft(${JSON.stringify(perp)}, "")`))).body.order).toMatchObject({ symbol: "ETH/USDT:USDT", side: "sell" });
   });
 
   it("prepares a position's close at the door and reads it as the close sheet does: its worth against this server's cap, or as before on an account that does not say", async () => {
@@ -447,7 +614,7 @@ describe("the same drafts through the real account's door, on the stand-in accou
     a = await read();
     expect(a.intents.some((x: { id: string }) => x.id === it0.id)).toBe(false);
     expect(a.spend.filter((x: { scope: string; agent: string }) => x.scope === "trade" && x.agent === s.agent.address)).toEqual([]);
-    // even in Aggressive the agent now places nothing: its authority ended with the words
+    // even in Beast the agent now places nothing: its authority ended with the words
     expect((await act({ type: "setPolicy", change: "mode", value: "open" })).status).toBe(200);
     const order = await s.svc.exchange(await signAgent(s.agent, { type: "agentLiveOrder", venue: "ex", symbol: "SOL/USDT", side: "buy", orderType: "market", qty: "", usd: "50", limitPrice: "", nonce: Date.now() } as AgentAction));
     expect((order as { code?: string }).code).toBe("E_MANDATE_NONE");

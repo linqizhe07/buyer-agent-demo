@@ -48,7 +48,7 @@ import { CHAIN_BY_ID, CHAINS, STABLECOINS, type ChainName } from "./chain.ts";
 import { known as knownFigure, once, type EarnPosition, type EarnProduct, type EarnSource, type EarnState, type LiveEarner } from "./earn.ts";
 import type { Price } from "./prices.ts";
 import { badOrder, ceilTo, DONE, floorTo, inDollars, onStep, pick, plain, type LiveTrader, type Market, type MarketKind, type OrderRequest, type OrderState, type OrderStatus, type Position, type TimeInForce } from "./trade.ts";
-import { isStable, num, redact, REGION, type LiveBalance, type LiveSource } from "./types.ts";
+import { asRefusal, isStable, num, redact, REGION, type LiveBalance, type LiveSource } from "./types.ts";
 import { mmWriter } from "./writes.ts";
 
 /** one mm command, its `data` back; a failure throws mm's own error. A write asks for a longer wait than a read */
@@ -644,7 +644,7 @@ export function mmTrader(d: MmTraderDeps): LiveTrader & { kinds: MarketKind[] } 
     try {
       data = await call(args, SWAPS, `read swap ${short(r.quoteId)}`, "track");
     } catch (e) {
-      return e as Refusal;
+      return isRefusal(e) ? e : asRefusal(venue, "MetaMask", e);
     }
     const x = obj(data);
     const st = str(x?.status).toUpperCase();
@@ -688,7 +688,7 @@ export function mmTrader(d: MmTraderDeps): LiveTrader & { kinds: MarketKind[] } 
     try {
       data = await call(args, "MetaMask", `read wallet request ${pollingId}`, "track");
     } catch (e) {
-      return e as Refusal;
+      return isRefusal(e) ? e : asRefusal(venue, "MetaMask", e);
     }
     const job = arr(obj(data)?.requests)
       .map(obj)
@@ -745,7 +745,7 @@ export function mmTrader(d: MmTraderDeps): LiveTrader & { kinds: MarketKind[] } 
     try {
       data = await call(args, PM, `look up ${key}`, "order");
     } catch (e) {
-      return e as Refusal;
+      return isRefusal(e) ? e : asRefusal(venue, "MetaMask", e);
     }
     const m = obj(obj(obj(data)?.result)?.market);
     if (!m) return unread(PM, args);
@@ -762,7 +762,7 @@ export function mmTrader(d: MmTraderDeps): LiveTrader & { kinds: MarketKind[] } 
     try {
       data = await call(args, PM, `read the book of ${short(tokenId)}`, "order");
     } catch (e) {
-      return e as Refusal;
+      return isRefusal(e) ? e : asRefusal(venue, "MetaMask", e);
     }
     const b = obj(obj(obj(data)?.result)?.book);
     if (!b) return unread(PM, args);
@@ -818,7 +818,7 @@ export function mmTrader(d: MmTraderDeps): LiveTrader & { kinds: MarketKind[] } 
     try {
       data = await call(args, PM, "say whether it serves this location", "order");
     } catch (e) {
-      return e as Refusal;
+      return isRefusal(e) ? e : asRefusal(venue, "MetaMask", e);
     }
     const g = obj(obj(data)?.result) ?? obj(data);
     // the IP mm reports is left out of everything kept
@@ -876,7 +876,7 @@ export function mmTrader(d: MmTraderDeps): LiveTrader & { kinds: MarketKind[] } 
     try {
       data = await call(args, PM, `${o.side} ${plain(o.qty)} ${m.base} shares in ${m.name}`, "order", { timeoutMs: MM_WRITE_TIMEOUT_MS });
     } catch (e) {
-      return e as Refusal;
+      return isRefusal(e) ? e : asRefusal(venue, "MetaMask", e);
     }
     const res = obj(obj(obj(data)?.result)?.response);
     // an ok envelope is not acceptance: Polymarket can answer 200 with success false and its reason
@@ -925,7 +925,7 @@ export function mmTrader(d: MmTraderDeps): LiveTrader & { kinds: MarketKind[] } 
     try {
       data = await call(args, PM, `list the open orders in ${short(cid)}`, "track");
     } catch (e) {
-      return e as Refusal;
+      return isRefusal(e) ? e : asRefusal(venue, "MetaMask", e);
     }
     const orders = arr(obj(obj(data)?.result)?.orders).map(obj);
     const o = orders.find((x) => str(x?.id) === ref);
@@ -948,7 +948,7 @@ export function mmTrader(d: MmTraderDeps): LiveTrader & { kinds: MarketKind[] } 
     try {
       data = await call(args, PM, `cancel ${short(ref)}`, "track");
     } catch (e) {
-      return e as Refusal;
+      return isRefusal(e) ? e : asRefusal(venue, "MetaMask", e);
     }
     const resp = obj(obj(obj(data)?.result)?.response);
     const canceled = arr(resp?.canceled).map(str);
@@ -1062,7 +1062,7 @@ export function mmTrader(d: MmTraderDeps): LiveTrader & { kinds: MarketKind[] } 
     try {
       data = await call(args, HL, "list its perpetuals", "order");
     } catch (e) {
-      return e as Refusal;
+      return isRefusal(e) ? e : asRefusal(venue, "MetaMask", e);
     }
     if (!Array.isArray(data)) return unread(HL, args);
     perpList = { at: now(), rows: data.map((x) => obj(x)).filter((x): x is Record<string, unknown> => x !== undefined) };
@@ -1078,7 +1078,7 @@ export function mmTrader(d: MmTraderDeps): LiveTrader & { kinds: MarketKind[] } 
     try {
       data = await call(args, HL, `read ${coin}`, "order");
     } catch (e) {
-      return e as Refusal;
+      return isRefusal(e) ? e : asRefusal(venue, "MetaMask", e);
     }
     const row = arr(data).map(obj).find((r) => r && same(str(r.symbol), coin));
     const got = row ? perpOf(row) : undefined;
@@ -1181,7 +1181,7 @@ export function mmTrader(d: MmTraderDeps): LiveTrader & { kinds: MarketKind[] } 
     try {
       data = await call(args, HL, `${o.side} ${plain(o.qty)} ${spot.coin}`, "order", { timeoutMs: MM_WRITE_TIMEOUT_MS });
     } catch (e) {
-      return e as Refusal;
+      return isRefusal(e) ? e : asRefusal(venue, "MetaMask", e);
     }
     return perpState(obj(data), args, o.qty, `${o.side} ${plain(o.qty)} ${spot.coin}`, o.clientId);
   }
@@ -1194,7 +1194,7 @@ export function mmTrader(d: MmTraderDeps): LiveTrader & { kinds: MarketKind[] } 
     try {
       data = await call(args, HL, "list what the Hyperliquid account holds", "order");
     } catch (e) {
-      return e as Refusal;
+      return isRefusal(e) ? e : asRefusal(venue, "MetaMask", e);
     }
     if (!Array.isArray(data)) return unread(HL, args);
     return data.map((x) => obj(x)).filter((x): x is Record<string, unknown> => x !== undefined);
@@ -1224,7 +1224,7 @@ export function mmTrader(d: MmTraderDeps): LiveTrader & { kinds: MarketKind[] } 
     try {
       data = await call(args, HL, "list the resting orders", "track");
     } catch (e) {
-      return e as Refusal;
+      return isRefusal(e) ? e : asRefusal(venue, "MetaMask", e);
     }
     const o = arr(data).map(obj).find((x) => str(x?.orderId) === ref);
     if (!o) return no("E_ACCOUNT_ORDER_UNKNOWN", { venue, message: `${HL} no longer lists ${ref} among the resting orders, and mm has no call that says whether it filled or was canceled: mm perps positions shows what is held`, native: { command: cmd(args), coin } });
@@ -1244,7 +1244,7 @@ export function mmTrader(d: MmTraderDeps): LiveTrader & { kinds: MarketKind[] } 
     try {
       data = await call(args, HL, `cancel ${ref}`, "track");
     } catch (e) {
-      return e as Refusal;
+      return isRefusal(e) ? e : asRefusal(venue, "MetaMask", e);
     }
     const r = obj(data);
     if (r?.ok === true) return { ...before, status: "canceled", native: { command: cmd(args), answer: { orderId: str(r.orderId), ok: true }, before: before.native } };
@@ -1270,7 +1270,7 @@ export function mmTrader(d: MmTraderDeps): LiveTrader & { kinds: MarketKind[] } 
     try {
       data = await call(args, HL, `close ${plain(qty)} ${coin}`, "order", { timeoutMs: MM_WRITE_TIMEOUT_MS });
     } catch (e) {
-      return e as Refusal;
+      return isRefusal(e) ? e : asRefusal(venue, "MetaMask", e);
     }
     const row = arr(data).map(obj).find((r) => r && same(str(r.symbol), coin));
     return perpState(row, args, all ? have : qty, `close ${plain(qty)} ${coin}`, clientId);
@@ -1320,7 +1320,7 @@ export function mmTrader(d: MmTraderDeps): LiveTrader & { kinds: MarketKind[] } 
     try {
       data = await call(args, "MetaMask", "list its chains", "order");
     } catch (e) {
-      return e as Refusal;
+      return isRefusal(e) ? e : asRefusal(venue, "MetaMask", e);
     }
     const ids = new Set(
       arr(obj(data)?.chains)
@@ -1439,7 +1439,7 @@ export function mmTrader(d: MmTraderDeps): LiveTrader & { kinds: MarketKind[] } 
       try {
         data = await call(args, HL, `set ${spot.coin} to ${leverage}x`, "order", { timeoutMs: MM_WRITE_TIMEOUT_MS });
       } catch (e) {
-        return e as Refusal;
+        return isRefusal(e) ? e : asRefusal(venue, "MetaMask", e);
       }
       const row = arr(data).map(obj).find((r) => r && same(str(r.symbol), spot.coin));
       if (!row || str(row.status).toLowerCase() === "rejected") return saidNo({ code: "ORDER_REJECTED", message: str(row?.error) || `${HL} did not take the leverage` }, HL, `set ${spot.coin} to ${leverage}x`, args, "order");
@@ -1469,7 +1469,7 @@ export function mmTrader(d: MmTraderDeps): LiveTrader & { kinds: MarketKind[] } 
       try {
         data = await call(args, PM, "list its events", "order");
       } catch (e) {
-        return e as Refusal;
+        return isRefusal(e) ? e : asRefusal(venue, "MetaMask", e);
       }
       const events = obj(obj(data)?.result)?.events;
       if (!Array.isArray(events)) return unread(PM, args);
@@ -1580,7 +1580,7 @@ export function mmEarner(d: MmEarnerDeps): LiveEarner {
     try {
       data = await call(args, EARN, "list its vaults", "order");
     } catch (e) {
-      return e as Refusal;
+      return isRefusal(e) ? e : asRefusal(venue, "MetaMask", e);
     }
     if (!Array.isArray(data)) return unread(EARN, args);
     const rows = data.map((x) => obj(x)).filter((x): x is Record<string, unknown> => x !== undefined);
@@ -1596,7 +1596,7 @@ export function mmEarner(d: MmEarnerDeps): LiveEarner {
     try {
       data = await call(args, EARN, "list what the wallet holds in vaults", "order");
     } catch (e) {
-      return e as Refusal;
+      return isRefusal(e) ? e : asRefusal(venue, "MetaMask", e);
     }
     if (!Array.isArray(data)) return unread(EARN, args);
     return data.map((x) => obj(x)).filter((x): x is Record<string, unknown> => x !== undefined);
@@ -1713,7 +1713,7 @@ export function mmEarner(d: MmEarnerDeps): LiveEarner {
       try {
         data = await call(args, "MetaMask", `read wallet request ${job}`, "track");
       } catch (e) {
-        return e as Refusal;
+        return isRefusal(e) ? e : asRefusal(venue, "MetaMask", e);
       }
       const j = arr(obj(data)?.requests)
         .map(obj)

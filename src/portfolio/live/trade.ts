@@ -24,7 +24,7 @@
  */
 import type { Refusal } from "../../core/errors.ts";
 import { no } from "../refuse.ts";
-import { isStable } from "./types.ts";
+import { isStable, type MarginMode } from "./types.ts";
 
 export type Side = "buy" | "sell";
 /** market · limit · stop (a market order once the price reaches `stopPrice`) · stop_limit (a limit order at `limitPrice` once it does) */
@@ -39,6 +39,10 @@ export interface Market {
   /** the account's name for it — what the owner and an agent type: `BTC/USDT` at an exchange, `AAPL` at a broker, `BTC-USD` at Robinhood
    * Crypto, `KXFED-25DEC-T4.00:YES` at Kalshi, `<token id>` or `<slug>:<outcome>` at Polymarket, `WETH/USDC@Base` from a wallet */
   symbol: string;
+  /** a perpetual's margin modes the venue lets be set from here (none listed: the venue sets none per market, so the page offers none) */
+  marginModes?: MarginMode[] | undefined;
+  /** where the 24-hour figures came from when they are not the venue's own documented reading (an exchange library's unified ticker) */
+  statsFrom?: string | undefined;
   /** in words */
   name: string;
   kind: MarketKind;
@@ -90,7 +94,8 @@ export interface Market {
   /** the venue's own category for it, in its own words ("Economics", "Sports", "Crypto") */
   category?: string | undefined;
   /** an event contract's question, which its outcomes share — the venue's id for it (Kalshi's market ticker, Polymarket's condition id) and
-   * the question in words — and which outcome this market is ("YES", "NO", a candidate's name) */
+   * the question in words — and which outcome this market is ("YES", "NO", a candidate's name). A pre-IPO perpetual's company instead:
+   * `preipo:<slug>` and the company's name (live/preipo.ts), which its contracts at every venue share */
   group?: { id: string; title: string } | undefined;
   outcome?: string | undefined;
   /** a perpetual's funding rate per interval (0.0001 = 0.01%) and when it is next paid, ISO 8601 */
@@ -100,6 +105,12 @@ export interface Market {
    * the issuer's own words (dex.ts carries them; a venue that says nothing of it leaves them out) */
   issuer?: string | undefined;
   eligibility?: string | undefined;
+  /** a PRE-IPO PERPETUAL (category "Pre-IPO", live/preipo.ts): a contract on the venue's estimate of a private company's valuation, not a
+   * share. The venue prices it in a unit of its own — $1 of price for $1,000,000,000 of implied valuation at every venue and instrument but
+   * OKX's ANTHROPIC and OPENAI swaps, $10,000,000,000 there since its 10:1 rebase of 30 June 2026 — so `perPoint` is the dollars of valuation
+   * one dollar of price stands for, `unit` that rule in words, and `usd` the valuation the price implies now (price × perPoint), where a
+   * price is known (a listing's always; a trader's start-from list carries none until the market is read) */
+  implied?: { perPoint: number; unit: string; usd?: number | undefined } | undefined;
 }
 
 /** a market's last 24 hours, as the venue reports it */
@@ -110,6 +121,8 @@ export interface MarketStats {
   volumeUsd24h?: number | undefined;
   high24h?: number | undefined;
   low24h?: number | undefined;
+  /** where these figures came from when not the venue's own documented reading (see Market.statsFrom) */
+  statsFrom?: string | undefined;
 }
 
 export type CandleInterval = "5m" | "1h" | "1d";
@@ -196,7 +209,8 @@ export interface LiveTrader {
   /** the kinds of market traded here, where the trader says them itself (the mm trader: tokens, event contracts, perpetuals); absent: the
    * account reads them from the connector the owner signed (accounts.ts tradeKinds) */
   kinds?: MarketKind[] | undefined;
-  /** a few markets to start from (query empty), or the ones matching a query; at most 20 */
+  /** a few markets to start from (query empty), or the ones matching a query; about 20 — an exchange's start-from list carries its pre-IPO
+   * perpetuals too, after the well-known markets, so that Markets groups them with the public venues' (exchange-trade.ts) */
   markets(query: string): Promise<Market[] | Refusal>;
   /** one market, with a fresh price */
   market(symbol: string): Promise<Market | Refusal>;

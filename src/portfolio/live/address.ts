@@ -101,7 +101,9 @@ export async function hyperliquidSource(req: AddressRequest): Promise<Opened> {
   };
   try {
     const first = await read();
-    const source: LiveSource = { name, kind: "perp", reference: address, via: "Hyperliquid info API · by address", address, readOnlyBecause: "Hyperliquid moves money only on a signature by the account's own key, and it does not serve this location: it is read, never written", noTradeBecause: "Hyperliquid does not serve this location, and it has no check the account could ask first: no order is placed there from here", probe: probeOf(req, "the perps account value and the spot balances are two ledgers, reported as the venue reports them", { calls: ["POST /info clearinghouseState", "POST /info spotClearinghouseState"], user: address }), read };
+    // what is asked here is two balances, nothing about where this machine is: Hyperliquid's own rule about that (its Terms of Use §1.6) is
+    // checked where orders are placed, by the MetaMask Agent Wallet's mm perps (metamask.ts), not asserted here
+    const source: LiveSource = { name, kind: "perp", reference: address, via: "Hyperliquid info API · by address", address, readOnlyBecause: "Hyperliquid moves money only on a signature by the account's own key: connected by its address, it is read, never written", noTradeBecause: "connected by its address, it is only read: perpetuals are placed through the MetaMask Agent Wallet's mm perps, after Hyperliquid's own rule (Terms of Use §1.6) is checked for this machine", probe: probeOf(req, "the perps account value and the spot balances are two ledgers, reported as the venue reports them", { calls: ["POST /info clearinghouseState", "POST /info spotClearinghouseState"], user: address }), read };
     return { source, first };
   } catch (err) {
     return asRefusal(req.venue, name, err);
@@ -152,7 +154,9 @@ export async function polymarketSource(req: AddressRequest): Promise<Opened> {
   };
   try {
     const first = await read();
-    const source: LiveSource = { name, kind: "prediction", reference: address, via: "Polymarket Data API · by address", address, readOnlyBecause: "money goes in and out of Polymarket at Polymarket", noTradeBecause: "connected by its address, it is only read: to trade, connect Polymarket with the account wallet's key (Polymarket's own location check comes first)", probe: probeOf(req, `the address is the account wallet Polymarket shows in the profile menu, not the key that signs for it${cashUnread ? " · the cash could not be read from Polygon this time" : ""}`, { calls: ["GET /v2/positions?user=", "balanceOf pUSD on Polygon"], user: address }), read };
+    // a pasted address is watched, not proven the user's, so the account gives no address to send money to; connected with the key that signs
+    // for the wallet (polymarket-clob.ts), the same wallet receives pUSD on Polygon and the bridge's deposits
+    const source: LiveSource = { name, kind: "prediction", reference: address, via: "Polymarket Data API · by address", address, readOnlyBecause: "connected by its address it is watched, not proven yours, so the account shows no address to send money to; money leaves Polymarket at Polymarket. Connect Polymarket with the key that signs for the wallet, and it receives pUSD on Polygon and Polymarket's bridge deposits", noTradeBecause: "connected by its address, it is only read: to trade, connect Polymarket with the account wallet's key (Polymarket's own location check comes first)", probe: probeOf(req, `the address is the account wallet Polymarket shows in the profile menu, not the key that signs for it${cashUnread ? " · the cash could not be read from Polygon this time" : ""}`, { calls: ["GET /v2/positions?user=", "balanceOf pUSD on Polygon"], user: address }), read };
     return { source, first };
   } catch (err) {
     return asRefusal(req.venue, name, err);

@@ -151,11 +151,16 @@ function asEvent(x: unknown): EventRow | undefined {
   return r as EventRow;
 }
 
-/** what is in the total and in no venue: money in flight, in escrow — counted as one more venue that is always there */
+/** What a point is made of, venue by venue, for the change: each venue's number, and what is in the total and in no venue (money in flight,
+ * in escrow) as one more venue that is always there. A venue whose number is STALE at the point is left out: its number is the last good
+ * one, not what it holds now, so nothing is read off it — the step into it counts nothing, and when it answers again it comes back as a
+ * venue that appeared (a connection, not a gain). Its stale number still leaves the remainder: it is in the total, and it is no one else's */
 const OTHER = "\u0000other";
 function parts(p: PointRow): Map<string, number> {
-  const m = new Map(Object.entries(p.byVenue).filter(([, v]) => finite(v)));
-  m.set(OTHER, p.usd - [...m.values()].reduce((s, v) => s + v, 0));
+  const stale = new Set(p.stale ?? []);
+  const all = Object.entries(p.byVenue).filter(([, v]) => finite(v));
+  const m = new Map(all.filter(([venue]) => !stale.has(venue)));
+  m.set(OTHER, p.usd - all.reduce((s, [, v]) => s + v, 0));
   return m;
 }
 

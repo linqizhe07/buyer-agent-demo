@@ -196,7 +196,7 @@ describe("an agent wallet", () => {
 });
 
 describe("an agent pays someone else, from its agent wallet", () => {
-  it("x402: Conservative asks the owner first; the owner's yes pays exactly what was shown, and the chain is what says it moved", async () => {
+  it("x402: Guard asks the owner first; the owner's yes pays exactly what was shown, and the chain is what says it moved", async () => {
     const x = await boot();
     await x.ok(x.own({ type: "approveSpend", agent: cc.address, scope: "payees", allow: "data.example.com", perPayment: "1", budget: "5", windowHours: 0, validUntil: START + 7 * DAY }));
     const first = await x.pay("https://data.example.com/v1/quote?symbol=NVDA");
@@ -214,11 +214,11 @@ describe("an agent pays someone else, from its agent wallet", () => {
     expect(x.svc.statement()[0]).toMatchObject({ kind: "pay", type: "transfer", accountName: "Agent wallet · research", status: "settled", amountUsd: 0.01 });
   });
 
-  it("Aggressive: a payee paid before is paid at once; a changed address, an overcharge, an unnamed host are refused, and the last is never asked", async () => {
+  it("Beast: a payee paid before is paid at once; a changed address, an overcharge, an unnamed host are refused, and the last is never asked", async () => {
     const x = await boot();
     await x.ok(x.own({ type: "approveSpend", agent: cc.address, scope: "payees", allow: "data.example.com", perPayment: "1", budget: "5", windowHours: 0, validUntil: START + 7 * DAY }));
     await x.ok(x.own({ type: "setPolicy", change: "mode", value: "open" }));
-    // a first payment is still a card in Aggressive: the owner pins the payee's address once
+    // a first payment is still a card in Beast: the owner pins the payee's address once
     const first = await x.pay("https://data.example.com/v1/quote?symbol=A");
     expect(!isRefusal(first) && first.kind).toBe("card");
     if (!isRefusal(first) && first.kind === "card") await x.approve(first.card.id);
@@ -234,7 +234,7 @@ describe("an agent pays someone else, from its agent wallet", () => {
     expect(x.payees.p.asked.length).toBe(before);
   });
 
-  it("any payee, when the owner signed `*`: Aggressive pays a new host without a card and pins its address; the agent wallet bounds it", async () => {
+  it("any payee, when the owner signed `*`: Beast pays a new host without a card and pins its address; the agent wallet bounds it", async () => {
     const x = await boot();
     await x.ok(x.own({ type: "approveSpend", agent: cc.address, scope: "payees", allow: "*", perPayment: "1", budget: "5", windowHours: 0, validUntil: START + 7 * DAY }));
     await x.ok(x.own({ type: "setPolicy", change: "mode", value: "open" }));
@@ -287,7 +287,7 @@ describe("after a restart", () => {
     expect([y.wallet, y.svc.restored?.venues]).toEqual([x.wallet, []]);
     expect([y.limit().spentMicro, y.limit().payTo]).toEqual([10_000, { "data.example.com": PAYEE.toLowerCase() }]);
     expect((await y.svc.accountView())!.venues.map((v) => v.id)).toEqual(["agent-research"]);
-    // paid before, Aggressive: no card this time either
+    // paid before, Beast: no card this time either
     expect(paid(await y.pay("https://data.example.com/v1/quote?symbol=B")).data).toEqual({ symbol: "B", price: 150.12 });
     expect(y.limit().spentMicro).toBe(20_000);
   });

@@ -49,13 +49,18 @@ import { LiveMoves, type LiveMoney } from "./live-moves.ts";
 import { LiveOrders, type CloseQuote, type LiveOrder, type OrderQuote } from "./live-orders.ts";
 import { LiveEarns, type EarnDesk, type EarnQuote, type LiveEarn } from "./live-earn.ts";
 import type { KeptAuthorisation } from "./pay-real.ts";
+import { CARD_TTL_MS, modeRules, type ModeRule } from "./mode-rules.ts";
 import { activeAgents, agentStatus, applyOwner, applyReport, ASK_TTL_MS, askProblem, ASKS_PER_AGENT, ASKS_PER_HOUR, cleanName, covers, deviceKeys, EARN_NAMES, emptyState, isOwner, MAX_ASKS, nameHolder, refsOf, spendFor, type AccountState, type AgentKey, type AgentReport, type AskKind, type OwnerKey, type SpendApproval, type SubAccount } from "./state.ts";
 
 const HUB = "metamask";
 /** devices that have asked to sign and wait for an owner, at most, at one time */
 const MAX_PENDING_DEVICES = 10;
 const STABLE = new Set(["USD", "USDC", "USDT", "pUSD"]);
-export const CARD_TTL_MS = 30 * 60_000;
+/** how long a card waits for the owner: written once, in account/mode-rules.ts (the page and the agents read it from there) */
+export { CARD_TTL_MS };
+/** how long the answer to an instruction is kept for the same envelope again: the nonce window. An envelope older than that is refused as
+ * too old before the table is asked, so an entry past it is never read */
+const RESULTS_KEPT_MS = 2 * 86_400_000;
 /** what moves or holds only simulated money: routes between simulated venues, swaps and orders at them, floats, the address book, payees, app fees */
 const SIMULATED_ONLY = new Set(["sendAsset", "swap", "agentSendAsset", "agentSwap", "agentPay", "createSubAccount", "userSetAbstraction", "setDestination", "approveBuilderFee", "agentExecute", "agentOrder"]);
 /** what a real account with agent wallets also takes: an agent wallet, made by the owner's signature, and an agent's payment from one */
@@ -273,9 +278,12 @@ export class AccountEngine {
   /** orders placed at venues connected live, newest first */
   orders: LiveOrder[] = [];
   private orderSeq = 0;
-  private results = new Map<string, Outcome>();
+  /** the answer to each instruction taken, by its digest, for the nonce window: the same envelope again gets the same answer */
+  private results = new Map<string, { at: number; out: Outcome }>();
   /** instructions an earlier run of this account took, read back from its ledgers: none of them is taken again */
   private readonly taken = new Set<string>();
+  /** cards closed because nobody answered them in time (expireCards): an owner answering one late is told it expired, not that it is unknown */
+  private readonly expired = new Set<string>();
   private seq = 0;
   private payer: Payer | undefined;
   /** the door for REAL money at venues connected live (account/live-moves.ts) */
@@ -486,10 +494,11 @@ export class AccountEngine {
     }
 
     // The same instruction again: the first answer, and nothing runs twice. An owner's instruction is ONE instruction whoever of the owners
-    // signed first (two signatures changing places are not a new one); an agent's is its own.
+    // signed first (two signatures changing places are not a new one); an agent's is its own. Answers older than the nonce window are let go
     const key = isOwnerAction(action) ? `owner:${hash}` : `${signer}:${hash}`;
+    for (const [k, kept] of this.results) if (now - kept.at > RESULTS_KEPT_MS) this.results.delete(k);
     const seen = this.results.get(key);
-    if (seen) return seen;
+    if (seen) return seen.out;
     if (this.taken.has(key)) return this.refused(no("E_ACCOUNT_NONCE", { message: "an earlier run of this account already took this instruction: it is not taken twice", detail: { nonce: action.nonce, verdict: "used" } }), envelope, signer);
     if (signers.size < this.state.threshold && isOwnerAction(action)) return this.refused(no("E_ACCOUNT_THRESHOLD", { message: `this account needs ${this.state.threshold} signers; ${signers.size} signed`, detail: { threshold: this.state.threshold, signed: [...signers] } }), envelope, signer);
 
@@ -507,8 +516,8 @@ export class AccountEngine {
     // an order or a cancel is not kept waiting while the account asks other venues how their orders stand
     await this.settle(["liveCancel", "agentLiveCancel", "liveOrder", "agentLiveOrder"].includes(action.type));
     const out = await this.run(action, envelope, signer, agent, hash);
-    this.results.set(key, out);
-    if (!isRefusal(out) && isOwnerAction(action)) this.answered(action);
+    this.results.set(key, { at: now, out });
+    if (!isRefusal(out) && isOwnerAction(action)) this.answered(action, envelope);
     if (isRefusal(out)) this.host.log({ kind: "account-refusal", venue: out.venue ?? "*", tool: action.type, code: out.code, reason: out.message, detail: out.detail, native: out.native, signer, envelope, ...(agent ? { agent: slug(agent.name) } : {}) });
     return out;
   }
@@ -557,11 +566,13 @@ export class AccountEngine {
       }
       case "connectVenue":
       case "disconnectVenue": {
-        // a venue with money on its way to it or from it stays plugged in until that has landed
-        const busy = this.host.adapter(action.venue) ? this.payments.find((p) => (p.status === "pending" || (p.status === "authorized" && p.live)) && (p.from === action.venue || p.to === action.venue)) : undefined;
+        // a venue with money on its way to it or from it stays plugged in until that has landed; an order still open there keeps it
+        // plugged in too — disconnected, the account could neither follow the order nor cancel it. Both hold only while the venue IS
+        // connected: one that did not come back after a restart is connected again so that its open order can be followed, or canceled
+        const connected = this.host.adapter(action.venue) !== undefined;
+        const busy = connected ? this.payments.find((p) => (p.status === "pending" || (p.status === "authorized" && p.live)) && (p.from === action.venue || p.to === action.venue)) : undefined;
         if (busy) return no("E_ACCOUNT_BAD_ACTION", { venue: action.venue, message: `${this.name(action.venue)} has a payment in flight (${busy.id}): it can be ${action.type === "connectVenue" ? "connected live" : "unplugged"} when that has landed`, detail: { payment: busy.id } });
-        // an order still open there: disconnected, the account could neither follow it nor cancel it
-        const open = this.trade.openAt(action.venue);
+        const open = connected ? this.trade.openAt(action.venue) : undefined;
         if (open) return no("E_ACCOUNT_BAD_ACTION", { venue: action.venue, message: `${this.name(action.venue)} has an open order (${open.id}): cancel it, or let it fill, before ${action.type === "connectVenue" ? "connecting it again" : "disconnecting it"}`, detail: { order: open.id } });
         const r = action.type === "connectVenue" ? await this.host.connect(action.venue, action.connector, action.label, action.credentialRef) : this.host.disconnect(action.venue);
         if (isRefusal(r)) return r;
@@ -595,7 +606,7 @@ export class AccountEngine {
       case "liveLeverage":
         return this.trade.leverage(action, { signer, authority: "owner", envelope });
       case "agentLiveLeverage":
-        return this.trade.leverage(action, { signer, authority: "agent", envelope });
+        return this.trade.leverage(action, { signer, authority: "agent", envelope, agent: agent!, hash });
       case "liveEarn":
         return this.earn.owner(action, { signer, envelope, hash });
       case "agentLiveEarn":
@@ -639,10 +650,14 @@ export class AccountEngine {
         return a.agentAddress.toLowerCase() === "0x0000000000000000000000000000000000000000" ? `agent key "${a.agentName}" revoked` : `agent key "${a.agentName}" authorised until ${etDate(a.validUntil)}`;
       case "approveBuilderFee":
         return a.maxFeeRate.trim() === "0" ? `fee approval for ${a.builder.slice(0, 10)}… removed` : `${a.builder.slice(0, 10)}… may charge up to ${a.maxFeeRate}`;
-      case "approveSpend":
-        if (a.scope === "trade") return micro(a.budget) === 0 ? "trading limit revoked" : `trading limit: ${a.allow.trim() === "*" ? "every venue on the account now" : a.allow} · up to $${a.perPayment} an order · $${a.budget} of orders in all · until ${etDate(a.validUntil)}`;
-        if (a.scope === "earn") return micro(a.budget) === 0 ? "earn limit revoked" : `earn limit: ${a.allow.trim() === "*" ? "every venue on the account now" : a.allow} · up to $${a.perPayment} put in at a time · $${a.budget} in all · until ${etDate(a.validUntil)}`;
-        return micro(a.budget) === 0 ? `spending approval (${a.scope}) revoked` : `spending approval: ${a.scope} ${a.allow.trim() === "*" ? (a.scope === "venues" ? "every venue on the account now" : "every payee") : a.allow} · up to $${a.perPayment} a payment · $${a.budget} in all · until ${etDate(a.validUntil)}`;
+      case "approveSpend": {
+        // what the limit is for, when the owner tied it to an intent; and how often, when the owner set a window
+        const answers = a.intent?.trim() ? ` · for ${a.intent.trim()}` : "";
+        const window = (what: string) => (a.windowHours > 0 ? ` · one ${what} every ${a.windowHours} h at each ${a.scope === "payees" ? "payee" : "venue"}` : "");
+        if (a.scope === "trade") return micro(a.budget) === 0 ? "trading limit revoked" : `trading limit: ${a.allow.trim() === "*" ? "every venue on the account now" : a.allow} · up to $${a.perPayment} an order · $${a.budget} of orders in all (a close that sells a holding counts like an order; a derivative position closed reduce-only does not)${window("order")} · until ${etDate(a.validUntil)}${answers}`;
+        if (a.scope === "earn") return micro(a.budget) === 0 ? "earn limit revoked" : `earn limit: ${a.allow.trim() === "*" ? "every venue on the account now" : a.allow} · up to $${a.perPayment} put in at a time · $${a.budget} in all${window("supply")} · until ${etDate(a.validUntil)}${answers}`;
+        return micro(a.budget) === 0 ? `spending approval (${a.scope}) revoked` : `spending approval: ${a.scope} ${a.allow.trim() === "*" ? (a.scope === "venues" ? "every venue on the account now" : "every payee") : a.allow} · up to $${a.perPayment} a payment · $${a.budget} in all${window("payment")} · until ${etDate(a.validUntil)}${answers}`;
+      }
       case "createSubAccount":
         return `sub-account "${a.name}" created with a float of up to $${a.float}`;
       case "userSetAbstraction":
@@ -756,15 +771,20 @@ export class AccountEngine {
   }
 
   /** The owner's signed action that answers what agents asked closes those asks: a key let in (letIn), a limit (limit), an agent wallet made
-   * or topped up (topup), a venue connected (venue), a new session, a leverage cap, a mode. Run only after the action went through */
-  private answered(a: OwnerAction): void {
-    const close = (kind: AskKind, agent?: string, venue?: string) => {
-      this.asks = this.asks.filter((x) => !(x.kind === kind && (agent === undefined || x.agent === agent) && (venue === undefined || x.venue === "" || x.venue === venue)));
+   * or topped up (topup), a venue connected (venue), a new session, a leverage cap, a mode. Run only after the action went through. An ask
+   * that names a venue is answered by an action about that venue; one that names none, by any */
+  private answered(a: OwnerAction, envelope: Envelope): void {
+    const close = (kind: AskKind, agent?: string, venues?: string[]) => {
+      this.asks = this.asks.filter((x) => !(x.kind === kind && (agent === undefined || x.agent === agent) && (venues === undefined || x.venue === "" || venues.includes(x.venue))));
     };
     if (a.type === "approveAgent") close("letIn", a.agentAddress.toLowerCase());
-    else if (a.type === "approveSpend") close("limit", a.agent.toLowerCase());
-    else if (a.type === "createSubAccount") close("topup", a.agent.toLowerCase());
-    else if (a.type === "connectVenue") close("venue", undefined, a.venue);
+    else if (a.type === "approveSpend") {
+      // a revoke grants nothing, so it answers no ask; a limit answers the asks for one at the venues it covers ("every venue" as it was written out)
+      if (micro(a.budget) === 0) return;
+      const made = this.state.spends.find((x) => x.envelope === envelope);
+      close("limit", a.agent.toLowerCase(), made?.allow ?? a.allow.split(",").map((x) => x.trim()).filter(Boolean));
+    } else if (a.type === "createSubAccount") close("topup", a.agent.toLowerCase());
+    else if (a.type === "connectVenue") close("venue", undefined, [a.venue]);
     else if (a.type === "setPolicy" && (a.change === "session" || a.change === "maxLeverage" || a.change === "mode")) close(a.change === "maxLeverage" ? "leverage" : a.change);
     else if (a.type === "liveMove") {
       // a top-up: real money moved into an agent's wallet
@@ -1027,6 +1047,8 @@ export class AccountEngine {
 
   private async answerCard(action: Extract<OwnerAction, { type: "approveCard" }>, envelope: Envelope, signer: string): Promise<Outcome> {
     const card = this.host.card(action.card);
+    // a card that ran out of time was closed by the account already (expireCards): an answer that comes now is told so
+    if (card && card.status !== "pending" && this.expired.has(card.id)) return no("E_ACCOUNT_CARD_EXPIRED", { detail: { card: card.id, expiredAt: card.expiresAt } });
     if (!card || card.status !== "pending") return no("E_CARD_NOT_GRANTED", { message: `no pending card ${action.card}` });
     if (action.action !== cardHash(card)) return no("E_ACCOUNT_BAD_SIGNATURE", { message: "this approval names a different instruction than the one the card holds", detail: { card: card.id } });
     let held = card.action !== undefined;
@@ -1075,6 +1097,9 @@ export class AccountEngine {
     } else if (card.action.type === "agentLiveClose") {
       release();
       again = await this.trade.releaseClose(card, { signer: key.address, agent: key });
+    } else if (card.action.type === "agentLiveLeverage") {
+      release();
+      again = await this.trade.releaseLeverage(card, { signer: key.address, agent: key });
     } else if (card.action.type === "agentLiveEarn") {
       release();
       again = await this.earn.release(card, { signer: key.address, agent: key });
@@ -1094,8 +1119,24 @@ export class AccountEngine {
 
   // ---- time -----------------------------------------------------------------------------
 
+  /** Cards nobody answered inside their thirty minutes: each gives back what it held of its limit — exactly as the owner's answer would —
+   * and is closed, so that a dead card never holds an agent's limit past its time. Run before anything reads or moves */
+  expireCards(nowMs: number): void {
+    for (const card of this.host.cards()) {
+      if (card.status !== "pending" || !card.expiresAt || nowMs < Date.parse(card.expiresAt)) continue;
+      // in the approval that was holding it — which may have been replaced since — never in whatever approval happens to be live now
+      if (card.action !== undefined && card.approval) this.patchSpend(card.approval, (x) => ({ ...x, reservedMicro: Math.max(0, x.reservedMicro - micro(String(card.usd))) }));
+      this.trade.forget(card.id);
+      this.earn.forget(card.id);
+      this.expired.add(card.id);
+      if (this.expired.size > 500) this.expired.delete(this.expired.values().next().value!);
+      this.host.closeCard(card.id, "rejected", "The card expired before it was answered; nothing moved");
+    }
+  }
+
   /** land whatever is due; called before anything reads or moves */
   async settle(quick = false): Promise<void> {
+    this.expireCards(this.nowMs());
     this.record(await settleDue(this.payments, this.nowMs(), this.money()));
     this.payer?.tick(this.nowMs());
     if (quick) return;
@@ -1105,11 +1146,15 @@ export class AccountEngine {
     } catch (err) {
       this.host.log({ kind: "note", venue: "*", tool: "live poll", reason: `asking how payments stand failed: ${String((err as Error)?.message ?? err).slice(0, 160)}` });
     }
+    // a page read waits for the venues a few seconds at most: what arrives later is shown on the next read. The timer is cleared whichever
+    // side wins, so a read does not keep the process alive after it is done
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      // a page read waits for the venues a few seconds at most: what arrives later is shown on the next read
-      await Promise.race([Promise.all([this.trade.poll(), this.earn.poll()]), new Promise((resolve) => setTimeout(resolve, 3_000))]);
+      await Promise.race([Promise.all([this.trade.poll(), this.earn.poll()]), new Promise((resolve) => (timer = setTimeout(resolve, 3_000)))]);
     } catch (err) {
       this.host.log({ kind: "note", venue: "*", tool: "order poll", reason: `asking how orders stand failed: ${String((err as Error)?.message ?? err).slice(0, 160)}` });
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }
 
@@ -1198,14 +1243,19 @@ export class AccountEngine {
       earns: this.earns.slice(0, 40),
       keys: this.state.agents.map((k) => ({ address: k.address, name: k.name, code: k.code, validUntil: new Date(k.validUntil).toISOString(), approvedAt: k.approvedAt, status: agentStatus(this.state, k.address, now) })),
       requests: this.state.requests,
-      spend: this.state.spends.filter((s) => s.revokedAt === undefined).map((s) => ({ id: s.id, agent: s.agent, agentName: this.state.agents.find((k) => k.address === s.agent)?.name ?? s.agent, scope: s.scope, allow: s.allow, perPaymentUsd: s.perPaymentMicro / 1e6, budgetUsd: s.budgetMicro / 1e6, spentUsd: s.spentMicro / 1e6, reservedUsd: s.reservedMicro / 1e6, windowHours: s.windowHours, validUntil: new Date(s.validUntil).toISOString(), expired: now >= s.validUntil, payTo: s.payTo })),
+      spend: this.state.spends.filter((s) => s.revokedAt === undefined).map((s) => ({ id: s.id, agent: s.agent, agentName: this.state.agents.find((k) => k.address === s.agent)?.name ?? s.agent, scope: s.scope, allow: s.allow, perPaymentUsd: s.perPaymentMicro / 1e6, budgetUsd: s.budgetMicro / 1e6, spentUsd: s.spentMicro / 1e6, reservedUsd: s.reservedMicro / 1e6, windowHours: s.windowHours, validUntil: new Date(s.validUntil).toISOString(), expired: now >= s.validUntil, payTo: s.payTo, ...(s.intent ? { intent: s.intent } : {}) })),
       fees: this.state.fees.map((f) => ({ builder: f.builder, maxFeeRate: `${r2(f.maxFeeRate * 100)}%` })),
       cards: this.host.cards().filter((c) => c.status === "pending").map((c) => ({ id: c.id, flight: c.flight, usd: c.usd, reason: c.reason, hash: cardHash(c), kind: c.action?.type ?? c.intent.kind, ...(c.signer ? { agent: c.signer, agentName: this.agentName(c.signer) } : {}), ...(c.expiresAt ? { expiresAt: c.expiresAt } : {}), shown: c.action ? [...Object.entries(c.offer ?? {}).map(([name, value]) => ({ name, value: String(value) })), ...Object.entries(c.action).filter(([k]) => k !== "type" && k !== "mandates" && k !== "cnf").map(([name, value]) => ({ name, value: typeof value === "object" ? JSON.stringify(value) : String(value) }))] : [{ name: "account", value: c.account }, { name: "what", value: JSON.stringify(c.intent) }] })),
       pay: this.payer?.view() ?? { payees: [], sessions: [] },
       connectable: this.host.connectable(),
       liveUsd: r2(venues.filter((v) => "live" in v && v.live).reduce((s, v) => s + v.usd, 0)),
       ...(this.host.live ? { connectLive: this.host.live() } : {}),
-      subAccounts: this.state.subAccounts.map((s) => ({ id: s.id, name: s.name, agent: s.agent, agentName: this.state.agents.find((k) => k.address === s.agent)?.name ?? s.agent, address: s.address, capUsd: s.capMicro / 1e6, balanceUsd: s.balanceMicro / 1e6 })),
+      // a real account's agent wallet is read from the chains as the venue `agent-<name>`: what it holds is that venue's number. The
+      // simulated float's balance stands only where no such venue is on the account
+      subAccounts: this.state.subAccounts.map((s) => {
+        const live = venues.find((v) => v.id === agentWalletVenue(s.name));
+        return { id: s.id, name: s.name, agent: s.agent, agentName: this.state.agents.find((k) => k.address === s.agent)?.name ?? s.agent, address: s.address, capUsd: s.capMicro / 1e6, balanceUsd: live ? live.usd : s.balanceMicro / 1e6 };
+      }),
       signers: { owners, threshold: this.state.threshold, pendingDevices: this.state.pendingDevices.map((d) => ({ kid: d.kid, at: d.at })) },
       destinations: this.state.destinations.map((d) => ({ ...d, usable: now >= Date.parse(d.usableAt), usableOn: etDate(Date.parse(d.usableAt)) })),
       activeKeys: activeAgents(this.state, now).length,
@@ -1213,6 +1263,7 @@ export class AccountEngine {
       intents: this.state.intents.filter((x) => now < x.validUntil).map((x) => ({ id: x.id, agent: x.agent, agentName: x.agent === "*" ? "every agent" : this.agentName(x.agent), venue: x.venue, symbol: x.symbol, side: x.side, usd: x.usd, text: x.text, validUntil: new Date(x.validUntil).toISOString(), at: x.at, reports: x.reports, ...(x.report ? { report: { ...x.report, byName: this.agentName(x.report.by) } } : {}), byAgent: x.byAgent.map((r) => ({ ...r, byName: this.agentName(r.by) })) })),
       asks: this.waitingAsks(now).map((x) => ({ ...x })),
       declinedAsks: this.declinedAsks(now).map((x) => ({ ...x })),
+      modeRules: modeRules(),
       ...(this.host.real ? { real: true as const } : {}),
     };
   }
@@ -1277,6 +1328,8 @@ export class AccountEngine {
       quote = { words: r.quote.words, feeUsd: 0, receiveUsd: r.quote.usd, lands: r.quote.kind === "withdraw" ? r.quote.lands : "in the product", access: "owner", final: true, legs: [], earn: r.quote };
     } else if (isOwnerAction({ type })) {
       action = { ...draft, type, nonce } as unknown as OwnerAction;
+      // a limit that names no intent carries no `intent` field at all: it then signs exactly as a limit always has
+      if (action.type === "approveSpend" && typeof action.intent === "string" && action.intent.trim() === "") delete action.intent;
       // an earn limit over "every account" is refused here, before it is shown and signed, as the door would refuse it
       if (action.type === "approveSpend" && action.scope === "earn" && String(action.allow).split(",").some((x) => x.trim() === "*")) return no("E_ACCOUNT_BAD_ACTION", { message: EARN_NAMES });
     } else return no("E_ACCOUNT_BAD_ACTION", { message: `"${type}" is not something the owner signs` });
@@ -1336,7 +1389,8 @@ export interface AccountPage {
   earns: LiveEarn[];
   keys: Array<{ address: string; name: string; code: string; validUntil: string; approvedAt: string; status: string }>;
   requests: AccountState["requests"];
-  spend: Array<{ id: string; agent: string; agentName: string; scope: string; allow: string[]; perPaymentUsd: number; budgetUsd: number; spentUsd: number; reservedUsd: number; windowHours: number; validUntil: string; expired: boolean; payTo: Record<string, string> }>;
+  /** the standing limits. `intent`: the open intent the owner tied the limit to when signing it (its id), where there is one */
+  spend: Array<{ id: string; agent: string; agentName: string; scope: string; allow: string[]; perPaymentUsd: number; budgetUsd: number; spentUsd: number; reservedUsd: number; windowHours: number; validUntil: string; expired: boolean; payTo: Record<string, string>; intent?: string }>;
   fees: Array<{ builder: string; maxFeeRate: string }>;
   /** cards waiting for the owner. `kind`: the agent's instruction type (agentLiveOrder, agentLiveMove …); a card the older write path raised
    * names its intent's kind (trade, move …). `agent`: the key that asked, and its name on the account */
@@ -1366,6 +1420,9 @@ export interface AccountPage {
   asks: AgentAsk[];
   /** what the owner declined in the last day (answerAsk), for the agent that asked to see (in memory: a restart clears it) */
   declinedAsks: DeclinedAsk[];
+  /** what Guard and Beast do with an agent's request, door by door, and how long a card waits (minutes), as the doors themselves have it
+   * (account/mode-rules.ts): the Mode sheet draws its table from here */
+  modeRules: { rows: ModeRule[]; cardMinutes: number };
 }
 
 /** money in a venue's earn product, as a holding on the account page: the product, what goes in and comes out, its yield */

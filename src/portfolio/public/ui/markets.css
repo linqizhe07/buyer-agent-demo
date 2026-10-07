@@ -1,9 +1,9 @@
-/* Markets (ui/markets.js), in the Clean cards look (M2): category tabs over a hairline, Closing soon as white cards of radius 20 with Yes and
-   No tinted in the up and down colours, Movers as white pills lifted by the card's shadow, the Most traded and Watching tables inside cards
-   with pill buttons, the Venues board with its "Open to agents" switch, one market in the drawer, and the connect picker and its one short
-   form (ui/connect.js), drawn in the Venues tab and in the sheet. Colours, radii, shadows and fonts only from ui/tokens.css, so Cream and
-   Black alike (Black drops the shadows and keeps the hairlines). Manrope throughout: numbers in its 800 with tabular figures, no mono here
-   but a key file's path. */
+/* Markets (ui/markets.js), in the Clean cards look (M2): category tabs over a hairline, one table of markets inside a card with pill
+   buttons, the Predictions as white cards of radius 20 with Yes and No tinted in the up and down colours, one folded footer line, and one
+   market in the drawer (the one drawer: a Portfolio holding opens it too). The connect picker and its one short form (ui/connect.js) are
+   drawn in the sheet with the .pick rules at the foot. Colours, radii, shadows and fonts only from ui/tokens.css, so Cream and Black alike
+   (Black drops the shadows and keeps the hairlines). Manrope throughout: numbers in its 800 with tabular figures, no mono here but a key
+   file's path. Motion is transform and opacity only. */
 
 .mk { display: flex; flex-direction: column; gap: 26px; min-width: 0; }
 .mk-block { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
@@ -12,20 +12,37 @@
 /* what did not answer, quietly, in the venue's own words: a soft note on the second surface */
 .mk-missing { font-size: 12px; line-height: 1.5; color: var(--dim); background: var(--surface-2); border-radius: var(--radius-s); padding: 8px 12px; margin: 0; }
 .mk-missing b { font-weight: 600; color: var(--text); }
+/* what the account says of a list itself (how it was chosen, where the rest is; a read-only server): one quiet line a sentence */
+.mk-note { font-size: 12px; line-height: 1.5; color: var(--dim); margin: -14px 0 0; }
+.mk-note + .mk-note { margin-top: -8px; }
+/* a market the venue has closed: its words where the buttons would be */
+.mk-shut { margin: 0; line-height: 1.45; }
 .mk-fail { display: flex; flex-direction: column; gap: 12px; align-items: flex-start; }
-/* a card whose last part is a table (Most traded, Watching, Your venues): the header sits close above it, as on the board */
+/* a card whose last part is a table (the markets, Watching): the header sits close above it, as on the board */
 .mk .sec:has(> .t-wrap:last-child), .mk .card:has(> .t-wrap:last-child) { gap: 8px; }
 
-/* a Closing soon card (.box: white, radius 20): where and how much, a countdown, the question, Yes and No at its foot. A row of cards
-   shares its three rows (a subgrid), so a top line that wraps in one card moves every question in that row alike: the questions start on
-   one line, and so do the buttons */
+/* the one footer line: why these rows and what is not shown, folded (details). Its words are the account's own notes, the venues that did
+   not answer and a read-only server; nothing stands open, nothing is lost. Opening slides the words in — transform and opacity only */
+.mk-foot { font-size: 12px; color: var(--dim); margin-top: -10px; }
+.mk-foot summary { cursor: pointer; list-style: none; display: inline-flex; align-items: center; gap: 6px; min-height: 44px; color: var(--dim); text-decoration: underline; text-underline-offset: 3px; }
+.mk-foot summary::-webkit-details-marker { display: none; }
+.mk-foot summary:hover { color: var(--text); }
+.mk-foot .mk-i { font-size: 13px; text-decoration: none; }
+.mk-foot-b { display: flex; flex-direction: column; gap: 8px; padding-bottom: 4px; }
+.mk-foot-b .mk-note, .mk-foot-b .mk-note + .mk-note { margin: 0; }
+.mk-foot[open] .mk-foot-b { animation: mk-in 180ms cubic-bezier(0.2, 0.8, 0.2, 1); }
+@keyframes mk-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .mk-foot[open] .mk-foot-b { animation: none; } }
+
+/* a prediction card (.box: white, radius 20): where and how much (not under Predictions, where the tab says it), a countdown, the
+   question, Yes and No at its foot. A row of cards shares its three rows (a subgrid), so a top line that wraps in one card moves every
+   question in that row alike: the questions start on one line, and so do the buttons */
 .mk-card { gap: 14px; }
 .mk-cards > .mk-card { display: grid; grid-row: span 3; grid-template-rows: subgrid; row-gap: 14px; align-content: start; }
 .mk-card-foot { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
-.mk-card-top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font-size: 12px; }
+.mk-card-top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font-size: 12px; min-height: 18px; }
 .mk-card-top > span:first-child { min-width: 0; }
-.mk-card-top .tag { margin-left: 4px; }
-.mk-close { color: var(--warn-text); font-family: var(--font-sans); font-size: 12px; font-weight: 600; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.mk-close { color: var(--warn-text); font-family: var(--font-sans); font-size: 12px; font-weight: 600; white-space: nowrap; font-variant-numeric: tabular-nums; position: relative; }
 .mk-close[data-closed] { color: var(--dim); }
 /* the question: a button, its words at the top of its 44 (a button would centre them, and one-line questions would sit lower than the
    first line of a two-line one) */
@@ -33,39 +50,32 @@
 .mk-card-q:hover { text-decoration: underline; text-underline-offset: 3px; }
 /* Yes and No (.yes .no-btn, tinted): first in the card's foot, so a row of cards lines its buttons up */
 .mk-yn { display: flex; gap: 8px; }
-.mk-card-foot > .link { align-self: flex-start; }
 .mk-yn button, .mk-buy { font-variant-numeric: tabular-nums; }
 /* pointed at: ringed in its own colour in Cream (a darker fill would take the words under 4.5:1), brighter in Black (still over 7:1) */
 .mk-yn button:hover:not(:disabled), .mk-buy:hover:not(:disabled) { box-shadow: inset 0 0 0 1.5px currentColor; }
 :root[data-theme="black"] .mk-yn button:hover:not(:disabled), :root[data-theme="black"] .mk-buy:hover:not(:disabled) { box-shadow: none; filter: brightness(1.25); }
 @media (prefers-color-scheme: dark) { :root:not([data-theme]) .mk-yn button:hover:not(:disabled), :root:not([data-theme]) .mk-buy:hover:not(:disabled) { box-shadow: none; filter: brightness(1.25); } }
 
-/* movers: white pills lifted by the card's shadow, a round letter tile, the name, ▲/▼ and the venue that says it */
-.mk-chips { display: flex; gap: 10px; flex-wrap: wrap; }
-.mk-chip { display: inline-flex; align-items: center; gap: 10px; min-height: 48px; padding: 0 16px 0 8px; border: 1px solid var(--card-border); border-radius: var(--radius-pill); background: var(--surface); box-shadow: var(--shadow-card); color: var(--text); font-size: 14px; white-space: nowrap; max-width: 100%; }
-.mk-chip:hover { background: linear-gradient(var(--hover), var(--hover)) var(--surface); box-shadow: var(--shadow-lift); }
-.mk-chip .av { width: 32px; height: 32px; }
-.mk-chip b { font-weight: 700; }
-.mk-chip .v { font-size: 12px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-
-/* the tables, inside their cards: ★, the market's name as a button, where it is listed (public prices dimmed), pill buttons. The name and
-   where it is listed wrap, so the buttons at the end of a row always fit the card */
+/* the tables, inside their cards: ★, the market's name as a button, where it is listed (public prices dimmed), one pill button. The name
+   and where it is listed wrap, so the button at the end of a row always fits the card */
 .mk-t td { white-space: nowrap; }
 .mk-t td.mk-c-name { white-space: normal; min-width: 180px; }
 .mk-t td.mk-c-where { white-space: normal; min-width: 120px; max-width: 280px; }
-.mk-vt td, .mk-d .mk-t td { white-space: normal; }
+.mk-d .mk-t td { white-space: normal; }
+/* an event's countdown in its row, under the question */
+.mk-t .mk-close { font-weight: 600; }
 /* where it is listed, as a line under the name (aligned with the name, past the 34 tile and its 12 gap): only while the Where column is
    not drawn */
 .mk-where-l { display: none; padding-left: 46px; margin-top: -6px; font-size: 12px; line-height: 1.4; white-space: normal; }
 /* a window between a phone and about 1220 wide (the rail beside the pane): the table would need more than its card, so Where moves under
-   the name and a row's buttons may stack, and Trade · Hand to agent · Connect to trade stay whole inside the card */
+   the name, and Trade · Connect to trade stay whole inside the card */
 @media (min-width: 641px) and (max-width: 1219px) {
   .mk-t th.mk-c-where, .mk-t td.mk-c-where { display: none; }
   .mk-t .mk-where-l { display: block; max-width: 240px; }
   .mk-t td.mk-c-name { min-width: 170px; }
 }
-/* narrower still (under about 1090, the rail beside): a row's buttons stack, right-aligned, and the cells sit closer, rather than the row
-   leave the card (under about 980 with the rail it scrolls inside the card, its edge shaded: shell.css .t-wrap) */
+/* narrower still (under about 1090, the rail beside): the cells sit closer, rather than the row leave the card (under about 980 with the
+   rail it scrolls inside the card, its edge shaded: shell.css .t-wrap) */
 @media (min-width: 641px) and (max-width: 1089px) {
   .mk-t .acts { flex-wrap: wrap; justify-content: flex-end; }
   .mk-t th, .mk-t td { padding-left: 8px; padding-right: 8px; }
@@ -84,31 +94,27 @@
 .mk-name:hover b { text-decoration: underline; text-underline-offset: 3px; }
 .mk-where .pub { color: var(--dim); }
 .mk-why { font-size: 12px; white-space: nowrap; }
-/* a row's buttons: pills on the second surface, the board's 14px words */
+/* a row's button: a pill on the second surface, the board's 14px words */
 .mk-t .acts .btn-sm { font-size: 14px; padding: 0 16px; }
 /* a word that does something is a target of 44 pixels too */
 .mk .link, .mk-d .link { min-height: 44px; display: inline-flex; align-items: center; }
 .t .acts .btn .ico { width: 16px; height: 16px; }
+/* a pre-IPO contract: the valuation its price implies is the figure, the contract price under it, small; in the drawer the contract line
+   takes its own row under the valuation, with the venue's unit sentence */
+.mk-implied { display: block; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.mk-implied b { font-family: var(--font-num); font-weight: 800; }
+.mk-contract { display: block; font-variant-numeric: tabular-nums; }
+.mk-d-px .mk-contract { flex-basis: 100%; font-size: 13px; color: var(--dim); white-space: normal; }
+.mk-d-px .mk-contract > span { color: var(--text); font-weight: 700; }
+/* a listing's own valuation and unit, under its venue's name in Across venues */
+.mk-unit { white-space: normal; }
 
-/* the Venues board */
-.mk-health { font-size: 13px; }
-.mk-health.bad { color: var(--down); }
-td.mk-trading { font-size: 13px; max-width: 320px; }
-.mk-vt td:first-child { min-width: 200px; }
-.mk-vt td:nth-child(2) { min-width: 210px; }
-/* "Open to agents": a pill track on the second surface with a knob in the dim colour; open, the track is filled in the text colour. The
-   word beside it (Open · Closed) says the same, never the colour alone */
-.mk-switch { display: inline-flex; align-items: center; gap: 10px; min-height: 44px; border: 0; padding: 0; border-radius: var(--radius-pill); background: none; color: var(--text); font-size: 13px; font-weight: 600; white-space: nowrap; }
-.mk-switch .track { width: 40px; height: 24px; border-radius: var(--radius-pill); border: 0; background: var(--surface-2); position: relative; flex: none; }
-.mk-switch .track::after { content: ""; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: var(--dim); transition: left 0.15s ease; }
-.mk-switch[aria-checked="true"] .track { background: var(--primary); }
-.mk-switch[aria-checked="true"] .track::after { left: 19px; background: var(--on-primary); }
-@media (prefers-reduced-motion: reduce) { .mk-switch .track::after { transition: none; } }
-.mk-ask { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; font-size: 14px; }
-.mk-ask .acts { display: inline-flex; gap: 8px; }
-
-/* one market, in the drawer: the price in Manrope 800, its facts on a soft inset, pills to act, the parts under hairlines */
-.mk-d { display: flex; flex-direction: column; gap: 18px; }
+/* one market, in the drawer: the price in Manrope 800, its facts on a soft inset, pills to act, the parts under hairlines; each part is
+   painted on its own (data-sec), so a fresh read repaints only what changed */
+.mk-d { display: flex; flex-direction: column; gap: 0; }
+.mk-sec { display: flex; flex-direction: column; gap: 18px; }
+.mk-sec:empty { display: none; }
+.mk-sec + .mk-sec:not(:empty) { margin-top: 18px; }
 .mk-d .who b { font-size: 17px; font-weight: 700; line-height: 1.3; }
 .mk-d-px { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
 .mk-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 16px; margin: 0; background: var(--bg); border-radius: var(--radius-m); padding: 14px 16px; }
@@ -125,10 +131,16 @@ td.mk-trading { font-size: 13px; max-width: 320px; }
 .mk-d-acts .btn { flex: 1 1 110px; }
 .mk-d .callout p { font-size: 14px; line-height: 1.5; }
 .mk-d .sec .h2 { font-size: 17px; }
+.mk-d .sec-head .link { font-size: 13px; min-height: 36px; }
 .mk-chart { height: 150px; }
 .mk-axis { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; font-family: var(--font-sans); font-size: 12px; color: var(--dim); font-variant-numeric: tabular-nums; }
 .mk-d .t td, .mk-d .t th { padding-left: 6px; padding-right: 6px; }
 .mk-d .why { white-space: normal; }
+/* You hold: a position's Close… and an order's Cancel at the end of its own line */
+.mk-held > div { align-items: center; }
+.mk-held > div > div { flex: 1; min-width: 0; }
+.mk-held > div > .btn, .mk-held > div > .st { margin-left: auto; flex: none; }
+.mk-cost { margin: 0; font-size: 13px; line-height: 1.5; }
 /* a tokenised asset: who issues it and whom it is for, in the issuer's words (a short line in a row, all of it in the drawer on an inset) */
 .mk-name .mk-iss { display: block; font-size: 11px; color: var(--dim); max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mk-iss-box { gap: 4px; }

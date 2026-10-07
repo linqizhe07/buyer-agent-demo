@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { Refusal } from "../../src/core/errors.ts";
 import { no } from "../../src/portfolio/refuse.ts";
-import { categoryOf, tabOfCategory, tabsOfCategories } from "../../src/portfolio/live/categories.ts";
-import { exploreAcross, type ExploreVenue } from "../../src/portfolio/live/explore.ts";
+import { categoryOf, isExcludedCategory, roleOfCategory } from "../../src/portfolio/live/categories.ts";
+import { exploreAcross, PREDICTIONS_MAX, type ExploreVenue } from "../../src/portfolio/live/explore.ts";
 import type { OpenExchange } from "../../src/portfolio/live/exchange.ts";
 import { exchangeTickers, type Listing, type PublicSource } from "../../src/portfolio/live/public-markets.ts";
 import type { LiveTrader, Market, MarketKind, MarketStats } from "../../src/portfolio/live/trade.ts";
@@ -178,19 +178,20 @@ describe("event contracts", () => {
   });
 
   it("folds a market's named outcomes; one Polymarket market seen connected (mm) and public is one row, traded where it is connected, its volume counted once", async () => {
-    const legs = polymarket("nfl-atl-no-2026-10-06", "Falcons vs. Saints", [["Falcons", 0.915], ["Saints", 0.085]], { closeTime: iso(NOW + 10 * HOUR), volumeUsd24h: 4.2e6, category: "Sports" });
+    const legs = polymarket("brazil-runoff-2026-10-06", "Who wins the run-off?", [["Lula", 0.915], ["Other", 0.085]], { closeTime: iso(NOW + 10 * HOUR), volumeUsd24h: 4.2e6, category: "Politics" });
     const mm = trader({ markets: [], events: legs.map((m, i) => (i === 0 ? { ...m, change24h: 0.44 } : m)) });
     const gamma = pub("polymarket", "Polymarket", { kind: "events", connectTo: "polymarket", connector: "live:polymarket-trade", listings: legs.map((m) => ({ ...m, types: [], volumeUsd24h: 4.25e6 })) });
     const out = await exploreAcross({ connected: [venue("metamask", "MetaMask", mm)], public: [gamma] }, { clock });
     const row = out.items.find((i) => i.key === `pm:${COND}`)!;
     // mm trades it already: Polymarket's public listing of the same market would only say "connect to trade" what can be traded
     expect(row.outcomes?.map((o) => [o.label, o.price, o.at.map((a) => a.venue)])).toEqual([
-      ["Falcons", 0.915, ["metamask"]],
-      ["Saints", 0.085, ["metamask"]],
+      ["Lula", 0.915, ["metamask"]],
+      ["Other", 0.085, ["metamask"]],
     ]);
     // both report Gamma's volume for the one market: it is counted once, the larger figure, not added up
-    expect(row).toMatchObject({ change24h: 0.44, changeFrom: { venue: "metamask" }, volumeUsd24h: 4.25e6, tabs: expect.arrayContaining(["predictions", "sports"]) });
-    expect(row.at.map((a) => [a.venue, a.symbol, a.connected, a.public])).toEqual([["metamask", "nfl-atl-no-2026-10-06:Falcons", true, false]]);
+    // it closes within the day, so it is in Now too; a venue's category makes no tab of its own any more
+    expect(row).toMatchObject({ change24h: 0.44, changeFrom: { venue: "metamask" }, volumeUsd24h: 4.25e6, tabs: ["all", "predictions"] });
+    expect(row.at.map((a) => [a.venue, a.symbol, a.connected, a.public])).toEqual([["metamask", "brazil-runoff-2026-10-06:Lula", true, false]]);
     // a market mm does not list keeps its public line, to connect to trade
     const other = polymarket("another-market", "Another?", [["Yes", 0.2], ["No", 0.8]], { volumeUsd24h: 1e5 }, `0x${"cd".repeat(32)}`);
     const both = await exploreAcross({ connected: [venue("metamask", "MetaMask", mm)], public: [pub("polymarket", "Polymarket", { kind: "events", connectTo: "polymarket", connector: "live:polymarket-trade", listings: [...legs, ...other].map((m) => ({ ...m, types: [] })) })] }, { clock });
@@ -279,41 +280,176 @@ describe("tabs", () => {
     const x = trader({ markets: [mk("BTC/USDT", "spot", "BTC", "USDT", { price: 100_000, volumeUsd24h: 2e9, changePct24h: 1 })] });
     const out = await exploreAcross({ connected: [venue("okx", "OKX", x)] }, { clock });
     expect(out.tabs).toEqual([
-      { id: "now", label: "Now", count: 1 },
+      { id: "all", label: "All", count: 1 },
       { id: "crypto", label: "Crypto", count: 1 },
     ]);
+    expect(out.items[0]?.tabs).toEqual(["all", "crypto"]);
   });
 
-  it("makes Macro and Sports from the venues' own categories, through the one table", async () => {
+  it("makes no tab of a venue's category: every event is Predictions, and its category is the venue's own word for the card", async () => {
     const k = trader({ events: [...kalshi("KXCPI-26OCT", "CPI above 3%?", 0.4, { category: "Economics" }), ...kalshi("KXNFL-1", "Falcons win?", 0.6, { category: "Sports" }), ...kalshi("KXPRES-1", "Who wins?", 0.5, { category: "Elections" })] });
     const pmTagged = polymarket("brazil", "Brazil election", [["Yes", 0.5], ["No", 0.5]], { tags: ["Politics", "Macro Election 2", "World"], category: "Politics" }, `0x${"cd".repeat(32)}`);
     const gamma = pub("polymarket", "Polymarket", { kind: "events", connectTo: "polymarket", connector: "live:polymarket-trade", listings: pmTagged });
     const out = await exploreAcross({ connected: [venue("kalshi", "Kalshi", k)], public: [gamma] }, { clock });
-    expect(out.tabs.map((t) => [t.id, t.count])).toEqual([
-      ["predictions", 4],
-      ["macro", 1],
-      ["sports", 1],
-    ]);
-    expect(out.items.find((i) => i.key === "kalshi:KXCPI-26OCT")?.tabs).toEqual(["predictions", "macro"]);
-    // "Macro Election 2" is a tag about elections, not the word "macro"
-    expect(out.items.find((i) => i.key === `pm:${"0x" + "cd".repeat(32)}`)?.tabs).toEqual(["predictions"]);
-    const sports = await exploreAcross({ connected: [venue("kalshi", "Kalshi", k)] }, { clock, tab: "sports" });
-    expect(sports.items.map((i) => i.key)).toEqual(["kalshi:KXNFL-1"]);
+    // the owner asked for a few hot markets, not every bet: an event under an excluded category (sports here) is not one of the few even
+    // when a venue the owner connected lists it — a search still finds it, under the venue's own word
+    expect(out.tabs.map((t) => [t.id, t.count])).toEqual([["all", 3], ["predictions", 3]]);
+    expect(out.items.map((i) => [i.key, i.category, i.tabs])).toEqual(
+      expect.arrayContaining([
+        ["kalshi:KXCPI-26OCT", "Economics", ["all", "predictions"]],
+        ["kalshi:KXPRES-1", "Elections", ["all", "predictions"]],
+        [`pm:${"0x" + "cd".repeat(32)}`, "Politics", ["all", "predictions"]],
+      ]),
+    );
+    expect(out.items.some((i) => i.key === "kalshi:KXNFL-1")).toBe(false);
+    expect(out.notes).toContain("Predictions: at most 12 rows, each venue's busiest in turn, without sports, weather and entertainment; a search reaches everything the venues' listings loaded.");
+    const searched = await exploreAcross({ connected: [venue("kalshi", "Kalshi", k)], public: [gamma] }, { clock, q: "falcons" });
+    expect(searched.items.map((i) => [i.key, i.category])).toEqual([["kalshi:KXNFL-1", "Sports"]]);
   });
 
-  it("reads a category word whole, without regard to case or punctuation", () => {
-    expect(tabOfCategory("Fed Rates")).toBe("macro");
-    expect(tabOfCategory("fed-rates")).toBe("macro");
-    expect(tabOfCategory("NFL (All)")).toBe("sports");
-    expect(tabOfCategory("Macro Election 2")).toBeUndefined();
-    expect(tabOfCategory("Crypto")).toBeUndefined();
-    expect([...tabsOfCategories(["Sports", "NFL", undefined, "Games"])]).toEqual(["sports"]);
+  it("reads a category word whole, without regard to case or punctuation, and prefers the table's word among a venue's several", () => {
+    expect(roleOfCategory("Fed Rates")).toBe("shown");
+    expect(roleOfCategory("fed-rates")).toBe("shown");
+    expect(roleOfCategory("NFL (All)")).toBe("excluded");
+    expect(roleOfCategory("Hide From New")).toBe("plumbing");
+    expect(roleOfCategory("Macro Election 2")).toBeUndefined();
+    expect(isExcludedCategory(["Politics", "Sports", undefined, "Games"])).toBe(true);
+    expect(isExcludedCategory(["Politics", "World", undefined])).toBe(false);
+    // Gamma's "Fed Decision in October?" carries Fed, fomc, Trump, Economy and Fed Rates: the card reads "Fed Rates"
+    expect(categoryOf(["Fed", "fomc", "Trump", "Economy", "Fed Rates"])).toBe("Fed Rates");
+    // the venue's plumbing is never the category (public F5)
+    expect(categoryOf(["Parent For Derivative", "United States", "US Election", "Politics"])).toBe("Politics");
+    expect(categoryOf(["putin", "Geopolitics", "Ukraine", "Politics"])).toBe("Politics");
     expect(categoryOf(["Games", "Sports", "NFL"])).toBe("Sports");
     expect(categoryOf(["Politics", "World"])).toBe("Politics");
+    // nothing the table names: the first word that is not plumbing, in title case when the venue wrote it in lower case
+    expect(categoryOf(["Rewards 20", "4.5", "50", "pedro sanchez"])).toBe("Pedro Sanchez");
+    expect(categoryOf(["Hide From New", "Recurring", "1H"])).toBeUndefined();
   });
 });
 
-describe("movers, closing, now", () => {
+describe("the Predictions list", () => {
+  /** nine Kalshi markets (contracts) and nine Polymarket markets (dollars), each venue's busiest first, all closing within the day */
+  const kalshiNine = Array.from({ length: 9 }, (_, i) => kalshi(`KXK-${i}`, `Kalshi question ${i}?`, 0.5, { contracts24h: 90_000 - i * 10_000, closeTime: iso(NOW + (i + 2) * HOUR), category: "Economics", types: [] })).flat();
+  const pmNine = Array.from({ length: 9 }, (_, i) => polymarket(`pm-${i}`, `Polymarket question ${i}?`, [["Yes", 0.5], ["No", 0.5]], { volumeUsd24h: 500_000 - i * 50_000, closeTime: iso(NOW + (i + 2) * HOUR), category: "Politics", types: [] }, `0x${String(i).repeat(64)}`)).flat();
+  const sources = () => ({ public: [pub("kalshi", "Kalshi", { kind: "events", connectTo: "kalshi", connector: "live:kalshi", listings: kalshiNine }), pub("polymarket", "Polymarket", { kind: "events", connectTo: "polymarket", connector: "live:polymarket-trade", listings: pmNine })] });
+
+  it("shows at most twelve event rows when nothing is searched for: each venue's busiest in turn, the venue with the busiest row first; what closes soon is drawn from the same few", async () => {
+    const out = await exploreAcross(sources(), { clock, tab: "predictions" });
+    expect(out.items).toHaveLength(PREDICTIONS_MAX);
+    // Polymarket's $500,000 row is the busiest (a Kalshi contract counts a dollar only to order), so Polymarket leads and the venues alternate
+    expect(out.items.map((i) => i.key)).toEqual([`pm:0x${"0".repeat(64)}`, "kalshi:KXK-0", `pm:0x${"1".repeat(64)}`, "kalshi:KXK-1", `pm:0x${"2".repeat(64)}`, "kalshi:KXK-2", `pm:0x${"3".repeat(64)}`, "kalshi:KXK-3", `pm:0x${"4".repeat(64)}`, "kalshi:KXK-4", `pm:0x${"5".repeat(64)}`, "kalshi:KXK-5"]);
+    expect(out.tabs).toEqual([
+      { id: "all", label: "All", count: PREDICTIONS_MAX },
+      { id: "predictions", label: "Predictions", count: PREDICTIONS_MAX },
+    ]);
+    // the seventh busiest of either venue closes within the day too, and is in neither the list nor what closes soon
+    expect(out.closing.length).toBe(8);
+    expect(out.closing.every((c) => out.items.some((i) => i.key === c.key))).toBe(true);
+    expect(out.notes).toContain(`Predictions: at most ${PREDICTIONS_MAX} rows, each venue's busiest in turn, without sports, weather and entertainment; a search reaches everything the venues' listings loaded.`);
+    // asked for every row, the dropped event rows are still gone: the page's "All results" is the same few
+    const every = await exploreAcross(sources(), { clock });
+    expect(every.items.filter((i) => i.kind === "event")).toHaveLength(PREDICTIONS_MAX);
+    // a sort asked for sorts the same few
+    const soonest = await exploreAcross(sources(), { clock, tab: "predictions", sort: "closing" });
+    expect(soonest.items.map((i) => i.key).slice(0, 2)).toEqual([`pm:0x${"0".repeat(64)}`, "kalshi:KXK-0"]);
+    expect(soonest.items).toHaveLength(PREDICTIONS_MAX);
+  });
+
+  it("orders a Polymarket row by its whole event's dollars where Gamma gives them, and keeps the row's volume the market's own", async () => {
+    // the Fed decision: one hot event ($880,418) spread over five markets, its busiest $254,692; a quieter event whose one market trades more
+    const fed = polymarket("fed-decreases-50", "Will the Fed decrease rates by 50+ bps?", [["Yes", 0.02], ["No", 0.98]], { volumeUsd24h: 254_692, eventVolumeUsd24h: 880_418, types: [] } as Partial<Listing>, `0x${"01".repeat(32)}`);
+    const one = polymarket("one-market-event", "One question?", [["Yes", 0.5], ["No", 0.5]], { volumeUsd24h: 300_000, eventVolumeUsd24h: 300_000, types: [] } as Partial<Listing>, `0x${"02".repeat(32)}`);
+    const out = await exploreAcross({ public: [pub("polymarket", "Polymarket", { kind: "events", connectTo: "polymarket", connector: "live:polymarket-trade", listings: [...one, ...fed] })] }, { clock, tab: "predictions" });
+    expect(out.items.map((i) => [i.key, i.volumeUsd24h, i.eventVolumeUsd24h])).toEqual([
+      [`pm:0x${"01".repeat(32)}`, 254_692, 880_418],
+      [`pm:0x${"02".repeat(32)}`, 300_000, 300_000],
+    ]);
+  });
+
+  it("with a search, every event row that matches is shown, however many, and the sentence about the few is not said", async () => {
+    const out = await exploreAcross(sources(), { clock, q: "question" });
+    expect(out.items).toHaveLength(18);
+    expect(out.notes.some((n) => n.startsWith("Predictions:"))).toBe(false);
+  });
+
+  it("carries what the sources say of their lists, each sentence once and under 160 characters", async () => {
+    const tokens = { ...pub("robinhood-stock-tokens", "Robinhood Stock Tokens", { kind: "tokens", connectTo: "robinhood-wallet", connector: "live:wallet", readOnly: "only read here", listings: [mk("AAPL", "token", "AAPL", "USD", { price: 230, types: [] })] }), notes: () => ["Robinhood Stock Tokens: 40 of 194 shown · search for the rest"] };
+    const said = "Kalshi: the busiest market in each of 10 series — Fed decision, CPI.";
+    const k = { ...pub("kalshi", "Kalshi", { kind: "events", connectTo: "kalshi", connector: "live:kalshi", listings: kalshiNine.slice(0, 2) }), notes: () => [said, "  "] };
+    const again = { ...pub("kalshi-2", "Kalshi again", { kind: "events", connectTo: "kalshi", connector: "live:kalshi", listings: [] }), notes: () => [said] };
+    const out = await exploreAcross({ public: [tokens, k, again] }, { clock });
+    expect(out.notes).toEqual(["Robinhood Stock Tokens: 40 of 194 shown · search for the rest", said, `Predictions: at most ${PREDICTIONS_MAX} rows, each venue's busiest in turn, without sports, weather and entertainment; a search reaches everything the venues' listings loaded.`]);
+    expect(out.notes.every((n) => n.length < 160)).toBe(true);
+    // a source without a word to say, or one whose words cannot be read, says nothing
+    const mute = { ...pub("okx", "OKX", { listings: [mk("BTC/USDT", "spot", "BTC", "USDT", { price: 1, types: [] })] }), notes: () => { throw new Error("no words"); } };
+    expect((await exploreAcross({ public: [mute] }, { clock })).notes).toEqual([]);
+    // a source is told what was searched for, so it can hold its "N of M shown" for the whole list only
+    const asked: string[] = [];
+    const counted = { ...tokens, notes: (o: { q?: string | undefined }) => (asked.push(o.q ?? ""), o.q ? [] : ["Robinhood Stock Tokens: 40 of 194 shown · search for the rest"]) };
+    expect((await exploreAcross({ public: [counted] }, { clock, q: "nvda" })).notes).toEqual([]);
+    expect(asked).toEqual(["nvda"]);
+  });
+});
+
+describe("an event past its close", () => {
+  const k = (listings: Listing[]) => pub("kalshi", "Kalshi", { kind: "events", connectTo: "kalshi", connector: "live:kalshi", listings });
+  const p = (listings: Listing[]) => pub("polymarket", "Polymarket", { kind: "events", connectTo: "polymarket", connector: "live:polymarket-trade", listings });
+
+  it("is closed at Kalshi whatever the listing says, keeps Polymarket's own open flag, and says pastEnd on the row and its leg either way", async () => {
+    const kalshiLegs = kalshi("KXBTCD-26OCT0514-T85000", "Bitcoin above $85,000 at 2pm?", 0.6, { closeTime: iso(NOW - HOUR), contracts24h: 1_000, category: "Crypto", types: [] });
+    // Gamma's own answer for the Lula market on 2026-10-06: endDate the day before, active, not closed, accepting orders
+    const pmLegs = polymarket("lula-2026", "Will Lula win?", [["Yes", 0.155], ["No", 0.845]], { closeTime: iso(NOW - 10 * HOUR), volumeUsd24h: 1_185_573, types: [] });
+    const out = await exploreAcross({ public: [k(kalshiLegs), p(pmLegs)] }, { clock });
+    expect(out.items.find((i) => i.key === "kalshi:KXBTCD-26OCT0514-T85000")).toMatchObject({ pastEnd: true, at: [expect.objectContaining({ venue: "kalshi", open: false, pastEnd: true })] });
+    expect(out.items.find((i) => i.key === `pm:${COND}`)).toMatchObject({ pastEnd: true, at: [expect.objectContaining({ venue: "polymarket", open: true, pastEnd: true })] });
+    // neither is in what closes soon: the window starts now
+    expect(out.closing).toEqual([]);
+    // a market still to close carries neither
+    const live = await exploreAcross({ public: [k(kalshi("KXA-1", "A?", 0.3, { closeTime: iso(NOW + HOUR), types: [] }))] }, { clock });
+    expect(live.items[0]?.pastEnd).toBeUndefined();
+    expect(live.items[0]?.at[0]).toMatchObject({ open: true });
+    expect(live.items[0]?.at[0]?.pastEnd).toBeUndefined();
+  });
+});
+
+describe("a venue's line", () => {
+  it("carries the venue's own bid and ask beside its price, for a coin and for an event's lead outcome", async () => {
+    const kraken = pub("kraken", "Kraken", { listings: [mk("BTC/USD", "spot", "BTC", "USD", { price: 100_000, bid: 99_990, ask: 100_010, volumeUsd24h: 4e7, types: [] })] });
+    const legs = kalshi("KXFED-27APR-T4.00", "Fed above 4.00% after April?", 0.43, { closeTime: iso(NOW + 30 * 24 * HOUR), types: [] }).map((m, i) => (i === 0 ? { ...m, bid: 0.42, ask: 0.45 } : m));
+    const out = await exploreAcross({ public: [kraken, pub("kalshi", "Kalshi", { kind: "events", connectTo: "kalshi", connector: "live:kalshi", listings: legs })] }, { clock });
+    expect(out.items.find((i) => i.key === "coin:BTC")?.at[0]).toMatchObject({ venue: "kraken", price: 100_000, bid: 99_990, ask: 100_010 });
+    expect(out.items.find((i) => i.key === "kalshi:KXFED-27APR-T4.00")?.at[0]).toMatchObject({ venue: "kalshi", symbol: "KXFED-27APR-T4.00:YES", price: 0.43, bid: 0.42, ask: 0.45 });
+  });
+
+  it("a read-only listing's line is a price and not a connection to make, once the row trades at a connected venue", async () => {
+    const nvda = mk("NVDA/USDG@Robinhood Chain", "token", "NVDA", "USDG", { name: "NVIDIA Stock Token on Robinhood Chain", price: 180, types: ["market"], category: "RWA", issuer: "Robinhood", eligibility: "not for US persons" });
+    const tokens = pub("robinhood-stock-tokens", "Robinhood Stock Tokens", { kind: "tokens", connectTo: "robinhood-wallet", connector: "live:wallet", readOnly: "Robinhood's own prices", listings: [mk("NVDA", "token", "NVDA", "USD", { name: "NVIDIA", price: 181, bid: 180.9, ask: 181.1, types: [] })] });
+    const out = await exploreAcross({ connected: [venue("wallet", "Browser wallet", trader({ markets: [nvda] }), "live:wallet")], public: [tokens] }, { clock });
+    const row = out.items.find((i) => i.key === "rwa:NVDA")!;
+    expect(row.at.map((a) => [a.venue, a.connected, a.canTrade, a.connectTo, a.connector])).toEqual([
+      ["wallet", true, true, undefined, undefined],
+      ["robinhood-stock-tokens", false, false, undefined, undefined],
+    ]);
+    expect(row.at[1]).toMatchObject({ public: true, price: 181, bid: 180.9, ask: 181.1, note: "Robinhood's own prices" });
+    // with no wallet connected the line offers the connection, as before
+    const alone = await exploreAcross({ public: [tokens] }, { clock });
+    expect(alone.items[0]?.at[0]).toMatchObject({ public: true, connectTo: "robinhood-wallet", connector: "live:wallet" });
+    // a wallet connected that may not trade leaves the offer too
+    const cannot = await exploreAcross({ connected: [venue("wallet", "Browser wallet", trader({ markets: [nvda], can: false, whyNot: "the wallet is read-only here" }), "live:wallet")], public: [tokens] }, { clock });
+    expect(cannot.items.find((i) => i.key === "rwa:NVDA")?.at[1]).toMatchObject({ connectTo: "robinhood-wallet" });
+  });
+});
+
+describe("order among ties", () => {
+  it("rows that report no volume keep their source's order — Robinhood's well-known tokens first, not the alphabet", async () => {
+    const tokens = pub("robinhood-stock-tokens", "Robinhood Stock Tokens", { kind: "tokens", connectTo: "robinhood-wallet", connector: "live:wallet", readOnly: "only read here", listings: ["NVDA", "AAPL", "MSFT", "AEHR"].map((s) => mk(s, "token", s, "USD", { name: `${s} • Robinhood Token`, price: 100, types: [] })) });
+    const out = await exploreAcross({ public: [tokens] }, { clock, tab: "rwas" });
+    expect(out.items.map((i) => i.base)).toEqual(["NVDA", "AAPL", "MSFT", "AEHR"]);
+  });
+});
+
+describe("movers, closing, all", () => {
   it("counts a mover only above the 24-hour dollar volume floor, biggest change first, and says which venue the change is from", async () => {
     const x = trader({
       markets: [
@@ -330,6 +466,10 @@ describe("movers, closing, now", () => {
     ]);
     const lower = await exploreAcross({ connected: [venue("okx", "OKX", x)] }, { clock, moversMinUsd: { coin: 10_000 } });
     expect(lower.movers.map((m) => m.key)).toEqual(["coin:THIN", "coin:ETH", "coin:BTC"]);
+    // a perpetual's floor is ten times a coin's: a $5M perpetual's jump is not news, a $5M coin's is
+    const perps = trader({ markets: [mk("PONS/USDC:USDC", "perp", "PONS", "USDC", { price: 0.1, volumeUsd24h: 5e6, changePct24h: 40 }), mk("AVAX/USDT", "spot", "AVAX", "USDT", { price: 30, volumeUsd24h: 5e6, changePct24h: 9 }), mk("BTC/USDC:USDC", "perp", "BTC", "USDC", { price: 100_000, volumeUsd24h: 1.8e9, changePct24h: 1 })] });
+    const thin = await exploreAcross({ connected: [venue("hl", "HL", perps)] }, { clock });
+    expect(thin.movers.map((m) => m.key)).toEqual(["coin:AVAX", "perp:BTC"]);
     const sorted = await exploreAcross({ connected: [venue("okx", "OKX", x)] }, { clock, sort: "movers" });
     expect(sorted.items.map((i) => i.key)).toEqual(["coin:THIN", "coin:NOVOL", "coin:ETH", "coin:BTC"]);
   });
@@ -352,16 +492,22 @@ describe("movers, closing, now", () => {
     expect(byClose.items.map((i) => i.name)).toEqual(["Closes in 1h", "Closes in 5h", "Closes in 20h", "Closes in a week", "Closed an hour ago"]);
   });
 
-  it("makes Now of what closes within a day by volume, the movers and the most traded, each once", async () => {
+  it("All is every row as one table, by volume, and the body still carries what closes within a day, the movers and the most traded for agents", async () => {
     const x = trader({
       markets: [mk("BTC/USDT", "spot", "BTC", "USDT", { price: 100_000, volumeUsd24h: 2e9, changePct24h: 1 }), mk("DOGE/USDT", "spot", "DOGE", "USDT", { price: 0.2, volumeUsd24h: 3e6, changePct24h: 12 })],
-      events: kalshi("KXBTCD-1", "Bitcoin above 100k today?", 0.5, { closeTime: iso(NOW + 3 * HOUR) }),
+      events: kalshi("KXBTCD-1", "Bitcoin above 100k today?", 0.5, { closeTime: iso(NOW + 3 * HOUR), volumeUsd24h: 5e5 }),
     });
-    const out = await exploreAcross({ connected: [venue("somewhere", "Somewhere", x)] }, { clock, tab: "now" });
-    expect(out.items.map((i) => i.key)).toEqual(["event:somewhere:KXBTCD-1", "coin:DOGE", "coin:BTC"]);
-    expect(out.items.every((i) => i.tabs[0] === "now")).toBe(true);
-    expect(out.tabs.find((t) => t.id === "now")?.count).toBe(3);
+    const out = await exploreAcross({ connected: [venue("somewhere", "Somewhere", x)] }, { clock, tab: "all" });
+    expect(out.items.map((i) => i.key)).toEqual(["coin:BTC", "coin:DOGE", "event:somewhere:KXBTCD-1"]);
+    // every row's tabs start with All; All is the first tab and counts every row
+    expect(out.items.every((i) => i.tabs[0] === "all")).toBe(true);
+    expect(out.tabs[0]).toEqual({ id: "all", label: "All", count: 3 });
+    expect(out.tabs.map((t) => t.id)).toEqual(["all", "crypto", "predictions"]);
+    // no tab asked is the same list
+    expect((await exploreAcross({ connected: [venue("somewhere", "Somewhere", x)] }, { clock })).items.map((i) => i.key)).toEqual(["coin:BTC", "coin:DOGE", "event:somewhere:KXBTCD-1"]);
     expect(out.mostTraded.map((i) => i.key)).toEqual(["coin:BTC", "coin:DOGE"]);
+    expect(out.movers.map((i) => i.key)).toEqual(["coin:DOGE", "coin:BTC"]);
+    expect(out.closing.map((i) => i.key)).toEqual(["event:somewhere:KXBTCD-1"]);
   });
 
   it("filters by a query over every venue's symbols and names", async () => {
@@ -369,6 +515,96 @@ describe("movers, closing, now", () => {
     const out = await exploreAcross({ connected: [venue("okx", "OKX", x)] }, { clock, q: "bitcoin" });
     expect(out.items.map((i) => i.key)).toEqual(["coin:BTC"]);
     expect(x.calls).toContain("markets:bitcoin");
+  });
+});
+
+describe("pre-IPO perpetuals: one row per company", () => {
+  const UNIT = "a price of $1 stands for $1,000,000,000 of implied company valuation (one contract ≈ one-billionth of the company)";
+  const OKX_UNIT = "OKX: a price of $1 stands for $10,000,000,000 of implied company valuation since its 10:1 rebase of 30 June 2026";
+  const anthropic = { id: "preipo:anthropic", title: "Anthropic" };
+  /** a venue's pre-IPO perpetual as public-markets.ts lists it, or as a connected key's trader lists it (no price: its stats bring one) */
+  const pre = (symbol: string, base: string, quote: string, price: number | undefined, perPoint: number, extra: Partial<Listing> = {}): Listing =>
+    mk(symbol, "perp", base, quote, { ...(price !== undefined ? { price } : {}), category: "Pre-IPO", group: anthropic, implied: { perPoint, unit: perPoint === 1e10 ? OKX_UNIT : UNIT, ...(price !== undefined ? { usd: Math.round(price * perPoint) } : {}) }, issuer: "Anthropic", eligibility: "Anthropic, 29 June 2026: unapproved transfers are void", types: [], ...extra });
+
+  it("folds the contracts at every venue into the company's row — OKX's 214 in its $10B unit beside Gate's 2,140 in the $1B unit — each line with its own price and implied valuation, the row's the median; it is Pre-IPO, not Perps", async () => {
+    const okx = pub("okx-preipo", "OKX", { listings: [pre("ANTHROPIC/USDT:USDT", "ANTHROPIC", "USDT", 214.51, 1e10, { volumeUsd24h: undefined, changePct24h: 2.07, fundingRate: 0, nextFundingAt: "2026-10-07T00:00:00.000Z" })], connectTo: "okx", connector: "live:exchange:okx" });
+    const gate = pub("gate-preipo", "Gate", { listings: [pre("ANTHROPIC/USDT:USDT", "ANTHROPIC", "USDT", 2139.8, 1e9, { volumeUsd24h: 651_204, changePct24h: 1.9 })], connectTo: "gate", connector: "live:exchange:gate" });
+    const deribit = pub("deribit-preipo", "Deribit", { listings: [pre("ANTH/USDC:USDC", "ANTH", "USDC", 2078.81, 1e9, { volumeUsd24h: 330_972.78, changePct24h: 1.69 })], connectTo: "deribit", connector: "live:exchange:deribit" });
+    const out = await exploreAcross({ public: [okx, gate, deribit] }, { clock });
+    expect(out.items).toHaveLength(1);
+    const row = out.items[0]!;
+    expect(row).toMatchObject({ key: "preipo:anthropic", kind: "perp", name: "Anthropic", base: "ANTHROPIC", category: "Pre-IPO", group: anthropic, tabs: ["all", "preipo"], issuer: "Anthropic", eligibility: "Anthropic, 29 June 2026: unapproved transfers are void", volumeUsd24h: 651_204 + 330_972.78, changePct24h: 1.9, changeFrom: { venue: "gate-preipo", venueName: "Gate" } });
+    // the median implied valuation (2.145T, 2.1398T, 2.0788T → 2.1398T) and the row's price in the $1-per-$1B convention; no change24h (the units differ)
+    expect(row.implied).toEqual({ usd: 2_139_800_000_000, unit: "the median of 3 venues' implied valuations (each venue's own contract price and unit are on its line)" });
+    expect(row.price).toBe(2139.8);
+    expect(row.change24h).toBeUndefined();
+    // each venue's line keeps its own contract price and implied valuation in its own unit; the busiest first
+    expect(row.at.map((a) => [a.venue, a.symbol, a.price, a.implied, a.connectTo])).toEqual([
+      ["gate-preipo", "ANTHROPIC/USDT:USDT", 2139.8, { usd: 2_139_800_000_000, unit: UNIT }, "gate"],
+      ["deribit-preipo", "ANTH/USDC:USDC", 2078.81, { usd: 2_078_810_000_000, unit: UNIT }, "deribit"],
+      ["okx-preipo", "ANTHROPIC/USDT:USDT", 214.51, { usd: 2_145_100_000_000, unit: OKX_UNIT }, "okx"],
+    ]);
+    // Pre-IPO is its tab; Perps has nothing here
+    expect(out.tabs.map((t) => [t.id, t.count])).toEqual([["all", 1], ["preipo", 1]]);
+    expect((await exploreAcross({ public: [okx, gate, deribit] }, { clock, tab: "preipo" })).items.map((i) => i.key)).toEqual(["preipo:anthropic"]);
+    expect((await exploreAcross({ public: [okx, gate, deribit] }, { clock, tab: "perps" })).items).toEqual([]);
+    expect(out.notes).toContain("Pre-IPO perpetuals are contracts on a venue's estimate of a private company's valuation, not shares; each venue says who may trade them once a key connects.");
+    expect(out.notes.every((n) => n.length < 160)).toBe(true);
+    // a search by the company's name
+    expect((await exploreAcross({ public: [okx, gate, deribit] }, { clock, q: "anthropic" })).items.map((i) => i.key)).toEqual(["preipo:anthropic"]);
+  });
+
+  it("a connected key's contract is the row's line to trade — its unit from its list, its price from its stats — and the venue's public source is not asked", async () => {
+    const key = trader({ markets: [pre("ANTHROPIC/USDT:USDT", "ANTHROPIC", "USDT", undefined, 1e10)], stats: { "ANTHROPIC/USDT:USDT": { price: 214.6, changePct24h: 2.1, volumeUsd24h: 520_000 } } });
+    const okxPublic = pub("okx-preipo", "OKX", { listings: [pre("ANTHROPIC/USDT:USDT", "ANTHROPIC", "USDT", 214.51, 1e10)], connectTo: "okx", connector: "live:exchange:okx" });
+    const gate = pub("gate-preipo", "Gate", { listings: [pre("ANTHROPIC/USDT:USDT", "ANTHROPIC", "USDT", 2139.8, 1e9, { volumeUsd24h: 651_204 })], connectTo: "gate", connector: "live:exchange:gate" });
+    const out = await exploreAcross({ connected: [venue("okx", "OKX", key, "live:exchange:okx")], public: [okxPublic, gate] }, { clock });
+    expect(okxPublic.asked).toEqual([]);
+    const row = out.items.find((i) => i.key === "preipo:anthropic")!;
+    expect(row.at.map((a) => [a.venue, a.connected, a.canTrade, a.price, a.implied?.usd, a.connectTo])).toEqual([
+      ["gate-preipo", false, false, 2139.8, 2_139_800_000_000, "gate"],
+      ["okx", true, true, 214.6, 2_146_000_000_000, undefined],
+    ]);
+    // two venues: the median of two is their middle
+    expect(row.implied?.usd).toBe(2_142_900_000_000);
+    expect(row.price).toBe(2142.9);
+  });
+
+  it("the median guard runs on the implied valuation, never on the contract price: a venue 20% away is set aside and said", async () => {
+    const okx = pub("okx-preipo", "OKX", { listings: [pre("ANTHROPIC/USDT:USDT", "ANTHROPIC", "USDT", 214.51, 1e10)], connectTo: "okx", connector: "live:exchange:okx" });
+    const gate = pub("gate-preipo", "Gate", { listings: [pre("ANTHROPIC/USDT:USDT", "ANTHROPIC", "USDT", 2139.8, 1e9)], connectTo: "gate", connector: "live:exchange:gate" });
+    const odd = pub("odd-preipo", "Odd", { listings: [pre("ANTHROPIC/USDT:USDT", "ANTHROPIC", "USDT", 1600, 1e9)], connectTo: "odd", connector: "live:exchange:odd" });
+    const out = await exploreAcross({ public: [okx, gate, odd] }, { clock });
+    expect(out.items[0]?.at.map((a) => a.venue).sort()).toEqual(["gate-preipo", "okx-preipo"]);
+    expect(out.missing).toEqual([expect.objectContaining({ venue: "odd-preipo", symbol: "ANTHROPIC/USDT:USDT", connected: false, why: expect.stringContaining("an implied 1600000000000 in its unit, more than 10% from the other venues' 2139800000000 for Anthropic") })]);
+    // a single venue: its own unit sentence is the row's
+    const alone = await exploreAcross({ public: [okx] }, { clock });
+    expect(alone.items[0]?.implied).toEqual({ usd: 2_145_100_000_000, unit: OKX_UNIT });
+    expect(alone.items[0]?.price).toBe(2145.1);
+  });
+
+  it("the IPO questions stay in Predictions beside the busiest few whatever their volume, as Predictions and not Pre-IPO, so the company drawer can name them", async () => {
+    const kalshiNine = Array.from({ length: 9 }, (_, i) => kalshi(`KXK-${i}`, `Kalshi question ${i}?`, 0.5, { contracts24h: 90_000 - i * 10_000, closeTime: iso(NOW + (i + 2) * HOUR), category: "Economics", types: [] })).flat();
+    const ipoK = kalshi("KXIPOANTHROPIC-DATE-26DEC01", "When will Anthropic officially announce an IPO? (Dec 1, 2026)", 0.67, { contracts24h: 4_227, closeTime: iso(NOW + 56 * 24 * HOUR), category: "IPOs", types: [] });
+    const pmNine = Array.from({ length: 9 }, (_, i) => polymarket(`pm-${i}`, `Polymarket question ${i}?`, [["Yes", 0.5], ["No", 0.5]], { volumeUsd24h: 500_000 - i * 50_000, closeTime: iso(NOW + (i + 2) * HOUR), category: "Politics", types: [] }, `0x${String(i).repeat(64)}`)).flat();
+    const ipoP = polymarket("anthropic-ipo-by-m", "Will Anthropic IPO by December 31, 2026?", [["Yes", 0.83], ["No", 0.17]], { volumeUsd24h: 27_271, eventVolumeUsd24h: 40_703, closeTime: iso(NOW + 86 * 24 * HOUR), category: "IPO", types: [] } as Partial<Listing>, `0x${"b4".repeat(32)}`);
+    const sources = { public: [pub("kalshi", "Kalshi", { kind: "events" as const, connectTo: "kalshi", connector: "live:kalshi", listings: [...kalshiNine, ...ipoK] }), pub("polymarket", "Polymarket", { kind: "events" as const, connectTo: "polymarket", connector: "live:polymarket-trade", listings: [...pmNine, ...ipoP] })] };
+    const out = await exploreAcross(sources, { clock, tab: "predictions" });
+    // the twelve busiest in turn, then the two IPO questions, Polymarket's busier one first
+    expect(out.items).toHaveLength(PREDICTIONS_MAX + 2);
+    expect(out.items.slice(PREDICTIONS_MAX).map((i) => [i.key, i.category, i.tabs])).toEqual([
+      [`pm:0x${"b4".repeat(32)}`, "IPO", ["all", "predictions"]],
+      ["kalshi:KXIPOANTHROPIC-DATE-26DEC01", "IPOs", ["all", "predictions"]],
+    ]);
+    expect(out.tabs.map((t) => [t.id, t.count])).toEqual([["all", PREDICTIONS_MAX + 2], ["predictions", PREDICTIONS_MAX + 2]]);
+    expect(out.notes).toContain("Predictions: and the IPO questions at Kalshi and Polymarket, beside the busiest few.");
+    expect(out.notes.every((n) => n.length < 160)).toBe(true);
+    // All carries them too; what closes soon is still the interleaved few
+    const all = await exploreAcross(sources, { clock });
+    expect(all.items.filter((i) => i.kind === "event")).toHaveLength(PREDICTIONS_MAX + 2);
+    expect(all.closing.every((c) => !["IPO", "IPOs"].includes(c.category ?? ""))).toBe(true);
+    // with a search the IPO sentence is not said
+    expect((await exploreAcross(sources, { clock, q: "ipo" })).notes.some((n) => n.includes("IPO questions"))).toBe(false);
   });
 });
 

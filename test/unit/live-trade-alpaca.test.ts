@@ -100,13 +100,48 @@ const stockAnswers = (asset: Record<string, unknown>, clock: unknown, q: unknown
 });
 
 describe("Alpaca's connection carries a trader", () => {
-  it("through the source the account opens: it can trade, and says what; the two reads are still the only calls made while connecting", async () => {
+  it("through the source the account opens: it can trade, and says what; the two reads and the one soft question about crypto wallets are the only calls made while connecting", async () => {
     const { t, reads, source } = await alpaca();
     expect([t.can, t.what]).toEqual([true, "US stocks, ETFs and crypto"]);
-    expect(calls(reads)).toEqual([`GET ${LIVE}/v2/account`, `GET ${LIVE}/v2/positions`]);
-    expect(source.readOnlyBecause).toBe("Alpaca's API moves no cash: deposits and withdrawals are made at Alpaca");
-    expect(source.probe).toEqual({ can: ["read", "trade"], note: "an Alpaca key has no scopes: any key can place orders, and no key can move cash", native: { calls: ["GET /v2/account", "GET /v2/positions"], paper: false } });
+    expect(calls(reads)).toEqual([`GET ${LIVE}/v2/account`, `GET ${LIVE}/v2/positions`, `GET ${LIVE}/v2/wallets`]);
+    // Alpaca's 404 to GET /v2/wallets is Alpaca's answer: no crypto wallets for this account, in its words, and nothing is assumed about cash
+    expect(source.writer).toBeUndefined();
+    expect(source.readOnlyBecause).toBe('Alpaca has not enabled the Crypto Wallets API for this account (GET /v2/wallets: HTTP 404, "not set up in this test: GET https://api.alpaca.markets/v2/wallets"): cash moves by ACH at Alpaca, and crypto wallets are enabled by Alpaca on request');
+    expect(source.probe).toEqual({ can: ["read", "trade"], note: `an Alpaca key has no scopes: any key can place orders. ${source.readOnlyBecause}`, native: { calls: ["GET /v2/account", "GET /v2/positions", "GET /v2/wallets"], paper: false, wallets: false } });
     expect(source.noTradeBecause).toBeUndefined();
+  });
+
+  it("an account Alpaca has enabled crypto wallets for: a writer that receives — GET /v2/wallets?asset=&chain= gives the wallet, made on the spot — and nothing leaves, in Alpaca's words (its withdrawal endpoint is deprecated, sunset 2026-10-09)", async () => {
+    const WALLET = "0x2222222222222222222222222222222222222222";
+    const { seen, source } = await alpaca({
+      [`GET ${LIVE}/v2/wallets`]: json([]),
+      [`GET ${LIVE}/v2/wallets?asset=USDC&chain=ETH`]: json({ address: WALLET.toLowerCase(), chain: "ETH", created_at: "2026-10-06T09:00:00Z" }),
+      [`GET ${LIVE}/v2/wallets?asset=USDG&chain=ARB`]: json({ code: 40410000, message: "asset not found" }, 404),
+    });
+    expect(source.readOnlyBecause).toBeUndefined();
+    expect(source.probe.note).toContain("Crypto comes in to Alpaca's wallets for this account (GET /v2/wallets: enabled)");
+    expect((source.probe.native as { wallets: boolean }).wallets).toBe(true);
+    const w = source.writer!;
+    expect(w.can).toEqual({ withdraw: false, ledgers: [], transfer: false, swap: false, receive: true, send: false, why: { withdraw: expect.stringContaining("Sunset: 2026-10-09") as unknown as string } });
+    expect([w.withdraw, w.transfer, w.swap, w.send]).toEqual([undefined, undefined, undefined, undefined]);
+    const eth = ok(await w.depositAddress("USDC", "Ethereum"));
+    expect(eth.address).toBe(WALLET);
+    expect(eth.note).toContain("Alpaca's own USDC wallet for this account on Ethereum");
+    expect(calls(seen)).toEqual([`GET ${LIVE}/v2/wallets?asset=USDC&chain=ETH`]);
+    expect(seen[0]!.headers).toEqual(AUTH);
+    // Alpaca's chains are ETH, ARB, SOL, BTC and XRP: a chain of this account's that is not among them is refused before Alpaca is asked
+    const poly = refusal(await w.depositAddress("USDC", "Polygon"));
+    expect([poly.code, poly.message]).toEqual(["E_VENUE_RAIL_CLOSED", "Alpaca's crypto wallets are on Ethereum and Arbitrum (Alpaca's chains: ETH, ARB, SOL, BTC, XRP): not on Polygon"]);
+    // an asset Alpaca has no wallet for: its own words
+    const none = refusal(await w.depositAddress("USDG", "Arbitrum"));
+    expect([none.code, none.message]).toEqual(["E_VENUE_RAIL_CLOSED", "Alpaca has no USDG wallet on Arbitrum for this account (it says: asset not found)"]);
+    expect(calls(seen)).toEqual([`GET ${LIVE}/v2/wallets?asset=USDC&chain=ETH`, `GET ${LIVE}/v2/wallets?asset=USDG&chain=ARB`]);
+  });
+
+  it("Alpaca not answering the wallets question is not a no: nothing is sent to it until it is connected again, and the words say so", async () => {
+    const { source } = await alpaca({ [`GET ${LIVE}/v2/wallets`]: json({ message: "service unavailable" }, 503) });
+    expect(source.writer).toBeUndefined();
+    expect(source.readOnlyBecause).toBe('Alpaca did not say whether this account has crypto wallets (GET /v2/wallets: HTTP 503, "service unavailable"): nothing is sent to it from here until it is connected again. Cash moves by ACH at Alpaca');
   });
 
   it("with Alpaca's replace, its positions and its close; no leverage call, since Alpaca sets none per position", async () => {
@@ -237,7 +272,7 @@ describe("an order", () => {
 
   it("a paper key trades on Alpaca's paper host; prices still come from the one market-data host", async () => {
     const { t, seen, reads } = await alpaca({ [`POST ${PAPER}/v2/orders`]: json(order()), ...Object.fromEntries(Object.entries(stockAnswers(AAPL, OPEN, quote("AAPL", 1, 2), trade("AAPL", 1.5))).map(([k, v]) => [k.replace(LIVE, PAPER), v])) }, { paper: true });
-    expect(calls(reads)).toEqual([`GET ${PAPER}/v2/account`, `GET ${PAPER}/v2/positions`]);
+    expect(calls(reads)).toEqual([`GET ${PAPER}/v2/account`, `GET ${PAPER}/v2/positions`, `GET ${PAPER}/v2/wallets`]);
     ok(await t.market("AAPL"));
     ok(await t.place({ symbol: "AAPL", side: "buy", type: "market", qty: 1, worstPrice: 2.04, clientId: "ord-0007" }));
     expect(calls(seen)).toEqual([`GET ${PAPER}/v2/assets/AAPL`, `GET ${PAPER}/v2/clock`, `GET ${DATA}/v2/stocks/AAPL/quotes/latest`, `GET ${DATA}/v2/stocks/AAPL/trades/latest`, `POST ${PAPER}/v2/orders`]);

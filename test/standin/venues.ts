@@ -3,32 +3,38 @@
  * account's own doors, reads and pages run against them unchanged. Nothing here reaches the network and no money exists: every balance,
  * price and fill is the stand-in's own, made up and kept in memory.
  *
- *   live:standin-exchange    spot BTC, ETH and SOL against USDT, and their perpetuals: balances in a spot and a futures ledger, the last 24
- *                            hours, candles, positions, leverage, an order changed in place; a limit order rests and fills when the price
- *                            crosses it; a stop triggers. It moves money between its own ledgers, swaps one stablecoin for another and
- *                            withdraws to an agent wallet of the account's (the stand-in chain credits it); it gives no deposit address.
- *                            And it EARNS (an earner, live/earn.ts): a flexible USDT product and a bonded ETH one; money goes in from spot
- *                            and comes back there, each request done on the next tick, and — as at OKX — what is in earn is not in the
- *                            exchange's balance read
- *   live:standin-events      event contracts with a YES and a NO leg, closing minutes to days ahead (Economics, Crypto, Sports, Weather),
- *                            and a fifteen-minute "Bitcoin up or down" that rolls over and settles; positions
+ *   live:standin-exchange    spot BTC, ETH and SOL against USDT, and their perpetuals — and a pre-IPO perpetual, ANTHROPIC/USDT:USDT, a
+ *                            contract on Anthropic's implied valuation (live/preipo.ts: category Pre-IPO, $1 of price for $1,000,000,000,
+ *                            about 2,100 here): balances in a spot and a futures ledger, the last 24 hours, candles, positions, leverage,
+ *                            an order changed in place; a limit order rests and fills when the price crosses it; a stop triggers. It moves
+ *                            money between its own ledgers, swaps one stablecoin for another and withdraws to an agent wallet of the
+ *                            account's (the stand-in chain credits it); it gives no deposit address. And it EARNS (an earner, live/earn.ts):
+ *                            a flexible USDT product and a bonded ETH one; money goes in from spot and comes back there, each request done
+ *                            on the next tick, and — as at OKX — what is in earn is not in the exchange's balance read
+ *   live:standin-events      event contracts with a YES and a NO leg, closing minutes to days ahead (Economics, Crypto, Sports, Weather,
+ *                            and an IPO question), and a fifteen-minute "Bitcoin up or down" that rolls over and settles; positions
  *   live:standin-wallet      a wallet that swaps on its own (as the mm command line does: nothing for a browser wallet to send): WETH and
  *                            cbBTC on Base, and USDY, a tokenised fund (an RWA), on Ethereum — its market carries the RWA category, an
  *                            issuer and the issuer's words, as a real wallet's tokenised shares do (dex.ts), so it is an RWA in Markets
  *                            and in holdings alike
  *   live:standin-pubex       the exchange behind the public listing below, for "Connect to trade"
+ *   live:standin-pubperps    the perp exchange behind the public perpetuals below (as Hyperliquid stands behind the real ones); it lists
+ *                            the same Anthropic pre-IPO perpetual, unconnected, so Markets shows one Anthropic row with Trade at the
+ *                            Stand-in Exchange and Connect to trade here
  *   live:standin-pubevents   the event market behind the public events below
  *
- * and the keyless public sources Markets reads beside them: an exchange's coins (DOGE, AVAX and LINK only there), an event market's events,
- * stock tokens that are only read, and an exchange that answers this location with its own geoblock — so the page shows the venue's words.
- * The exchange's and the event market's public sources give price history too (`candles`), as the real keyless ones do.
+ * and the keyless public sources Markets reads beside them: an exchange's coins (DOGE, AVAX and LINK only there), an event market's events
+ * with their tags (its Sports one is left out, as the real read leaves sports out), a perp exchange's perpetuals, stock tokens that are only
+ * read, and an exchange that answers this location with its own geoblock — so the page shows the venue's words. Each says what its list is
+ * made of (`notes`). The exchanges' and the event market's public sources give price history too (`candles`), as the real keyless ones do.
  */
 import { isRefusal, type Refusal } from "../../src/core/errors.ts";
 import { no } from "../../src/portfolio/refuse.ts";
 import { register } from "../../src/portfolio/live/index.ts";
-import { RWA_CATEGORY } from "../../src/portfolio/live/categories.ts";
+import { isExcludedCategory, RWA_CATEGORY } from "../../src/portfolio/live/categories.ts";
 import type { EarnPosition, EarnProduct, EarnState, LiveEarner } from "../../src/portfolio/live/earn.ts";
 import { CHAINS, type ChainName, type ChainReader, type ChainSender } from "../../src/portfolio/live/chain.ts";
+import { impliedUsd, PRE_IPO_CATEGORY, PRE_IPO_ISSUERS, PRE_IPO_PER_POINT } from "../../src/portfolio/live/preipo.ts";
 import type { Listing, PublicSource } from "../../src/portfolio/live/public-markets.ts";
 import { badOrder, DONE, notionalOf, onStep, type Candle, type CandleInterval, type LiveTrader, type Market, type MarketKind, type MarketStats, type OrderChange, type OrderRequest, type OrderState, type OrderStatus, type Position } from "../../src/portfolio/live/trade.ts";
 import { isStable, type LiveBalance, type LiveSource } from "../../src/portfolio/live/types.ts";
@@ -50,6 +56,8 @@ export interface World {
   prices: PriceBook;
   ex: ExchangeBook;
   pubex: ExchangeBook;
+  /** the perp exchange behind the public perpetuals: not connected on the stand-in account */
+  pubperps: ExchangeBook;
   predict: EventBook;
   pubevents: EventBook;
   wallet: WalletBook;
@@ -329,6 +337,8 @@ export interface CoinSpec {
   /** dollars traded a day */
   volume: number;
   perp?: { maxLeverage: number; funding: number; basis: number } | undefined;
+  /** a perpetual on a private company's implied valuation (live/preipo.ts): the company it stands for; its price is in the $1-per-$1,000,000,000 unit */
+  preipo?: { slug: string; name: string } | undefined;
 }
 
 const nextFunding = (now: number): string => new Date(Math.ceil((now + 1) / (8 * HOUR)) * 8 * HOUR).toISOString();
@@ -359,9 +369,13 @@ export class ExchangeBook extends Book {
     const day = w().prices.day(s.key);
     const volume = s.volume * (1 + 0.04 * Math.sin(now / (3 * HOUR) + (seedOf(s.symbol) % 7)));
     const common = { symbol: s.symbol, base: s.base, quote: s.quote, price: toStep(p, s.priceStep), bid: toStep(bid, s.priceStep), ask: toStep(ask, s.priceStep), minQty: s.minQty, qtyStep: s.qtyStep, priceStep: s.priceStep, open: true, types: ["market", "limit", "stop", "stop_limit"] as Market["types"], tifs: ["gtc", "ioc", "fok"] as Market["tifs"], postOnly: true, changePct24h: Number(day.changePct24h.toFixed(2)), change24h: toStep(day.change24h * (s.perp?.basis ?? 1), s.priceStep), volumeUsd24h: Math.round(volume) };
-    return s.perp
-      ? { ...common, name: `${s.base} perpetual`, kind: "perp", reduceOnly: true, maxLeverage: s.perp.maxLeverage, fundingRate: s.perp.funding, nextFundingAt: nextFunding(now) }
-      : { ...common, name: `${s.base} / ${s.quote}`, kind: "spot", sellsReduce: true };
+    if (!s.perp) return { ...common, name: `${s.base} / ${s.quote}`, kind: "spot", sellsReduce: true };
+    const perp: Market = { ...common, name: `${s.base} perpetual`, kind: "perp", reduceOnly: true, maxLeverage: s.perp.maxLeverage, fundingRate: s.perp.funding, nextFundingAt: nextFunding(now) };
+    if (!s.preipo) return perp;
+    // a pre-IPO perpetual carries what the real ones carry (public-markets.ts, exchange-trade.ts): its category, its company, the valuation
+    // its price implies in the venue's unit, and the issuer's own words where the issuer has given some
+    const said = PRE_IPO_ISSUERS[s.preipo.slug];
+    return { ...perp, name: `${s.preipo.name} pre-IPO perpetual`, category: PRE_IPO_CATEGORY, group: { id: `preipo:${s.preipo.slug}`, title: s.preipo.name }, implied: { perPoint: PRE_IPO_PER_POINT, unit: "a price of $1 stands for $1,000,000,000 of implied company valuation (a stand-in: nothing here is real)", usd: impliedUsd(common.price, PRE_IPO_PER_POINT) }, ...(said ? { issuer: said.issuer, eligibility: said.eligibility } : {}) };
   }
 
   markets(): Market[] {
@@ -563,6 +577,8 @@ export interface EventSpec {
   id: string;
   title: string;
   category: string;
+  /** the venue's own tags for it, as Gamma gives an event several (the public listing carries them; one under an excluded word is left out) */
+  tags?: string[] | undefined;
   /** when it stops trading */
   closeAt: number;
   /** YES now, and its change over 24 hours in dollars per contract */
@@ -859,6 +875,8 @@ function curves(prices: PriceBook, t0: number): { events: EventSpec[]; publicEve
     ["NVDA", 182.4, 1.9, 0.6],
     ["TSLA", 251.3, -2.7, 0.9],
     ["SPY", 662.1, 0.4, 0.3],
+    // Anthropic's implied valuation in the pre-IPO perpetuals' unit: about $2.1 trillion, as the real venues quoted it on 2026-10-06
+    ["ANTHROPIC", 2_100, 1.2, 0.5],
   ];
   for (const [key, price, change24h, vol] of coins) prices.add(key, { price, change24h, vol });
   const events: EventSpec[] = [
@@ -867,11 +885,16 @@ function curves(prices: PriceBook, t0: number): { events: EventSpec[]; publicEve
     { id: "SI-ETH-WEEK", title: "Will ETH close the week above $2,500?", category: "Crypto", closeAt: t0 + 4 * D + 7 * H, yes: 0.38, change: 0.06, volume: 410_000, vol: 1.2 },
     { id: "SI-FINAL-HOME", title: "Will the home side win Sunday's championship final?", category: "Sports", closeAt: t0 + 3 * D + 20 * H, yes: 0.55, change: -0.02, volume: 960_000 },
     { id: "SI-RAIN-NYC", title: "Will it rain in New York tomorrow?", category: "Weather", closeAt: t0 + 20 * H + 35 * MINUTE, yes: 0.33, change: 0.05, volume: 74_000, vol: 0.6 },
+    // an IPO question, under the venue's own word for it (categories.ts isIpoCategory): it stays in Predictions beside the busiest few, and
+    // the Pre-IPO company drawer names it
+    { id: "SI-IPO-ANTHROPIC", title: "Will Anthropic IPO before January 1, 2027?", category: "IPO", closeAt: t0 + 86 * D + 5 * H, yes: 0.64, change: 0.03, volume: 215_000, vol: 0.5 },
   ];
+  // the public event exchange's events carry tags as Gamma's do: the Sports one is there to be LEFT OUT of the public listing (categories.ts),
+  // and the housekeeping tags ("Hide From New", "Recurring") are never the category shown
   const publicEvents: EventSpec[] = [
-    { id: "SX-JOBS-NEXT", title: "Will the unemployment rate be 4.5% or higher in the next jobs report?", category: "Economics", closeAt: t0 + 6 * D + 2 * H, yes: 0.27, change: 0.02, volume: 530_000 },
-    { id: "SX-OPENER-OT", title: "Will the season opener go to overtime?", category: "Sports", closeAt: t0 + 11 * H, yes: 0.18, change: -0.01, volume: 150_000, vol: 0.7 },
-    { id: "SX-YIELD-FRI", title: "Will the 10-year Treasury yield close above 4.25% on Friday?", category: "Financials", closeAt: t0 + 2 * D + 2 * H, yes: 0.47, change: 0.03, volume: 380_000 },
+    { id: "SX-JOBS-NEXT", title: "Will the unemployment rate be 4.5% or higher in the next jobs report?", category: "Economics", tags: ["Jobs Report", "Economy", "Recurring"], closeAt: t0 + 6 * D + 2 * H, yes: 0.27, change: 0.02, volume: 530_000 },
+    { id: "SX-OPENER-OT", title: "Will the season opener go to overtime?", category: "Sports", tags: ["Games", "Sports", "NFL (All)"], closeAt: t0 + 11 * H, yes: 0.18, change: -0.01, volume: 150_000, vol: 0.7 },
+    { id: "SX-YIELD-FRI", title: "Will the 10-year Treasury yield close above 4.25% on Friday?", category: "Financials", tags: ["Hide From New", "Treasuries", "Finance"], closeAt: t0 + 2 * D + 2 * H, yes: 0.47, change: 0.03, volume: 380_000 },
   ];
   for (const e of [...events, ...publicEvents]) prices.add(`ev:${e.id}`, { price: e.yes, change24h: e.change, vol: e.vol, event: true });
   return { events, publicEvents };
@@ -884,6 +907,8 @@ const EX_COINS: CoinSpec[] = [
   { symbol: "BTC/USDT:USDT", base: "BTC", quote: "USDT", key: "BTC", qtyStep: 0.001, minQty: 0.001, priceStep: 0.1, spread: 0.0001, volume: 4.2e9, perp: { maxLeverage: 50, funding: 0.0001, basis: 1.0003 } },
   { symbol: "ETH/USDT:USDT", base: "ETH", quote: "USDT", key: "ETH", qtyStep: 0.01, minQty: 0.01, priceStep: 0.01, spread: 0.00012, volume: 1.6e9, perp: { maxLeverage: 25, funding: 0.00008, basis: 1.0004 } },
   { symbol: "SOL/USDT:USDT", base: "SOL", quote: "USDT", key: "SOL", qtyStep: 0.1, minQty: 0.1, priceStep: 0.01, spread: 0.0002, volume: 5.2e8, perp: { maxLeverage: 20, funding: -0.00005, basis: 0.9998 } },
+  // the pre-IPO perpetual, as a real exchange names it: a contract on Anthropic's implied valuation, about 2,100 in the $1-per-$1B unit
+  { symbol: "ANTHROPIC/USDT:USDT", base: "ANTHROPIC", quote: "USDT", key: "ANTHROPIC", qtyStep: 0.001, minQty: 0.001, priceStep: 0.01, spread: 0.0005, volume: 1.4e6, perp: { maxLeverage: 20, funding: 0.00005, basis: 1 }, preipo: { slug: "anthropic", name: "Anthropic" } },
 ];
 
 const PUB_COINS: CoinSpec[] = [
@@ -893,6 +918,16 @@ const PUB_COINS: CoinSpec[] = [
   { symbol: "DOGE/USD", base: "DOGE", quote: "USD", key: "DOGE", qtyStep: 1, minQty: 10, priceStep: 0.00001, spread: 0.0004, volume: 8.2e8 },
   { symbol: "AVAX/USD", base: "AVAX", quote: "USD", key: "AVAX", qtyStep: 0.01, minQty: 0.1, priceStep: 0.001, spread: 0.0004, volume: 2.1e8 },
   { symbol: "LINK/USD", base: "LINK", quote: "USD", key: "LINK", qtyStep: 0.01, minQty: 0.1, priceStep: 0.001, spread: 0.0004, volume: 3.4e8 },
+];
+
+/** the public perp exchange's perpetuals (as Hyperliquid's keyless list is read in public-markets.ts): coins the connected exchange has no
+ * perpetual of, so each is a Perps row of its own marked "Connect to trade" */
+const PUB_PERPS: CoinSpec[] = [
+  { symbol: "DOGE/USDC:USDC", base: "DOGE", quote: "USDC", key: "DOGE", qtyStep: 1, minQty: 10, priceStep: 0.00001, spread: 0.0004, volume: 2.6e8, perp: { maxLeverage: 10, funding: 0.0000125, basis: 1.0002 } },
+  { symbol: "AVAX/USDC:USDC", base: "AVAX", quote: "USDC", key: "AVAX", qtyStep: 0.01, minQty: 0.1, priceStep: 0.001, spread: 0.0004, volume: 1.1e8, perp: { maxLeverage: 10, funding: -0.00002, basis: 0.9999 } },
+  { symbol: "LINK/USDC:USDC", base: "LINK", quote: "USDC", key: "LINK", qtyStep: 0.01, minQty: 0.1, priceStep: 0.001, spread: 0.0004, volume: 1.5e8, perp: { maxLeverage: 10, funding: 0.00001, basis: 1.0001 } },
+  // the same company's pre-IPO perpetual at an unconnected venue, a hair apart in price: Markets folds it into the connected one's row
+  { symbol: "ANTHROPIC/USDC:USDC", base: "ANTHROPIC", quote: "USDC", key: "ANTHROPIC", qtyStep: 0.001, minQty: 0.001, priceStep: 0.01, spread: 0.0006, volume: 9.2e5, perp: { maxLeverage: 10, funding: 0.00005, basis: 1.004 }, preipo: { slug: "anthropic", name: "Anthropic" } },
 ];
 
 const WALLET_TOKENS: TokenSpec[] = [
@@ -921,6 +956,8 @@ export function makeWorld(o: { t0?: number | undefined; clock?: (() => number) |
   ex.leverage.set("BTC/USDT:USDT", { leverage: 3, marginMode: "cross" });
   const pubex = new ExchangeBook("px", "Stand-in Public Exchange", PUB_COINS);
   pubex.add("spot", "USD", 500);
+  const pubperps = new ExchangeBook("pp", "Stand-in Perp Exchange", PUB_PERPS);
+  pubperps.add("futures", "USDC", 400);
   const predict = new EventBook("se", "Stand-in Predictions", events, true);
   predict.add("cash", "USD", 640);
   const pubevents = new EventBook("pe", "Stand-in Event Exchange", publicEvents, false);
@@ -928,14 +965,14 @@ export function makeWorld(o: { t0?: number | undefined; clock?: (() => number) |
   const wallet = new WalletBook("sw", "Stand-in Wallet", WALLET_TOKENS);
   for (const [chain, asset, amount] of [["Base", "USDC", 820], ["Base", "WETH", 0.35], ["Base", "cbBTC", 0.004], ["Ethereum", "USDY", 1_500], ["Ethereum", "USDC", 150]] as const) wallet.add(chain, asset, amount);
   const earn = new EarnBook(ex, EARN_PRODUCTS);
-  current = { t0, clock, prices, ex, pubex, predict, pubevents, wallet, earn, chain: new Map() };
+  current = { t0, clock, prices, ex, pubex, pubperps, predict, pubevents, wallet, earn, chain: new Map() };
   return current;
 }
 
 /** a few seconds pass: prices step, every book fills what the price crossed, and earn finishes what was asked of it */
 export function tick(world: World): void {
   world.prices.tick();
-  for (const b of [world.ex, world.pubex, world.predict, world.pubevents, world.wallet]) b.sweep();
+  for (const b of [world.ex, world.pubex, world.pubperps, world.predict, world.pubevents, world.wallet]) b.sweep();
   world.earn.tick();
 }
 
@@ -1088,6 +1125,7 @@ export function registerStandins(): void {
     } });
   add("standin-exchange", "Stand-in Exchange · spot and perpetuals (test harness)", `Spot BTC, ETH and SOL and their perpetuals; ${STANDIN}.`, (venue, label) => exchangeSource(w().ex, venue, label, "spot and perpetuals", true));
   add("standin-pubex", "Stand-in Public Exchange · spot (test harness)", `Spot coins priced in dollars, DOGE, AVAX and LINK among them; ${STANDIN}.`, (venue, label) => exchangeSource(w().pubex, venue, label, "spot", false));
+  add("standin-pubperps", "Stand-in Perp Exchange · perpetuals (test harness)", `DOGE, AVAX and LINK perpetuals in USDC; ${STANDIN}.`, (venue, label) => exchangeSource(w().pubperps, venue, label, "perpetuals", false));
   add("standin-events", "Stand-in Predictions · event contracts (test harness)", `Event contracts with a YES and a NO leg; ${STANDIN}.`, (venue, label) => ({ name: label || w().predict.name, kind: "prediction", reference: "stand-in", via: `${w().predict.name} · ${STANDIN}`, probe: probe(["read", "trade"]), read: async () => w().predict.read(), trader: w().predict.trader(venue), readOnlyBecause: readOnly }));
   add("standin-pubevents", "Stand-in Event Exchange · event contracts (test harness)", `Event contracts; ${STANDIN}.`, (venue, label) => ({ name: label || w().pubevents.name, kind: "prediction", reference: "stand-in", via: `${w().pubevents.name} · ${STANDIN}`, probe: probe(["read", "trade"]), read: async () => w().pubevents.read(), trader: w().pubevents.trader(venue), readOnlyBecause: readOnly }));
   add("standin-wallet", "Stand-in Wallet · tokens on Base and Ethereum (test harness)", `A wallet that swaps on its own (as the mm command line does): WETH, cbBTC and USDY, a tokenised fund; ${STANDIN}.`, (venue, label) => ({ name: label || w().wallet.name, kind: "agent-wallet", reference: "stand-in", via: `${w().wallet.name} · ${STANDIN}`, probe: probe(["read", "swap"]), read: async () => w().wallet.read(), trader: w().wallet.trader(venue), readOnlyBecause: readOnly }));
@@ -1110,16 +1148,45 @@ export function publicSources(): PublicSource[] {
     // its public price history, as an exchange's keyless OHLCV
     candles: async (symbol, interval, since) => w().pubex.candles("standin-pubex-public", symbol, interval, since),
   };
+  // the public side of the perp exchange, as Hyperliquid's keyless list is: its perpetuals busiest first, each a Perps row to connect to trade
+  let shownPerps: { of: number; total: number } | undefined;
+  const pubperps: PublicSource = {
+    id: "standin-pubperps-public",
+    name: "Stand-in Perp Exchange",
+    kind: "exchange",
+    connectTo: "standin-pubperps",
+    connector: "live:standin-pubperps",
+    listings: async (o) => {
+      const all = w().pubperps.matching(o.q ?? "").sort((a, b) => (b.volumeUsd24h ?? 0) - (a.volumeUsd24h ?? 0));
+      const pool = all.slice(0, o.limit);
+      if (!o.q) shownPerps = { of: pool.length, total: all.length };
+      return pool.map(listed);
+    },
+    candles: async (symbol, interval, since) => w().pubperps.candles("standin-pubperps-public", symbol, interval, since),
+    notes: (o) => (!o.q && shownPerps && shownPerps.of < shownPerps.total ? [`Stand-in Perp Exchange: ${shownPerps.of} of ${shownPerps.total} perpetuals shown · search for the rest`] : []),
+  };
+  // the public side of the event exchange, as the real Gamma read is (public-markets.ts): each market carries its event's tags, an event
+  // under an excluded word (the Sports one) is left out, and the venue says what its list is made of
+  const publicLegs = (ms: Market[]): Listing[] =>
+    ms
+      .map((m): Listing => {
+        const spec = w().pubevents.events.find((e) => e.id === m.group?.id);
+        return { ...m, types: [], tags: spec?.tags ?? (m.category ? [m.category] : []) };
+      })
+      .filter((m) => !isExcludedCategory([m.category, ...(m.tags ?? [])]));
   const pubevents: PublicSource = {
     id: "standin-pubevents-public",
     name: "Stand-in Event Exchange",
     kind: "events",
     connectTo: "standin-pubevents",
     connector: "live:standin-pubevents",
-    listings: async (o) => w().pubevents.matching(o.q ?? "").slice(0, o.limit * 2).map(listed),
-    events: async (o) => w().pubevents.eventsList(o).map(listed),
+    listings: async (o) => publicLegs(w().pubevents.matching(o.q ?? "")).slice(0, o.limit * 2),
+    events: async (o) => publicLegs(w().pubevents.eventsList(o)),
     candles: async (symbol, interval, since) => w().pubevents.candles("standin-pubevents-public", symbol, interval, since),
+    notes: () => ["Stand-in Event Exchange: its busiest events, without sports (a stand-in: nothing here is real)."],
   };
+  // how much of the token list a listing with nothing searched for shows, for the sentence under it
+  let shownTokens: { of: number; total: number } | undefined;
   const tokens: PublicSource = {
     id: "standin-stock-tokens",
     name: "Stand-in Stock Tokens",
@@ -1127,14 +1194,17 @@ export function publicSources(): PublicSource[] {
     connectTo: "standin-stock-tokens",
     connector: "live:standin-stock-tokens",
     readOnly: "these stock tokens are only read here: no connection on this account trades them",
-    listings: async (o) =>
-      STOCK_TOKENS.filter((t) => !o.q || `${t.symbol} ${t.name}`.toLowerCase().includes(o.q.toLowerCase()))
-        .slice(0, o.limit)
-        .map((t) => {
-          const p = w().prices.now(t.key);
-          const d = w().prices.day(t.key);
-          return { symbol: t.symbol, name: t.name, kind: "token" as MarketKind, base: t.symbol, quote: "USD", price: toStep(p, 0.01), bid: toStep(p * 0.999, 0.01, "floor"), ask: toStep(p * 1.001, 0.01, "ceil"), open: true, types: [], changePct24h: Number(d.changePct24h.toFixed(2)), volumeUsd24h: t.volume };
-        }),
+    listings: async (o) => {
+      const matching = STOCK_TOKENS.filter((t) => !o.q || `${t.symbol} ${t.name}`.toLowerCase().includes(o.q.toLowerCase()));
+      const pool = matching.slice(0, o.limit);
+      if (!o.q) shownTokens = { of: pool.length, total: matching.length };
+      return pool.map((t) => {
+        const p = w().prices.now(t.key);
+        const d = w().prices.day(t.key);
+        return { symbol: t.symbol, name: t.name, kind: "token" as MarketKind, base: t.symbol, quote: "USD", price: toStep(p, 0.01), bid: toStep(p * 0.999, 0.01, "floor"), ask: toStep(p * 1.001, 0.01, "ceil"), open: true, types: [], changePct24h: Number(d.changePct24h.toFixed(2)), volumeUsd24h: t.volume };
+      });
+    },
+    notes: (o) => (!o.q && shownTokens && shownTokens.of < shownTokens.total ? [`Stand-in Stock Tokens: ${shownTokens.of} of ${shownTokens.total} shown · search for the rest`] : []),
   };
   // an exchange that does not serve this location: the page shows its own words, and nothing looks for a way around it
   const geo: PublicSource = {
@@ -1145,7 +1215,7 @@ export function publicSources(): PublicSource[] {
     connector: "live:standin-geo",
     listings: async () => no("E_VENUE_GEOBLOCKED", { venue: "standin-geo", message: "Stand-in Geo Exchange does not serve this location: that is its own rule, and the account does not look for a way around it", native: { status: 451, said: '{"code":0,"msg":"Service unavailable from a restricted location (stand-in)."}' } }),
   };
-  return [pubex, pubevents, tokens, geo];
+  return [pubex, pubevents, pubperps, tokens, geo];
 }
 
 // ---- the network, the chain and the payees, as the stand-in answers them: nothing leaves the process -------------------------------------

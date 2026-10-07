@@ -1,4 +1,6 @@
-/* Connecting an account: the wallets this browser has, and every kind of account as tiles, each with its one short form. */
+/* Connecting an account: the wallets this browser has, and every kind of account as tiles, each with its one short form. The picker
+   (openPicker) is reached from Portfolio › Accounts "Connect an account" and Get started; a listing's "Connect to trade" and an agent's
+   ask for a venue open the one connection's form straight away (connectVia → openConnect). Nothing else on the page draws the catalogue. */
 
 // ---- wallets in this browser ------------------------------------------------------------
 
@@ -35,6 +37,8 @@ async function proveWallet(w) {
 // ---- connecting an account --------------------------------------------------------------
 
 let EXCHANGES = null;
+/* the connect form's check of its key file, or its sign-in poll: one at a time, stopped the moment another form takes the dialog */
+let CONNECT_TIMER = 0;
 
 /* every kind of account that can be connected, as tiles: the owner picks what it is, not how it is reached */
 const TILES = [
@@ -139,7 +143,8 @@ const keyCommand = (path, fields) => {
 /** every way of connecting an account, as tiles, in the dialog */
 function openPicker() {
   if (!A.connectLive) return;
-  $("modal-form").innerHTML = `<h2>Connect an account</h2>
+  clearInterval(CONNECT_TIMER);
+  $("modal-form").innerHTML = `<h2 id="modal-form-title">Connect an account</h2>
     ${catalog(Owner.role === "owner")}
     <div class="dim small">${writesOn() ? "Orders go through only when you sign them, or inside a limit you give an agent." : "Read-only: this server places no orders."}</div>
     <div class="end"><button type="button" id="modal-cancel">Cancel</button></div>`;
@@ -151,14 +156,17 @@ function openPicker() {
 /** one way of connecting, as one short form */
 async function openConnect(o, { exchange = "", watch = false, name = "", back = false, label: shownAs = "", ref: keyRef = "" } = {}) {
   if (!o) return;
+  clearInterval(CONNECT_TIMER);
   /* the venue's name, and what the dialog is called: watching an address connects nothing that could move */
   const title = o.kind === "exchange" && !exchange ? "an exchange" : name || o.label.split(" · ")[0];
   const heading = watch ? "Watch an address" : o.kind === "wallet" ? "Connect a browser wallet" : `Connect ${title}`;
-  $("modal-form").innerHTML = `${back ? '<button type="button" class="link dim back" id="modal-back">← All accounts</button>' : ""}<h2>${esc(heading)}</h2>
+  $("modal-form").innerHTML = `${back ? '<button type="button" class="link dim back" id="modal-back">← All accounts</button>' : ""}<h2 id="modal-form-title">${esc(heading)}</h2>
     <div id="live-body"></div>
     <div class="msg" id="modal-msg"></div>
     <div class="end"><button type="button" id="modal-cancel">Cancel</button><button type="submit" class="ink" id="modal-go"${Owner.role === "owner" ? "" : " disabled"}>${watch ? "Watch it" : "Connect"}</button></div>`;
   const form = $("modal-form");
+  // this form's own body: a check or a poll started here stops once another form has taken the dialog (back → another venue)
+  const body = $("live-body");
   let proven = null;
   /* "no" a refusal · "ok" done · "wait" the venue or the wallet is being asked */
   const say = (text, state) => { $("modal-msg").className = `msg${text && state ? ` ${state}` : ""}`; $("modal-msg").textContent = text || ""; };
@@ -178,10 +186,16 @@ async function openConnect(o, { exchange = "", watch = false, name = "", back = 
 
   if (o.needs === "key-file") {
     const pick = o.kind === "exchange" && !exchange;
-    if (o.kind === "exchange" && !EXCHANGES) EXCHANGES = ((await (await fetch("/api/account/exchanges")).json()).exchanges) || [];
+    // the exchanges this server connects, read once; a read that failed is asked again the next time, not kept as an empty list
+    if (o.kind === "exchange" && !EXCHANGES) {
+      const got = await api("/api/account/exchanges");
+      EXCHANGES = got && Array.isArray(got.exchanges) ? got.exchanges : null;
+      if (body.isConnected === false) return;
+      if (!EXCHANGES) say(refusalOf(got) || "The list of exchanges could not be read. Close this and try again.", "no");
+    }
     const vname = o.kind === "exchange" ? exchangeName() : title;
     const page = API_PAGES[o.kind === "exchange" ? exchangeId() : o.kind];
-    $("live-body").innerHTML = `${pick ? field("Exchange", select("exchange", EXCHANGES.map((x) => [x.id, x.name]))) : ""}
+    $("live-body").innerHTML = `${pick ? field("Exchange", select("exchange", (EXCHANGES || []).map((x) => [x.id, x.name]))) : ""}
       <div class="steps">
         <div class="step"><i>1</i><div>Make an API key at <span id="kf-venue">${esc(vname)}</span> that can trade, with withdrawals off<span id="kf-pagewrap"${page ? "" : " hidden"}> · <a href="${esc(page || "#")}" target="_blank" rel="noopener" id="kf-page">open its API page</a></span>.<div class="dim small kf-how" id="kf-how">${esc(keyHow(o.kind === "exchange" ? exchangeId() : o.kind))}</div></div></div>
         <div class="step"><i>2</i><div>Save it here, readable only by you:<div class="pathbox"><code id="kf-path">…</code><button type="button" class="link" data-copy="path">Copy</button></div><div class="kf-cmd"><button type="button" class="btn btn-sm" data-copy="cmd">Copy setup command</button><span class="dim small" id="kf-fields"></span></div></div></div>
@@ -219,10 +233,10 @@ async function openConnect(o, { exchange = "", watch = false, name = "", back = 
     };
     /* the server says whether the file is there, private and complete — names of fields only, never what is in them */
     const check = async () => {
-      if (!$("modal").open || !$("kf-status")) return;
+      if (!$("modal").open || body.isConnected === false || !$("kf-status")) return;
       const q = new URLSearchParams({ kind: o.kind, venue: venueId(), ref: form.elements.ref.value.trim(), exchange: exchangeId() });
       const resp = await fetch(`/api/account/keyfile?${q}`).catch(() => null);
-      if (!$("kf-status")) return;
+      if (body.isConnected === false || !$("kf-status")) return;
       // a server from before this check: the owner saves the file and connects, and the connection says what is wrong, if anything
       if (!resp || !resp.ok) return void (($("kf-status").className = "msg wait"), ($("kf-status").textContent = "Save the file, then Connect."));
       const r = await resp.json().catch(() => null);
@@ -252,6 +266,9 @@ async function openConnect(o, { exchange = "", watch = false, name = "", back = 
     });
     check();
     const timer = setInterval(check, 2000);
+    // stopped when the dialog closes; and the next openConnect or openPicker stops it first, so a form replaced from the back button (another
+    // venue) is never written to by this form's check
+    CONNECT_TIMER = timer;
     $("modal").addEventListener("close", () => clearInterval(timer), { once: true });
   } else if (o.needs === "address") {
     const wallets = o.kind === "wallet" && !watch ? await findWallets() : [];
@@ -295,8 +312,9 @@ async function openConnect(o, { exchange = "", watch = false, name = "", back = 
         $("modal-msg").innerHTML = `<a href="${esc(r.url)}" target="_blank" rel="noopener">Open ${esc(who)}’s sign-in page</a>, then come back.`;
       }
       const until = Date.now() + 15 * 60_000;
+      // the poll ends with this form: the dialog closed, or another connection's form in its place
       const poll = async () => {
-        if (!$("modal").open) return;
+        if (!$("modal").open || body.isConnected === false) return;
         const st = await fetch(`/api/account/signin/status?state=${encodeURIComponent(r.state)}`).then((x) => x.json()).catch(() => ({}));
         if (st.status === "ready") {
           form.elements.ref.value = r.state;
@@ -305,7 +323,7 @@ async function openConnect(o, { exchange = "", watch = false, name = "", back = 
         }
         if (st.status === "failed") return say(st.error || "the sign-in did not finish", "no");
         if (Date.now() > until) return say("The sign-in ran out: start again.", "no");
-        setTimeout(poll, 1500);
+        CONNECT_TIMER = setTimeout(poll, 1500);
       };
       poll();
     });

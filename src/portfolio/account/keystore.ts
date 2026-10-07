@@ -55,11 +55,14 @@ function parse(text: string): KeyFile | undefined {
  * the account does not sign with a key it cannot vouch for, and it does not quietly replace one either. */
 export function loadOrCreateKey(path: string, kind: KeyFile["kind"], name: string): SimKey | Refusal {
   const label = `${kind}:${slugOf(name)}`;
+  // a refusal names the key, never the file's path: the path says where the account's home is, and a refusal travels to pages and seats.
+  // Whoever needs the path reads it in `detail`
+  const whose = `the key file of the ${kind === "seat" ? "agent seat" : "agent wallet"} "${name}"`;
   if (existsSync(path)) {
     const mode = statSync(path).mode & 0o777;
-    if (mode & 0o077) return no("E_ACCOUNT_CREDENTIAL", { message: `${path} can be read by other users of this machine (mode ${mode.toString(8)}): make it the user's alone (chmod 600) before it is used`, detail: { path, mode: mode.toString(8) } });
+    if (mode & 0o077) return no("E_ACCOUNT_CREDENTIAL", { message: `${whose} can be read by other users of this machine (mode ${mode.toString(8)}): make it the user's alone (chmod 600) before it is used`, detail: { path, mode: mode.toString(8) } });
     const f = parse(readFileSync(path, "utf8"));
-    if (!f) return no("E_ACCOUNT_CREDENTIAL", { message: `${path} is not a key file this account wrote: move it aside, and a new key is made`, detail: { path } });
+    if (!f) return no("E_ACCOUNT_CREDENTIAL", { message: `${whose} is not a key file this account wrote: move it aside, and a new key is made`, detail: { path } });
     return fromFile(f, label);
   }
   const dir = dirname(path);

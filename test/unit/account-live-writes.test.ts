@@ -10,7 +10,7 @@ import { signAgent, signOwner, simKey, type AgentAction, type OwnerAction } from
 import type { ChainName, ChainReader, Mined } from "../../src/portfolio/live/chain.ts";
 import type { ExchangeClient, OpenExchange } from "../../src/portfolio/live/exchange.ts";
 import type { LiveDeps } from "../../src/portfolio/live/index.ts";
-import { exchangeWriter } from "../../src/portfolio/live/writes.ts";
+import { exchangeWriter, type LiveWriter } from "../../src/portfolio/live/writes.ts";
 import { PortfolioService } from "../../src/portfolio/service.ts";
 
 /** REAL-money writes, against stand-ins for everything real: an exchange that records what it is asked, a chain that holds what the test
@@ -339,7 +339,7 @@ describe("real money at venues connected live", () => {
     expect(code(await x.engine.live.sent("pay-9999", hash))).toBe("E_ACCOUNT_BAD_ACTION");
   });
 
-  it("in Conservative mode an agent can only ask: a card every time, showing the address and the fee, and the owner's yes is what moves it", async () => {
+  it("in Guard mode an agent can only ask: a card every time, showing the address and the fee, and the owner's yes is what moves it", async () => {
     const x = await boot();
     x.svc.setMode("guard");
     await x.connectOkx();
@@ -366,14 +366,14 @@ describe("real money at venues connected live", () => {
     expect(withdraws(x).length).toBe(1);
   });
 
-  it("in Aggressive mode, which only the owner's signature sets, a move inside the agent's limit goes at once — to the owner's own place — and nothing outside it does", async () => {
+  it("in Beast mode, which only the owner's signature sets, a move inside the agent's limit goes at once — to the owner's own place — and nothing outside it does", async () => {
     const x = await boot();
     x.svc.setMode("guard");
     await x.connectOkx();
     const w = await x.provenWallet();
     await x.own({ type: "approveAgent", agentAddress: cc.address, agentName: "Claude Code", validUntil: START + 30 * DAY });
     await x.own({ type: "approveSpend", agent: cc.address, scope: "venues", allow: "okx,wallet-mine", perPayment: "100", budget: "120", windowHours: 0, validUntil: START + 7 * DAY });
-    expect(summary(await x.own({ type: "setPolicy", change: "mode", value: "open" }))).toBe("Aggressive: agents trade and move inside their limits without asking");
+    expect(summary(await x.own({ type: "setPolicy", change: "mode", value: "open" }))).toBe("Beast: agents trade and move inside their limits without asking");
     const ask = { type: "agentLiveMove" as const, kind: "withdraw", from: "okx", fromLedger: "", to: "wallet-mine", toLedger: "", asset: "USDC", toAsset: "USDC", network: "Arbitrum", amount: "40", maxFee: "0" };
     const spend = () => x.engine.state.spends.find((s) => s.scope === "venues" && s.revokedAt === undefined)!;
     const went = await x.ag(ask);
@@ -408,8 +408,9 @@ describe("real money at venues connected live", () => {
     expect(x.mmCalls.some((c) => c[0] === "transfer")).toBe(false);
   });
 
-  it("a venue that is only read is never a source or a destination of real money", async () => {
-    const http = async (url: string) => (url.endsWith("/v2/account") ? { status: 200, body: { cash: "100" }, text: "" } : { status: 200, body: [], text: "" });
+  it("a venue that is only read is never a source or a destination of real money, and the reason is the venue's own answer", async () => {
+    // Alpaca without crypto wallets for this account: its 403 to GET /v2/wallets is the reason, in its words
+    const http = async (url: string) => (url.endsWith("/v2/account") ? { status: 200, body: { cash: "100" }, text: "" } : url.endsWith("/v2/wallets") ? { status: 403, body: { code: 40310000, message: "crypto wallets are not enabled for this account" }, text: "" } : { status: 200, body: [], text: "" });
     const x = await boot();
     (x.svc as unknown as { opts: { liveDeps: Partial<LiveDeps> } }).opts.liveDeps.http = http as never;
     await x.connectOkx();
@@ -417,12 +418,120 @@ describe("real money at venues connected live", () => {
     mkdirSync(join(home, "credentials/alpaca"), { recursive: true });
     writeFileSync(join(home, "credentials/alpaca/api-key.json"), JSON.stringify({ keyId: "made-up", secret: "made-up-too" }), { mode: 0o600 });
     expect(code(await x.own({ type: "connectVenue", venue: "alpaca", connector: "live:alpaca", label: "", credentialRef: "" }))).toBe("account");
+    const WHY = 'Alpaca has not enabled the Crypto Wallets API for this account (GET /v2/wallets: HTTP 403, "crypto wallets are not enabled for this account"): cash moves by ACH at Alpaca, and crypto wallets are enabled by Alpaca on request';
     const to = refusal(await x.prepared({ kind: "withdraw", from: "okx", to: "alpaca", asset: "USDC", network: "Arbitrum", amount: "10" }));
-    expect([to.code, to.message]).toEqual(["E_ACCOUNT_DESTINATION", "Alpaca: Alpaca's API moves no cash: deposits and withdrawals are made at Alpaca"]);
+    expect([to.code, to.message]).toEqual(["E_ACCOUNT_DESTINATION", `Alpaca: ${WHY}`]);
     const from = refusal(await x.prepared({ kind: "send", from: "alpaca", to: "okx", asset: "USDC", network: "Arbitrum", amount: "10" }));
-    expect(from.message).toBe("Alpaca: Alpaca's API moves no cash: deposits and withdrawals are made at Alpaca");
+    expect(from.message).toBe(`Alpaca: ${WHY}`);
     // and a simulated venue is not a live one
     expect(refusal(await x.prepared({ kind: "withdraw", from: "okx", to: "binance", asset: "USDC", network: "Arbitrum", amount: "10" })).code).toBe("E_ACCOUNT_DESTINATION");
+  });
+
+  it("Alpaca with crypto wallets: a destination of real money — its own wallet for the asset on Ethereum or Arbitrum, as Alpaca gives it — and never a source", async () => {
+    const WALLET = "0x3333333333333333333333333333333333333333";
+    const asked: string[] = [];
+    const http = async (url: string) => {
+      asked.push(url);
+      if (url.endsWith("/v2/account")) return { status: 200, body: { cash: "100" }, text: "" };
+      if (url.endsWith("/v2/wallets")) return { status: 200, body: [], text: "[]" };
+      if (url.includes("/v2/wallets?asset=USDC&chain=ARB")) return { status: 200, body: { address: WALLET, chain: "ARB", created_at: "2026-10-06T09:00:00Z" }, text: "" };
+      return { status: 200, body: [], text: "" };
+    };
+    const x = await boot();
+    (x.svc as unknown as { opts: { liveDeps: Partial<LiveDeps> } }).opts.liveDeps.http = http as never;
+    await x.connectOkx();
+    const home = (x.svc as unknown as { opts: { home: string } }).opts.home;
+    mkdirSync(join(home, "credentials/alpaca"), { recursive: true });
+    writeFileSync(join(home, "credentials/alpaca/api-key.json"), JSON.stringify({ keyId: "made-up", secret: "made-up-too" }), { mode: 0o600 });
+    expect(code(await x.own({ type: "connectVenue", venue: "alpaca", connector: "live:alpaca", label: "", credentialRef: "" }))).toBe("account");
+    // the same door every exchange withdrawal goes through: the owner is shown Alpaca's wallet address, and signs for exactly it
+    const to = await x.prepared({ kind: "withdraw", from: "okx", to: "alpaca", asset: "USDC", network: "Arbitrum", amount: "10" });
+    expect(isRefusal(to) ? to : to.toAddress).toBe(WALLET);
+    expect(asked.filter((u) => u.includes("asset=USDC&chain=ARB"))).toHaveLength(1);
+    // the Receive sheet reads the same writer
+    const where = await x.svc.receive("alpaca", "USDC", "Arbitrum");
+    expect(isRefusal(where) ? where : where.address).toBe(WALLET);
+    // nothing leaves Alpaca from here: its withdrawal endpoint is deprecated, and the writer says so in Alpaca's words (accounts.ts types
+    // `liveCan` by hand, without the writer's `why`: read as the writer's own shape until its owner widens it)
+    const v = (await x.svc.accountView())!.venues.find((y) => y.id === "alpaca")!;
+    const can = v.liveCan as LiveWriter["can"] | undefined;
+    expect(can?.withdraw).toBe(false);
+    expect(can?.why?.withdraw).toContain("Sunset: 2026-10-09");
+    expect(refusal(await x.prepared({ kind: "withdraw", from: "alpaca", to: "okx", asset: "USDC", network: "Arbitrum", amount: "10" })).code).toBe("E_VENUE_RAIL_CLOSED");
+  });
+});
+
+describe("an exchange's deposit address, through the library", () => {
+  /** a Kraken-like exchange: no address for an asset on a network until one is made, as the library reports it (InvalidAddress, "returned no
+   * addresses"); createDepositAddress makes it, and the next fetch has it */
+  function makesOnDemand(opts: { creates?: boolean } = {}) {
+    const calls: Call[] = [];
+    let made = false;
+    const x = {
+      id: "kraken",
+      name: "Kraken",
+      requiredCredentials: { apiKey: true, secret: true },
+      has: { createDepositAddress: opts.creates !== false },
+      calls,
+      markets: {},
+      currencies: { USDC: { networks: { ERC20: { fee: 1, withdraw: true, deposit: true } } } },
+      async loadMarkets() {},
+      async fetchBalance() {
+        return { total: {} };
+      },
+      async fetchDepositAddress(code: string, params?: Record<string, unknown>) {
+        calls.push(["fetchDepositAddress", code, params]);
+        if (!made) throw Object.assign(new Error("kraken privatePostDepositAddresses() returned no addresses for USDC"), { name: "InvalidAddress" });
+        return { address: "0x00000000000000000000000000000000000000c0", tag: null };
+      },
+      async createDepositAddress(code: string, params?: Record<string, unknown>) {
+        calls.push(["createDepositAddress", code, params]);
+        made = true;
+        return { address: "0x00000000000000000000000000000000000000c0", tag: null };
+      },
+    };
+    return { x: x as unknown as ExchangeClient, calls };
+  }
+
+  it("where the exchange hands out no address until one is made, the library makes it and asks again: fetch, create, fetch", async () => {
+    const { x, calls } = makesOnDemand();
+    const w = exchangeWriter(x, "kraken", "Kraken", ["s3cret"], { can: [] }, []);
+    const r = await w.depositAddress("USDC", "Ethereum");
+    expect(isRefusal(r) ? r : r.address).toBe(getAddress("0x00000000000000000000000000000000000000c0"));
+    expect(calls.map((c) => c[0])).toEqual(["fetchDepositAddress", "createDepositAddress", "fetchDepositAddress"]);
+    expect(calls.map((c) => c[2])).toEqual([{ network: "ERC20" }, { network: "ERC20" }, { network: "ERC20" }]);
+  });
+
+  it("where the library has no call that makes one, the exchange's words come back and the owner makes it at the exchange", async () => {
+    const { x, calls } = makesOnDemand({ creates: false });
+    const w = exchangeWriter(x, "kraken", "Kraken", ["s3cret"], { can: [] }, []);
+    const r = refusal(await w.depositAddress("USDC", "Ethereum"));
+    expect([r.code, r.message]).toEqual(["E_VENUE_REJECTED", "Kraken has no USDC deposit address on Ethereum yet, and the library has no call that makes one there: make it at Kraken first"]);
+    expect((r.native as { said: string }).said).toContain("returned no addresses");
+    expect(calls.map((c) => c[0])).toEqual(["fetchDepositAddress"]);
+  });
+
+  it("Coinbase's withdrawal carries the account's id as idem, so a retry is the same withdrawal", async () => {
+    const calls: Call[] = [];
+    const x = {
+      id: "coinbase",
+      name: "Coinbase",
+      has: {},
+      markets: {},
+      currencies: { USDC: { networks: { BASE: { fee: 0, withdraw: true, deposit: true } } } },
+      async loadMarkets() {},
+      async fetchBalance() {
+        return { total: {} };
+      },
+      async withdraw(code: string, amount: number, address: string, tag?: string, params?: Record<string, unknown>) {
+        calls.push(["withdraw", code, amount, address, tag, params]);
+        return { id: "cb-1", status: "pending" };
+      },
+    } as unknown as ExchangeClient;
+    const w = exchangeWriter(x, "coinbase", "Coinbase", ["s3cret"], { can: ["read", "transfer (send and withdraw)"] }, []);
+    const r = await w.withdraw!({ asset: "USDC", amount: 5, address: getAddress("0x00000000000000000000000000000000000000c0"), network: "Base", clientId: "0f3a9c01-b2d4-e6f8-0a1b-2c3d4e5f6071" });
+    expect(isRefusal(r) ? r : r.ref).toBe("cb-1");
+    expect(calls[0]![5]).toEqual({ network: "BASE", idem: "0f3a9c01b2d4e6f80a1b2c3d4e5f6071" });
   });
 });
 

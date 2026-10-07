@@ -1,13 +1,15 @@
-/* The statement: what is still under way, and every transaction, one line each — trades, transfers, and money into or out of an earn
-   product — in a wide sheet the clock in the top bar opens. */
+/* The statement: every transaction, one line each — trades, transfers, and money into or out of an earn product — in a wide sheet the clock
+   in the top bar opens; filtered, added up, downloaded as CSV, printed. Orders still open are the Trade pane's working list, not here. */
 
 // ---- statement -------------------------------------------------------------------------
 
-const isLive = (o) => ["open", "partial", "pending"].includes(o.status);
 const ST = { "not followed since a restart": ["Not followed since a restart", "failed"], filled: ["Filled", "settled"], settled: ["Done", "settled"], done: ["Done", "settled"], partial: ["Part filled", "pending"], open: ["Open", "pending"], pending: ["On the way", "pending"], "waiting for wallet": ["Waiting for your wallet", "pending"], canceled: ["Canceled", ""], expired: ["Expired", ""], rejected: ["Rejected", "failed"], failed: ["Failed", "failed"], returned: ["Returned", "failed"] };
-/* the month a line falls in, in New York time, as its date is shown */
-const monthOf = (iso) => new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" }).format(new Date(iso)).slice(0, 7);
-const monthName = (m) => new Intl.DateTimeFormat("en-GB", { month: "long", year: "numeric", timeZone: "UTC" }).format(new Date(`${m}-01T00:00:00Z`));
+/* the month a line falls in, in New York time, as its date is shown; a line whose time is not one has no month (it shows under All time) */
+const monthOf = (iso) => {
+  const ms = Date.parse(String(iso ?? ""));
+  return Number.isFinite(ms) ? new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" }).format(new Date(ms)).slice(0, 7) : "";
+};
+const monthName = (m) => (/^\d{4}-\d{2}$/.test(String(m)) ? new Intl.DateTimeFormat("en-GB", { month: "long", year: "numeric", timeZone: "UTC" }).format(new Date(`${m}-01T00:00:00Z`)) : String(m));
 /* a statement's amount: a buy is money out, a sell money in; a transfer between your own places, and money into or out of an earn product
    (it stays yours), are shown as they are */
 const amountOf = (l) => (l.type === "trade" ? (l.amountUsd ? `${l.amountUsd < 0 ? "−" : "+"}${fine(Math.abs(l.amountUsd))}` : "—") : fine(l.amountUsd));
@@ -31,45 +33,12 @@ const stmtCsv = (lines) => [["date", "id", "type", "kind", "account", "to", "des
 /* who a line is by, for the agent filter: "you" for the owner's own, or the agent's key */
 const lineBy = (l) => (l.agent ? String(l.agent).toLowerCase() : "you");
 
-/** what is still under way: orders on a book, and anything waiting for your wallet — each with what you can do about it. Drawn into `el`
- * (the Statement's own place unless another is given) */
-function renderOpen(owner, el = $("open-now")) {
-  if (!el) return;
-  const orders = (A.orders || []).filter(isLive);
-  const wallet = A.payments.filter((p) => p.live && p.status === "authorized");
-  if (!orders.length && !wallet.length) return void (el.innerHTML = "");
-  const orderRow = (o) => {
-    const waiting = o.walletTxs && !o.ref;
-    const amendable = !waiting && !o.canceling && ((A.venues.find((x) => x.id === o.venue) || {}).trade || {}).amend;
-    return `<tr><td>${o.side === "buy" ? "Buy" : "Sell"} ${esc(qtyOf(o.qty))} ${esc(o.contractSize ? "contracts" : o.base)} · ${esc(o.venueName)}<span class="why">${esc([`${nyDay(o.at)} ${nyTime(o.at)}`, byOf(o), typeText(o), o.note].join(" · "))}</span></td><td class="r num2">${fine(o.qty * o.price * (o.contractSize || 1))}</td><td>${owner ? `${waiting ? `<button type="button" class="link" data-order-send="${esc(o.id)}"${INFLIGHT.has(o.clientId) ? " disabled" : ""}>${o.reported ? "Report again" : "Send from wallet…"}</button> · ` : ""}${amendable ? `<button type="button" class="link" data-amend="${esc(o.id)}">Change…</button> · ` : ""}<button type="button" class="link dim" data-cancel="${esc(o.id)}" data-venue="${esc(o.venue)}">Cancel</button>` : `<span class="st pending">${o.canceling ? "Canceling" : "Open"}</span>`}</td></tr>`;
-  };
-  const payRow = (p) => `<tr><td>${esc(whatOf(p))}<span class="why">${esc(`${nyDay(p.at)} ${nyTime(p.at)} · ${byOf(p)}${p.live.sendBy && !p.live.reported ? ` · send by ${nyTime(p.live.sendBy)}` : ""}`)}</span></td><td class="r num2">${fine(p.amountUsd)}</td><td>${owner ? `<button type="button" class="link" data-wallet-send="${esc(p.id)}"${INFLIGHT.has(`${p.id}@${p.at}`) ? " disabled" : ""}>${p.live.reported ? "Report again" : "Send from wallet…"}</button>` : '<span class="st pending">Waiting for your wallet</span>'}</td></tr>`;
-  el.innerHTML = `<div class="sub-h">Under way</div><table class="open-t"><tbody>${orders.map(orderRow).join("")}${wallet.map(payRow).join("")}</tbody></table>`;
-  for (const b of el.querySelectorAll("button[data-cancel]")) b.addEventListener("click", () => own({ type: "liveCancel", venue: b.dataset.venue, order: b.dataset.cancel }));
-  for (const b of el.querySelectorAll("button[data-amend]")) b.addEventListener("click", () => openAmend(A.orders.find((x) => x.id === b.dataset.amend)));
-  const later = (fn) => async (b) => {
-    b.disabled = true;
-    try {
-      await fn(b);
-    } catch (err) {
-      flash = String((err && err.message) || err).slice(0, 200);
-    }
-    await load();
-  };
-  for (const b of el.querySelectorAll("button[data-order-send]")) b.addEventListener("click", () => later(async () => sendOrderFromWallet(A.orders.find((x) => x.id === b.dataset.orderSend)))(b));
-  for (const b of el.querySelectorAll("button[data-wallet-send]")) b.addEventListener("click", () => later(async () => {
-    const p = A.payments.find((x) => x.id === b.dataset.walletSend);
-    const n = p && p.legs[0].native;
-    if (n && n.walletTx) await sendFromWallet(p, n.walletTx, n.walletTxs);
-  })(b));
-}
-
-/** the Statement, in a wide sheet: under way, then every line, narrowed to the lens when the lens is one venue or one agent */
+/** the Statement, in a wide sheet: every line, narrowed to the lens when the lens is one venue or one agent */
 function openStatement() {
   const l = lensNow();
   if (l.kind === "venue") view.account = l.id;
   if (l.kind === "agent") view.agent = l.id.toLowerCase();
-  openSheet('<div class="old"><div class="stmt-tools" id="statement-tools"></div><div class="print-head" id="print-head"></div><div id="open-now"></div><div><div class="filters" id="statement-filters"></div><div id="statement"></div></div></div>', { title: "Statement", wide: true, redraw: () => renderStatement(owns()) });
+  openSheet('<div class="old"><div class="stmt-tools" id="statement-tools"></div><div class="print-head" id="print-head"></div><div><div class="filters" id="statement-filters"></div><div id="statement"></div></div></div>', { title: "Statement", wide: true, redraw: () => renderStatement(owns()) });
   allStatement = false;
   renderStatement(owns());
 }
@@ -78,22 +47,26 @@ function openStatement() {
  * who did it; downloaded as CSV; printed. Draws only while the Statement is open */
 function renderStatement(owner) {
   if (!$("statement")) return;
-  renderOpen(owner);
-  const working = (A.orders || []).filter(isLive);
-  const months = [...new Set(S.map((l) => monthOf(l.at)))].sort().reverse();
+  const months = [...new Set(S.map((l) => monthOf(l.at)).filter(Boolean))].sort().reverse();
   if (view.month && view.month !== "all" && !months.includes(view.month)) view.month = "";
   const month = view.month || (months.includes(monthOf(A.now)) ? monthOf(A.now) : "all");
   // who did what: you, and each agent a line names (by its key; its name as the account knows it, or as the line recorded it)
   const agents = [...new Map(S.filter((l) => l.agent).map((l) => [lineBy(l), l.agentName || keyName(l.agent)])).entries()];
   if (view.agent && view.agent !== "you" && !agents.some(([a]) => a === view.agent)) view.agent = "";
   const lines = S.filter((l) => (month === "all" || monthOf(l.at) === month) && (!view.account || l.account === view.account || l.to === view.account) && (!view.type || l.type === view.type) && (!view.agent || lineBy(l) === view.agent));
-  $("statement-tools").innerHTML = `${owner && working.length > 1 ? `<button type="button" class="btn btn-sm" id="cancel-all">Cancel all ${working.length} open</button>` : ""}${S.length ? `<button type="button" class="btn btn-sm" id="csv-statement">${icon("download", "sm")}Download CSV</button><button type="button" class="btn btn-sm" id="print-statement">${icon("print", "sm")}Print</button>` : ""}`;
+  $("statement-tools").innerHTML = S.length ? `<button type="button" class="btn btn-sm" id="csv-statement">${icon("download", "sm")}Download CSV</button><button type="button" class="btn btn-sm" id="print-statement">${icon("print", "sm")}Print</button>` : "";
   const accounts = [...new Map(S.flatMap((l) => [[l.account, l.accountName], ...(l.to ? [[l.to, l.toName || l.to]] : [])])).entries()];
-  $("statement-filters").innerHTML = S.length ? `${select("month", [["all", "All time"], ...months.map((m) => [m, monthName(m)])], month)}${select("account", [["", "All accounts"], ...accounts], view.account)}${select("type", stmtKinds(S, view.type), view.type)}${agents.length ? select("agent", [["", "You and every agent"], ["you", "You"], ...agents], view.agent) : ""}` : "";
-  for (const el of $("statement-filters").querySelectorAll("select")) {
-    el.setAttribute("aria-label", { month: "Month", account: "Account", type: "Kind", agent: "Who" }[el.name]);
-    el.addEventListener("change", () => { view[el.name] = el.value; allStatement = false; renderStatement(owner); });
-  }
+  /* the filters: each select's options and value, by its name. The selects are made once and then kept — their options and values follow
+     the lines (setOptions) — so one that is open under the pointer is never rebuilt by a read of the account */
+  const filters = $("statement-filters");
+  const lists = S.length ? { month: [[["all", "All time"], ...months.map((m) => [m, monthName(m)])], month], account: [[["", "All accounts"], ...accounts], view.account], type: [stmtKinds(S, view.type), view.type], ...(agents.length ? { agent: [[["", "You and every agent"], ["you", "You"], ...agents], view.agent] } : {}) } : {};
+  if ([...filters.querySelectorAll("select")].map((s) => s.name).join() !== Object.keys(lists).join()) {
+    filters.innerHTML = Object.entries(lists).map(([name, [opts, val]]) => select(name, opts, val)).join("");
+    for (const el of filters.querySelectorAll("select")) {
+      el.setAttribute("aria-label", { month: "Month", account: "Account", type: "Kind", agent: "Who" }[el.name]);
+      el.addEventListener("change", () => { view[el.name] = el.value; allStatement = false; renderStatement(owner); });
+    }
+  } else for (const [name, [opts, val]] of Object.entries(lists)) setOptions(filters.querySelector(`select[name="${name}"]`), opts, val);
   if (!S.length) return void ($("statement").innerHTML = `<p class="empty">${connected().length ? "No transactions yet. Trade or move money from an account, or let an agent trade inside a limit." : "Connect an account to start."}</p>`);
   const total = stmtTotals(lines);
   const shown = allStatement ? lines : lines.slice(0, 25);
@@ -107,11 +80,6 @@ function renderStatement(owner) {
     }).join("")}</tbody></table><div class="totals dim small">${esc(total)}</div>${lines.length > shown.length ? `<button type="button" class="link dim more-btn" id="all-statement">Show all ${lines.length}</button>` : ""}`
     : '<p class="empty">Nothing in this view.</p>';
   if ($("all-statement")) $("all-statement").addEventListener("click", () => { allStatement = true; renderStatement(owner); });
-  if ($("cancel-all")) $("cancel-all").addEventListener("click", async () => {
-    if (!(await confirmSheet(`Cancel all ${working.length} open orders? Each comes off its venue's book, one signature each.`, { title: "Cancel every open order", yes: `Cancel ${working.length} orders`, no: "Keep them", danger: true }))) return;
-    // every open order off the book, one signature each
-    for (const o of working) await own({ type: "liveCancel", venue: o.venue, order: o.id });
-  });
   if ($("csv-statement")) $("csv-statement").addEventListener("click", () => download(`statement-${month === "all" ? "all" : month}${view.type ? `-${view.type}` : ""}.csv`, stmtCsv(lines)));
   if ($("print-statement")) $("print-statement").addEventListener("click", () => {
     allStatement = true;
@@ -122,6 +90,5 @@ function renderStatement(owner) {
   });
 }
 
+/* a payment in a few words (the Trade pane's working list reads it for money on its way) */
 const whatOf = (p) => (p.kind === "swap" ? `Swap at ${nameOf(p.from)} · ${p.sourceToken} → ${p.token}` : p.kind === "transfer" && p.from === p.to ? `Transfer at ${nameOf(p.from)} · ${p.legs[0].fromLedger} → ${p.legs[0].toLedger}` : `${p.kind[0].toUpperCase() + p.kind.slice(1)} · ${nameOf(p.from)} → ${nameOf(p.to)}${p.live && p.live.network ? ` · ${p.live.network}` : ""}`);
-/* who did it: you, or an agent — on your yes (Conservative), or inside its limit (Aggressive) */
-const byOf = (p) => (p.authority !== "agent" ? "You" : `${keyName(p.agent)}, ${p.card ? "approved by you" : "inside its limit"}`);

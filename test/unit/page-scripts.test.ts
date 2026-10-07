@@ -1,4 +1,5 @@
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -27,9 +28,11 @@ afterAll(async () => {
   rmSync(home, { recursive: true, force: true });
 });
 
-/** what the page names, in its order: its scripts, and the stylesheets served from here (the fonts come from Google, not from this server) */
-const scripts = () => [...html.matchAll(/<script\b[^>]*\bsrc="([^"]+)"/g)].map((m) => m[1] ?? "");
-const styles = () => [...html.matchAll(/<link\b[^>]*\bhref="([^"]+)"/g)].map((m) => m[1] ?? "").filter((h) => h.startsWith("/"));
+/** what the page names, in its order: its scripts and its stylesheets, as files (the server names each with its content's hash, ?v=…, so a
+ * browser keeps it a year); the face it preloads is its own too (public/fonts), named apart */
+const unversioned = (u: string) => u.replace(/\?v=[0-9a-f]{16}$/, "");
+const scripts = () => [...html.matchAll(/<script\b[^>]*\bsrc="([^"]+)"/g)].map((m) => unversioned(m[1] ?? ""));
+const styles = () => [...html.matchAll(/<link\b[^>]*\brel="stylesheet"[^>]*\bhref="([^"]+)"/g)].map((m) => unversioned(m[1] ?? "")).filter((h) => h.startsWith("/"));
 const source = (src: string) => readFileSync(join(PUBLIC, src.replace(/^\//, "")), "utf8");
 /** the files this shell's builder owns: the page, the contract, the shell, the statement, the agents' mount point */
 const SHELL = ["account.html", "ui/core.js", "ui/shell.js", "ui/statement.js", "ui/agents-mount.js"];
@@ -102,7 +105,7 @@ describe("the account page's scripts", () => {
     expect(named.filter((s) => s.startsWith("/ui/")).sort()).toEqual(onDisk.sort());
     // the order the contract names: what moves money and what connects before the panes that use it, the statement and the agents' mount
     // point after them, the shell last
-    expect(named).toEqual(["/owner.js", "/ui/core.js", "/ui/connect.js", "/ui/money.js", "/ui/asset.js", "/ui/intent.js", "/ui/portfolio.js", "/ui/markets.js", "/ui/trade.js", "/ui/statement.js", "/ui/agents-mount.js", "/ui/shell.js"]);
+    expect(named).toEqual(["/owner.js", "/ui/core.js", "/ui/connect.js", "/ui/money.js", "/ui/asset.js", "/ui/intent.js", "/ui/portfolio.js", "/ui/earn.js", "/ui/markets.js", "/ui/trade.js", "/ui/statement.js", "/ui/agents-mount.js", "/ui/shell.js"]);
     // each ui script waits for the page to be parsed and runs in the order named
     for (const m of html.matchAll(/<script\b([^>]*)\bsrc="(\/ui\/[^"]+)"/g)) expect(m[1], m[2] ?? "").toMatch(/\bdefer\b/);
     // the tokens first (both backgrounds), then the shell, then what the earlier renderers still draw; the classic page's sheet is not needed
@@ -112,7 +115,21 @@ describe("the account page's scripts", () => {
       expect(r.status, path).toBe(200);
       expect(r.headers.get("content-type"), path).toMatch(path.endsWith(".css") ? /^text\/css\b/ : /^application\/javascript\b/);
       expect(await r.text(), path).toBe(source(path));
+      // the page names it with its content's hash: asked for so, it is kept a year as it is; the browser that asks gets it compressed
+      const hash = createHash("sha256").update(readFileSync(join(PUBLIC, path.slice(1)))).digest("hex").slice(0, 16);
+      expect(html, path).toContain(`"${path}?v=${hash}"`);
+      const kept = await fetch(`${srv.url}${path}?v=${hash}`, { headers: { "accept-encoding": "br, gzip" } });
+      expect(kept.headers.get("cache-control"), path).toBe("public, max-age=31536000, immutable");
+      expect(kept.headers.get("content-encoding"), path).toBe(statSync(join(PUBLIC, path.slice(1))).size >= 1024 ? "br" : null);
+      expect(await kept.text(), path).toBe(source(path));
     }
+    // the page's face is its own: preloaded before the first paint, served from here and kept a year (no font is asked of another host)
+    const preload = [...html.matchAll(/<link\b[^>]*\brel="preload"[^>]*\bhref="([^"]+)"/g)].map((m) => m[1] ?? "");
+    expect(preload).toEqual(["/fonts/manrope-v20-latin.woff2"]);
+    const font = await fetch(`${srv.url}${preload[0]}`);
+    expect([font.status, font.headers.get("content-type"), font.headers.get("cache-control")]).toEqual([200, "font/woff2", "public, max-age=31536000, immutable"]);
+    expect(html).not.toMatch(/fonts\.(googleapis|gstatic)\.com/);
+    for (const path of ["/fonts/../server.ts", "/fonts/OFL.txt", "/fonts/nope.woff2"]) expect((await raw(path)).status, path).toBe(404);
   });
 
   it("answers nothing else under /ui/: no folder, no second dot, nothing encoded, no other kind of file, nothing that is not there", async () => {
@@ -133,14 +150,15 @@ describe("the account page's scripts", () => {
       expect(html, tab).toMatch(new RegExp(`<section class="pane" data-pane="${tab}"[^>]*>[\\s\\S]*?<div id="pane-${tab}">`));
       expect(html, tab).toMatch(new RegExp(`<a href="#/${tab}" data-tab="${tab}">`));
     }
-    for (const id of ["rail-trade", "lens", "lens-menu", "search", "open-statement", "copy-setup", "open-menu", "open-agents", "open-settings", "mode", "banner", "restored", "modal", "sheet", "modal-form", "drawer", "ask"]) expect(html, id).toContain(`id="${id}"`);
+    for (const id of ["lens", "lens-menu", "search", "open-statement", "open-agents", "open-settings", "mode", "mode-note", "mode-more", "banner", "restored", "modal", "sheet", "modal-form", "drawer", "ask"]) expect(html, id).toContain(`id="${id}"`);
+    // the IA round took the "+ Trade" pill (the nav item and the t key are the way), the ⧉ and the ≡ Menu off the chrome
+    for (const gone of ["rail-trade", "copy-setup", "open-menu"]) expect(html, gone).not.toContain(`id="${gone}"`);
     expect(html).toMatch(/<dialog id="modal"><div id="sheet"><\/div><form method="dialog" id="modal-form"><\/form><\/dialog>/);
     expect(html).toMatch(/<div id="toasts" role="status" aria-live="polite"><\/div><div id="alerts" role="alert"/);
     // the search lives in the page, so a refresh neither freezes nor wipes it
     expect(html).toMatch(/<form class="search" id="search-form" role="search" data-live>/);
-    // the two backgrounds and the mode, at the rail's foot
-    expect(html).toContain('data-set-theme="cream"');
-    expect(html).toContain('data-set-theme="black"');
+    // the mode at the rail's foot (Guard | Beast; the wire values stay guard | open); the background is a Settings matter, drawn there
+    expect(html).not.toContain("data-set-theme");
     expect(html).toContain('data-set-mode="guard"');
     expect(html).toContain('data-set-mode="open"');
   });
@@ -166,8 +184,8 @@ describe("the account page's scripts", () => {
     expect(b.opened).toEqual(["buyer-agent-owner"]);
     expect(b.stored).toEqual(["account.theme"]);
     // the shell and the contract it gives the panes
-    const contract = ["render", "load", "own", "api", "forget", "refusalOf", "toast", "openSheet", "closeSheet", "openDrawer", "closeDrawer", "confirmSheet", "pickSheet", "whatYouSign", "quoteDialog", "go", "onRoute", "routed", "lensNow", "inLens", "chg", "avatar", "icon", "table", "seg", "field", "select", "formOf", "download", "copyText", "esc", "money", "fine", "px", "short", "qty", "qtyOf", "owns", "writesOn", "canTrade", "canMove"];
-    const mine = ["openStatement", "renderStatement", "renderOpen", "openAgents", "openSettings", "renderAgents", "renderDevices", "renderDial", "setMode", "setTheme", "openMenu", "copySetup", "lensMenu", "drawPane"];
+    const contract = ["render", "load", "own", "cancelOrder", "api", "forget", "refusalOf", "toast", "openSheet", "closeSheet", "openDrawer", "closeDrawer", "confirmSheet", "pickSheet", "whatYouSign", "quoteDialog", "paint", "go", "onRoute", "routed", "lensNow", "inLens", "chg", "avatar", "icon", "table", "seg", "field", "select", "formFields", "setOptions", "debounce", "thenLoad", "download", "copyText", "esc", "money", "fine", "px", "usd", "cents", "short", "qtyOf", "typeText", "isLive", "byOf", "readOnlyWords", "owns", "writesOn", "canTrade", "canMove", "isAgentWallet", "modeOf", "dollarsOf", "isDollar", "networksOf", "bridgeChainsOf", "walletFor", "mined"];
+    const mine = ["openStatement", "renderStatement", "openAgents", "openSettings", "openMode", "renderAgents", "renderDevices", "renderDial", "setMode", "setTheme", "copySetup", "downloadBalances", "lensMenu", "drawPane"];
     // what the other parts already define, and the shell calls
     const there = ["openPicker", "openConnect", "connectVia", "keyHowFor", "openLiveMove", "openAmend", "renderWallets", "openClose", "declineAsk"];
     const all = [...contract, ...mine, ...there];
@@ -254,7 +272,7 @@ describe("the account page's scripts", () => {
     expect([...new Set([...css.matchAll(/#([a-zA-Z][\w-]*)/g)].map((m) => m[1] ?? ""))].filter((i) => !ids.has(i))).toEqual([]);
   });
 
-  it("copies the agent setup command the account gives — from the top bar, the menu and the first steps alike — and the command run from its folder when it gives none", async () => {
+  it("copies the agent setup command the account gives — from the Agents sheet and the first steps alike — and the command run from its folder when it gives none", async () => {
     const b = browser();
     const copied: string[] = [];
     b.run("var COPIED = []; copyText = async (t) => { COPIED.push(t); }; var TOASTS = []; toast = (t) => TOASTS.push(t.html || t)");
@@ -266,10 +284,10 @@ describe("the account page's scripts", () => {
     const said = b.run("TOASTS") as string[];
     expect(said[0]).toContain("Run it in this account's folder");
     expect(said[1]).toContain("Run it where your agent runs, then let the agent in under Agents.");
-    // one copy, three places: the top bar's button, the menu's item and the first steps' button all call it
-    expect(source("ui/shell.js")).toContain('$("copy-setup").addEventListener("click", copySetup);');
-    expect(source("ui/shell.js")).toContain("setup: copySetup");
-    expect(source("ui/portfolio.js")).toContain('case "setup": return void copySetup();');
+    // one copy, two places: the Agents sheet's button and the first steps' button both call it (the top bar's ⧉ and the menu are gone)
+    expect(source("ui/agents-mount.js")).toContain('$("agents-setup").addEventListener("click", copySetup);');
+    expect(source("ui/portfolio.js")).toContain("copySetup()");
+    expect(source("ui/shell.js")).not.toContain("copy-setup");
   });
 
   it("asks nothing with the browser's own prompt, confirm or alert boxes: none in the shell's files, and the page as a whole adds none", () => {

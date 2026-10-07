@@ -65,4 +65,3 @@
 /* the statement's lines */
 .old table.stmt th { font-size: 12px; font-weight: 600; color: var(--dim); text-align: left; padding-bottom: 8px; }
 .old table.stmt th.r { text-align: right; }
-.old .open-t { margin-bottom: 14px; }

@@ -11,8 +11,8 @@
  *      the account counts is what that worst price allows, and if a venue fills worse anyway, the real cost is counted, not the plan;
  *   5. the OWNER signed it — the exact size, the limit price, what it is worth and ten minutes — or an AGENT asked inside the trading limit
  *      the owner signed for it (which venues, how much an order, how much in all, until when), with the dial open to it (the session, the
- *      venue switched on). Conservative mode: the agent's order is a card the owner signs, and the owner's yes places exactly the card;
- *      Aggressive: inside its limit it is placed at once;
+ *      venue switched on). Guard mode: the agent's order is a card the owner signs, and the owner's yes places exactly the card;
+ *      Beast: inside its limit it is placed at once;
  *   6. the venue itself agrees: its own key permissions, balances, risk checks and region rules still apply, and its refusal is the answer.
  *
  * Trading moves money between what the user holds AT ONE VENUE (dollars into BTC, shares into cash); nothing leaves the venue by an order.
@@ -31,6 +31,7 @@ import { ceilTo, DONE, floorTo, inDollars, notionalOf, onStep, ORDER_TYPES, plai
 import type { CardLike, Outcome } from "./exchange.ts";
 import type { LiveEngine, LiveVenue } from "./live-moves.ts";
 import { orderLine } from "./statement.ts";
+import { CARD_TTL_MS } from "./mode-rules.ts";
 import { micro, type AgentAction, type Envelope, type OwnerAction } from "./sign.ts";
 import { covers, spendFor, type AgentKey, type SpendApproval } from "./state.ts";
 
@@ -90,6 +91,9 @@ export interface LiveOrder {
   heldBy?: string | undefined;
   /** the venue agreed to cancel it and has not yet said it is gone */
   canceling?: boolean | undefined;
+  /** the account stopped following it: a cancel was asked while its venue was not connected (it did not come back after a restart), so
+   * what it held of a limit was given back and nothing is asked of the venue about it. What became of it is the venue's to show */
+  unfollowed?: true | undefined;
   /** a wallet order: the hash the wallet reported for it — once there is one, that is the transaction, and the page reports it again rather
    * than sending another */
   reported?: string | undefined;
@@ -171,6 +175,8 @@ export class LiveOrders {
   private readonly shownAmend = new Map<string, { order: string; qty: number; limitPrice?: number | undefined; stopPrice?: number | undefined; maxUsd: number }>();
   /** what each close card showed the owner: the market and the size, which an approval releases exactly */
   private readonly shownClose = new Map<string, { symbol: string; qty: number }>();
+  /** what each leverage card showed the owner: the market, the leverage and the margin mode, which an approval sets exactly */
+  private readonly shownLeverage = new Map<string, { symbol: string; leverage: number; marginMode: string }>();
   /** this run of the account: part of every client id it sends, so a restart never sends a venue an id it has seen */
   private readonly run = randomBytes(8).toString("hex");
   constructor(private readonly e: OrderEngine) {}
@@ -273,8 +279,16 @@ export class LiveOrders {
     if (isExpired(this.e.host.now(), o.sessionExpiresAt)) return no("E_WALLET_SESSION_EXPIRED", { venue, message: "the agent's session has expired: every write stops, reads continue", detail: { sessionExpiresAt: o.sessionExpiresAt } });
     if (o.revoked.includes(venue)) return no("E_WALLET_ACCOUNT_REVOKED", { venue, message: `${venue} is switched off for agents: reads only`, detail: { revoked: o.revoked } });
     const reach = o.reach[venue];
-    if (reach && !reach.includes("trade")) return no("E_WALLET_REACH", { venue, message: `the owner did not open trading at ${venue} to agents`, detail: { reach } });
+    if (reach && !reach.includes("trade")) return no("E_WALLET_REACH", { venue, message: `the owner did not open trading at ${this.money()?.venue(venue)?.name ?? venue} to agents`, detail: { reach } });
     return null;
+  }
+
+  /** a card closed without an answer (it expired): what it showed is not kept for a yes that cannot come */
+  forget(card: string): void {
+    this.shown.delete(card);
+    this.shownAmend.delete(card);
+    this.shownClose.delete(card);
+    this.shownLeverage.delete(card);
   }
 
   /** the agent's trading limit as it stands now, its owner signature still good, the dial open at the venue */
@@ -310,7 +324,7 @@ export class LiveOrders {
     return this.place(p, { signer: who.signer, authority: "owner", action: who.hash, envelope: who.envelope });
   }
 
-  /** An agent's order. Its trading limit and the dial first; then Conservative: a card the owner signs; Aggressive: placed at once */
+  /** An agent's order. Its trading limit and the dial first; then Guard: a card the owner signs; Beast: placed at once */
   async agent(a: AgentLiveOrderAction, who: { signer: string; envelope: Envelope; hash: Hex; agent: AgentKey }): Promise<Outcome> {
     const now = Date.parse(this.e.host.now());
     const spend = await this.limit(who.signer, text(a.venue));
@@ -323,8 +337,8 @@ export class LiveOrders {
       if (c) return c;
       const out = await this.charged(spend.id, p, { signer: who.signer, authority: "agent", agent: who.agent.address, action: who.hash, approval: spend.id });
       if (isRefusal(out)) return out;
-      this.e.host.log({ kind: "action", venue: p.v.id, tool: a.type, signer: who.signer, envelope: who.envelope, outcome: "accepted", notionalUsd: p.maxUsd, reason: `aggressive mode: ${this.words(p)}, inside the trading limit`, flight: flight.no });
-      this.e.host.say(flight.no, `${who.agent.name} ${this.words(p)}: inside its limit, so it went without a card (Aggressive)`, "ok");
+      this.e.host.log({ kind: "action", venue: p.v.id, tool: a.type, signer: who.signer, envelope: who.envelope, outcome: "accepted", notionalUsd: p.maxUsd, reason: `Beast: ${this.words(p)}, inside the trading limit`, flight: flight.no });
+      this.e.host.say(flight.no, `${who.agent.name} ${this.words(p)}: inside its limit, so it went without a card (Beast)`, "ok");
       return { ...out, flight: flight.no } as Outcome;
     }
     // the card holds what it shows, to the cent: answering it frees exactly that
@@ -335,7 +349,7 @@ export class LiveOrders {
     // the owner's answer signs the card's hash: it covers the agent's request AND the market, size, price and worth the owner is shown
     const actionHash = keccak256(stringToHex(canonical({ action: who.hash, offer, symbol: p.m.symbol, qty: plain(p.qty), price: plain(p.price), worth: worth.toFixed(2) })));
     const intent: Intent = { kind: "trade", symbol: p.m.symbol, side: p.side, qty: p.qty };
-    const card = this.e.host.raiseCard(flight.no, { account: p.v.id, intent, usd: worth, reason: `${who.agent.name} asks to ${this.words(p)}`, why: "live", action: a, actionHash, signer: who.signer, expiresAt: new Date(now + 30 * 60_000).toISOString(), offer, approval: spend.id });
+    const card = this.e.host.raiseCard(flight.no, { account: p.v.id, intent, usd: worth, reason: `${who.agent.name} asks to ${this.words(p)}`, why: "live", action: a, actionHash, signer: who.signer, expiresAt: new Date(now + CARD_TTL_MS).toISOString(), offer, approval: spend.id });
     this.shown.set(card.id, { symbol: p.m.symbol, qty: p.qty, price: p.price, notional: p.notional, maxUsd: worth });
     this.e.patchSpend(spend.id, (x) => ({ ...x, reservedMicro: x.reservedMicro + micro(String(worth)) }));
     this.e.host.log({ kind: "action", venue: p.v.id, tool: a.type, signer: who.signer, envelope: who.envelope, outcome: "card", notionalUsd: worth, reason: `${card.id} · ${this.words(p)}`, flight: flight.no, intentId: card.id });
@@ -361,12 +375,15 @@ export class LiveOrders {
     return this.charged(spend.id, p, { signer: who.signer, authority: "agent", agent: who.agent.address, card: card.id, action: card.actionHash, approval: spend.id });
   }
 
-  /** counted against the limit first, so an order that fills at once settles its count when it is placed; uncounted if the venue says no */
+  /** Counted against the limit first, so an order that fills at once settles its count when it is placed — and the venue's turn in the
+   * limit's window taken (`last`, read by state.ts covers: one order per window at each venue). Both undone if the venue says no */
   private async charged(approval: string, p: Plan, who: Who): Promise<Outcome> {
     const amount = micro(p.maxUsd.toFixed(6));
-    this.e.patchSpend(approval, (x) => ({ ...x, spentMicro: x.spentMicro + amount }));
+    const now = Date.parse(this.e.host.now());
+    const was = this.e.state.spends.find((x) => x.id === approval)?.last[p.v.id];
+    this.e.patchSpend(approval, (x) => ({ ...x, spentMicro: x.spentMicro + amount, last: { ...x.last, [p.v.id]: now } }));
     const out = await this.place(p, who);
-    if (isRefusal(out)) this.e.patchSpend(approval, (x) => ({ ...x, spentMicro: Math.max(0, x.spentMicro - amount) }));
+    if (isRefusal(out)) this.e.patchSpend(approval, (x) => ({ ...x, spentMicro: Math.max(0, x.spentMicro - amount), last: was === undefined ? Object.fromEntries(Object.entries(x.last).filter(([k]) => k !== p.v.id)) : { ...x.last, [p.v.id]: was } }));
     return out;
   }
 
@@ -388,12 +405,21 @@ export class LiveOrders {
       return { ok: true, kind: "order", order: o };
     }
     const v = this.money()?.venue(o.venue);
-    if (!v?.trader) return no("E_VENUE_RAIL_CLOSED", { venue: o.venue, message: `${o.venueName} is no longer connected live: cancel the order at the venue` });
+    if (!v?.trader) {
+      // the venue is not connected now (it did not come back after a restart, or was unplugged): there is nothing to send the cancel to, and
+      // nothing to ask how the order stands. The account stops following the order and gives back what it held of a limit — what the
+      // venue did with it since is the venue's to show, and the order is canceled there
+      if (o.unfollowed) return no("E_ACCOUNT_BAD_ACTION", { venue: o.venue, message: `${o.id} is not followed since a restart: ${o.venueName} is not connected, so it is canceled at the venue`, detail: { order: o.id } });
+      this.unfollow(o, by, who);
+      return { ok: true, kind: "order", order: o };
+    }
     const r = await safely(() => v.trader!.cancel(o.ref, o.symbol), o.venue, o.venueName);
     if (isRefusal(r)) {
       this.e.host.log({ kind: "account-refusal", venue: o.venue, tool: "live cancel", code: r.code, reason: r.message, native: r.native, signer: who.signer });
       return r;
     }
+    // the venue answered about it: an order the account had stopped following is followed again from here
+    o.unfollowed = undefined;
     if (DONE.has(r.status)) this.apply(o, r, "");
     else {
       // the venue took the cancel but has not said the order is gone: it may still fill on the way, so it is followed until it says
@@ -405,6 +431,17 @@ export class LiveOrders {
     this.e.host.log({ kind: "order", venue: o.venue, tool: "live cancel", outcome: o.status, venueOrderId: o.ref, reason: `${o.id} · cancel by ${by} · ${o.canceling && !DONE.has(o.status) ? "the venue took the cancel" : o.filledQty ? `${qtyText(o.filledQty)} of ${qtyText(o.qty)} had filled` : "nothing had filled"}`, signer: who.signer, envelope: who.envelope });
     this.giveBack(o);
     return { ok: true, kind: "order", order: o };
+  }
+
+  /** An order whose venue the account cannot reach, which `by` asked to cancel: not followed from here on. What it held of a limit beyond
+   * what had filled goes back (what filled stays counted), its line says so, and a restart does not follow it again */
+  private unfollow(o: LiveOrder, by: string, who: { signer: string; envelope: Envelope }): void {
+    o.unfollowed = true;
+    o.note = `not followed since a restart: ${o.venueName} is not connected, so the account can neither cancel it nor see it fill. Cancel it at the venue`;
+    o.updatedAt = new Date(this.money()?.realNow() ?? Date.now()).toISOString();
+    this.giveBack(o, true);
+    this.e.host.log({ kind: "order", venue: o.venue, tool: "live cancel", outcome: "not followed", venueOrderId: o.ref, reason: `${o.id} · ${by} asked to cancel it while ${o.venueName} is not connected: the account stopped following it, and what it held of a limit is free`, signer: who.signer, envelope: who.envelope });
+    this.line(o);
   }
 
   /** the order's line on the statement, as it stands now — and the order itself, so that a restarted account follows it again */
@@ -518,9 +555,10 @@ export class LiveOrders {
   }
 
   /** An agent's order that is done settles its count: what it did not use goes back to the limit; if the venue filled it worse than the
-   * worst price allowed, the real cost is counted, and the ledger says so */
-  private giveBack(o: LiveOrder): void {
-    if (!o.approval || !DONE.has(o.status)) return;
+   * worst price allowed, the real cost is counted, and the ledger says so. `unfollowed`: the account stopped following the order, so it
+   * settles now, on what had filled when the venue last answered */
+  private giveBack(o: LiveOrder, unfollowed = false): void {
+    if (!o.approval || !(unfollowed || DONE.has(o.status))) return;
     const used = o.filledQty > 0 ? notionalOf(o, o.filledQty, o.avgPrice !== undefined && o.avgPrice > 0 ? o.avgPrice : o.price) : 0;
     const diff = micro(Math.abs(o.usd - used).toFixed(6));
     if (used <= o.usd) {
@@ -620,6 +658,7 @@ export class LiveOrders {
     const mine = o && (who.authority === "owner" || (o.authority === "agent" && o.agent === who.agent?.address));
     if (!o || !mine) return no("E_ACCOUNT_ORDER_UNKNOWN", { venue: a.venue, message: who.authority === "agent" && o ? `${a.order} was not placed by this agent: an agent changes only its own orders` : `there is no order ${a.order} at ${a.venue} on the account`, detail: { order: a.order } });
     if (DONE.has(o.status) || (o.walletTxs && !o.ref)) return no("E_ACCOUNT_BAD_ACTION", { venue: o.venue, message: `${o.id} is ${o.walletTxs && !o.ref ? "waiting for a wallet" : o.status}: there is nothing to change at the venue`, detail: { order: o.id } });
+    if (o.unfollowed) return no("E_ACCOUNT_BAD_ACTION", { venue: o.venue, message: `${o.id} is not followed since a restart: it is canceled, here once ${o.venueName} is connected again or at the venue, not changed`, detail: { order: o.id } });
     const v = this.money()?.venue(o.venue);
     if (!v?.trader) return no("E_VENUE_RAIL_CLOSED", { venue: o.venue, message: `${o.venueName} is no longer connected live` });
     if (!v.trader.amend) return no("E_VENUE_RAIL_CLOSED", { venue: o.venue, message: `${o.venueName} changes no order in place: cancel it and place another` });
@@ -645,7 +684,7 @@ export class LiveOrders {
   }
 
   /** Change an open order in place. The owner: held to what was signed. An agent: only its own order; what the order becomes worth MORE is
-   * judged like a new order of the difference — Aggressive inside its limit at once, Conservative on a card; worth less, it simply goes */
+   * judged like a new order of the difference — Beast inside its limit at once, Guard on a card; worth less, it simply goes */
   async amend(a: LiveAmendAction | AgentLiveAmendAction, who: { signer: string; authority: "owner" | "agent"; agent?: AgentKey | undefined; envelope: Envelope; hash: Hex }): Promise<Outcome> {
     const o = this.changeable(a, who);
     if (isRefusal(o)) return o;
@@ -656,6 +695,12 @@ export class LiveOrders {
       if (this.money()!.realNow() > signed.deadline) return no("E_ACCOUNT_EXPIRED", { message: "this change was good for ten minutes after it was prepared: prepare it again" });
       const held = this.hold(r.p, o.symbol, Number(signed.maxNotional), "signed for");
       if (isRefusal(held)) return held;
+      // an agent's order the owner grows still counts on the agent's limit: the growth has to fit that limit, as the agent's own change
+      // would have to — the owner's signature changes the order, not the limit (a bigger limit is its own signature, under Agents)
+      const onto = o.approval ? this.e.state.spends.find((s) => s.id === o.approval) : undefined;
+      const more = onto ? held.maxUsd - o.usd : 0;
+      const c = onto && more > 1e-9 ? covers(onto, o.venue, micro(more.toFixed(6)), Date.parse(this.e.host.now()), { window: false }) : null;
+      if (c) return { ...c, message: `${c.message}. ${o.id} counts against ${this.agentName(o.agent)}'s trading limit: give it a bigger limit under Agents, or grow the order by less` };
       return this.applyAmend(o, held, r.change, who);
     }
     const spend = await this.limit(who.signer, o.venue);
@@ -666,19 +711,20 @@ export class LiveOrders {
     const more = this.growth(o, p.maxUsd, spend.id);
     if (more <= 1e-9) return this.applyAmend(o, p, r.change, who, spend.id);
     const now = Date.parse(this.e.host.now());
+    // a change to an order already placed is not a second order: the limit's window is not judged here
     if (this.e.host.policy().mode === "open") {
-      const c = covers(spend, o.venue, micro(more.toFixed(6)), now);
+      const c = covers(spend, o.venue, micro(more.toFixed(6)), now, { window: false });
       if (c) return c;
       return this.applyAmend(o, p, r.change, who, spend.id);
     }
     const worth = cents(p.maxUsd);
     const extra = cents(more);
-    const c = covers(spend, o.venue, micro(extra.toFixed(2)), now);
+    const c = covers(spend, o.venue, micro(extra.toFixed(2)), now, { window: false });
     if (c) return c;
     const flight = this.e.host.openFlight({ id: slug(who.agent!.name), name: who.agent!.name, code: who.agent!.code }, `change ${o.id}: ${this.words(p)} · real money`);
     const offer = { payee: o.venueName, payTo: o.symbol, amount: `${o.id} → ${p.side} ${qtyText(p.qty)} ${p.m.base}`, protocol: `change an order · ${this.words(p)}`, network: `${p.side === "buy" ? "costs at most" : "worth about"} ${usd(worth)} · ${usd(extra)} more than now` };
     const actionHash = keccak256(stringToHex(canonical({ action: who.hash, offer, qty: plain(p.qty), limit: p.limitPrice !== undefined ? plain(p.limitPrice) : "", stop: p.stopPrice !== undefined ? plain(p.stopPrice) : "", worth: worth.toFixed(2) })));
-    const card = this.e.host.raiseCard(flight.no, { account: o.venue, intent: { kind: "trade", symbol: p.m.symbol, side: p.side, qty: p.qty }, usd: extra, reason: `${who.agent!.name} asks to change ${o.id}: ${this.words(p)}`, why: "live", action: a as AgentLiveAmendAction, actionHash, signer: who.signer, expiresAt: new Date(now + 30 * 60_000).toISOString(), offer, approval: spend.id });
+    const card = this.e.host.raiseCard(flight.no, { account: o.venue, intent: { kind: "trade", symbol: p.m.symbol, side: p.side, qty: p.qty }, usd: extra, reason: `${who.agent!.name} asks to change ${o.id}: ${this.words(p)}`, why: "live", action: a as AgentLiveAmendAction, actionHash, signer: who.signer, expiresAt: new Date(now + CARD_TTL_MS).toISOString(), offer, approval: spend.id });
     this.shownAmend.set(card.id, { order: o.id, qty: p.qty, ...(p.limitPrice !== undefined ? { limitPrice: p.limitPrice } : {}), ...(p.stopPrice !== undefined ? { stopPrice: p.stopPrice } : {}), maxUsd: worth });
     this.e.patchSpend(spend.id, (x) => ({ ...x, reservedMicro: x.reservedMicro + micro(String(extra)) }));
     this.e.host.log({ kind: "action", venue: o.venue, tool: a.type, signer: who.signer, envelope: who.envelope, outcome: "card", notionalUsd: extra, reason: `${card.id} · change ${o.id}: ${this.words(p)}`, flight: flight.no, intentId: card.id });
@@ -702,9 +748,14 @@ export class LiveOrders {
     const line = perOrder(spend, held.maxUsd);
     if (line) return line;
     const more = this.growth(o, held.maxUsd, spend.id);
-    const c = more > 0 ? covers(spend, o.venue, micro(more.toFixed(6)), Date.parse(this.e.host.now())) : null;
+    const c = more > 0 ? covers(spend, o.venue, micro(more.toFixed(6)), Date.parse(this.e.host.now()), { window: false }) : null;
     if (c) return c;
     return this.applyAmend(o, held, r.change, { signer: who.signer, authority: "agent", agent: who.agent }, spend.id);
+  }
+
+  /** an agent key's name on the account, for a sentence about its order */
+  private agentName(address: string | undefined): string {
+    return this.e.state.agents.find((k) => k.address === address)?.name ?? "the agent";
   }
 
   /** the venue's amend, and the order as it stands after it. What it is worth more is counted first (and uncounted if the venue says no);
@@ -733,11 +784,18 @@ export class LiveOrders {
     return { ok: true, kind: "order", order: o };
   }
 
-  /** Close a position — all of it, or some — at a venue. It only shrinks what is held, so it does not count against a limit. The owner's goes at
-   * once; an agent's is an order the owner sees like any other — in Conservative a card, in Aggressive at once inside its per-order line —
-   * and only where its trading limit lets it trade (a position the agent closes may be the owner's own). The venue's own close where it has
-   * one; otherwise a reduce-only market order, and only where the market takes reduce-only: a close that could open a position the other way
-   * is not sent */
+  /** Close a position — all of it, or some — at a venue. The owner's goes at once. An agent's is an order the owner sees like any other, and
+   * only where its trading limit lets it trade (a position the agent closes may be the owner's own); what it counts depends on what the
+   * close IS:
+   *
+   *   a derivative position closed reduce-only (or by the venue's own close) only shrinks what is held, so it counts nothing against the
+   *   limit's budget — Guard a card, Beast at once inside the per-order line and a card above it;
+   *   a plain sell of a holding (spot, shares, event contracts: markets where a sell can only sell what is held) IS a sell order, and counts
+   *   against the trading limit exactly as one does — the per-order line, the budget, the window — settling its count as it fills.
+   *   Guard a card that holds its share, Beast at once; over the limit it is refused, as a sell order is.
+   *
+   * The venue's own close where it has one; otherwise a reduce-only market order, and only where the market takes reduce-only, or the plain
+   * sell: a close that could open a position the other way is not sent */
   async close(a: CloseFields | AgentLiveCloseAction, who: { signer: string; authority: "owner" | "agent"; agent?: AgentKey | undefined; envelope?: Envelope | undefined; hash: Hex; card?: string | undefined }): Promise<Outcome> {
     const v = this.money()?.venue(text(a.venue));
     if (!v) return no("E_WALLET_ACCOUNT_UNKNOWN", { venue: a.venue, message: `"${a.venue}" is not a venue connected live` });
@@ -750,14 +808,25 @@ export class LiveOrders {
     }
     const c = await this.closing(v as LiveVenue & { trader: LiveTrader }, a);
     if (isRefusal(c)) return c;
-    const { pos, qty, native, p } = c;
-    if (spend && who.card === undefined && !(this.e.host.policy().mode === "open" && micro(p.maxUsd.toFixed(6)) <= spend.perPaymentMicro)) return this.closeCard(a, p, qty, who);
+    const { pos, qty, native, plainSell, p } = c;
+    const open = this.e.host.policy().mode === "open";
+    const asking = spend !== undefined && who.card === undefined && !open;
+    if (spend && plainSell) {
+      // a card holds what it shows, to the cent; a release or a Beast close is counted at what it is worth
+      const amount = micro((asking ? cents(p.maxUsd) : p.maxUsd).toFixed(6));
+      const limit = covers(spend, v.id, amount, Date.parse(this.e.host.now()));
+      if (limit) return { ...limit, message: `${limit.message}. A close that sells a holding is a sell order, and counts against the trading limit like one` };
+      if (asking) return this.closeCard(a, p, qty, who, spend);
+      return this.charged(spend.id, p, { signer: who.signer, authority: "agent", agent: who.agent!.address, action: who.hash, approval: spend.id, ...(who.envelope ? { envelope: who.envelope } : {}), ...(who.card ? { card: who.card } : {}) });
+    }
+    if (spend && who.card === undefined && !(open && micro(p.maxUsd.toFixed(6)) <= spend.perPaymentMicro)) return this.closeCard(a, p, qty, who);
     return this.place(p, { signer: who.signer, authority: who.authority, ...(who.agent ? { agent: who.agent.address } : {}), action: who.hash, ...(who.envelope ? { envelope: who.envelope } : {}), ...(who.card ? { card: who.card } : {}) }, native ? (clientId) => native.call(v.trader, pos.symbol, qty, clientId) : undefined);
   }
 
   /** What a close at `v` would be: the position, how much of it, the venue's own close or a reduce-only market order (a plain sell where a
-   * sell can only sell what is held; nothing where neither holds), and the order's plan. `uncapped`: the plan does not judge the cap */
-  private async closing(v: LiveVenue & { trader: LiveTrader }, a: CloseFields | AgentLiveCloseAction, uncapped = false): Promise<{ pos: Position; qty: number; native: LiveTrader["close"]; p: Plan } | Refusal> {
+   * sell can only sell what is held — `plainSell`; nothing where neither holds), and the order's plan. `uncapped`: the plan does not judge
+   * the cap */
+  private async closing(v: LiveVenue & { trader: LiveTrader }, a: CloseFields | AgentLiveCloseAction, uncapped = false): Promise<{ pos: Position; qty: number; native: LiveTrader["close"]; plainSell: boolean; p: Plan } | Refusal> {
     const list = await safely(() => v.trader.positions!(), v.id, v.name, STATUS_MS);
     if (isRefusal(list)) return list;
     const pos = list.find((x) => x.symbol === text(a.symbol));
@@ -772,7 +841,7 @@ export class LiveOrders {
     if (mk && !mk.reduceOnly && !plainSell) return no("E_VENUE_ORDER_INVALID", { venue: v.id, message: `${v.name} takes no reduce-only order in ${mk.name}, and has no close of its own: close it at the venue, so that nothing opens the other way` });
     const p = await this.plan({ venue: v.id, symbol: pos.symbol, side: pos.side === "long" ? "sell" : "buy", orderType: "market", qty: plain(qty), usd: "", limitPrice: "", stopPrice: "", tif: "", postOnly: "", reduceOnly: native || plainSell ? "" : "true" }, uncapped);
     if (isRefusal(p)) return p;
-    return { pos, qty, native, p };
+    return { pos, qty, native, plainSell, p };
   }
 
   /** What the owner is shown before signing a close: the side and size it closes, its worst price, what it is worth (a buy back: the most
@@ -799,18 +868,20 @@ export class LiveOrders {
     };
   }
 
-  /** an agent's close the owner answers: what it closes and what that is worth, shown on a card. It counts against no limit, so the card holds
-   * none of one */
-  private closeCard(a: CloseFields | AgentLiveCloseAction, p: Plan, qty: number, who: { signer: string; agent?: AgentKey | undefined; envelope?: Envelope | undefined; hash: Hex }): Outcome {
+  /** an agent's close the owner answers: what it closes and what that is worth, shown on a card. A derivative's reduce-only close counts
+   * against no limit, so its card holds none of one; a plain sell of a holding is an order, so its card holds its share of `spend` while it
+   * waits, as an order's card does */
+  private closeCard(a: CloseFields | AgentLiveCloseAction, p: Plan, qty: number, who: { signer: string; agent?: AgentKey | undefined; envelope?: Envelope | undefined; hash: Hex }, spend?: SpendApproval): Outcome {
     const agent = who.agent!;
     const now = Date.parse(this.e.host.now());
     const flight = this.e.host.openFlight({ id: slug(agent.name), name: agent.name, code: agent.code }, `close ${qtyText(qty)} ${p.m.base} of ${p.m.name} · real money`);
     const worth = cents(p.maxUsd);
-    const offer = { payee: p.v.name, payTo: p.m.symbol, amount: `close · ${p.side} ${qtyText(qty)} ${p.m.base}`, protocol: "real order · a close at market", network: `${p.side === "buy" ? "costs at most" : "worth about"} ${usd(worth)} · it only shrinks what is held` };
+    const offer = { payee: p.v.name, payTo: p.m.symbol, amount: `close · ${p.side} ${qtyText(qty)} ${p.m.base}`, protocol: "real order · a close at market", network: `${p.side === "buy" ? "costs at most" : "worth about"} ${usd(worth)} · ${spend ? "it sells what is held, and counts against the trading limit like a sell order" : "it only shrinks what is held"}` };
     // the owner's answer signs the card's hash: the agent's request AND the market and size the owner is shown
     const actionHash = keccak256(stringToHex(canonical({ action: who.hash, offer, symbol: p.m.symbol, qty: plain(qty), worth: worth.toFixed(2) })));
-    const card = this.e.host.raiseCard(flight.no, { account: p.v.id, intent: { kind: "trade", symbol: p.m.symbol, side: p.side, qty }, usd: worth, reason: `${agent.name} asks to close ${qtyText(qty)} ${p.m.base} of ${p.m.name}`, why: "live", action: a as AgentLiveCloseAction, actionHash, signer: who.signer, expiresAt: new Date(now + 30 * 60_000).toISOString(), offer });
+    const card = this.e.host.raiseCard(flight.no, { account: p.v.id, intent: { kind: "trade", symbol: p.m.symbol, side: p.side, qty }, usd: worth, reason: `${agent.name} asks to close ${qtyText(qty)} ${p.m.base} of ${p.m.name}`, why: "live", action: a as AgentLiveCloseAction, actionHash, signer: who.signer, expiresAt: new Date(now + CARD_TTL_MS).toISOString(), offer, ...(spend ? { approval: spend.id } : {}) });
     this.shownClose.set(card.id, { symbol: p.m.symbol, qty });
+    if (spend) this.e.patchSpend(spend.id, (x) => ({ ...x, reservedMicro: x.reservedMicro + micro(worth.toFixed(2)) }));
     this.e.host.log({ kind: "action", venue: p.v.id, tool: "agentLiveClose", signer: who.signer, ...(who.envelope ? { envelope: who.envelope } : {}), outcome: "card", notionalUsd: worth, reason: `${card.id} · close ${qtyText(qty)} of ${p.m.name}`, flight: flight.no, intentId: card.id });
     return { ok: true, kind: "card", pending: true, card, flight: flight.no };
   }
@@ -825,8 +896,11 @@ export class LiveOrders {
   }
 
   /** A perpetual's leverage (and margin mode). The owner: up to what the venue takes. An agent: where its trading limit lets it trade, up to
-   * the most the owner signed for agents (1x unless the owner signed more) */
-  async leverage(a: LeverageFields, who: { signer: string; authority: "owner" | "agent"; envelope: Envelope }): Promise<Outcome> {
+   * the most the owner signed for agents (1x unless the owner signed more) — and where a position is open in that market (anyone's: the
+   * account cannot tell the owner's from the agent's), the change alters what that position risks, so it is answered like a close of it:
+   * Guard a card, Beast at once when the position is inside the agent's per-order line and a card above it. With no position
+   * there it is set at once in both modes: the next order's card shows the leverage */
+  async leverage(a: LeverageFields, who: { signer: string; authority: "owner" | "agent"; envelope?: Envelope | undefined; agent?: AgentKey | undefined; hash?: Hex | undefined; card?: string | undefined }): Promise<Outcome> {
     const v = this.money()?.venue(text(a.venue));
     if (!v) return no("E_WALLET_ACCOUNT_UNKNOWN", { venue: a.venue, message: `"${a.venue}" is not a venue connected live` });
     if (!v.trader?.setLeverage) return no("E_VENUE_RAIL_CLOSED", { venue: v.id, message: `${v.name} sets no leverage from the account` });
@@ -834,7 +908,7 @@ export class LiveOrders {
     if (!/^\d{1,3}$/.test(text(a.leverage)) || !(lev >= 1)) return no("E_ACCOUNT_BAD_ACTION", { message: "leverage is a whole number, 1 or more" });
     if (text(a.marginMode) !== "" && a.marginMode !== "cross" && a.marginMode !== "isolated") return no("E_ACCOUNT_BAD_ACTION", { message: 'a margin mode is "cross" or "isolated"' });
     const m = this.money()!;
-    if (!m.writes().on) return no("E_WALLET_LIVE_WRITES_OFF", { message: `this server changes nothing at a venue: it was started read-only. ${m.writes().turnOn}` });
+    if (!m.writes().on) return no("E_WALLET_LIVE_WRITES_OFF", { message: `this server changes nothing at a venue: it was started read-only. To trade, stop it and start it again with: ${m.writes().turnOn}`, detail: { turnOn: m.writes().turnOn } });
     const mk = await safely(() => v.trader!.market(text(a.symbol)), v.id, v.name, STATUS_MS);
     if (isRefusal(mk)) return mk;
     if (mk.kind !== "perp" && mk.kind !== "future") return no("E_ACCOUNT_BAD_ACTION", { venue: v.id, message: `leverage is set on a perpetual or a future; ${mk.name} is ${mk.kind}` });
@@ -844,19 +918,54 @@ export class LiveOrders {
       if (isRefusal(spend)) return spend;
       const cap = this.e.host.policy().maxLeverage ?? 1;
       if (lev > cap) return no("E_ACCOUNT_LIMIT", { venue: v.id, message: `the owner lets agents use at most ${cap}x leverage: ${lev}x is the owner's to set, or to allow`, detail: { maxLeverage: cap } });
+      if (who.card === undefined && v.trader.positions) {
+        const list = await safely(() => v.trader!.positions!(), v.id, v.name, STATUS_MS);
+        if (isRefusal(list)) return list;
+        const pos = list.find((x) => x.symbol === mk.symbol && x.qty > 0);
+        if (pos) {
+          const worth = pos.usd ?? notionalOf(mk, pos.qty, pos.markPrice ?? mk.price ?? 0);
+          if (!(this.e.host.policy().mode === "open" && micro(worth.toFixed(6)) <= spend.perPaymentMicro)) return this.leverageCard(a, mk, v, lev, pos, worth, who);
+        }
+      }
     }
     const r = await safely(() => v.trader!.setLeverage!(mk.symbol, lev, (text(a.marginMode) || undefined) as "cross" | "isolated" | undefined), v.id, v.name);
     if (isRefusal(r)) {
       this.e.host.log({ kind: "account-refusal", venue: v.id, tool: "live leverage", code: r.code, reason: r.message, native: r.native, signer: who.signer });
       return r;
     }
-    this.e.host.log({ kind: "action", venue: v.id, tool: "live leverage", signer: who.signer, envelope: who.envelope, outcome: "ok", reason: `${mk.name} at ${v.name}: ${r.leverage}x${r.marginMode ? `, ${r.marginMode} margin` : ""}`, native: r.native });
+    this.e.host.log({ kind: "action", venue: v.id, tool: "live leverage", signer: who.signer, ...(who.envelope ? { envelope: who.envelope } : {}), ...(who.card ? { intentId: who.card } : {}), outcome: "ok", reason: `${mk.name} at ${v.name}: ${r.leverage}x${r.marginMode ? `, ${r.marginMode} margin` : ""}`, native: r.native });
     return { ok: true, kind: "result", result: { venue: v.id, symbol: mk.symbol, leverage: r.leverage, ...(r.marginMode ? { marginMode: r.marginMode } : {}) } };
   }
 
-  /** an order still open at a venue: a venue with one is not disconnected until it is done */
+  /** an agent's leverage change the owner answers: the market, the leverage and the position open there, shown on a card. It moves no money
+   * and counts against no limit, so the card holds none of one. The card's intent names the position the change bears on */
+  private leverageCard(a: LeverageFields, mk: Market, v: LiveVenue, lev: number, pos: Position, worth: number, who: { signer: string; agent?: AgentKey | undefined; envelope?: Envelope | undefined; hash?: Hex | undefined }): Outcome {
+    const agent = who.agent!;
+    const now = Date.parse(this.e.host.now());
+    const mode = text(a.marginMode);
+    const flight = this.e.host.openFlight({ id: slug(agent.name), name: agent.name, code: agent.code }, `set leverage to ${lev}x on ${mk.name} · a position is open there`);
+    const offer = { payee: v.name, payTo: mk.symbol, amount: `leverage ${lev}x${mode ? ` · ${mode} margin` : ""}`, protocol: "a perpetual's leverage", network: `a ${pos.side} position of ${qtyText(pos.qty)} ${mk.base} (about ${usd(worth)}) is open there: its risk changes with the leverage` };
+    // the owner's answer signs the card's hash: the agent's request AND the market, the leverage and the margin mode the owner is shown
+    const actionHash = keccak256(stringToHex(canonical({ action: who.hash ?? null, offer, symbol: mk.symbol, leverage: lev, marginMode: mode })));
+    const card = this.e.host.raiseCard(flight.no, { account: v.id, intent: { kind: "trade", symbol: mk.symbol, side: pos.side === "long" ? "buy" : "sell", qty: pos.qty }, usd: worth, reason: `${agent.name} asks to set leverage to ${lev}x on ${mk.name} — a position of ${qtyText(pos.qty)} ${mk.base} is open there`, why: "live", action: a as Extract<AgentAction, { type: "agentLiveLeverage" }>, actionHash, signer: who.signer, expiresAt: new Date(now + CARD_TTL_MS).toISOString(), offer });
+    this.shownLeverage.set(card.id, { symbol: mk.symbol, leverage: lev, marginMode: mode });
+    this.e.host.log({ kind: "action", venue: v.id, tool: "agentLiveLeverage", signer: who.signer, ...(who.envelope ? { envelope: who.envelope } : {}), outcome: "card", notionalUsd: worth, reason: `${card.id} · leverage ${lev}x on ${mk.name}`, flight: flight.no, intentId: card.id });
+    return { ok: true, kind: "card", pending: true, card, flight: flight.no };
+  }
+
+  /** the owner approved an agent's leverage change: exactly what the card showed, judged again (the limit, the agents' cap, the venue) */
+  async releaseLeverage(card: CardLike, who: { signer: string; agent: AgentKey }): Promise<Outcome> {
+    const a = card.action as Extract<AgentAction, { type: "agentLiveLeverage" }>;
+    const shown = this.shownLeverage.get(card.id);
+    this.shownLeverage.delete(card.id);
+    if (!shown) return no("E_ACCOUNT_REQUOTE", { message: "this card's leverage change is not known to this run of the account: the agent asks again" });
+    return this.leverage({ venue: a.venue, symbol: shown.symbol, leverage: String(shown.leverage), marginMode: shown.marginMode }, { signer: who.signer, authority: "agent", agent: who.agent, hash: card.actionHash, card: card.id });
+  }
+
+  /** an order still open at a venue: a venue with one is not disconnected until it is done. One the account stopped following is not open
+   * here: it is the venue's */
   openAt(venue: string): LiveOrder | undefined {
-    return this.e.orders.find((o) => o.venue === venue && !DONE.has(o.status) && !(o.walletTxs && !o.ref));
+    return this.e.orders.find((o) => o.venue === venue && !DONE.has(o.status) && !o.unfollowed && !(o.walletTxs && !o.ref));
   }
 
   /** What became of the open orders: every open order asked of its venue at once, at most every ten seconds per order, each for at most
@@ -874,7 +983,7 @@ export class LiveOrders {
     if (!m) return;
     const now = m.realNow();
     const due = this.e.orders.filter((o) => {
-      if (DONE.has(o.status) || (o.walletTxs && !o.ref)) return false;
+      if (DONE.has(o.status) || o.unfollowed || (o.walletTxs && !o.ref)) return false;
       const wait = POLL_MS * Math.min(30, 2 ** (this.misses.get(o.id) ?? 0));
       return now - (this.polled.get(o.id) ?? 0) >= wait;
     });

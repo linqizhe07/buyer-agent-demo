@@ -126,6 +126,22 @@ export const num = (v: unknown): number => {
   return Number.isFinite(n) ? n : 0;
 };
 
+/** how a perpetual's margin is held: across the account, or per position */
+export type MarginMode = "cross" | "isolated";
+
+/** What a trader says about a market, or its last 24 hours, beyond what trade.ts names today: carried as JSON to the page and to agents, so
+ * each is set only where it is true, and left out where nothing is known. (trade.ts's Market and MarketStats name the same two fields once
+ * their owner adds them; until then a trader returns `Market & MarketExtras`.) */
+export interface MarketExtras {
+  /** the margin modes a perpetual's leverage is set with here, where the venue sets one per market (Binance: both; OKX: the account's orders
+   * go in cross margin, so cross); `[]` where the venue sets none per market (a unified Bybit account: the whole account's); absent where
+   * leverage is not set from the account at all. The page draws a Margin choice only from this list */
+  marginModes?: MarginMode[] | undefined;
+  /** where the 24-hour figures came from, when they are not the venue's own ticker read against its docs: the exchange library's unified
+   * reading of a ticker the account has not checked (its 24-hour window, and its volume, are the library's word) */
+  statsFrom?: string | undefined;
+}
+
 /** dollar stablecoins count one for one; everything else needs a price from somewhere. USDG is Paxos's Global Dollar: the dollar Robinhood's
  * Stock Tokens trade against on Robinhood Chain */
 export const STABLES = new Set(["USD", "USDC", "USDC.E", "USDT", "USDT0", "USD₮0", "USD₮", "FDUSD", "PYUSD", "DAI", "TUSD", "USDP", "PUSD", "USDG"]);
