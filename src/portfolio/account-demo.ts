@@ -19,7 +19,7 @@ import { etDate, whenLabel } from "./account/calendar.ts";
 import { cardHash, type CardLike, type Outcome } from "./account/exchange.ts";
 import * as X from "./account/protocols.ts";
 import { hlRecover, hlTypedData, signAgent, signerOf, signOwner, simKey, ZERO, type Action, type AgentAction, type AnySig, type Hex, type OwnerAction, type SimKey } from "./account/sign.ts";
-import { defaultHome } from "./server.ts";
+import { demoHome } from "./home.ts";
 import { loadOpenness, PortfolioService } from "./service.ts";
 
 const argv = process.argv.slice(2);
@@ -87,7 +87,7 @@ export const NOT_PROVEN = [
 ];
 
 async function main(): Promise<number> {
-  const home = value("--home") ?? defaultHome();
+  const home = value("--home") ?? demoHome("account-demo-");
   const owner = simKey("owner");
   const cc = simKey("agent:claude-code");
   const codex = simKey("agent:codex");

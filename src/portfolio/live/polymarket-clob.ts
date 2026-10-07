@@ -13,9 +13,31 @@
  *   GET  gamma /markets/slug/{slug}    a market by its name: its outcomes and their ids, neg-risk, whether it takes orders
  *   GET  gamma /markets/keyset         the markets to choose from (by 24-hour volume, kept five minutes), and a token's market by condition id
  *   GET  /book?token_id=               the book: best bid and ask, the tick, the smallest order, neg-risk
- *   POST /order                        one signed order, with the L2 headers: an HMAC over the exact body sent
+ *   POST /order                        one signed order, with the L2 headers: an HMAC over the exact body sent. Its `orderType` is the time
+ *                                     in force (GTC, FAK or FOK), and an order that rests (GTC) may say `postOnly`
  *   GET  /data/order/{id}              what became of it; GET /data/trades?market= for the prices it filled at
  *   DELETE /order                      cancel it
+ *   GET  data-api /v2/positions?user=  what the wallet holds, outcome by outcome
+ *   GET  gamma /events                 event contracts to discover: the open events, busiest first, with their markets and tags
+ *   GET  /prices-history?market=       an outcome's price history, by its token id
+ *
+ * The last two only read: like Gamma and the book, they need no credentials, and the location check stays where it is, before every order.
+ *
+ * Money IN, for the owner's Receive (polymarketWriter; docs.polymarket.com/trading/bridge and /concepts/pusd, read 2026-10-06), keyless:
+ *   pUSD on Polygon                    straight to the wallet the orders are made by (`maker`): pUSD is "a standard ERC-20 token on Polygon",
+ *                                      and that wallet's pUSD is the cash the account reads here
+ *   POST bridge.polymarket.com/deposit {address: maker} → address.evm: the bridge address unique to that wallet, one for every EVM chain;
+ *                                      what is sent to it "is bridged and swapped to pUSD automatically" and credited to the wallet
+ *   GET  bridge.polymarket.com/supported-assets   the chains and tokens it takes, with the least it takes ("Deposits below the minimum will
+ *                                      not be processed"): asked before an address is given, and the token checked against the one the
+ *                                      account would send
+ * Money OUT is not made from here: the CLOB has no withdrawal call, and the bridge's withdrawal is a pUSD transfer the Polymarket wallet
+ * itself sends ("Send pUSD from your Polymarket wallet to the appropriate bridge address") — a transaction this account does not sign with
+ * the key file's key. The writer says so (`can.why.withdraw`).
+ *
+ * What the CLOB does not have is not offered: no stop or trigger order, no reduce-only flag, no leverage, and no change to an open order in
+ * place (/order takes POST and DELETE only: an order is signed, so another price or size is another order). Its GTD order, good until a
+ * date the owner names, has no counterpart among the account's times in force.
  *
  * Who signs: the key file holds the signer's private key. When the money sits in a Polymarket wallet (the address in the profile menu),
  * the file also names that wallet (`funderAddress`) and its kind (`signatureType`): 1 a Proxy wallet, 2 a Safe, 3 a Deposit Wallet (every
@@ -31,10 +53,11 @@ import { privateKeyToAccount, type PrivateKeyAccount } from "viem/accounts";
 import { isRefusal, type Refusal } from "../../core/errors.ts";
 import { no } from "../refuse.ts";
 import { polymarketSource } from "./address.ts";
-import type { ChainReader } from "./chain.ts";
+import { CHAINS, type ChainName, type ChainReader } from "./chain.ts";
 import type { KeyFile, KeyShape } from "./credentials.ts";
-import { badOrder, ceilTo, floorTo, inDollars, pick, plain, type LiveTrader, type Market, type OrderRequest, type OrderState, type OrderStatus } from "./trade.ts";
+import { badOrder, ceilTo, floorTo, inDollars, pick, plain, type Candle, type CandleInterval, type LiveTrader, type Market, type OrderRequest, type OrderState, type OrderStatus, type Position, type TimeInForce } from "./trade.ts";
 import { asRefusal, num, REGION, redact, unreachable, type Http, type HttpReply, type LiveBalance, type LiveSource } from "./types.ts";
+import { tokenOn, type LiveWriter } from "./writes.ts";
 
 export const POLYMARKET_TRADE_KEY: KeyShape = {
   required: ["privateKey"],
@@ -44,6 +67,7 @@ export const POLYMARKET_TRADE_KEY: KeyShape = {
 
 const CLOB = "https://clob.polymarket.com";
 const GAMMA = "https://gamma-api.polymarket.com";
+const DATA = "https://data-api.polymarket.com/v2";
 const GEOBLOCK = "https://polymarket.com/api/geoblock";
 const CHAIN_ID = 137;
 /** Polygon, from docs.polymarket.com/resources/contracts and the clients' configs (all four agree). The V1 exchanges (domain "1") are dead */
@@ -97,11 +121,34 @@ const ROUNDING: Array<{ tick: number; price: number; size: number; amount: numbe
 ];
 const roundingOf = (tick: number) => ROUNDING.find((r) => Math.abs(r.tick - tick) < 1e-12);
 
+/** The CLOB's order types, which its OpenAPI calls the time in force, in the account's words (docs.polymarket.com/concepts/order-lifecycle):
+ * GTC rests until it fills or is canceled; FAK, fill and kill, fills what it can at once and cancels the rest, which is the account's
+ * immediate-or-cancel (except that a FAK matching nothing is refused, not canceled: error-codes, "FAK orders are partially filled or killed
+ * if no match is found"); FOK fills all of it at once or none of it. GTD is left out (see above), and no Polymarket market has a session
+ * for a `day` order to end with */
+type ClobOrderType = "GTC" | "FAK" | "FOK";
+const TIF: Partial<Record<TimeInForce, ClobOrderType>> = { gtc: "GTC", ioc: "FAK", fok: "FOK" };
+const TIFS_HERE: TimeInForce[] = ["gtc", "ioc", "fok"];
+
 const LIST_MS = 5 * 60_000;
 /** what market() learned about a symbol is used by place() for this long; the price a market order may fill at comes with the order */
 const KNOWN_MS = 60_000;
 const TOKEN = /^\d{10,90}$/;
 const SLUG = /^[a-z0-9][a-z0-9-]*$/i;
+/** The prices a bar is folded from: one-minute prices make five-minute bars, five-minute prices hourly ones, hourly prices daily ones
+ * (`fidelity` is in minutes). Polymarket refuses a range too long for its fidelity ("'startTs' and 'endTs' interval is too long", OBSERVED
+ * for forty days of one-minute prices) */
+const FIDELITY_MIN: Record<CandleInterval, number> = { "5m": 1, "1h": 5, "1d": 60 };
+const BAR_MS: Record<CandleInterval, number> = { "5m": 5 * 60_000, "1h": 3_600_000, "1d": 86_400_000 };
+/** the longest startTs-to-endTs range /prices-history takes: fourteen days, under the fifteen or so it answers (OBSERVED 2026-10-05) */
+const HISTORY_RANGE_MS = 14 * 86_400_000;
+/** a category as Gamma's tag slug: "Climate & Science" → climate-science */
+const tagSlug = (category: string): string =>
+  category
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
 const ORDER_ID = /^0x[0-9a-fA-F]{64}$/;
 
 type Json = Record<string, unknown>;
@@ -206,12 +253,20 @@ interface Outcome {
   minSize?: number | undefined;
   price?: number | undefined;
   notes: string[];
+  /** what Gamma's market says beyond the order rules: its end (`endDate`), the pUSD traded in it in 24 hours (`volume24hr`, the
+   * market's, which all its outcomes share), the change of its price in 24 hours (`oneDayPriceChange`, absolute: the first outcome's,
+   * whose price Gamma's market price is), and its event's category when the caller knows it */
+  closeTime?: string | undefined;
+  volume24h?: number | undefined;
+  change24h?: number | undefined;
+  category?: string | undefined;
 }
 
 /** Every outcome of a Gamma market. The trading id follows the market's `version`, even where both id fields are present: a v1 (CTF)
  * market trades its `clobTokenIds` (a JSON-encoded string), a v2 market its `positionIds` (Polymarket says a v1 market's positionIds have
- * no book). Index i of `outcomes` is index i of the ids. Any other version is left out */
-function outcomesOf(m: Json): Outcome[] {
+ * no book). Index i of `outcomes` is index i of the ids. Any other version is left out. `oneDayPriceChange` is said for the first outcome
+ * only: Gamma's market price, last trade, best bid and best ask are all that outcome's (OBSERVED), and the others' change is not given */
+function outcomesOf(m: Json, category?: string): Outcome[] {
   const version = m.version === "v1" || m.version === "v2" ? m.version : undefined;
   const slug = typeof m.slug === "string" ? m.slug : "";
   if (!version || !slug) return [];
@@ -226,6 +281,9 @@ function outcomesOf(m: Json): Outcome[] {
   if (num(m.secondsDelay) > 0) notes.push(`Polymarket holds an order that would match for ${plain(num(m.secondsDelay))} s before matching it, and it cannot be canceled meanwhile`);
   if (m.restricted === true) notes.push("Polymarket restricts this market in some places");
   const question = String(m.question ?? slug);
+  const closeTime = typeof m.endDate === "string" && m.endDate ? m.endDate : undefined;
+  const volume24h = given(m.volume24hr);
+  const dayChange = given(m.oneDayPriceChange);
   return names.map((outcome, i) => ({
     symbol: `${slug}:${outcome}`,
     slug,
@@ -241,6 +299,10 @@ function outcomesOf(m: Json): Outcome[] {
     minSize: positive(m.orderMinSize),
     price: positive(prices[i]),
     notes,
+    ...(closeTime ? { closeTime } : {}),
+    ...(volume24h !== undefined && volume24h >= 0 ? { volume24h } : {}),
+    ...(i === 0 && dayChange !== undefined ? { change24h: dayChange } : {}),
+    ...(category ? { category } : {}),
   }));
 }
 
@@ -290,6 +352,43 @@ interface Known {
   at: number;
 }
 
+// ---- positions -------------------------------------------------------------------------------------
+
+/** a number the Data API gave: a missing or null one is "unavailable, never zero" in its conventions, so it stays unknown rather than 0 */
+const given = (v: unknown): number | undefined => {
+  const n = typeof v === "number" ? v : typeof v === "string" && v.trim() !== "" ? Number(v) : NaN;
+  return Number.isFinite(n) ? n : undefined;
+};
+const POSITION_FIELDS = ["token_id", "condition_id", "slug", "outcome", "outcome_index", "status", "redeemable", "mergeable", "negative_risk", "end_date", "current_size", "avg_price", "current_price", "current_value", "entry_cost_usdc", "entry_fees_usdc", "realized_pnl", "unrealized_pnl"] as const;
+
+/** One row of the Data API's positions (docs.polymarket.com/api-reference/wallet/list-positions-for-a-user-or-market), in the account's words.
+ * The symbol is the one market() takes: `<slug>:<outcome>`, or the token id when the row names no market. The shares held are
+ * `current_size` (`total_size` is every share ever bought). Every holding is long: a bet against an outcome is the other outcome bought, and
+ * a sell can only be of shares the wallet holds. A resolved market's shares stay a position until they are redeemed (status REDEEMABLE,
+ * marked at 0 when the outcome lost). The profile fields of the row (name, image) are left out */
+function positionOf(p: Json): Position | undefined {
+  const qty = num(p.current_size);
+  if (!(qty > 0)) return undefined;
+  const slug = typeof p.slug === "string" ? p.slug : "";
+  const outcome = typeof p.outcome === "string" ? p.outcome : "";
+  const token = typeof p.token_id === "string" ? p.token_id : "";
+  const symbol = SLUG.test(slug) && outcome ? `${slug}:${outcome}` : TOKEN.test(token) ? token : undefined;
+  if (symbol === undefined) return undefined;
+  const title = typeof p.title === "string" && p.title ? p.title : slug || token;
+  return {
+    symbol,
+    name: `${title} · ${outcome || "?"}`,
+    kind: "event",
+    side: "long",
+    qty,
+    entryPrice: positive(p.avg_price),
+    markPrice: given(p.current_price),
+    usd: given(p.current_value),
+    unrealizedUsd: given(p.unrealized_pnl),
+    native: Object.fromEntries(POSITION_FIELDS.filter((k) => p[k] !== undefined).map((k) => [k, p[k]])),
+  };
+}
+
 // ---- refusals --------------------------------------------------------------------------------------
 
 /** the CLOB's region refusal is not in Polymarket's docs; a third-party report has 403 "Trading restricted in your region", which the
@@ -333,6 +432,9 @@ export async function polymarketTradeSource(req: PolymarketTradeRequest): Promis
   if (isRefusal(read)) return read;
   const creds = await t.creds();
   if (isRefusal(creds)) return creds;
+  // the wallet the orders are made by is where money lands: the writer gives its address for pUSD on Polygon, and Polymarket's bridge address
+  // for the other chains. It is not the source's `address`: that field is a watched or proven wallet, and the service would ask a wallet
+  // proof for it; the key file's key signing Polymarket's orders is what shows the wallet is the owner's here
   const source: LiveSource = {
     name,
     kind: "prediction",
@@ -340,14 +442,106 @@ export async function polymarketTradeSource(req: PolymarketTradeRequest): Promis
     via: `Polymarket CLOB · orders signed by the account wallet's key (${SIG_NAME[w.type]})`,
     probe: {
       can: ["trade"],
-      note: `orders are made by ${w.maker}${w.maker === w.eoa ? "" : ` and signed by its owner key ${w.eoa}`}; Polymarket issued CLOB credentials for ${w.eoa}, kept in this process's memory only${w.type === 0 ? " · Polymarket says a plain address trades only once it has allowlisted it" : ""}`,
+      note: `orders are made by ${w.maker}${w.maker === w.eoa ? "" : ` and signed by its owner key ${w.eoa}`}; Polymarket issued CLOB credentials for ${w.eoa}, kept in this process's memory only${w.type === 0 ? " · Polymarket says a plain address trades only once it has allowlisted it" : ""} · money comes in to that wallet as pUSD on Polygon, or through Polymarket's bridge from the other chains; it leaves Polymarket at Polymarket`,
       native: { calls: ["GET polymarket.com/api/geoblock", "GET data-api /v2/positions?user=", "balanceOf pUSD on Polygon", "GET /auth/derive-api-key"], maker: w.maker, signer: w.eoa, signatureType: w.type },
     },
     read: read.source.read,
-    readOnlyBecause: "money goes in and out of Polymarket at Polymarket",
+    writer: polymarketWriter({ venue: req.venue, name, maker: w.maker, http: req.http, clock: req.clock }),
     trader: t.trader,
   };
   return { source, first: read.first };
+}
+
+// ---- money in: pUSD on Polygon, and Polymarket's bridge ------------------------------------------------
+
+const BRIDGE = "https://bridge.polymarket.com";
+/** the chains of this account's that Polymarket's bridge takes deposits from (its supported-assets page, read 2026-10-06, lists these six
+ * among others; every EVM chain goes through the one `evm` address the bridge gives a wallet). What each chain takes, and the least it takes,
+ * is asked of the bridge itself each time, kept ten minutes */
+const BRIDGE_CHAINS: ChainName[] = ["Ethereum", "Polygon", "Arbitrum", "Base", "Optimism", "BNB Chain"];
+const BRIDGE_MS = 10 * 60_000;
+
+/** Money INTO Polymarket, for the wallet the orders are made by. Nothing leaves from here: `can.why.withdraw` says how it does leave */
+function polymarketWriter(c: { venue: string; name: string; maker: Hex; http: Http; clock: () => number }): LiveWriter {
+  type Listed = { symbol: string; address: string; minUsd: number | undefined };
+  let listed: { at: number; byChain: Map<number, Listed[]> } | undefined;
+  let bridge: { at: number; evm: Hex; note: string | undefined } | undefined;
+  const call = async (path: string, init: { method?: string; headers?: Record<string, string>; body?: string } = {}): Promise<HttpReply> => {
+    try {
+      return await c.http(`${BRIDGE}${path}`, { method: init.method ?? "GET", headers: { accept: "application/json", ...(init.headers ?? {}) }, ...(init.body !== undefined ? { body: init.body } : {}) });
+    } catch (err) {
+      throw unreachable(c.venue, `${c.name}'s bridge`, err);
+    }
+  };
+  /** the bridge's no, in its words: its errors are `{"error": "…"}` */
+  const bridgeNo = (r: HttpReply, doing: string): Refusal => {
+    const b = isObj(r.body) ? r.body : {};
+    const said = String(typeof b.error === "string" ? b.error : r.text).replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 220);
+    const native = { status: r.status, said };
+    if (r.status === 429) return no("E_VENUE_UNREACHABLE", { venue: c.venue, message: `${c.name}'s bridge is rate-limiting this machine: try again in a minute`, native });
+    if (r.status >= 500 || r.status === 0) return no("E_VENUE_UNREACHABLE", { venue: c.venue, message: `${c.name}'s bridge did not answer`, native });
+    return no("E_VENUE_REJECTED", { venue: c.venue, message: `${c.name}'s bridge refused to ${doing}${said ? `: ${said}` : ` (HTTP ${r.status})`}`, native });
+  };
+  const supported = async (): Promise<Map<number, Listed[]> | Refusal> => {
+    if (listed && c.clock() - listed.at < BRIDGE_MS) return listed.byChain;
+    const r = await call("/supported-assets");
+    if (r.status !== 200 || !isObj(r.body)) return bridgeNo(r, "list what it takes");
+    const byChain = new Map<number, Listed[]>();
+    for (const row of (Array.isArray(r.body.supportedAssets) ? r.body.supportedAssets : []).filter(isObj)) {
+      const chainId = num(row.chainId);
+      const token = isObj(row.token) ? row.token : {};
+      const symbol = String(token.symbol ?? "").toUpperCase();
+      if (!chainId || !symbol) continue;
+      const here = byChain.get(chainId) ?? [];
+      here.push({ symbol, address: String(token.address ?? ""), minUsd: given(row.minCheckoutUsd) });
+      byChain.set(chainId, here);
+    }
+    listed = { at: c.clock(), byChain };
+    return byChain;
+  };
+  /** the bridge address of this wallet: POST /deposit answers one per kind of chain (evm, svm, btc, tron), "unique to your wallet" */
+  const bridgeAddress = async (): Promise<{ evm: Hex; note: string | undefined } | Refusal> => {
+    if (bridge && c.clock() - bridge.at < BRIDGE_MS) return bridge;
+    const r = await call("/deposit", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ address: c.maker }) });
+    if ((r.status !== 200 && r.status !== 201) || !isObj(r.body)) return bridgeNo(r, "give a deposit address for this wallet");
+    const addresses = isObj(r.body.address) ? r.body.address : {};
+    const evm = String(addresses.evm ?? "");
+    if (!isAddress(evm, { strict: false })) return no("E_VENUE_REJECTED", { venue: c.venue, message: `${c.name}'s bridge answered without an EVM deposit address`, native: { status: r.status, said: r.text.replace(/\s+/g, " ").slice(0, 200) } });
+    bridge = { at: c.clock(), evm: getAddress(evm), note: typeof r.body.note === "string" && r.body.note ? r.body.note.replace(/\s+/g, " ").slice(0, 200) : undefined };
+    return bridge;
+  };
+  return {
+    can: {
+      receive: true,
+      withdraw: false,
+      ledgers: [],
+      transfer: false,
+      swap: false,
+      send: false,
+      why: { withdraw: `money leaves ${c.name} by a pUSD transfer from the Polymarket wallet to one of its bridge addresses (POST bridge.polymarket.com/withdraw: "Send pUSD from your Polymarket wallet to the appropriate bridge address"), made at polymarket.com: the CLOB has no withdrawal call, and this account signs no transaction with the key file's key` },
+    },
+    async depositAddress(asset, network) {
+      const a = asset.trim().toUpperCase();
+      if (a === "PUSD") {
+        if (network !== "Polygon") return no("E_VENUE_RAIL_CLOSED", { venue: c.venue, message: `pUSD is a token on Polygon only (${c.name}'s collateral): from ${network}, send USDC or USDT to ${c.name}'s bridge address instead` });
+        return { address: c.maker, note: `the wallet ${c.name} trades from: pUSD on Polygon sent to it is the cash the account reads there (pUSD is a standard ERC-20 token on Polygon; ${c.name}'s docs describe deposits through its bridge and its Collateral Onramp, which both end as pUSD in this wallet)` };
+      }
+      if (!BRIDGE_CHAINS.includes(network)) return no("E_VENUE_RAIL_CLOSED", { venue: c.venue, message: `${c.name}'s bridge takes deposits from ${BRIDGE_CHAINS.join(", ")}, not ${network}` });
+      const chainId = CHAINS[network].chain.id;
+      const lists = await supported();
+      if (isRefusal(lists)) return lists;
+      const here = lists.get(chainId) ?? [];
+      const token = here.find((t) => t.symbol === a || (a === "USDC.E" && t.symbol === "USDCE"));
+      if (!token) return no("E_VENUE_RAIL_CLOSED", { venue: c.venue, message: `${c.name}'s bridge lists no ${asset} on ${network}: there it takes ${here.map((t) => t.symbol).join(", ") || "nothing it lists today"}`, detail: { takes: here.map((t) => t.symbol) } });
+      // a dollar this account knows is matched by its contract, not its name: the bridge lists pUSD on Polygon under the name USDC, and a
+      // transfer of the account's USDC to an address expecting that token is not the deposit the bridge describes
+      const mine = tokenOn(a, network);
+      if (mine && token.address && mine.address.toLowerCase() !== token.address.toLowerCase()) return no("E_VENUE_RAIL_CLOSED", { venue: c.venue, message: `${c.name}'s bridge lists ${asset} on ${network} at ${token.address}, not the ${mine.asset} this account sends (${mine.address})${network === "Polygon" ? ": that is pUSD, which goes straight to the wallet" : ""}`, detail: { bridge: token.address, account: mine.address } });
+      const b = await bridgeAddress();
+      if (isRefusal(b)) return b;
+      return { address: b.evm, note: `${c.name}'s bridge address, unique to this wallet: ${asset} sent to it on ${network} is bridged and credited as pUSD to ${c.maker}${token.minUsd !== undefined ? `. ${c.name} takes at least $${plain(token.minUsd)} a deposit there, and says deposits below the minimum are not processed` : ""}${b.note ? ` · ${c.name} says: ${b.note}` : ""}` };
+    },
+  };
 }
 
 // ---- the trader --------------------------------------------------------------------------------------
@@ -511,7 +705,21 @@ function polymarketTrader(c: { venue: string; name: string; wallet: Wallet; http
       priceStep: tick,
       open,
       note: open ? (o.notes.length ? o.notes.join(" · ") : undefined) : reason,
+      // every Polymarket order is a limit order, a market order being one priced to match at once (concepts/order-lifecycle): there is no
+      // stop or trigger order, no reduce-only flag and no leverage, so none is declared
       types: ["market", "limit"],
+      tifs: [...TIFS_HERE],
+      // an order that rests may be post-only: the CLOB takes it on GTC and GTD only (its OpenAPI, SendOrder.postOnly)
+      postOnly: true,
+      // a sell can only sell shares held — open sells reserve them, and a sell beyond them is refused: it never opens a position the other way
+      sellsReduce: true,
+      ...(o.change24h !== undefined ? { change24h: o.change24h } : {}),
+      ...(o.volume24h !== undefined ? { volumeUsd24h: o.volume24h } : {}),
+      ...(o.closeTime ? { closeTime: o.closeTime } : {}),
+      ...(o.category ? { category: o.category } : {}),
+      // the question all its outcomes share: Polymarket's condition id
+      ...(o.conditionId ? { group: { id: o.conditionId, title: o.question } } : {}),
+      outcome: o.outcome,
     };
   };
 
@@ -525,7 +733,7 @@ function polymarketTrader(c: { venue: string; name: string; wallet: Wallet; http
       if (!b?.conditionId) throw no("E_VENUE_REJECTED", { venue: c.venue, message: `${c.name} has no order book for the token ${s.slice(0, 12)}…: it is not one Polymarket trades, or its market is closed` });
       const found = await getJson(`${GAMMA}/markets/keyset?condition_ids=${encodeURIComponent(b.conditionId)}&limit=5`);
       const ms = isObj(found) && Array.isArray(found.markets) ? found.markets.filter(isObj) : [];
-      o = ms.flatMap(outcomesOf).find((x) => x.tokenId === s);
+      o = ms.flatMap((m) => outcomesOf(m)).find((x) => x.tokenId === s);
       if (!o) throw no("E_VENUE_REJECTED", { venue: c.venue, message: `${c.name} lists no open market for the token ${s.slice(0, 12)}…` });
       // the token is the name the owner gave: it stays the symbol
       o = { ...o, symbol: s };
@@ -641,10 +849,31 @@ function polymarketTrader(c: { venue: string; name: string; wallet: Wallet; http
     return stateOf(r.body);
   };
 
-  /** The signed order, as the official clients build it. `market` is a fill-and-kill order at the worst price the account allows: a sell of
-   * the shares asked, a buy of what those shares cost on the book now (Polymarket sizes a fill-and-kill buy in pUSD, so the cost is walked
-   * off the asks up to the worst price, and anything the book lacks is counted at the worst price). `limit` rests until filled or canceled */
-  const build = async (o: OrderRequest, k: Known): Promise<{ body: string; hash: Hex; orderType: "GTC" | "FAK"; creds: NonNullable<typeof creds> } | Refusal> => {
+  /** The CLOB order type an order is sent as, or why Polymarket would not take it as asked. A limit order rests (GTC) unless it is
+   * fill-and-kill (ioc, sent as FAK) or fill-or-kill (fok, FOK); a market order fills at once, FAK unless FOK is asked, and never rests
+   * (the clients send a market order as FAK or FOK only). Post-only is for an order that rests: the CLOB's OpenAPI says it is "Only
+   * supported for GTC and GTD orders", and the unified client refuses it on any other before sending, as this does */
+  const orderTypeOf = (o: OrderRequest): ClobOrderType | Refusal => {
+    if (o.type !== "limit" && o.type !== "market") return badOrder(c.venue, c.name, `the CLOB takes limit and market orders, not ${String(o.type).replace("_", "-")} orders: it has no stop or trigger order`);
+    if (o.stopPrice !== undefined) return badOrder(c.venue, c.name, "the CLOB has no stop orders, so an order there carries no stop price");
+    if (o.reduceOnly === true) return badOrder(c.venue, c.name, "the CLOB has no reduce-only flag (a sell there can only be of shares the wallet holds, so it never opens a position)");
+    // own keys only, as with the key file's words: "constructor" is not a time in force
+    const sent = o.tif !== undefined && Object.hasOwn(TIF, o.tif) ? TIF[o.tif] : undefined;
+    if (o.tif !== undefined && sent === undefined) return badOrder(c.venue, c.name, `an order here is good till canceled (gtc), fill-and-kill (ioc) or fill-or-kill (fok), not ${String(o.tif)}`);
+    const t = sent ?? (o.type === "limit" ? "GTC" : "FAK");
+    if (o.type === "market" && t === "GTC") return badOrder(c.venue, c.name, "a market order here fills at once, fill-and-kill (ioc) or fill-or-kill (fok): an order that rests is a limit order");
+    if (o.postOnly === true && o.type === "market") return badOrder(c.venue, c.name, "a market order takes from the book: only a limit order may be post-only");
+    if (o.postOnly === true && t !== "GTC") return badOrder(c.venue, c.name, "post-only is for an order that rests (gtc): a fill-and-kill or fill-or-kill order takes from the book at once");
+    return t;
+  };
+
+  /** The signed order, as the official clients build it. An order that rests (GTC: a limit order, post-only or not) is its shares at its
+   * limit. One that fills at once (FAK or FOK: every market order, and a limit order that is fill-and-kill or fill-or-kill) is built as the
+   * clients build a price-protected market order, bounded at the limit or at the worst price the account allows: a sell of the shares
+   * asked, and a buy of what those shares cost on the book now. The CLOB sizes a FAK or FOK buy in pUSD, not in shares ("CLOB GTC/GTD BUY
+   * targets are shares; FOK/FAK BUY targets are collateral", migrate/polymarket-v2/api-integrations), so the cost is walked off the asks up
+   * to the bound, anything the book lacks is counted at the bound, and the pUSD goes to the cent as the clients send it */
+  const build = async (o: OrderRequest, k: Known, orderType: ClobOrderType): Promise<{ body: string; hash: Hex; orderType: ClobOrderType; creds: NonNullable<typeof creds> } | Refusal> => {
     const cfg = roundingOf(k.tick);
     if (!cfg) return badOrder(c.venue, c.name, `the tick here is ${plain(k.tick)}, which is not one Polymarket's clients round for`, { tick: k.tick });
     const hundredths = Math.round(o.qty * 100);
@@ -662,7 +891,8 @@ function polymarketTrader(c: { venue: string; name: string; wallet: Wallet; http
     const amountQ = quantum(cfg.amount);
     let makerAmount: bigint;
     let takerAmount: bigint;
-    if (o.type === "limit") {
+    // place() sends GTC for a limit order only: a market order never rests
+    if (orderType === "GTC") {
       const usd = mulDiv(shares, priceM, SCALE * amountQ, false) * amountQ;
       [makerAmount, takerAmount] = o.side === "buy" ? [usd, shares] : [shares, usd];
     } else if (o.side === "sell") {
@@ -680,13 +910,14 @@ function polymarketTrader(c: { venue: string; name: string; wallet: Wallet; http
         left -= take;
       }
       cost += mulDiv(left, priceM, SCALE, true);
-      // each level was rounded up: the whole is held to the shares at the worst price, the most the account valued it at
+      // each level was rounded up: the whole is held to the shares at the bound, the most the account valued it at
       const most = mulDiv(shares, priceM, SCALE, false);
       if (cost > most) cost = most;
-      // pUSD to two decimals, down: never more than the worst price allows
+      // pUSD to two decimals, down: never more than the bound allows
       const sizeQ = quantum(cfg.size);
       makerAmount = (cost / sizeQ) * sizeQ;
-      // the fewest shares it may bring, rounded up, so that no fill is dearer than the worst price
+      // the fewest shares it may bring, rounded up, so that no fill is dearer than the bound. Whether the CLOB holds this figure to the
+      // market's smallest order in shares is not in its docs (they disagree on that minimum's units); its refusal would be its own words
       takerAmount = mulDiv(makerAmount, SCALE, priceM * amountQ, true) * amountQ;
       if (makerAmount === 0n) return badOrder(c.venue, c.name, "the order is worth less than a cent");
     }
@@ -708,13 +939,15 @@ function polymarketTrader(c: { venue: string; name: string; wallet: Wallet; http
     }
     const k2 = await credsOf();
     if (isRefusal(k2)) return k2;
-    const orderType = o.type === "limit" ? "GTC" : "FAK";
-    // the body as the unified client sends it; it is serialised once, and those exact bytes are signed and sent
+    // the body as the unified client sends it; it is serialised once, and those exact bytes are signed and sent. The order type and post-only
+    // are not in the signed order: they travel only here, `postOnly` last and only when asked (place() allows it on GTC alone). The
+    // expiration is "0" for all three types: only a GTD order has one
     const body = JSON.stringify({
       deferExec: false,
       order: { builder: ZERO32, expiration: "0", maker: w.maker, makerAmount: makerAmount.toString(), metadata: ZERO32, salt: s, side: o.side === "buy" ? "BUY" : "SELL", signature, signatureType: w.type, signer: w.signer, takerAmount: takerAmount.toString(), timestamp: timestamp.toString(), tokenId: k.tokenId },
       orderType,
       owner: k2.apiKey,
+      ...(o.postOnly === true ? { postOnly: true } : {}),
     });
     return { body, hash, orderType, creds: k2 };
   };
@@ -742,6 +975,10 @@ function polymarketTrader(c: { venue: string; name: string; wallet: Wallet; http
 
     async place(o) {
       try {
+        // an order the CLOB would not take as asked is refused here, before anything is sent: Polymarket's location check stays the first
+        // thing sent for every order
+        const orderType = orderTypeOf(o);
+        if (isRefusal(orderType)) return orderType;
         if (!(Number.isFinite(o.qty) && o.qty > 0)) return badOrder(c.venue, c.name, "a size is more than zero");
         if (o.type === "limit" && !(o.limitPrice !== undefined && Number.isFinite(o.limitPrice) && o.limitPrice > 0)) return badOrder(c.venue, c.name, "a limit order has a limit price");
         if (o.type === "market" && o.limitPrice !== undefined) return badOrder(c.venue, c.name, "a market order has no limit price");
@@ -751,10 +988,10 @@ function polymarketTrader(c: { venue: string; name: string; wallet: Wallet; http
         if (geo) return geo;
         const k = await resolve(o.symbol);
         if (!k.open) return no("E_VENUE_MARKET_CLOSED", { venue: c.venue, message: `${c.name}: ${k.name} takes no orders now${k.why ? ` (${k.why})` : ""}` });
-        const built = await build(o, k);
+        const built = await build(o, k, orderType);
         if (isRefusal(built)) return built;
         // Polymarket takes no client order id: an order is its own hash (salt and timestamp make it unique). The account's id stays here
-        const mine = { clientId: o.clientId, orderHash: built.hash, orderType: built.orderType };
+        const mine = { clientId: o.clientId, orderHash: built.hash, orderType: built.orderType, ...(o.postOnly === true ? { postOnly: true } : {}) };
         let r: HttpReply;
         try {
           // the credentials whose key is the body's `owner`, and nothing re-derived on the way: the order is sent once, as signed
@@ -826,6 +1063,116 @@ function polymarketTrader(c: { venue: string; name: string; wallet: Wallet; http
         return asRefusal(c.venue, c.name, err, secrets());
       }
     },
+
+    /** What the wallet that holds the money has at Polymarket: the Data API's positions for it, asked as the address connection asks them
+     * (address.ts), page by page up to a thousand. A public read, like the balances: nothing is signed and nothing goes to the CLOB */
+    async positions() {
+      try {
+        const out: Position[] = [];
+        let cursor = "";
+        for (let page = 0; page < 5; page++) {
+          // a next page is the cursor with the same `user` (a bare cursor is a 400); the cursor carries the page size
+          const body = await getJson(`${DATA}/positions?user=${w.maker}&limit=200${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
+          for (const p of isObj(body) && Array.isArray(body.data) ? body.data.filter(isObj) : []) {
+            const held = positionOf(p);
+            if (held) out.push(held);
+          }
+          const pagination = isObj(body) && isObj(body.pagination) ? body.pagination : {};
+          cursor = typeof pagination.next_cursor === "string" ? pagination.next_cursor : "";
+          if (!cursor) break;
+        }
+        return out;
+      } catch (err) {
+        return asRefusal(c.venue, c.name, err, secrets());
+      }
+    },
+
+    /** Event contracts to discover, from Gamma's events (GET /events, list-events): the open ones (closed=false), the busiest first
+     * (order=volume24hr), in one tag when a category is asked (tag_slug), ending within the window when one is asked (end_date_min and
+     * end_date_max on the event, and each market's own endDate held to it too). Every outcome of every open order-book market among them is a
+     * market, the markets most traded in 24 hours first. Gamma's events carry tags and no category of their own (OBSERVED: `category` is in
+     * its schema and absent from its answers), so a market's category is the tag that was asked for, in Gamma's words (its label), or the
+     * event's `category` should Gamma send one; with neither, none is said. A read: no location check and no credentials */
+    async events({ category, closingWithinMs, limit }) {
+      try {
+        const n = Math.min(200, Math.floor(limit));
+        if (!(n > 0)) return [];
+        if (closingWithinMs !== undefined && !(Number.isFinite(closingWithinMs) && closingWithinMs > 0)) return no("E_ACCOUNT_BAD_ACTION", { venue: c.venue, message: "a window for markets closing soon is a number of milliseconds, more than 0" });
+        const tag = category !== undefined ? tagSlug(category) : undefined;
+        if (tag === "") return no("E_ACCOUNT_BAD_ACTION", { venue: c.venue, message: `a category at ${c.name} is one of its tags, in words ("Sports", "Crypto"), not "${String(category).slice(0, 40)}"` });
+        const now = c.clock();
+        const until = closingWithinMs !== undefined ? now + closingWithinMs : undefined;
+        // an event holds one market or hundreds (a game's every prop): a few events are plenty to choose the busiest markets from
+        const many = Math.min(20, Math.max(5, Math.ceil(n / 2)));
+        const window = until !== undefined ? `&end_date_min=${encodeURIComponent(new Date(now).toISOString())}&end_date_max=${encodeURIComponent(new Date(until).toISOString())}` : "";
+        const body = await getJson(`${GAMMA}/events?closed=false&order=volume24hr&ascending=false&limit=${many}${tag ? `&tag_slug=${encodeURIComponent(tag)}` : ""}${window}`);
+        const rows: Outcome[] = [];
+        const seen = new Set<string>();
+        for (const e of (Array.isArray(body) ? body : []).filter(isObj)) {
+          const asked = tag ? (Array.isArray(e.tags) ? e.tags : []).filter(isObj).find((t) => t.slug === tag) : undefined;
+          // an event that lists its tags without the one asked for is not in that category, whatever came back
+          if (tag && Array.isArray(e.tags) && !asked) continue;
+          const cat = typeof asked?.label === "string" && asked.label ? asked.label : typeof e.category === "string" && e.category ? e.category : undefined;
+          for (const m of (Array.isArray(e.markets) ? e.markets : []).filter(isObj)) {
+            for (const o of outcomesOf(m, cat)) {
+              if (!o.open || seen.has(o.symbol)) continue;
+              if (until !== undefined && !(o.closeTime && Date.parse(o.closeTime) > now && Date.parse(o.closeTime) <= until)) continue;
+              seen.add(o.symbol);
+              rows.push(o);
+            }
+          }
+        }
+        // the busiest markets first; a market's outcomes stay together, in Gamma's order (the sort is stable)
+        rows.sort((a, b) => (b.volume24h ?? 0) - (a.volume24h ?? 0));
+        return rows
+          .map((o) => marketOf(o, undefined))
+          .filter((m) => inDollars(m.quote))
+          .slice(0, n);
+      } catch (err) {
+        return asRefusal(c.venue, c.name, err, secrets());
+      }
+    },
+
+    /** An outcome's price history, from the CLOB's GET /prices-history (get-prices-history: `market` is the outcome's token id, `startTs` and
+     * `endTs` Unix seconds, `fidelity` minutes): Polymarket's price at moments `fidelity` apart, folded into bars. A bar's open and close are
+     * its first and last price, its high and low the highest and lowest of them — Polymarket's prices at those moments, not the trades'
+     * own extremes between them — and Polymarket gives no volume with them, so none is said. A bar starts on a whole step of its length.
+     * Polymarket refuses a startTs-to-endTs range longer than about fifteen days, whatever the fidelity ("invalid filters: 'startTs' and
+     * 'endTs' interval is too long"), and answers a startTs alone — the endTs is optional — up to now, three hundred days included
+     * (OBSERVED 2026-10-05, keyless GETs). So a longer history (the daily bars) is asked from its start with no end */
+    async candles(symbol, interval, sinceMs) {
+      try {
+        if (!Object.hasOwn(FIDELITY_MIN, interval)) return no("E_ACCOUNT_BAD_ACTION", { venue: c.venue, message: `price history comes in bars of 5m, 1h or 1d, not "${String(interval).slice(0, 12)}"` });
+        const now = c.clock();
+        if (!(Number.isFinite(sinceMs) && sinceMs < now)) return no("E_ACCOUNT_BAD_ACTION", { venue: c.venue, message: "price history starts before now" });
+        const k = await resolve(symbol);
+        const range = now - sinceMs > HISTORY_RANGE_MS ? "" : `&endTs=${Math.floor(now / 1000)}`;
+        const body = await getJson(`${CLOB}/prices-history?market=${k.tokenId}&startTs=${Math.floor(sinceMs / 1000)}${range}&fidelity=${FIDELITY_MIN[interval]}`);
+        const points = (isObj(body) && Array.isArray(body.history) ? body.history : [])
+          .filter(isObj)
+          .map((x) => ({ t: given(x.t), p: given(x.p) }))
+          .filter((x): x is { t: number; p: number } => x.t !== undefined && x.t > 0 && x.p !== undefined && x.p >= 0 && x.p <= 1)
+          .sort((a, b) => a.t - b.t);
+        const step = BAR_MS[interval];
+        const bars = new Map<number, Candle>();
+        for (const { t, p } of points) {
+          const at = Math.floor((t * 1000) / step) * step;
+          const b = bars.get(at);
+          if (!b) bars.set(at, { t: at, o: p, h: p, l: p, c: p });
+          else {
+            b.h = Math.max(b.h, p);
+            b.l = Math.min(b.l, p);
+            b.c = p;
+          }
+        }
+        return [...bars.values()];
+      } catch (err) {
+        return asRefusal(c.venue, c.name, err, secrets());
+      }
+    },
+
+    // Not here, because the CLOB has no call for them: amend (POST and DELETE are all /order takes; another price or size is another
+    // signed order), close (a position is closed by selling its shares, which place() does), setLeverage (there is no leverage)
   };
 
   /** Polymarket did not answer an order. The order's id is its EIP-712 hash, known before it is sent, so Polymarket is asked for that

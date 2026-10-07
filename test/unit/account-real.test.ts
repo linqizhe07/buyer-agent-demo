@@ -77,7 +77,7 @@ describe("a real account", () => {
     expect(p.connectLive?.options.some((o) => o.connector === "live:exchange")).toBe(true);
     expect(x.svc.payees).toBeUndefined();
     expect(x.svc.accounts()).toEqual([]);
-    // real money starts Conservative: every move an agent asks for waits for the owner
+    // real money starts Guard: every move an agent asks for waits for the owner
     expect(x.svc.policy().mode).toBe("guard");
     expect((await x.svc.overview()).portfolio.totalUsd).toBe(0);
   });

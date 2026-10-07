@@ -2,7 +2,7 @@ import { generateKeyPairSync, verify } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { isRefusal, type Refusal } from "../../src/core/errors.ts";
 import { READ_TOOLS, robinhoodCryptoSource, robinhoodKey, robinhoodSign, robinhoodStocksSource, uuidFrom, type McpSession, type McpTool, type OpenMcp } from "../../src/portfolio/live/robinhood.ts";
-import type { LiveTrader, Market, OrderState } from "../../src/portfolio/live/trade.ts";
+import type { LiveTrader, Market, OrderRequest, OrderState } from "../../src/portfolio/live/trade.ts";
 import type { Http, HttpReply, LiveSource } from "../../src/portfolio/live/types.ts";
 
 /** Robinhood's two trading interfaces — its Crypto Trading API and its Trading MCP server — against stand-ins that remember every request.
@@ -137,7 +137,29 @@ describe("Robinhood Crypto: orders through its own API", () => {
     const { trader } = await crypto(http);
     http.asked.length = 0;
     const m = ok(await trader.market("btc/usd"));
-    expect(m).toEqual({ symbol: "BTC-USD", name: "BTC / USD", kind: "crypto", base: "BTC", quote: "USD", price: 62000, bid: 61990, ask: 62010, qtyStep: 0.00000001, priceStep: 0.01, minNotional: 1, open: true, note: "Robinhood's fee is 0.85% of each order at this account's fee tier · at most 20 BTC an order · a market order goes as a limit at its worst price, good till canceled: what does not fill at once waits on the book · crypto trades every day, all day", types: ["market", "limit"] } satisfies Market);
+    expect(m).toEqual({
+      symbol: "BTC-USD",
+      name: "BTC / USD",
+      kind: "crypto",
+      base: "BTC",
+      quote: "USD",
+      price: 62000,
+      bid: 61990,
+      ask: 62010,
+      qtyStep: 0.00000001,
+      priceStep: 0.01,
+      minNotional: 1,
+      open: true,
+      note: "Robinhood's fee is 0.85% of each order at this account's fee tier · at most 20 BTC an order · a market order goes as a limit at its worst price, a stop as a stop-limit at its worst price: what does not fill at once waits on the book · market and limit orders are good till canceled (Robinhood keeps them 90 days); a stop is good for the day, Robinhood's default, unless good till canceled is chosen · crypto trades every day, all day",
+      // Robinhood's four crypto order types (its stop is stop_loss), and the two times in force the account has a name for: gtc and gfd —
+      // gfd for a stop only. Long only: a sell sells what is held
+      types: ["market", "limit", "stop", "stop_limit"],
+      tifs: ["gtc", "day"],
+      tifsByType: { market: ["gtc"], limit: ["gtc"], stop: ["gtc", "day"], stop_limit: ["gtc", "day"] },
+      sellsReduce: true,
+    } satisfies Market);
+    // and nothing Robinhood's crypto API does not have: no post-only, no reduce-only, no leverage
+    expect(["postOnly", "reduceOnly", "maxLeverage"].filter((k) => k in m)).toEqual([]);
     expect(http.asked.map((a) => a.url)).toEqual([`${BASE}/api/v2/crypto/trading/trading_pairs/?symbol=BTC-USD`, `${BASE}/api/v2/crypto/marketdata/best_bid_ask/?symbol=BTC-USD`]);
     expect(http.asked.every((a) => a.method === "GET" && a.headers["x-api-key"] === KEY.apiKey && a.headers["x-timestamp"] === TS && signedRight(a))).toBe(true);
     // the pair's rules are kept five minutes; the price is asked every time
@@ -233,6 +255,95 @@ describe("Robinhood Crypto: orders through its own API", () => {
     expect(writes(http)).toHaveLength(5);
   });
 
+  it("place(): a stop goes as Robinhood's stop_loss, a stop with a worst price as a stop_limit at it, a stop-limit as stop_limit; gtc is gtc, day is gfd", async () => {
+    const echo = (a: Asked) => {
+      const b = JSON.parse(a.body!);
+      return json(v2Order({ client_order_id: b.client_order_id, symbol: b.symbol, side: b.side, type: b.type, market_order_config: undefined, [`${b.type}_order_config`]: b[`${b.type}_order_config`] }), 201);
+    };
+    const http = robinhood((a, u) => (a.method === "POST" && u.pathname === "/api/v2/crypto/trading/orders/" ? echo(a) : undefined));
+    const { trader } = await crypto(http);
+    const id = (n: string) => uuidFrom(`${BASE}/${ACCOUNT}/${n}`);
+    // a sell stop with no worst price: Robinhood's stop, good for the day as Robinhood's stops are unless another time is chosen
+    expect(ok(await trader.place({ symbol: "BTC-USD", side: "sell", type: "stop", qty: 0.0005, stopPrice: 58000, clientId: "ord-0201" }))).toMatchObject({ ref: ORDER_ID, status: "open", filledQty: 0 });
+    // the same stop, good till canceled
+    ok(await trader.place({ symbol: "BTC-USD", side: "sell", type: "stop", qty: 0.0005, stopPrice: 58000, tif: "gtc", clientId: "ord-0202" }));
+    // a buy stop with a worst price, good for the day: a stop-limit whose limit is the worst price rounded down onto the pair's step
+    ok(await trader.place({ symbol: "BTC-USD", side: "buy", type: "stop", qty: 0.0005, stopPrice: 64000, worstPrice: 65280.009, tif: "day", clientId: "ord-0203" }));
+    // a sell stop with a worst price: its limit rounded up, never under the worst price
+    ok(await trader.place({ symbol: "ETH-USD", side: "sell", type: "stop", qty: 0.015, stopPrice: 2400, worstPrice: 2352.001, clientId: "ord-0204" }));
+    // a stop-limit as it was asked, good till canceled; a limit order said to be good till canceled is what it always was
+    ok(await trader.place({ symbol: "ETH-USD", side: "buy", type: "stop_limit", qty: 0.015, stopPrice: 2600, limitPrice: 2610.5, tif: "gtc", clientId: "ord-0205" }));
+    ok(await trader.place({ symbol: "BTC-USD", side: "buy", type: "limit", qty: 0.00012, limitPrice: 60000, tif: "gtc", clientId: "ord-0206" }));
+    expect(writes(http).map((a) => a.body)).toEqual([
+      `{"client_order_id":"${id("ord-0201")}","side":"sell","type":"stop_loss","symbol":"BTC-USD","stop_loss_order_config":{"asset_quantity":"0.00050000","stop_price":"58000.00","time_in_force":"gfd"}}`,
+      `{"client_order_id":"${id("ord-0202")}","side":"sell","type":"stop_loss","symbol":"BTC-USD","stop_loss_order_config":{"asset_quantity":"0.00050000","stop_price":"58000.00","time_in_force":"gtc"}}`,
+      `{"client_order_id":"${id("ord-0203")}","side":"buy","type":"stop_limit","symbol":"BTC-USD","stop_limit_order_config":{"asset_quantity":"0.00050000","limit_price":"65280.00","stop_price":"64000.00","time_in_force":"gfd"}}`,
+      `{"client_order_id":"${id("ord-0204")}","side":"sell","type":"stop_limit","symbol":"ETH-USD","stop_limit_order_config":{"asset_quantity":"0.0150","limit_price":"2352.01","stop_price":"2400.00","time_in_force":"gfd"}}`,
+      `{"client_order_id":"${id("ord-0205")}","side":"buy","type":"stop_limit","symbol":"ETH-USD","stop_limit_order_config":{"asset_quantity":"0.0150","limit_price":"2610.50","stop_price":"2600.00","time_in_force":"gtc"}}`,
+      `{"client_order_id":"${id("ord-0206")}","side":"buy","type":"limit","symbol":"BTC-USD","limit_order_config":{"asset_quantity":"0.00012000","limit_price":"60000.00","time_in_force":"gtc"}}`,
+    ]);
+    // each one signed POST to the account the API trades, the body signed exactly as it was sent
+    expect(writes(http).every((a) => a.url === `${BASE}/api/v2/crypto/trading/orders/?account_number=${ACCOUNT}` && signedRight(a))).toBe(true);
+  });
+
+  it("place(): what a Robinhood crypto order cannot carry is said here, and nothing is sent", async () => {
+    const http = robinhood((a) => (a.method === "POST" ? json(v2Order(), 201) : undefined));
+    const { trader } = await crypto(http);
+    const said = async (o: Partial<OrderRequest>) => refusal(await trader.place({ symbol: "BTC-USD", side: "sell", type: "stop", qty: 0.0005, stopPrice: 58000, clientId: "ord-0301", ...o }));
+    // good for the day is a stop's: Robinhood's market and limit crypto orders are good till canceled only
+    expect((await said({ type: "limit", stopPrice: undefined, limitPrice: 60000, tif: "day" })).message).toBe("Robinhood Crypto: a market or limit crypto order at Robinhood is good till canceled only (Robinhood keeps it 90 days): good for the day is for a stop");
+    expect((await said({ type: "market", stopPrice: undefined, tif: "day" })).code).toBe("E_VENUE_ORDER_INVALID");
+    // no immediate-or-cancel, no fill-or-kill, no post-only, no reduce-only
+    for (const tif of ["ioc", "fok"] as const) expect((await said({ tif })).message).toBe(`Robinhood Crypto: Robinhood's crypto orders are good till canceled or good for the day, never ${tif}`);
+    expect((await said({ type: "limit", stopPrice: undefined, limitPrice: 60000, postOnly: true })).message).toBe("Robinhood Crypto: Robinhood's crypto orders have no post-only or reduce-only flag");
+    expect((await said({ reduceOnly: true })).code).toBe("E_VENUE_ORDER_INVALID");
+    // a stop without a stop price, or with one off the pair's step (never rounded: the trigger is the owner's); a stop-limit without its limit
+    expect((await said({ stopPrice: undefined })).message).toBe("Robinhood Crypto: a stop price in BTC-USD moves in steps of 0.01");
+    expect((await said({ stopPrice: 58000.005 })).message).toBe("Robinhood Crypto: a stop price in BTC-USD moves in steps of 0.01");
+    expect((await said({ type: "stop_limit" })).message).toBe("Robinhood Crypto: a limit price in BTC-USD moves in steps of 0.01");
+    // a stop's worst price that is not a price
+    expect((await said({ worstPrice: 0 })).message).toBe("Robinhood Crypto: a stop order's worst price is a price more than zero");
+    expect((await said({ worstPrice: Infinity })).code).toBe("E_VENUE_ORDER_INVALID");
+    expect(writes(http)).toEqual([]);
+  });
+
+  it("positions(): what the account the API trades holds, as long positions in the pairs the account names, priced at Robinhood's midpoint", async () => {
+    let pricesFail = false;
+    const held = [
+      { account_number: ACCOUNT, asset_code: "BTC", total_quantity: "0.00500000", quantity_available_for_trading: "0.00400000" },
+      { account_number: ACCOUNT, asset_code: "ETH", total_quantity: "0.2500", quantity_available_for_trading: "0.2500" },
+      { account_number: ACCOUNT, asset_code: "USDC", total_quantity: "12.5", quantity_available_for_trading: "12.5" },
+      { account_number: ACCOUNT, asset_code: "DOGE", total_quantity: "0", quantity_available_for_trading: "0" },
+    ];
+    // V2Holding as Robinhood's docs give it: quantities as strings; best_bid_ask refuses a symbol it does not price
+    const http = net((a, u) => {
+      if (u.host !== "trading.robinhood.com" || a.method !== "GET") return undefined;
+      if (u.pathname === "/api/v2/crypto/trading/accounts/") return json(ACCOUNTS);
+      if (u.pathname === "/api/v2/crypto/trading/holdings/") return json({ results: held, next: null, previous: null });
+      if (u.pathname === "/api/v2/crypto/marketdata/best_bid_ask/") return pricesFail ? json({ type: "validation_error", errors: [{ detail: "Invalid symbol.", attr: "symbol" }] }, 400) : json({ results: u.searchParams.getAll("symbol").filter((s) => BOOK[s]).map((s) => ({ symbol: s, ...BOOK[s] })) });
+      return undefined;
+    });
+    const { trader } = await crypto(http);
+    http.asked.length = 0;
+    const list = ok(await trader.positions!());
+    expect(list.map(({ native: _native, ...p }) => p)).toEqual([
+      { symbol: "BTC-USD", name: "BTC / USD", kind: "crypto", side: "long", qty: 0.005, markPrice: 62000, usd: 310 },
+      { symbol: "ETH-USD", name: "ETH / USD", kind: "crypto", side: "long", qty: 0.25, markPrice: 2500, usd: 625 },
+      { symbol: "USDC-USD", name: "USDC / USD", kind: "crypto", side: "long", qty: 12.5, markPrice: 1, usd: 12.5 },
+    ]);
+    // Robinhood's own answer, its account named by the last four digits
+    expect(list[0]!.native).toEqual({ account_number: "··0009", asset_code: "BTC", total_quantity: "0.00500000", quantity_available_for_trading: "0.00400000" });
+    expect(JSON.stringify(list)).not.toContain(ACCOUNT);
+    // two signed reads: the holdings of the account the API trades, and one price request for the coins in it
+    expect(http.asked.map((a) => a.url)).toEqual([`${BASE}/api/v2/crypto/trading/holdings/?account_number=${ACCOUNT}`, `${BASE}/api/v2/crypto/marketdata/best_bid_ask/?symbol=BTC-USD&symbol=ETH-USD`]);
+    expect(http.asked.every((a) => a.method === "GET" && signedRight(a))).toBe(true);
+    // prices Robinhood does not give: the positions are still listed, without a value (a dollar coin is still a dollar)
+    pricesFail = true;
+    expect(ok(await trader.positions!()).map((p) => [p.symbol, p.qty, p.usd])).toEqual([["BTC-USD", 0.005, undefined], ["ETH-USD", 0.25, undefined], ["USDC-USD", 12.5, 12.5]]);
+    // Robinhood's crypto API has no call that closes a position, changes an order in place, or sets leverage: the trader offers none
+    expect([trader.close, trader.amend, trader.setLeverage]).toEqual([undefined, undefined, undefined]);
+  });
+
   it("place(): a yes without an order in it is looked for, never read as a refusal", async () => {
     const http = robinhood((a, u) => {
       if (a.method === "POST") return text("", 201);
@@ -262,6 +373,13 @@ describe("Robinhood Crypto: orders through its own API", () => {
     expect(await seen({ state: "failed" })).toMatchObject({ status: "rejected", filledQty: 0 });
     expect(await seen({ state: "pending" })).toMatchObject({ status: "pending" });
     expect(await seen({ state: "something_new" })).toMatchObject({ status: "pending" });
+    // a stop waiting for its price is open; once triggered it fills like any other order
+    const stop = { type: "stop_limit", market_order_config: undefined, stop_limit_order_config: { asset_quantity: 0.00012, limit_price: 57000, stop_price: 58000, time_in_force: "gfd" } };
+    expect(await seen({ ...stop, state: "open" })).toEqual({ ref: ORDER_ID, status: "open", filledQty: 0, feeUsd: 0 });
+    expect(await seen({ ...stop, state: "filled", filled_asset_quantity: 0.00012, average_price: 57950, fee_charged: 0.06 })).toEqual({ ref: ORDER_ID, status: "filled", filledQty: 0.00012, avgPrice: 57950, feeUsd: 0.06 });
+    // the states Robinhood's Trading MCP gives the same orders: confirmed is working, voided is done
+    expect(await seen({ ...stop, state: "confirmed" })).toMatchObject({ status: "open" });
+    expect(await seen({ ...stop, state: "voided" })).toMatchObject({ status: "rejected" });
     const asked = http.asked.filter((a) => new URL(a.url).pathname.includes(ORDER_ID));
     expect(asked.every((a) => a.method === "GET" && a.url === `${BASE}/api/v2/crypto/trading/orders/${ORDER_ID}/?account_number=${ACCOUNT}` && signedRight(a))).toBe(true);
   });
@@ -401,7 +519,7 @@ const props = (...names: string[]) => Object.fromEntries(names.map((n) => [n, { 
 const TOOLS: McpTool[] = [
   { name: "get_accounts", inputSchema: {} },
   { name: "get_portfolio", inputSchema: { required: ["account_number"], properties: props("account_number") } },
-  { name: "get_equity_positions" },
+  { name: "get_equity_positions", inputSchema: { required: ["account_number"], properties: props("account_number", "cursor") } },
   { name: "get_equity_quotes", inputSchema: { required: ["symbols"], properties: props("symbols") } },
   { name: "get_equity_tradability", inputSchema: { required: ["account_number", "symbols"], properties: props("account_number", "symbols") } },
   { name: "review_equity_order" },
@@ -470,11 +588,13 @@ describe("Robinhood stocks: orders through its MCP server, in the Agentic accoun
     expect(err!.message).toContain("token •••");
   });
 
-  it("market(): the quote, the tick, whole shares or fractions, and whether the Agentic account may trade the stock", async () => {
+  it("market(): the quote, the tick, whole shares or fractions, whether the Agentic account may trade the stock, and the regular session it is sent for", async () => {
     let t = tradability("AAPL");
     let q = quote("AAPL");
     const s = server({ ...READS, get_equity_quotes: () => done({ results: [q] }), get_equity_tradability: () => done({ results: [t] }) });
-    const { trader } = await stocks(s);
+    // Monday 5 October 2026, 10:00 New York: in the regular session
+    let now = START;
+    const { trader } = await stocks(s, () => now);
     s.called.length = 0;
     expect(ok(await trader.market("aapl"))).toEqual({
       symbol: "AAPL",
@@ -490,10 +610,30 @@ describe("Robinhood stocks: orders through its MCP server, in the Agentic accoun
       qtyStep: 1,
       priceStep: 0.01,
       open: true,
-      note: "orders go to your Robinhood Agentic account ··9876, the one account an agent may trade in · a market order goes as a limit at its worst price; orders are for the regular session (9:30 to 16:00 New York), good for the day, and outside it wait for the next open · whole shares only: Robinhood takes a fraction of a share only as a plain market order, which cannot be held to a worst price",
-      types: ["market", "limit"],
+      // every order here is for the regular session (market_hours "regular_hours"): its session is the market calendar's, by the clock
+      session: { open: true, closesAt: "2026-10-05T20:00:00.000Z" },
+      note: "orders go to your Robinhood Agentic account ··9876, the one account an agent may trade in · a market order goes as a limit at its worst price, a stop as a stop-limit at its worst price; orders are for the regular session (9:30 to 16:00 New York) and outside it wait for the next open · good for the day, Robinhood's default, unless good till canceled is chosen (Robinhood keeps such an order 90 days); a market order is good for the day only · whole shares only: Robinhood takes a fraction of a share only as a plain market order, which cannot be held to a worst price",
+      // place_equity_order's four types (market, limit, stop_market, stop_limit) and its two times in force (gfd, gtc): a market order is
+      // good for the day only. Long only
+      types: ["market", "limit", "stop", "stop_limit"],
+      tifs: ["gtc", "day"],
+      tifsByType: { market: ["day"], limit: ["gtc", "day"], stop: ["gtc", "day"], stop_limit: ["gtc", "day"] },
+      sellsReduce: true,
     } satisfies Market);
     expect(s.called).toEqual([["get_equity_quotes", { symbols: ["AAPL"] }], ["get_equity_tradability", { account_number: AGENTIC, symbols: ["AAPL"] }]]);
+    // and nothing the tool does not take: no post-only, no reduce-only, no leverage
+    const aapl = ok(await trader.market("AAPL"));
+    expect(["postOnly", "reduceOnly", "maxLeverage"].filter((k) => k in aapl)).toEqual([]);
+    // after the close, and over the weekend: still open for orders (they wait for the next open), out of session, and when it opens
+    now = Date.parse("2026-10-05T20:30:00.000Z");
+    expect([ok(await trader.market("AAPL")).open, ok(await trader.market("AAPL")).session]).toEqual([true, { open: false, opensAt: "2026-10-06T13:30:00.000Z" }]);
+    now = Date.parse("2026-10-10T16:00:00.000Z");
+    expect(ok(await trader.market("AAPL")).session).toEqual({ open: false, opensAt: "2026-10-12T13:30:00.000Z" });
+    now = START;
+    // a server whose place_equity_order no longer takes a stop_price is offered no stops
+    const noStops = server({ ...READS, get_equity_quotes: () => done({ results: [q] }), get_equity_tradability: () => done({ results: [t] }) }, TOOLS.map((x) => (x.name === "place_equity_order" ? { ...x, inputSchema: { required: ["account_number", "symbol", "side", "type"], properties: props("account_number", "symbol", "side", "type", "quantity", "limit_price", "time_in_force", "market_hours", "ref_id") } } : x)));
+    const plainOnly = ok(await (await stocks(noStops)).trader.market("AAPL"));
+    expect([plainOnly.types, plainOnly.tifs, plainOnly.note!.includes("stop")]).toEqual([["market", "limit"], ["gtc", "day"], false]);
     // the later of the regular and the extended sessions' last trades is the price; a closed book has no bid or ask
     q = quote("AAPL", { last_non_reg_trade_price: "231.40", venue_last_non_reg_trade_time: "2026-10-05T23:10:00Z", bid_price: "0", ask_price: "0" });
     t = tradability("AAPL", { fractional_tradability: "untradable" });
@@ -558,6 +698,94 @@ describe("Robinhood stocks: orders through its MCP server, in the Agentic accoun
     expect(callsTo(s, "place_equity_order").slice(3).map((a) => [a.side, a.type, a.limit_price])).toEqual([["buy", "limit", "1.00"], ["sell", "limit", "1.00"], ["buy", "limit", "0.9999"]]);
   });
 
+  it("place(): a stop as stop_market, a stop with a worst price as a stop_limit at it, a stop-limit as asked; good till canceled where chosen", async () => {
+    // what place_equity_order answers for a stop: Robinhood's market or limit order with trigger "stop"
+    const s = server({ ...READS, place_equity_order: (a: Record<string, unknown>) => done({ order: equityOrder({ side: a.side, type: a.type === "stop_limit" || a.type === "limit" ? "limit" : "market", trigger: String(a.type).startsWith("stop") ? "stop" : "immediate", state: "confirmed", quantity: a.quantity, price: a.limit_price ?? null, stop_price: a.stop_price ?? null, time_in_force: a.time_in_force }) }) });
+    const { trader } = await stocks(s);
+    const ref = (id: string) => uuidFrom(`https://agent.robinhood.com/mcp/trading/${AGENTIC}/${id}`);
+    // a sell stop with no worst price: Robinhood's stop_market, good for the day; waiting for its price it is open
+    expect(ok(await trader.place({ symbol: "AAPL", side: "sell", type: "stop", qty: 2, stopPrice: 220, clientId: "ord-0401" }))).toMatchObject({ ref: ORDER, status: "open", filledQty: 0 });
+    // a sell stop with a worst price, good till canceled: a stop-limit whose limit is the worst price rounded up onto a cent
+    ok(await trader.place({ symbol: "AAPL", side: "sell", type: "stop", qty: 2, stopPrice: 220, worstPrice: 215.601, tif: "gtc", clientId: "ord-0402" }));
+    // a buy stop with a worst price, good for the day: its limit rounded down; under a dollar, onto a hundredth of a cent
+    ok(await trader.place({ symbol: "PENNY", side: "buy", type: "stop", qty: 100, stopPrice: 0.55, worstPrice: 0.56109, tif: "day", clientId: "ord-0403" }));
+    // a stop-limit as it was asked, and a limit order good till canceled
+    ok(await trader.place({ symbol: "AAPL", side: "buy", type: "stop_limit", qty: 1, stopPrice: 240, limitPrice: 241.5, tif: "gtc", clientId: "ord-0404" }));
+    ok(await trader.place({ symbol: "AAPL", side: "buy", type: "limit", qty: 1, limitPrice: 218, tif: "gtc", clientId: "ord-0405" }));
+    // a market order said to be good for the day is what it always was
+    ok(await trader.place({ symbol: "AAPL", side: "buy", type: "market", qty: 1, tif: "day", clientId: "ord-0406" }));
+    expect(callsTo(s, "place_equity_order")).toEqual([
+      { account_number: AGENTIC, symbol: "AAPL", side: "sell", type: "stop_market", quantity: "2", stop_price: "220.00", time_in_force: "gfd", market_hours: "regular_hours", ref_id: ref("ord-0401") },
+      { account_number: AGENTIC, symbol: "AAPL", side: "sell", type: "stop_limit", quantity: "2", limit_price: "215.61", stop_price: "220.00", time_in_force: "gtc", market_hours: "regular_hours", ref_id: ref("ord-0402") },
+      { account_number: AGENTIC, symbol: "PENNY", side: "buy", type: "stop_limit", quantity: "100", limit_price: "0.5610", stop_price: "0.5500", time_in_force: "gfd", market_hours: "regular_hours", ref_id: ref("ord-0403") },
+      { account_number: AGENTIC, symbol: "AAPL", side: "buy", type: "stop_limit", quantity: "1", limit_price: "241.50", stop_price: "240.00", time_in_force: "gtc", market_hours: "regular_hours", ref_id: ref("ord-0404") },
+      { account_number: AGENTIC, symbol: "AAPL", side: "buy", type: "limit", quantity: "1", limit_price: "218.00", time_in_force: "gtc", market_hours: "regular_hours", ref_id: ref("ord-0405") },
+      { account_number: AGENTIC, symbol: "AAPL", side: "buy", type: "market", quantity: "1", time_in_force: "gfd", market_hours: "regular_hours", ref_id: ref("ord-0406") },
+    ]);
+  });
+
+  it("place(): what place_equity_order cannot carry is said here, and nothing is sent", async () => {
+    const s = server({ ...READS, place_equity_order: () => done({ order: equityOrder() }) });
+    const { trader } = await stocks(s);
+    const said = async (o: Partial<OrderRequest>) => refusal(await trader.place({ symbol: "AAPL", side: "sell", type: "stop", qty: 1, stopPrice: 220, clientId: "ord-0501", ...o }));
+    // a market order is good for the day only, however it is sent; nothing at Robinhood is immediate-or-cancel or fill-or-kill
+    expect((await said({ type: "market", stopPrice: undefined, tif: "gtc" })).message).toBe("Robinhood: a market order at Robinhood is good for the day only");
+    expect((await said({ type: "market", stopPrice: undefined, worstPrice: 230, tif: "gtc" })).code).toBe("E_VENUE_ORDER_INVALID");
+    for (const tif of ["ioc", "fok"] as const) expect((await said({ tif })).message).toBe(`Robinhood: Robinhood's stock orders are good for the day or good till canceled, never ${tif}`);
+    expect((await said({ type: "limit", stopPrice: undefined, limitPrice: 230, postOnly: true })).message).toBe("Robinhood: Robinhood's stock orders have no post-only or reduce-only flag");
+    expect((await said({ reduceOnly: true })).code).toBe("E_VENUE_ORDER_INVALID");
+    // a stop is whole shares, with a stop price on the US tick (never rounded); a stop-limit has its limit
+    expect((await said({ qty: 0.5 })).message).toBe("Robinhood: Robinhood takes a fraction of a share only in a market order: a stop order is whole shares");
+    expect((await said({ type: "stop_limit", qty: 0.5, limitPrice: 219 })).message).toBe("Robinhood: Robinhood takes a fraction of a share only in a market order: a stop-limit order is whole shares");
+    expect((await said({ stopPrice: undefined })).message).toBe("Robinhood: a stop order has a stop price");
+    expect((await said({ stopPrice: 220.005 })).message).toBe("Robinhood: a stop price at Robinhood is in cents (in hundredths of a cent under $1)");
+    expect((await said({ type: "stop_limit" })).message).toBe("Robinhood: a stop-limit order has a limit price");
+    expect((await said({ type: "stop_limit", limitPrice: 219.999 })).message).toBe("Robinhood: a limit price at Robinhood is in cents (in hundredths of a cent under $1)");
+    // a stop's worst price that is not a price
+    expect((await said({ worstPrice: -1 })).message).toBe("Robinhood: a stop order's worst price is a price more than zero");
+    expect(callsTo(s, "place_equity_order")).toEqual([]);
+  });
+
+  it("positions(): what the Agentic account holds, page by page, priced by Robinhood's quotes; with no Agentic account, nothing is asked", async () => {
+    const row = (symbol: string, quantity: string, average: string | null, type: string) => ({ symbol, quantity, intraday_quantity: "0", average_buy_price: average, shares_available_for_sells: quantity.startsWith("-") ? "0" : quantity, shares_held_for_sells: "0", shares_held_for_stock_grants: "0", shares_held_for_options_events: "0", shares_held_for_asset_transfer: "0", shares_pending_from_options_events: "0", type });
+    const CURSOR = "cD0yMDI2LTEwLTA1";
+    // get_equity_positions as its output schema has it: positions[] and the next page's URL, empty on the last page
+    const positionsOf = (a: Record<string, unknown>) =>
+      a.account_number !== AGENTIC ? done({ positions: [], next: "" })
+      : a.cursor === CURSOR ? done({ positions: [row("TSLA", "-1.00000000", "250.00", "short"), row("MSFT", "0.00000000", null, "empty")], next: "" })
+      : done({ positions: [row("AAPL", "3.00000000", "200.00", "long"), row("NVDA", "0.50000000", null, "long")], next: `https://api.robinhood.com/positions/?account_number=${AGENTIC}&cursor=${CURSOR}&nonzero=true` });
+    // no quote for NVDA this time
+    const s = server({ ...READS, get_equity_positions: positionsOf, get_equity_quotes: (a: { symbols: string[] }) => done({ results: a.symbols.filter((x) => x !== "NVDA").map((x) => quote(x, { last_trade_price: "230.25" })) }) });
+    const { trader } = await stocks(s);
+    s.called.length = 0;
+    const list = ok(await trader.positions!());
+    expect(list.map(({ native: _native, ...p }) => p)).toEqual([
+      { symbol: "AAPL", name: "AAPL", kind: "stock", side: "long", qty: 3, entryPrice: 200, markPrice: 230.25, usd: 690.75, unrealizedUsd: 90.75 },
+      { symbol: "NVDA", name: "NVDA", kind: "stock", side: "long", qty: 0.5 },
+      // a short: what it is worth and what it has made carry its sign
+      { symbol: "TSLA", name: "TSLA", kind: "stock", side: "short", qty: 1, entryPrice: 250, markPrice: 230.25, usd: -230.25, unrealizedUsd: 19.75 },
+    ]);
+    expect(list[0]!.native).toMatchObject({ symbol: "AAPL", shares_available_for_sells: "3.00000000", type: "long" });
+    // the Agentic account's two pages, then one call for the prices; nothing that trades
+    expect(s.called).toEqual([
+      ["get_equity_positions", { account_number: AGENTIC }],
+      ["get_equity_positions", { account_number: AGENTIC, cursor: CURSOR }],
+      ["get_equity_quotes", { symbols: ["AAPL", "NVDA", "TSLA"] }],
+    ]);
+    // quotes that do not come: the positions are still listed, without a value
+    const unpriced = server({ ...READS, get_equity_positions: positionsOf, get_equity_quotes: failed("RATE_LIMITED") });
+    expect(ok(await (await stocks(unpriced)).trader.positions!()).map((p) => [p.symbol, p.side, p.qty, p.usd])).toEqual([["AAPL", "long", 3, undefined], ["NVDA", "long", 0.5, undefined], ["TSLA", "short", 1, undefined]]);
+    // no Agentic account: refused in Robinhood's terms, and no position is asked for
+    const none = server({ ...READS, get_accounts: accounts(false), get_equity_positions: positionsOf });
+    const noneTrader = (await stocks(none)).trader;
+    none.called.length = 0;
+    const shut = refusal(await noneTrader.positions!());
+    expect([shut.code, shut.message]).toEqual(["E_VENUE_PERMISSION", `Robinhood: ${noneTrader.whyNot}`]);
+    expect(callsTo(none, "get_equity_positions")).toEqual([]);
+    // Robinhood's tools have no call that closes a position, changes an order in place, or sets leverage: the trader offers none
+    expect([trader.close, trader.amend, trader.setLeverage]).toEqual([undefined, undefined, undefined]);
+  });
+
   it("status(): every equity state Robinhood has, as the account's", async () => {
     let answer: Record<string, unknown> = equityOrder();
     const s = server({ ...READS, get_equity_orders: () => done({ orders: [answer], next: "" }) });
@@ -576,6 +804,12 @@ describe("Robinhood stocks: orders through its MCP server, in the Agentic accoun
     expect(await seen({ state: "partially_filled_rest_cancelled", cumulative_quantity: "0.4" })).toMatchObject({ status: "canceled", filledQty: 0.4 });
     for (const state of ["rejected", "failed", "voided", "locate_failed"]) expect((await seen({ state })).status).toBe("rejected");
     expect((await seen({ state: "something_new" })).status).toBe("pending");
+    // a stop (Robinhood's market or limit order with trigger "stop"): queued is taken, confirmed is waiting for its price, then it fills
+    const stop = { type: "limit", trigger: "stop", price: "215.61", stop_price: "220.00", time_in_force: "gtc" };
+    expect((await seen({ ...stop, state: "queued" })).status).toBe("pending");
+    expect(await seen({ ...stop, state: "confirmed" })).toEqual({ ref: ORDER, status: "open", filledQty: 0, feeUsd: 0 });
+    expect(await seen({ ...stop, state: "filled", cumulative_quantity: "1.00000000", average_price: "219.40", fees: "0.02" })).toEqual({ ref: ORDER, status: "filled", filledQty: 1, avgPrice: 219.4, feeUsd: 0.02 });
+    expect((await seen({ ...stop, state: "cancelled" })).status).toBe("canceled");
     expect(callsTo(s, "get_equity_orders").every((a) => JSON.stringify(a) === JSON.stringify({ account_number: AGENTIC, order_id: ORDER }))).toBe(true);
     answer = equityOrder({ id: "00000000-0000-4000-8000-000000000000" });
     expect(refusal(await trader.status(ORDER, "AAPL")).code).toBe("E_ACCOUNT_ORDER_UNKNOWN");
@@ -652,6 +886,8 @@ describe("Robinhood stocks: orders through its MCP server, in the Agentic accoun
     const first = ok(await trader.markets(""));
     expect(first.map((m) => m.symbol)).toEqual(["SPY", "QQQ", "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "HOOD"]);
     expect(first.every((m) => m.kind === "stock" && m.quote === "USD" && m.price === 230.1)).toBe(true);
+    // each with its session, so Markets can say one is closed: the regular session, by the calendar, at the clock's time
+    expect(first.every((m) => JSON.stringify(m.session) === JSON.stringify({ open: true, closesAt: "2026-10-05T20:00:00.000Z" }))).toBe(true);
     expect(s.called).toEqual([["get_equity_quotes", { symbols: first.map((m) => m.symbol) }]]);
     s.called.length = 0;
     const apple = ok(await trader.markets("apple"));

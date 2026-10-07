@@ -11,6 +11,8 @@
  */
 import type { Refusal } from "../core/errors.ts";
 import { eventMark, isEventSymbol } from "./events.ts";
+import type { MarketKind } from "./live/trade.ts";
+import type { LiveWriter } from "./live/writes.ts";
 
 /** `broker`: a stock-market account at a broker · `perp`: an account at a perp DEX (Hyperliquid) */
 export type AccountKind = "cex" | "agent-wallet" | "rwa" | "prediction" | "broker" | "perp";
@@ -60,17 +62,18 @@ export interface Account {
   /** a live venue reached by address: who showed the address is the user's (the wallet that signed); absent, it is only watched */
   proven?: string | undefined;
   /** what real money can be asked of a live venue, when the server moves real money at all */
-  liveCan?: { withdraw: boolean | "unknown"; ledgers: string[]; transfer: boolean | "unknown"; swap: boolean | "unknown"; receive: boolean; send: "wallet" | "mm" | false } | undefined;
+  liveCan?: LiveWriter["can"] | undefined;
   /** a venue connected live where orders can be placed: whether the key may trade (as the venue said), and what is traded there */
-  liveTrade?: { can: boolean | "unknown"; what: string } | undefined;
+  liveTrade?: { can: boolean | "unknown"; what: string; /** the kinds of market its trader offers, structured (`what` says it in words); absent: `tradeKinds` reads them from the connector */ kinds?: MarketKind[] | undefined; /** what else its trader does there: positions, an order changed in place, leverage, its own close */ positions?: boolean; amend?: boolean; leverage?: boolean; close?: boolean } | undefined;
   /** why no order is placed at this venue from the account, when none is */
   noTradeBecause?: string | undefined;
   /** why a live venue is only ever read */
   readOnlyBecause?: string | undefined;
 }
 
-/** `event`: shares of a prediction-market outcome, worth $1 or $0 at settlement */
-export type AssetClass = "crypto" | "stable" | "cash" | "rwa" | "event" | "equity";
+/** `event`: shares of a prediction-market outcome, worth $1 or $0 at settlement · `earn`: money in a venue's earn product (a vault, OKX's
+ * Simple Earn, a Kraken Earn strategy: live/earn.ts), owned and earning, not ready to trade or move until it is taken back out */
+export type AssetClass = "crypto" | "stable" | "cash" | "rwa" | "event" | "equity" | "earn";
 
 export interface Holding {
   account: string;
@@ -199,6 +202,26 @@ export function agentCode(name: string): string {
   return code.toUpperCase();
 }
 
+/** the kinds of market each live connector's trader offers (live/index.ts CONNECTORS), by its kind: what the Trade screen's grid is drawn from */
+const TRADE_KINDS: Record<string, MarketKind[]> = {
+  alpaca: ["stock", "crypto"],
+  robinhood: ["stock"],
+  "robinhood-crypto": ["crypto"],
+  kalshi: ["event"],
+  "polymarket-trade": ["event"],
+  metamask: ["token", "event", "perp"],
+  wallet: ["token"],
+};
+
+/** What a venue's trader offers, from the connector the owner signed (`live:exchange:okx`): an exchange trades spot, and perpetuals or dated
+ * futures where its trader says it lists them (live/exchange-trade.ts names those three cases, and only those); a connector this table does
+ * not know offers nothing it can name */
+export function tradeKinds(connector: string | undefined, what: string): MarketKind[] {
+  const kind = /^live:([a-z0-9-]+)/.exec(connector ?? "")?.[1] ?? "";
+  if (kind === "exchange") return what === "spot and perpetuals" ? ["spot", "perp"] : what === "spot and futures" ? ["spot", "future"] : ["spot"];
+  return [...(TRADE_KINDS[kind] ?? [])];
+}
+
 export const PAGE_AGENT: AgentId = { id: "page", name: "Portfolio manager (page script)", code: "PM" };
 export const SCRIPT_AGENT: AgentId = { id: "demo", name: "Terminal demo script", code: "TD" };
 
@@ -230,7 +253,7 @@ export const ENFORCER_LABEL: Record<ScopeEnforcer, string> = {
   issuer: "the issuer (transfer-restriction contract)",
   metamask: "MetaMask (Guard policy + MFA)",
 };
-export const CLASS_LABEL: Record<AssetClass, string> = { crypto: "Crypto", stable: "Stablecoins", cash: "Cash", rwa: "RWA", event: "Predictions", equity: "Stocks" };
+export const CLASS_LABEL: Record<AssetClass, string> = { crypto: "Crypto", stable: "Stablecoins", cash: "Cash", rwa: "RWA", event: "Predictions", equity: "Stocks", earn: "Earning" };
 export const CLASS_ORDER: AssetClass[] = ["cash", "stable", "crypto", "equity", "event", "rwa"];
 
 /** demo prices, fixed so a run is reproducible; the live MetaMask read brings its own USD values */

@@ -187,6 +187,34 @@ export function marketSession(ms: number): Session {
   return "closed";
 }
 
+/** The REGULAR SESSION (9:30 to 16:00 New York, on a market day) under way at `ms`, or else the next one: whether it is under way, and the
+ * instants it opens and closes. A market day is isMarketDay's, so the market's holidays are closed days. The market's early closes (13:00 on
+ * the day after Thanksgiving, and on some days before a holiday) are not known here: every session here closes at 16:00 */
+export function nextRegularSession(ms: number): { open: boolean; opensAt: number; closesAt: number } {
+  const t = et(ms);
+  // the New York dates from this one on, counted in UTC so that no daylight-saving change skips or repeats one; a market day is never more
+  // than four days away (a weekend beside a holiday)
+  for (let i = 0; i < 10; i++) {
+    const day = new Date(Date.UTC(t.y, t.m - 1, t.d + i));
+    const y = day.getUTCFullYear();
+    const m = day.getUTCMonth() + 1;
+    const d = day.getUTCDate();
+    const closesAt = fromEt(y, m, d, 16);
+    if (ms >= closesAt || !isMarketDay(closesAt)) continue;
+    const opensAt = fromEt(y, m, d, 9, 30);
+    return { open: ms >= opensAt, opensAt, closesAt };
+  }
+  throw new Error(`no market day within ten days of ${new Date(ms).toISOString()}`);
+}
+
+/** The regular session as a market carries it (live/trade.ts Market.session), from this calendar: in session now (marketSession says
+ * "regular") and, ISO, when it closes while it is open, or when it next opens while it is not. This is the session of a venue that sends
+ * every stock order for the regular session (Robinhood's market_hours "regular_hours") */
+export function regularSession(ms: number): { open: boolean; opensAt?: string; closesAt?: string } {
+  const s = nextRegularSession(ms);
+  return marketSession(ms) === "regular" ? { open: true, closesAt: new Date(s.closesAt).toISOString() } : { open: false, opensAt: new Date(s.opensAt).toISOString() };
+}
+
 /** `Tue 6 Oct` — a New York date as a person reads it */
 export function etDate(ms: number): string {
   const t = et(ms);

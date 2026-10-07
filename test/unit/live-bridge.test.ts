@@ -171,7 +171,7 @@ describe("bridge routes: what is asked of LI.FI", () => {
     expect(decodeBridgeCall(Q_STARGATE.transactionRequest.data)!.facet).toBe("Stargate");
     // the event LI.FI's contract logged in a real transfer
     expect(TRANSFER_STARTED_TOPIC).toBe("0xcba69f43792f9f399347222505213b55af8e0b0b54b893085c2e27ecbe1644f1");
-    expect(BRIDGE_CHAINS).toEqual(["Ethereum", "Optimism", "BNB Chain", "Polygon", "Base", "Arbitrum"]);
+    expect(BRIDGE_CHAINS).toEqual(["Ethereum", "Optimism", "BNB Chain", "Polygon", "Base", "Arbitrum", "Robinhood Chain"]);
   });
 
   it("two GETs, CHEAPEST and FASTEST, naming the destination, only the bridges that pay it themselves, and no call on arrival", async () => {
@@ -193,7 +193,10 @@ describe("bridge routes: what is asked of LI.FI", () => {
     const http = lifi([]);
     const cases: Array<[Partial<BridgeRouteRequest>, string]> = [
       [{ toChain: "Arbitrum" }, "E_ACCOUNT_BAD_ACTION"],
-      [{ toChain: "Robinhood Chain" }, "E_ACCOUNT_BAD_ACTION"],
+      // Robinhood Chain is bridged in USDG, not USDC
+      [{ toChain: "Robinhood Chain" }, "E_ACCOUNT_UNPRICED"],
+      [{ toChain: "Robinhood Chain" as never, toAsset: "USDT" }, "E_ACCOUNT_UNPRICED"],
+      [{ toChain: "Solana" as never }, "E_ACCOUNT_BAD_ACTION"],
       [{ asset: "ETH" }, "E_ACCOUNT_UNPRICED"],
       [{ asset: "DAI" }, "E_ACCOUNT_UNPRICED"],
       [{ toAsset: "PYUSD" }, "E_ACCOUNT_UNPRICED"],
@@ -620,7 +623,7 @@ describe("confirm sent: the hash is the transaction that was built", () => {
 
   it("a malformed hash, a chain not bridged from, or no way to read the chain: refused", async () => {
     expect(refusal(await confirmSent({ chain: chainStandIn(), expected: BUILT, hash: "0xabc" as Hex })).code).toBe("E_ACCOUNT_BAD_ACTION");
-    expect(refusal(await confirmSent({ chain: chainStandIn(), expected: { ...BUILT, chainId: 4663 }, hash: TX_USDT0.hash })).code).toBe("E_ACCOUNT_BAD_ACTION");
+    expect(refusal(await confirmSent({ chain: chainStandIn(), expected: { ...BUILT, chainId: 59144 }, hash: TX_USDT0.hash })).code).toBe("E_ACCOUNT_BAD_ACTION");
     expect(refusal(await confirmSent({ expected: BUILT, hash: TX_USDT0.hash })).code).toBe("E_ACCOUNT_BAD_ACTION");
   });
 });

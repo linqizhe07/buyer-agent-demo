@@ -34,9 +34,15 @@ const Owner = (() => {
     return k;
   }
 
+  /* a POST as { status, body }; one that never reaches the account (the service restarting, the network gone) is answered as a refusal in
+     the same shape, so every sheet shows it the way it shows a refusal, instead of staying at "Asking…" */
   async function post(path, body) {
-    const r = await fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body || {}) });
-    return { status: r.status, body: await r.json().catch(() => ({})) };
+    try {
+      const r = await fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body || {}) });
+      return { status: r.status, body: await r.json().catch(() => ({})) };
+    } catch {
+      return { status: 0, body: { ok: false, error: "The account did not answer. Try again." } };
+    }
   }
 
   /** offer this browser's public key; the first device to do so becomes the owner's device — on a server that moves real money, only with
@@ -66,10 +72,11 @@ const Owner = (() => {
 
   const prepare = (draft) => post("/api/account/prepare", { draft });
   const submit = async (prepared) => post("/api/exchange", { action: prepared.action, nonce: prepared.action.nonce, signature: await sign(prepared) });
-  /** prepare, sign, send: what one button on the page does */
+  /** prepare, sign, send: what one button on the page does. Only a prepared action — fields to sign — is signed; a refusal in any shape is
+      handed back as it came */
   async function act(draft) {
     const p = await prepare(draft);
-    return p.status === 200 ? submit(p.body) : p;
+    return p.status === 200 && p.body && p.body.ok !== false && Array.isArray(p.body.shown) ? submit(p.body) : p;
   }
   /** a refusal as one sentence */
   const why = (r) => (r.body && r.body.refusal && r.body.refusal.message) || (r.body && r.body.error) || (r.body && r.body.result && r.body.result.message) || "";

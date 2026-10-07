@@ -1,192 +1,67 @@
-/* the account page: the statement's paper and ink, one page — what you have, what waits for you, what moved, who may ask */
-[hidden]{display:none !important}
-main{gap:26px}
-.top{align-items:flex-start}
-.brand{margin:0 0 6px;font-family:"Source Serif 4",Georgia,"Times New Roman",serif;font-size:20px;font-weight:600;line-height:1.2}
-.head{display:flex;justify-content:space-between;align-items:flex-end;gap:24px;flex-wrap:wrap;margin-top:-10px}
-.head .sub{margin-top:10px}
-.head > button{padding:8px 18px;font-size:14px}
-.modes{display:flex;flex-direction:column;align-items:flex-end;gap:6px}
-.modes .seg button{padding:5px 14px}
-.pill{font-family:"IBM Plex Mono",Menlo,monospace;font-size:11px;letter-spacing:.04em;border:1px solid var(--line);border-radius:999px;padding:2px 10px;white-space:nowrap}
-.pill.warm{border-color:var(--orange);color:var(--orange)}
-.alloc{margin-top:-8px}
-.banner{border:1px solid var(--ink);border-radius:4px;padding:10px 14px;background:var(--card);font-size:14px}
-#flash:empty{display:none}
-#waiting{display:flex;flex-direction:column;gap:8px}
-.card{display:flex;gap:14px;align-items:center;background:var(--card);border:1px solid var(--orange);border-radius:4px;padding:10px 14px}
-.card .mark{color:var(--orange)}
-.card .txt{flex:1;min-width:0}
-.card .txt .dim{font-size:12px}
-.card details{margin-top:4px;font-size:12px}
-.card details pre{margin:6px 0 0;font-family:"IBM Plex Mono",Menlo,monospace;font-size:11px;white-space:pre-wrap;word-break:break-all}
-.card .btns{display:flex;gap:8px;flex:none}
-/* a section: its name, and what can be taken away from it */
-h2.sec{display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin:0 0 4px;padding-bottom:6px;border-bottom:1px solid var(--rule)}
-h2.sec .tools{font-family:"IBM Plex Sans",sans-serif;font-weight:400}
-section table{font-size:14px}
-section td{padding:10px 12px 10px 0}
-section td.r{text-align:right;padding-left:12px;padding-right:0;width:auto;white-space:nowrap}
-section td.num2{font-family:"IBM Plex Mono",Menlo,monospace;font-size:13px;white-space:nowrap}
-section td.r + td{padding-left:24px}
-section tr:last-child td{border-bottom:0}
-td .why,.why{display:block;color:var(--dim);font-size:12px;line-height:1.35;max-width:460px}
-.st{font-family:"IBM Plex Mono",Menlo,monospace;font-size:11px;letter-spacing:.04em;text-transform:uppercase;white-space:nowrap}
-.st.settled{color:var(--sage)}
-.st.pending,.st.authorized{color:var(--orange)}
-.st.failed,.st.stranded,.st.revoked,.st.expired{color:var(--ink);font-weight:500}
-.link{border:0;padding:0;color:var(--ink);text-decoration:underline;text-underline-offset:3px;font-size:13px;border-radius:0;background:none}
-.link.dim{color:var(--dim)}
-.empty{color:var(--dim);padding:12px 0 4px;font-size:14px;margin:0}
-.first{margin:10px 0 2px;font-size:14px}
-.more-btn{margin-top:8px}
-.hint{margin:8px 0 0}
-.msg{font-size:13px;min-height:18px}
-.msg.no::before{content:"✗";display:inline-block;background:var(--ink);color:var(--paper);border-radius:2px;font-size:11px;width:16px;line-height:16px;text-align:center;margin-right:8px}
-.msg.wait{color:var(--dim)}
-.msg.ok::before{content:"✓";display:inline-block;background:var(--sage);color:var(--paper);border-radius:2px;font-size:11px;width:16px;line-height:16px;text-align:center;margin-right:8px}
-details.inl{display:inline;margin-left:6px}
-details.inl summary,details.more summary{cursor:pointer;list-style:none;display:inline;text-decoration:underline;text-underline-offset:3px;color:var(--dim);font-size:12px}
-details.inl summary::-webkit-details-marker,details.more summary::-webkit-details-marker{display:none}
-details.inl[open]{display:block;margin:6px 0 0 24px;color:var(--dim);font-size:12px;line-height:1.45}
-/* accounts */
-.live-t td{vertical-align:top}
-.live-t td:last-child{white-space:nowrap}
+/* What the page's earlier renderers still draw, in the shell's tokens and the Clean cards look: the Agents and Settings sheets' tables and
+   forms, the statement's lines, the connect tiles and steps. Scoped to .old (the sheets those renderers draw into) and #modal-form (the
+   connect dialog), so that nothing here touches a pane drawn the new way. A rule goes when the last renderer using it goes. */
 
-.live-t td:last-child .link{margin-left:12px}
-.vn{font-weight:500}
-.cap{font-size:12px;line-height:1.4;margin-top:2px}
-.chip{font-family:"IBM Plex Mono",Menlo,monospace;font-size:11px;letter-spacing:.03em;border:1px solid var(--line);border-radius:999px;padding:1px 8px;color:var(--dim);white-space:nowrap}
-.chip.warm{border-color:var(--orange);color:var(--orange)}
-.chip.bad{border-color:var(--ink);color:var(--ink)}
-button.sm{padding:4px 12px;font-size:13px}
-details.more{margin-top:6px;font-size:12px;color:var(--dim)}
-details.more[open] summary{display:block;margin-bottom:4px}
-details.more div{line-height:1.45;max-width:560px}
-.holds{display:grid;grid-template-columns:auto auto auto;justify-content:start;gap:2px 16px;margin:4px 0 8px;font-family:"IBM Plex Mono",Menlo,monospace;font-size:11px;color:var(--ink)}
-.holds .dim{color:var(--dim)}
+/* a sheet drawn the earlier way: its tables, light rules between the rows, headers in sentence case */
+.old { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
+.old table { font-size: 14px; }
+.old th { text-align: left; padding: 8px 0; font-size: 12px; color: var(--dim); font-weight: 600; border-bottom: 1px solid var(--border); }
+.old td { padding: 12px 12px 12px 0; border-bottom: 1px solid var(--border); vertical-align: middle; }
+.old td.r, .old th.r { text-align: right; padding-left: 12px; padding-right: 0; white-space: nowrap; }
+.old td.num2 { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.old td.num2.mono { font-family: var(--font-mono); font-size: 13px; }
+.old td.r + td, .old th.r + th { padding-left: 24px; }
+.old tr:last-child td { border-bottom: 0; }
+.old .more-btn { margin-top: 8px; }
+.old .hint { margin: 8px 0 0; }
+
 /* connecting an account: pick what it is, then one short form */
-.pick-h{font-family:"IBM Plex Mono",Menlo,monospace;font-size:11px;letter-spacing:.06em;color:var(--dim);text-transform:uppercase;margin-bottom:-6px}
-section .pick-h{margin:14px 0 8px}
-.pick{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
-.pick.wide{grid-template-columns:repeat(auto-fill,minmax(168px,1fr))}
-.pick.wide .tile{padding:12px 14px}
-.tile{display:flex;flex-direction:column;align-items:flex-start;gap:2px;text-align:left;padding:10px 12px;border:1px solid var(--line);background:var(--card);border-radius:4px;min-width:0}
-.tile:hover,.tile:focus-visible{border-color:var(--ink);outline:none}
-.tile:disabled{opacity:.55}
-.tile b{font-weight:500;font-size:14px;overflow-wrap:anywhere}
-.tile span{font-size:11px;color:var(--dim);font-family:"IBM Plex Mono",Menlo,monospace}
-.tile em.on{font-style:normal;color:var(--sage)}
-/* the agent form: one form for a new agent and for a known agent's limit */
-.add{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-top:14px;padding-top:14px;border-top:1px dashed var(--line)}
-.add .newonly{display:contents}
-.add label,dialog label{display:flex;flex-direction:column;gap:4px;font-family:"IBM Plex Mono",Menlo,monospace;font-size:11px;letter-spacing:.05em;color:var(--dim);text-transform:uppercase}
-.add input,.add select,dialog input,dialog select{font:inherit;font-size:14px;padding:7px 10px;border:1px solid var(--ink);border-radius:3px;background:var(--card);color:var(--ink);min-width:0;text-transform:none;letter-spacing:0;font-family:"IBM Plex Sans","Helvetica Neue",Arial,sans-serif}
-.add input.s{width:100px}
-.add input.m{width:170px}
-.add input.l{width:320px}
-fieldset.chk{border:0;margin:0;padding:0;display:flex;flex-direction:column;gap:6px;min-width:0}
-fieldset.chk legend{padding:0;margin-bottom:4px;font-family:"IBM Plex Mono",Menlo,monospace;font-size:11px;letter-spacing:.05em;color:var(--dim);text-transform:uppercase}
-fieldset.chk label{display:inline-flex;flex-direction:row;align-items:center;gap:6px;font-family:"IBM Plex Sans","Helvetica Neue",Arial,sans-serif;font-size:13px;letter-spacing:0;text-transform:none;color:var(--ink)}
-fieldset.chk input{accent-color:var(--ink);margin:0}
-fieldset.chk label.also{margin-top:2px;color:var(--dim)}
-.kf-how{margin-top:4px;line-height:1.45}
-#tk-side{display:flex}
-#tk-side button{flex:1}
-.codeform{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
-.codeform input{font:inherit;font-family:"IBM Plex Mono",Menlo,monospace;font-size:14px;padding:6px 10px;border:1px solid var(--ink);border-radius:3px;background:var(--card);color:var(--ink);width:130px;text-transform:uppercase}
-.codeform .msg{margin-top:0}
-/* the dialog */
-dialog{border:1px solid var(--ink);border-radius:4px;background:var(--paper);color:var(--ink);padding:0;width:min(520px,calc(100vw - 32px));box-shadow:0 12px 40px rgba(0,0,0,.2)}
-dialog::backdrop{background:rgba(27,27,27,.28)}
-dialog form{display:flex;flex-direction:column;gap:14px;padding:22px 24px 20px}
-dialog h2{margin:0;font-size:22px}
-dialog .row{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px}
-dialog label{min-width:0}
-dialog select,dialog input{width:100%;box-sizing:border-box}
-dialog .msg{margin-top:0}
-dialog .quote{border-top:1px dashed var(--line);border-bottom:1px dashed var(--line);padding:10px 0;font-size:13px;min-height:74px;display:flex;flex-direction:column;gap:4px}
-dialog .quote.real{border:1px solid var(--orange);border-radius:4px;padding:10px 12px;background:var(--card)}
-dialog .quote .big{font-family:"IBM Plex Mono",Menlo,monospace;font-size:13px;display:flex;justify-content:space-between;gap:12px}
-dialog .quote .path{color:var(--dim);font-size:12px;line-height:1.4}
-dialog .quote .path b{font-weight:500;color:var(--ink)}
-dialog .quote .mono{font-family:"IBM Plex Mono",Menlo,monospace;font-size:11px;word-break:break-all;color:var(--ink)}
-dialog .path.dim{color:var(--dim)}
-dialog details{font-size:12px;color:var(--dim)}
-dialog details pre{margin:6px 0 0;font-family:"IBM Plex Mono",Menlo,monospace;font-size:11px;white-space:pre-wrap;word-break:break-all;color:var(--ink)}
-dialog .end{display:flex;justify-content:flex-end;gap:8px}
-dialog .end button{padding:8px 18px}
-.back{align-self:flex-start;margin-bottom:-8px}
-.steps{display:flex;flex-direction:column;gap:12px}
-.step{display:grid;grid-template-columns:22px minmax(0,1fr);gap:10px;font-size:14px;line-height:1.45}
-.step>i{font-style:normal;font-family:"IBM Plex Mono",Menlo,monospace;font-size:11px;width:20px;height:20px;border:1px solid var(--ink);border-radius:50%;display:inline-flex;align-items:center;justify-content:center;margin-top:1px}
-.step a{color:var(--ink);text-underline-offset:3px}
-.step .msg{margin-top:0}
-.pathbox{display:flex;gap:10px;align-items:center;margin:6px 0 8px;background:var(--card);border:1px solid var(--line);border-radius:3px;padding:6px 10px}
-.pathbox code{flex:1;min-width:0;font-family:"IBM Plex Mono",Menlo,monospace;font-size:12px;overflow-wrap:anywhere}
-.kf-cmd{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
-details.opts{font-size:12px;color:var(--dim)}
-details.opts summary{cursor:pointer}
-details.opts .row{margin-top:10px}
-#move-body,#live-body{display:flex;flex-direction:column;gap:14px}
-.wallets{display:flex;gap:8px;flex-wrap:wrap}
-.wallets button{display:inline-flex;align-items:center;gap:8px;padding:7px 12px;font-size:14px;background:var(--card);border-color:var(--line)}
-.wallets button:hover{border-color:var(--ink)}
-.wallets img{border-radius:4px}
-.or{font-size:12px;color:var(--dim);text-align:center;margin:-4px 0}
-@media (max-width:760px){
-  .top{gap:12px;flex-direction:column;align-items:stretch}
-  .modes{align-items:flex-start}
-  .head{align-items:flex-start}
-  .pick{grid-template-columns:repeat(2,minmax(0,1fr))}
-  section td.r{padding-left:8px}
-  .live-t tr{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px 12px;padding:12px 0;border-bottom:1px solid var(--line)}
-  .live-t tr:last-child{border-bottom:0}
-  section .live-t td,section .live-t td.r,section .live-t td.r + td{border:0;padding:0}
-  .live-t td:nth-child(3),.live-t td:nth-child(4){grid-column:1/-1;text-align:left}
-  .live-t td:last-child .link{margin-left:12px}
-  /* a statement line on a phone: what it was across the top; when, how much and how it stands under it */
-  table.stmt thead{display:none}
-  table.stmt tr,.open-t tr{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 12px;padding:10px 0;border-bottom:1px solid var(--line)}
-  section table.stmt td,section table.stmt td.r,section table.stmt td.r + td,section .open-t td,section .open-t td.r,section .open-t td.r + td{border:0;padding:0}
-  table.stmt td:nth-child(2){grid-column:1/-1;grid-row:1}
-  table.stmt td:nth-child(1){grid-column:1;grid-row:2}
-  table.stmt td:nth-child(1) .why{display:inline;margin-left:6px}
-  table.stmt td:nth-child(4){grid-column:2;grid-row:2;text-align:right}
-  table.stmt td:nth-child(5){grid-column:1/-1;grid-row:3}
-  .open-t td:first-child{grid-column:1/-1}
-  #agents table tr{display:grid;grid-template-columns:minmax(0,1fr);gap:4px;padding:10px 0;border-bottom:1px solid var(--line)}
-  section #agents table td,section #agents table td.r{border:0;padding:0;text-align:left}
-  dialog .row{grid-template-columns:1fr}
-  td .why{max-width:none}
-  .add input.l{width:100%}
-  .hide-s{display:none}
-  .card{flex-wrap:wrap;align-items:flex-start}
-  .card .txt{flex:1 1 calc(100% - 40px)}
-  .card .mono{margin-left:26px;align-self:center}
-  .card .btns{margin-left:auto}
-}
-/* the statement */
-.sub-h{font-family:"IBM Plex Mono",Menlo,monospace;font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:var(--dim);margin:6px 0 4px}
-.open-t{margin-bottom:14px}
-.filters{display:flex;gap:8px;flex-wrap:wrap;margin:4px 0 10px}
-.filters select{font:inherit;font-size:13px;padding:4px 8px;border:1px solid var(--line);border-radius:3px;background:var(--card);color:var(--ink);font-family:"IBM Plex Sans","Helvetica Neue",Arial,sans-serif}
-table.stmt th{font-family:"IBM Plex Mono",Menlo,monospace;font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:var(--dim);font-weight:400;text-align:left;padding-bottom:6px}
-table.stmt th.r{text-align:right}
-table.stmt th.r + th{padding-left:24px}
-.totals{margin-top:8px}
-.print-head{display:none}
-@media print{
-  body[data-print="statement"] main>*:not(#statement-sec){display:none!important}
-  body[data-print="statement"] #statement-tools,body[data-print="statement"] .filters,body[data-print="statement"] #open-now,body[data-print="statement"] .more-btn{display:none!important}
-  body[data-print="statement"] .print-head{display:block;margin-bottom:10px}
-  body[data-print="statement"]{background:#fff;color:#000}
-}
-/* liquidity */
-details.liq{margin:6px 0 2px;font-size:13px}
-details.liq summary{cursor:pointer;color:var(--dim);list-style:none}
-details.liq summary::-webkit-details-marker{display:none}
-details.liq summary b{color:var(--ink);font-weight:500}
-details.liq[open] summary{margin-bottom:6px}
-dialog .elsewhere:empty{display:none}
-dialog .elsewhere{margin-top:-4px;font-size:12px;color:var(--ink)}
+.pick-h { font-size: 12px; font-weight: 600; color: var(--dim); margin-bottom: -6px; }
+.pick { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.pick.wide { grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); }
+.pick.wide .tile { padding: 12px 14px; }
+.tile { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; padding: 10px 12px; border: 1px solid var(--card-border); background: var(--surface); box-shadow: var(--shadow-card); border-radius: var(--radius-s); min-width: 0; min-height: 44px; }
+.tile:hover, .tile:focus-visible { border-color: var(--rule); }
+.tile:disabled { opacity: 0.55; }
+.tile b { font-weight: 600; font-size: 14px; overflow-wrap: anywhere; }
+.tile span { font-size: 12px; color: var(--dim); }
+.tile em.on { font-style: normal; color: var(--up); }
+#modal-form .back { align-self: flex-start; margin-bottom: -8px; }
+#modal-form .steps { display: flex; flex-direction: column; gap: 12px; }
+#modal-form .step { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 10px; font-size: 14px; line-height: 1.45; }
+#modal-form .step > i { font-style: normal; font-size: 11px; font-weight: 700; width: 22px; height: 22px; background: var(--surface-2); border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; margin-top: 0; }
+#modal-form .step a { color: var(--text); }
+#modal-form .pathbox { display: flex; gap: 10px; align-items: center; margin: 6px 0 8px; background: var(--surface-2); border-radius: var(--radius-s); padding: 6px 6px 6px 12px; }
+#modal-form .pathbox code { flex: 1; min-width: 0; font-family: var(--font-mono); font-size: 12px; overflow-wrap: anywhere; }
+#modal-form .kf-cmd { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+#modal-form .kf-how { margin-top: 4px; line-height: 1.45; }
+#modal-form details.opts { font-size: 12px; color: var(--dim); }
+#modal-form details.opts summary { cursor: pointer; }
+#modal-form details.opts .row { margin-top: 10px; }
+#modal-form .wallets { display: flex; gap: 8px; flex-wrap: wrap; }
+#modal-form .wallets button { display: inline-flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 14px 0 8px; font-size: 14px; background: var(--surface); border: 1px solid var(--card-border); box-shadow: var(--shadow-card); }
+#modal-form .wallets button:hover { border-color: var(--rule); }
+#modal-form .wallets img { border-radius: 50%; }
+#modal-form .or { font-size: 12px; color: var(--dim); text-align: center; margin: -4px 0; }
+#live-body { display: flex; flex-direction: column; gap: 14px; }
+
+/* the agents' form: one form for a new agent and for a known agent's limit */
+.old .add { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; margin-top: 14px; padding-top: 16px; border-top: 1px solid var(--border); }
+.old .add .newonly { display: contents; }
+.old .add input.s { width: 100px; }
+.old .add input.m { width: 170px; }
+.old .add input.l { width: 320px; max-width: 100%; }
+.old .add > button[type="submit"] { min-height: 44px; padding: 0 20px; }
+.old fieldset.chk { border: 0; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.old fieldset.chk legend { padding: 0; margin-bottom: 4px; font-size: 12px; font-weight: 600; color: var(--dim); }
+.old fieldset.chk label { display: inline-flex; flex-direction: row; align-items: center; gap: 6px; font-family: var(--font-sans); font-size: 13px; font-weight: 500; letter-spacing: 0; text-transform: none; color: var(--text); min-height: 28px; }
+.old fieldset.chk input { accent-color: var(--text); margin: 0; width: auto; min-height: 0; }
+.old fieldset.chk label.also { margin-top: 2px; color: var(--dim); }
+.old .add details.pay { flex-basis: 100%; margin: 2px 0 0; }
+.old details.pay summary { cursor: pointer; font-size: 13px; color: var(--dim); }
+.old details.pay .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; margin-top: 8px; }
+.old #everything { margin-right: 10px; }
+
+/* the statement's lines */
+.old table.stmt th { font-size: 12px; font-weight: 600; color: var(--dim); text-align: left; padding-bottom: 8px; }
+.old table.stmt th.r { text-align: right; }

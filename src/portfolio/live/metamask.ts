@@ -11,22 +11,44 @@
  *   a swap               `<TOKEN>/USDC@<chain>`. `mm swap quote` moves nothing; `mm swap execute --quote-id` sends the quote just made,
  *                        never a blind re-quote; `mm swap status --quote-id` until MetaMask's Bridge API says COMPLETE or FAILED. A swap is
  *                        exact-input: a sell spends exactly the tokens, a buy spends qty × ask in USDC and gets about qty, never exactly
- *   a prediction order   `<market slug>:<outcome>` at Polymarket. `mm predict geoblock` first, then `mm predict place` (GTC at a limit, FAK
- *                        at a worst price for a market order); `mm predict orders` while it rests; `mm predict cancel --order-id`
+ *   a prediction order   `<market slug>:<outcome>` at Polymarket. `mm predict geoblock` first, then `mm predict place --order-type`: a limit
+ *                        order GTC (it rests, and `--post-only` keeps it a maker), or FAK (IOC) or FOK at its limit; a market order FAK, or
+ *                        FOK, at its worst price. `mm predict orders` while it rests; `mm predict cancel --order-id`
+ *   what is held         `mm predict positions`: the shares the Predict deposit wallet holds. A swap leaves tokens in the wallet itself,
+ *                        which `mm wallet balance` reads already: mm has no positions of its own for them
+ *   what to trade        `mm predict events list`: Polymarket's events, busiest first, for the account's market discovery. A read
+ *   a perpetual          `<COIN>-PERP` at Hyperliquid (`BTC-PERP`), through `mm perps` (perps.md): `mm perps markets` for the market, its
+ *                        mark price, funding and largest leverage; `mm perps open --type market|limit --leverage` (a market order is
+ *                        Hyperliquid's IOC within `--max-slippage-bps` of the mark, a limit order rests GTC); `mm perps orders` while it
+ *                        rests and `mm perps cancel --order-id`; `mm perps positions`; `mm perps close --symbol --size` (Hyperliquid's own
+ *                        reduce-only IOC); `mm perps modify --leverage`. Every order, close and leverage change first holds this machine's
+ *                        place to Hyperliquid's own line: mm 7.0.0 has no region check for its perpetuals, so the place is the one mm says
+ *                        (`mm predict geoblock` answers where this machine is), held to Hyperliquid's Terms of Use §1.6, which close the
+ *                        venue to anyone located in the United States, Ontario or a sanctioned territory. Restricted, or not known, and
+ *                        nothing is sent
  *
- * What moves money (`swap execute`, `predict place`) runs only when MetaMask's own switch is on as well as this server's:
- * PORTFOLIO_MM_WRITES=1, as for `mm transfer` (writes.ts). Otherwise the command that would run is printed and nothing runs. MetaMask's
- * Guard still judges every swap (its rolling 24-hour outflow, its allowlists): above its line it asks the owner by email or on MetaMask
- * Mobile, and mm waits up to ten minutes for the answer.
+ * No amend: mm 7.0.0 has no command that changes an order in place. A Polymarket position is closed by selling its shares (an order); a
+ * swap has neither close nor leverage.
+ *
+ * EARN, through `mm earn` (earn.md: LI.FI's earn API): mmEarner below. The vaults (`mm earn markets`), what the wallet holds in them (`mm
+ * earn positions`), money in (`mm earn supply --vault --chain-id`) and out (`mm earn withdraw --vault --chain-id`): from the wallet, back
+ * to the wallet, on the vault's own chain — never `--from-chain-id`, never anywhere else.
+ *
+ * What moves money (`swap execute`, `predict place`, `perps open`, `perps close`, `perps modify`, `earn supply`, `earn withdraw`) runs only
+ * when MetaMask's own switch is on as well as this server's: PORTFOLIO_MM_WRITES=1, as for `mm transfer` (writes.ts). Otherwise the command
+ * that would run is printed and nothing runs. MetaMask's Guard still judges every one (its rolling 24-hour outflow, its allowlists): above
+ * its line it asks the owner by email or on MetaMask Mobile, and mm waits up to ten minutes for the answer.
  */
 import { execFile } from "node:child_process";
 import { formatUnits, parseUnits } from "viem";
 import { isRefusal, type Code, type Refusal } from "../../core/errors.ts";
 import { holdingsOf, type MmBalance, type MmShow } from "../adapters/metamask.ts";
 import { no } from "../refuse.ts";
-import { CHAINS, STABLECOINS, type ChainName } from "./chain.ts";
-import { badOrder, ceilTo, DONE, floorTo, inDollars, onStep, pick, plain, type LiveTrader, type Market, type OrderRequest, type OrderState, type OrderStatus } from "./trade.ts";
-import { num, redact, REGION, type LiveBalance, type LiveSource } from "./types.ts";
+import { CHAIN_BY_ID, CHAINS, STABLECOINS, type ChainName } from "./chain.ts";
+import { known as knownFigure, once, type EarnPosition, type EarnProduct, type EarnSource, type EarnState, type LiveEarner } from "./earn.ts";
+import type { Price } from "./prices.ts";
+import { badOrder, ceilTo, DONE, floorTo, inDollars, onStep, pick, plain, type LiveTrader, type Market, type MarketKind, type OrderRequest, type OrderState, type OrderStatus, type Position, type TimeInForce } from "./trade.ts";
+import { asRefusal, isStable, num, redact, REGION, type LiveBalance, type LiveSource } from "./types.ts";
 import { mmWriter } from "./writes.ts";
 
 /** one mm command, its `data` back; a failure throws mm's own error. A write asks for a longer wait than a read */
@@ -76,6 +98,12 @@ const jsonOf = (s: string): unknown => {
 const obj = (v: unknown): Record<string, unknown> | undefined => (v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined);
 const arr = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
 const str = (v: unknown): string => (typeof v === "string" ? v : typeof v === "number" ? String(v) : "");
+/** a figure the venue gave, or nothing when it gave none: unlike num(), a figure that is not there is not read as 0 (a resolved outcome
+ * that lost really is worth 0) */
+const known = (v: unknown): number | undefined => {
+  const n = typeof v === "number" ? v : typeof v === "string" && v.trim() !== "" ? Number(v) : NaN;
+  return Number.isFinite(n) ? n : undefined;
+};
 
 function failureIn(v: unknown): MmFailure | undefined {
   const o = obj(v);
@@ -141,7 +169,9 @@ export const realMm =
 
 // ---- the source --------------------------------------------------------------------------------------
 
-export async function metamaskSource(req: { venue: string; label: string; run: RunMm; env?: Record<string, string | undefined> | undefined; now?: (() => number) | undefined }): Promise<{ source: LiveSource; first: LiveBalance[] } | Refusal> {
+/** `price`: a dollar price for an earn vault's asset that is not a dollar stablecoin (live/prices.ts); without one, only stablecoin vaults
+ * are valued, and money goes into no other */
+export async function metamaskSource(req: { venue: string; label: string; run: RunMm; env?: Record<string, string | undefined> | undefined; now?: (() => number) | undefined; price?: Price | undefined }): Promise<{ source: LiveSource & EarnSource; first: LiveBalance[] } | Refusal> {
   const name = req.label || "MetaMask Agent Wallet";
   const env = req.env ?? process.env;
   // redacted before it is cut short, so half a secret is never kept
@@ -167,7 +197,8 @@ export async function metamaskSource(req: { venue: string; label: string; run: R
   try {
     const first = await read();
     const trader = mmTrader({ venue: req.venue, name, address: show.address, run: req.run, env, now: req.now ?? Date.now });
-    const source: LiveSource = { name, kind: "agent-wallet", reference: "the mm command line's session on this machine", via: "MetaMask · mm command line", address: show.address, probe: { can: ["read", "transfer", "swap"], note: `MetaMask's Guard decides what goes out without asking (${rolling !== undefined ? `$${rolling} a rolling day` : "its policy"}); above that it asks you by email`, native: { address: show.address, tradingMode: show.tradingMode, rolling24h: rolling ?? null } }, read, writer: mmWriter(show.address as `0x${string}`, req.run, req.env), trader };
+    const earner = mmEarner({ venue: req.venue, name, address: show.address, run: req.run, env, now: req.now ?? Date.now, price: req.price });
+    const source: LiveSource & EarnSource = { name, kind: "agent-wallet", reference: "the mm command line's session on this machine", via: "MetaMask · mm command line", address: show.address, probe: { can: ["read", "transfer", "swap"], note: `MetaMask's Guard decides what goes out without asking (${rolling !== undefined ? `$${rolling} a rolling day` : "its policy"}); above that it asks you by email`, native: { address: show.address, tradingMode: show.tradingMode, rolling24h: rolling ?? null } }, read, writer: mmWriter(show.address as `0x${string}`, req.run, req.env), trader, earner };
     return { source, first };
   } catch (err) {
     return err as Refusal;
@@ -203,10 +234,26 @@ const WELL_KNOWN: Array<[ChainName, string]> = [
   ["Polygon", "WETH"], ["BNB Chain", "BTCB"],
 ];
 const SWAP_NOTE = "a swap your MetaMask Agent Wallet sends through MetaMask's swap API, at up to 0.5% slippage; prices are for about $100 and include MetaMask's fee, not the network fee. A swap is exact-input: a buy spends qty × ask in USDC and gets about qty. MetaMask's Guard may ask you to approve it first";
-const PM_NOTE = "a Polymarket order through mm, paid in pUSD from your Predict deposit wallet (mm predict setup and a deposit come first); a market order fills what it can at once, up to its worst price, and the rest is canceled; Polymarket's taker fee comes on top";
+const PM_NOTE = "a Polymarket order through mm, paid in pUSD from your Predict deposit wallet (mm predict setup and a deposit come first). A limit order rests until canceled (GTC), post-only if you ask; IOC fills what it can at once and cancels the rest, FOK fills all at once or not at all; a market order is IOC at its worst price, or FOK. An IOC or FOK buy spends size × price and may get more shares. Polymarket's taker fee comes on top";
+/** the times in force Polymarket takes through `mm predict place --order-type`, by the name each has there: GTC rests until canceled, FAK
+ * fills what it can at once and cancels the rest (the account's IOC), FOK fills all at once or not at all. GTD is not offered: it needs an
+ * expiry, which the account's order does not carry */
+const PM_ORDER_TYPES: Partial<Record<TimeInForce, "GTC" | "FAK" | "FOK">> = { gtc: "GTC", ioc: "FAK", fok: "FOK" };
+const PM_TIFS = Object.keys(PM_ORDER_TYPES) as TimeInForce[];
+const HL = "Hyperliquid";
+/** the smallest order Hyperliquid takes, in dollars of notional ("Order must have minimum value of $10") */
+const HL_MIN_USD = 10;
+/** Hyperliquid's price rule: at most five significant figures (a whole number always passes), and at most 6 − szDecimals decimals */
+const HL_PRICE_DECIMALS = 6;
+const PERP_NOTE = "a Hyperliquid perpetual through mm, margined in USDC in your Hyperliquid account (mm perps deposit comes first). A market order is Hyperliquid's IOC within the worst price; a limit order rests until canceled (GTC). It opens at the leverage set for it here (1x unless set); funding is paid or received every hour. Before every order the account holds this machine's place to Hyperliquid's own line (its Terms of Use §1.6)";
+/** Hyperliquid's own line: its Terms of Use §1.6 closes the venue to persons located in the United States of America or Ontario, Canada, and
+ * in territories under economic sanctions. The sanctioned territories are not listed there; these are the ones under comprehensive
+ * sanctions (ISO 3166: Cuba, Iran, North Korea, Syria, and Crimea, Sevastopol, Donetsk and Luhansk) */
+const HL_CLOSED = { countries: new Set(["US", "CU", "IR", "KP", "SY"]), regions: new Set(["CA-ON", "UA-43", "UA-40", "UA-14", "UA-09"]) };
+const HL_TERMS = "Hyperliquid's Terms of Use §1.6: the Interface is not available to persons located in the United States, Ontario, or a sanctioned territory";
 
-const INSUFFICIENT = new Set(["INSUFFICIENT_FUNDS", "INSUFFICIENT_GAS", "PREDICT_INSUFFICIENT_BALANCE", "PREDICT_INSUFFICIENT_FUNDING_BALANCE", "PREDICT_INSUFFICIENT_GAS"]);
-const INVALID = new Set(["INVALID_AMOUNT", "INVALID_INPUT", "INVALID_SWAP_PARAMS", "AMOUNT_TOO_LOW", "AMOUNT_TOO_HIGH", "SLIPPAGE_TOO_HIGH", "SLIPPAGE_TOO_LOW", "TOKEN_NOT_FOUND", "TOKEN_NOT_SUPPORTED", "NATIVE_ASSET_UNSUPPORTED", "UNSUPPORTED_CHAIN", "REFUEL_UNSUPPORTED_ROUTE", "RWA_NATIVE_TOKEN_UNSUPPORTED", "INVALID_TICK_SIZE", "INVALID_ORDER_TYPE", "INVALID_SIDE", "PREDICT_ORDER_SIZE_TOO_SMALL", "MISSING_FLAG", "MISSING_SWAP_PARAMS", "MISSING_CHAIN", "INVALID_CHAIN"]);
+const INSUFFICIENT = new Set(["INSUFFICIENT_FUNDS", "INSUFFICIENT_GAS", "INSUFFICIENT_BALANCE", "INSUFFICIENT_LP_BALANCE", "PREDICT_INSUFFICIENT_BALANCE", "PREDICT_INSUFFICIENT_FUNDING_BALANCE", "PREDICT_INSUFFICIENT_GAS"]);
+const INVALID = new Set(["INVALID_AMOUNT", "INVALID_INPUT", "INVALID_SWAP_PARAMS", "AMOUNT_TOO_LOW", "AMOUNT_TOO_HIGH", "SLIPPAGE_TOO_HIGH", "SLIPPAGE_TOO_LOW", "TOKEN_NOT_FOUND", "TOKEN_NOT_SUPPORTED", "NATIVE_ASSET_UNSUPPORTED", "UNSUPPORTED_CHAIN", "REFUEL_UNSUPPORTED_ROUTE", "RWA_NATIVE_TOKEN_UNSUPPORTED", "INVALID_TICK_SIZE", "INVALID_ORDER_TYPE", "INVALID_SIDE", "PREDICT_ORDER_SIZE_TOO_SMALL", "MISSING_FLAG", "MISSING_SWAP_PARAMS", "MISSING_CHAIN", "INVALID_CHAIN", "INVALID_SYMBOL", "INVALID_SIZE", "INVALID_LEVERAGE", "INVALID_PRICE", "INVALID_SLIPPAGE", "AMBIGUOUS_VAULT"]);
 const PERMISSION = new Set(["WRONG_WALLET_MODE", "TX_DENIED", "TX_EXPIRED", "PREDICT_SETUP_REQUIRED", "PREDICT_AUTH_REQUIRED", "PREDICT_INSUFFICIENT_ALLOWANCE"]);
 const UNAUTHORIZED = new Set(["AUTH_FAILED", "AUTH_ERROR", "TOKEN_INVALID", "TOKEN_REFRESH_FAILED", "NOT_INITIALIZED", "PREDICT_AUTH_INVALID"]);
 const REGION_CODES = new Set(["PREDICT_GEOBLOCKED", "PREDICT_UNAVAILABLE_FOR_LEGAL_REASONS", "RWA_GEO_RESTRICTED"]);
@@ -257,10 +304,18 @@ interface PmSpot {
   tick: number;
   min: number;
 }
+/** a Hyperliquid perpetual as `mm perps markets` lists it: its coin, the decimals of a size, the most leverage it takes */
+interface PerpSpot {
+  kind: "perp";
+  coin: string;
+  szDecimals: number;
+  maxLeverage: number | undefined;
+  mark: number | undefined;
+}
 interface Seen {
   m: Market;
   at: number;
-  spot: SwapSpot | PmSpot;
+  spot: SwapSpot | PmSpot | PerpSpot;
 }
 interface PmInfo {
   slug: string;
@@ -275,13 +330,24 @@ interface PmInfo {
   tick: number;
   min: number;
   at: number;
+  /** what Gamma's market says beyond the order rules, which mm passes on: the pUSD traded in it in 24 hours (`volume24hr`, the market's,
+   * which its outcomes share), the change of its price in 24 hours (`oneDayPriceChange`, absolute: the first outcome's, whose price
+   * Gamma's market price is), and its event's category when the caller knows it */
+  volume24h?: number | undefined;
+  change24h?: number | undefined;
+  category?: string | undefined;
 }
 
-type Parsed = { kind: "swap"; token: string; chain: ChainName } | { kind: "predict"; tokenId: string } | { kind: "predict"; slug: string; outcome: string };
+type Parsed = { kind: "swap"; token: string; chain: ChainName } | { kind: "predict"; tokenId: string } | { kind: "predict"; slug: string; outcome: string } | { kind: "perp"; coin: string };
 
-/** `ETH/USDC@Base` is a swap; `<slug>:<outcome>` or an outcome's token id is a Polymarket order */
+/** `<COIN>-PERP` (BTC-PERP, kPEPE-PERP): a perpetual on Hyperliquid's main market, by the coin's name there */
+const PERP = /^([A-Za-z0-9]{1,20})-PERP$/i;
+
+/** `ETH/USDC@Base` is a swap; `<slug>:<outcome>` or an outcome's token id is a Polymarket order; `BTC-PERP` a Hyperliquid perpetual */
 function parseSymbol(venue: string, symbol: string): Parsed | Refusal {
   const s = symbol.trim();
+  const pp = PERP.exec(s);
+  if (pp) return { kind: "perp", coin: pp[1]! };
   // the token goes to mm as its own argv element after --to: one that starts with "-" would be read as a flag (--yes executes at once)
   const sw = /^([^/@\s-][^/@\s]*)\/([^/@\s]+)@(.+)$/.exec(s);
   if (sw) {
@@ -294,7 +360,7 @@ function parseSymbol(venue: string, symbol: string): Parsed | Refusal {
   if (/^\d{20,80}$/.test(s)) return { kind: "predict", tokenId: s };
   const pm = /^([a-z0-9][a-z0-9-]*):(.+)$/i.exec(s);
   if (pm) return { kind: "predict", slug: pm[1]!, outcome: pm[2]!.trim() };
-  return no("E_ACCOUNT_BAD_ACTION", { venue, message: "a market here is a swap, <TOKEN>/USDC@<chain> (for example ETH/USDC@Base), or a Polymarket outcome, <market slug>:<outcome> (for example will-it-rain-tomorrow:Yes)" });
+  return no("E_ACCOUNT_BAD_ACTION", { venue, message: "a market here is a swap, <TOKEN>/USDC@<chain> (for example ETH/USDC@Base), a Polymarket outcome, <market slug>:<outcome> (for example will-it-rain-tomorrow:Yes), or a Hyperliquid perpetual, <COIN>-PERP (for example BTC-PERP)" });
 }
 
 /** a swap's id at mm is its quote id; the trade's hash, or the wallet job waiting for Guard's approval, rides after it */
@@ -332,8 +398,9 @@ export interface MmTraderDeps {
   now: () => number;
 }
 
-export function mmTrader(d: MmTraderDeps): LiveTrader {
-  const { venue, run, env, now } = d;
+/** mm's language, as the trader and the earner both speak it: its failures read, its refusals turned into the account's (mm's own code and
+ * words in `native`), MetaMask's own switch, and the BYOK secrets mm reads from its environment kept out of everything shown */
+function mmVoice(venue: string, run: RunMm, env: Record<string, string | undefined>) {
   // the BYOK secrets mm reads from its environment (its skill: set MM_PASSWORD and MM_MNEMONIC rather than pass them inline)
   const secrets = [env.MM_PASSWORD, env.MM_MNEMONIC];
   // redacted before the whitespace is folded, so a secret over several lines is still found
@@ -342,14 +409,6 @@ export function mmTrader(d: MmTraderDeps): LiveTrader {
   const writesOn = (): boolean => env.PORTFOLIO_MM_WRITES === "1";
   const off = (commands: string[][]): Refusal =>
     no("E_WALLET_LIVE_WRITES_OFF", { venue, message: `MetaMask's own switch is off (PORTFOLIO_MM_WRITES is not 1). ${commands.length > 1 ? "The commands that would run" : "The command that would run"}: ${commands.map(cmd).join(", then ")}`, detail: { commands: commands.map(cmd) } });
-
-  const seen = new Map<string, Seen>();
-  const infos = new Map<string, PmInfo>();
-  /** what place() knew of a swap, for reading its fill: lost on a restart, when mm's own legs are read instead */
-  const swaps = new Map<string, { side: "buy" | "sell"; qty: number; spent: number; feeUsd: number | undefined }>();
-  /** mm takes no client order id (7.0.0), so the account's id is honoured here: a retry with it is the same order, not a second one */
-  const placing = new Map<string, Promise<OrderState | Refusal>>();
-  let chains: { at: number; list: ChainName[] } | undefined;
 
   const failureOf = (err: unknown): MmFailure & { notices: MmNotice[] } => {
     if (err instanceof MmError) return { code: err.code, message: err.said, hint: err.hint, notices: err.notices };
@@ -367,14 +426,15 @@ export function mmTrader(d: MmTraderDeps): LiveTrader {
     const say = (code: Code, message: string): Refusal => no(code, { venue, message, native });
     const m = f.message;
     if (REGION_CODES.has(f.code) || /closed only mode/i.test(m) || REGION.test(m)) return say("E_VENUE_GEOBLOCKED", `${who} does not serve this location: that is its own rule, and the account does not look for a way around it`);
-    if (INSUFFICIENT.has(f.code) || /insufficient (funds|balance|native balance|token balance)|not enough balance/i.test(m)) return say("E_VENUE_INSUFFICIENT", `${who}: not enough to ${doing} (${words})`);
+    if (INSUFFICIENT.has(f.code) || /insufficient (funds|balance|native balance|token balance|margin)|not enough balance/i.test(m)) return say("E_VENUE_INSUFFICIENT", `${who}: not enough to ${doing} (${words})`);
     if (f.code === "TX_DENIED" || f.code === "TX_EXPIRED") return say("E_VENUE_PERMISSION", `MetaMask's Guard asked you to approve this, and ${f.code === "TX_DENIED" ? "it was denied" : "the approval window passed"}: nothing was sent`);
     if (f.code === "PREDICT_SETUP_REQUIRED" || f.code === "PREDICT_AUTH_REQUIRED") return say("E_VENUE_PERMISSION", `the wallet is not set up to trade on ${PM}: run mm predict setup --wait in a terminal first`);
     if (f.code === "PREDICT_INSUFFICIENT_ALLOWANCE") return say("E_VENUE_PERMISSION", `the Predict deposit wallet has not allowed ${PM}'s exchange to use its funds: run mm predict approve --wait in a terminal`);
     if (PERMISSION.has(f.code) || /address banned/i.test(m)) return say("E_VENUE_PERMISSION", `${who} refused to ${doing}: ${words}`);
     if (UNAUTHORIZED.has(f.code) || /unauthori[sz]ed|invalid api key/i.test(m)) return say("E_VENUE_UNAUTHORIZED", who === PM ? `${PM} no longer accepts mm's trading credentials: run mm predict auth --refresh in a terminal` : "mm is not signed in, or MetaMask no longer accepts its session: sign in with mm in a terminal (mm wallet show must work)");
     if (f.code === "RWA_MARKET_UNAVAILABLE" || /not yet ready|no orderbook exists|cancel-only|post-only mode|trading is currently disabled/i.test(m)) return say("E_VENUE_MARKET_CLOSED", `${who} takes no orders here now: ${words}`);
-    if (INVALID.has(f.code) || /invalid price|invalid tick size|tick size rule|align to tick|lower than the minimum|invalid expiration/i.test(m)) return { ...badOrder(venue, who, words), native };
+    // a post-only order that would have taken at once is refused as written ("invalid post-only order: order crosses book")
+    if (INVALID.has(f.code) || /invalid price|invalid tick size|tick size rule|align to tick|lower than the minimum|invalid expiration|invalid post-only order|crosses (the )?book|minimum value of \$/i.test(m)) return { ...badOrder(venue, who, words), native };
     if (DOWN.has(f.code) || /too many requests|HTTP (429|5\d\d)|order timed out|\b425\b|ECONNRESET|ETIMEDOUT/i.test(m)) return say("E_VENUE_UNREACHABLE", f.code === "ENOENT" || f.code === "UNSUPPORTED_NODE" ? `mm could not run on this machine: ${words}` : `${who} did not answer in time, or is limiting requests: try again in a minute`);
     if (when === "track" && (UNKNOWN_ORDER.has(f.code) || /invalid orderid|not found/i.test(m))) return say("E_ACCOUNT_ORDER_UNKNOWN", `${who} does not know this order: ${words}`);
     return say("E_VENUE_REJECTED", `${who} refused to ${doing}: ${words}`);
@@ -388,6 +448,30 @@ export function mmTrader(d: MmTraderDeps): LiveTrader {
     }
   };
   const unread = (who: string, args: string[]): Refusal => no("E_VENUE_REJECTED", { venue, message: `${who} answered in a way this connection could not read`, native: { command: cmd(args) } });
+
+  /** a wallet job mm stopped waiting for (Guard asking the owner, a timeout that may still land): its polling id, from mm's notices or words */
+  const jobOf = (f: MmFailure & { notices: MmNotice[] }): string | undefined => f.notices.find((n) => str(n.pollingId))?.pollingId ?? /requests watch\s+([\w-]+)/.exec(`${f.hint ?? ""} ${f.message}`)?.[1] ?? /\(request ([\w-]+)\)/.exec(f.message)?.[1];
+  /** is it a wallet job that may still go through, rather than a refusal: Guard's approval asked for, or mm stopped waiting */
+  const mayLand = (f: MmFailure & { notices: MmNotice[] }): { mfa: boolean } | undefined => {
+    const mfa = (f.code === "EXECUTE_FAILED" && /awaiting MFA approval/i.test(f.message)) || f.notices.some((n) => n.kind === "AWAITING_MFA");
+    const noHash = f.code === "EXECUTE_FAILED" && /no hash is available yet/i.test(f.message);
+    return MAY_LAND.has(f.code) || mfa || noHash ? { mfa } : undefined;
+  };
+
+  return { said, cmd, writesOn, off, failureOf, saidNo, call, unread, jobOf, mayLand };
+}
+
+export function mmTrader(d: MmTraderDeps): LiveTrader & { kinds: MarketKind[] } {
+  const { venue, run, env, now } = d;
+  const { said, cmd, writesOn, off, failureOf, saidNo, call, unread } = mmVoice(venue, run, env);
+
+  const seen = new Map<string, Seen>();
+  const infos = new Map<string, PmInfo>();
+  /** what place() knew of a swap, for reading its fill: lost on a restart, when mm's own legs are read instead */
+  const swaps = new Map<string, { side: "buy" | "sell"; qty: number; spent: number; feeUsd: number | undefined }>();
+  /** mm takes no client order id (7.0.0), so the account's id is honoured here: a retry with it is the same order, not a second one */
+  const placing = new Map<string, Promise<OrderState | Refusal>>();
+  let chains: { at: number; list: ChainName[] } | undefined;
 
   // ---- swaps -------------------------------------------------------------------------------------
 
@@ -494,7 +578,9 @@ export function mmTrader(d: MmTraderDeps): LiveTrader {
 
   async function placeSwap(o: OrderRequest, s: Seen & { spot: SwapSpot }): Promise<OrderState | Refusal> {
     const { m, spot } = s;
-    if (o.type !== "market") return badOrder(venue, SWAPS, "a swap is a market order: mm takes no limit price");
+    if (o.type !== "market" || o.stopPrice !== undefined) return badOrder(venue, SWAPS, "a swap is a market order: mm takes no limit or stop price");
+    // nothing more to choose: a swap lands whole on chain or reverts, and mm takes no time in force, post-only or reduce-only for it
+    if (o.tif !== undefined || o.postOnly || o.reduceOnly) return badOrder(venue, SWAPS, "a swap takes no time in force, post-only or reduce-only: it lands whole on chain, or reverts");
     if (!(o.qty > 0) || !onStep(o.qty, m.qtyStep)) return badOrder(venue, SWAPS, `a size of ${m.base} moves in steps of ${plain(m.qtyStep ?? 0)}`, { qtyStep: m.qtyStep });
     const sell = o.side === "sell";
     const tokenArg = spot.token.native ? spot.token.symbol : spot.token.address;
@@ -558,7 +644,7 @@ export function mmTrader(d: MmTraderDeps): LiveTrader {
     try {
       data = await call(args, SWAPS, `read swap ${short(r.quoteId)}`, "track");
     } catch (e) {
-      return e as Refusal;
+      return isRefusal(e) ? e : asRefusal(venue, "MetaMask", e);
     }
     const x = obj(data);
     const st = str(x?.status).toUpperCase();
@@ -602,7 +688,7 @@ export function mmTrader(d: MmTraderDeps): LiveTrader {
     try {
       data = await call(args, "MetaMask", `read wallet request ${pollingId}`, "track");
     } catch (e) {
-      return e as Refusal;
+      return isRefusal(e) ? e : asRefusal(venue, "MetaMask", e);
     }
     const job = arr(obj(data)?.requests)
       .map(obj)
@@ -633,6 +719,23 @@ export function mmTrader(d: MmTraderDeps): LiveTrader {
     return names.map((n, i) => ({ name: str(n), tokenId: str(ids[i]), price: num(prices[i]) })).filter((o) => o.tokenId !== "");
   };
 
+  /** one Gamma market as mm passes it on (`markets get`, and each market of `events list`) */
+  const infoOf = (m: Record<string, unknown>, category?: string): PmInfo => {
+    const volume24h = known(m.volume24hr);
+    const change24h = known(m.oneDayPriceChange);
+    return { slug: str(m.slug), question: str(m.question) || str(m.slug), conditionId: str(m.conditionId), outcomes: outcomesOf(m), active: m.active === true, closed: m.closed === true, accepting: m.acceptingOrders !== false, orderBook: m.enableOrderBook !== false, endDate: str(m.endDate), tick: num(m.orderPriceMinTickSize), min: num(m.orderMinSize), at: now(), ...(volume24h !== undefined && volume24h >= 0 ? { volume24h } : {}), ...(change24h !== undefined ? { change24h } : {}), ...(category ? { category } : {}) };
+  };
+  /** what a Polymarket outcome's market says beyond its order rules, as the account's market fields: the change only on the first outcome,
+   * the question its outcomes share by its condition id */
+  const pmExtra = (info: PmInfo, i: number, outcome: string): Partial<Market> => ({
+    ...(i === 0 && info.change24h !== undefined ? { change24h: info.change24h } : {}),
+    ...(info.volume24h !== undefined ? { volumeUsd24h: info.volume24h } : {}),
+    ...(info.endDate ? { closeTime: info.endDate } : {}),
+    ...(info.category ? { category: info.category } : {}),
+    group: { id: info.conditionId, title: info.question },
+    outcome,
+  });
+
   /** `mm predict markets get --market <slug | id | condition id>`: kept five minutes for lookups, asked again for a fresh market */
   async function pmInfo(key: string, fresh: boolean): Promise<PmInfo | Refusal> {
     const hit = infos.get(key.toLowerCase());
@@ -642,11 +745,11 @@ export function mmTrader(d: MmTraderDeps): LiveTrader {
     try {
       data = await call(args, PM, `look up ${key}`, "order");
     } catch (e) {
-      return e as Refusal;
+      return isRefusal(e) ? e : asRefusal(venue, "MetaMask", e);
     }
     const m = obj(obj(obj(data)?.result)?.market);
     if (!m) return unread(PM, args);
-    const info: PmInfo = { slug: str(m.slug), question: str(m.question) || str(m.slug), conditionId: str(m.conditionId), outcomes: outcomesOf(m), active: m.active === true, closed: m.closed === true, accepting: m.acceptingOrders !== false, orderBook: m.enableOrderBook !== false, endDate: str(m.endDate), tick: num(m.orderPriceMinTickSize), min: num(m.orderMinSize), at: now() };
+    const info = infoOf(m);
     if (!info.conditionId || !info.outcomes.length) return unread(PM, args);
     for (const k of [key, info.slug, info.conditionId, ...info.outcomes.map((o) => o.tokenId)]) if (k) infos.set(k.toLowerCase(), info);
     return info;
@@ -659,7 +762,7 @@ export function mmTrader(d: MmTraderDeps): LiveTrader {
     try {
       data = await call(args, PM, `read the book of ${short(tokenId)}`, "order");
     } catch (e) {
-      return e as Refusal;
+      return isRefusal(e) ? e : asRefusal(venue, "MetaMask", e);
     }
     const b = obj(obj(obj(data)?.result)?.book);
     if (!b) return unread(PM, args);
@@ -702,7 +805,9 @@ export function mmTrader(d: MmTraderDeps): LiveTrader {
     const why = whyClosed(info);
     const price = book.bid !== undefined && book.ask !== undefined ? (book.bid + book.ask) / 2 : (book.last ?? (outcome.price || undefined));
     const symbol = info.slug ? `${info.slug}:${outcome.name}` : tokenId;
-    const m: Market = { symbol, name: `${info.question} · ${outcome.name}`, kind: "event", base: outcome.name, quote: "pUSD", price: price !== undefined ? sig(price) : undefined, bid: book.bid, ask: book.ask, minQty: min || undefined, qtyStep: 0.01, priceStep: tick, open: why === undefined, note: why ?? PM_NOTE, types: ["limit", "market"] };
+    // what mm predict place takes here: GTC, IOC (FAK) and FOK, and --post-only; no reduce-only flag and no leverage, so neither is said
+    // a sell can only be of shares the deposit wallet holds: it closes a position, never opens one the other way (sellsReduce)
+    const m: Market = { symbol, name: `${info.question} · ${outcome.name}`, kind: "event", base: outcome.name, quote: "pUSD", price: price !== undefined ? sig(price) : undefined, bid: book.bid, ask: book.ask, minQty: min || undefined, qtyStep: 0.01, priceStep: tick, open: why === undefined, note: why ?? PM_NOTE, types: ["limit", "market"], tifs: [...PM_TIFS], postOnly: true, sellsReduce: true, ...pmExtra(info, info.outcomes.indexOf(outcome), outcome.name) };
     seen.set(symbol.toUpperCase(), { m, at: now(), spot: { kind: "predict", tokenId, conditionId: info.conditionId, tick, min } });
     return m;
   }
@@ -713,7 +818,7 @@ export function mmTrader(d: MmTraderDeps): LiveTrader {
     try {
       data = await call(args, PM, "say whether it serves this location", "order");
     } catch (e) {
-      return e as Refusal;
+      return isRefusal(e) ? e : asRefusal(venue, "MetaMask", e);
     }
     const g = obj(obj(data)?.result) ?? obj(data);
     // the IP mm reports is left out of everything kept
@@ -723,24 +828,46 @@ export function mmTrader(d: MmTraderDeps): LiveTrader {
     return undefined;
   }
 
+  /** the order type mm sends Polymarket, or why there is none. A limit order rests (GTC) unless IOC or FOK is asked, at its limit; a market
+   * order fills at once, FAK unless FOK is asked, at its worst price. Post-only is for an order that rests: mm refuses --post-only with FOK
+   * or FAK, so it is refused here first, before Polymarket's region check or anything else is asked */
+  function pmOrderType(o: OrderRequest): "GTC" | "FAK" | "FOK" | Refusal {
+    const tif = o.tif ?? (o.type === "market" ? "ioc" : "gtc");
+    // its own keys only: "constructor" is not a time in force, and nothing but GTC, FAK or FOK reaches mm's argv
+    const ot = Object.hasOwn(PM_ORDER_TYPES, tif) ? PM_ORDER_TYPES[tif] : undefined;
+    const names = PM_TIFS.map((t) => t.toUpperCase());
+    if (!ot) return badOrder(venue, PM, `mm places ${names.slice(0, -1).join(", ")} or ${names.at(-1)} orders here, not ${String(tif).toUpperCase()}`);
+    if (o.type === "market" && ot === "GTC") return badOrder(venue, PM, "a market order fills at once (IOC or FOK): only a limit order rests until canceled");
+    if (o.postOnly && o.type !== "limit") return badOrder(venue, PM, "post-only is for a limit order");
+    if (o.postOnly && ot !== "GTC") return badOrder(venue, PM, `a post-only order rests on the book or is refused, and ${tif.toUpperCase()} never rests: mm takes --post-only only for an order that rests (GTC)`);
+    return ot;
+  }
+
   async function placePm(o: OrderRequest, s: Seen & { spot: PmSpot }): Promise<OrderState | Refusal> {
     const { m, spot } = s;
     const { tick, min, tokenId } = spot;
+    // Polymarket through mm takes a limit or a market order, never a stop, and mm has no reduce-only flag for it
+    if (o.type !== "limit" && o.type !== "market") return badOrder(venue, PM, `mm places limit and market orders here, not ${String(o.type).replace("_", "-")} orders`);
+    if (o.stopPrice !== undefined) return badOrder(venue, PM, "mm places no stop orders here, so an order carries no stop price");
+    if (o.reduceOnly) return badOrder(venue, PM, "mm takes no reduce-only flag for an order here");
+    const ot = pmOrderType(o);
+    if (isRefusal(ot)) return ot;
     if (!(o.qty > 0) || !onStep(o.qty, 0.01)) return badOrder(venue, PM, "a size is in shares, in steps of 0.01", { qtyStep: 0.01 });
     if (min > 0 && o.qty < min - 1e-9) return badOrder(venue, PM, `the smallest order in ${m.name} is ${plain(min)} shares`, { minQty: min });
+    // the price mm is sent: a limit order's limit (where it rests, or the worst an IOC or FOK fill may take), or a market order's worst price,
+    // snapped to the tick on the safe side. An IOC or FOK buy spends size × price, and may get more shares
     let price: number;
     if (o.type === "limit") {
       price = o.limitPrice ?? NaN;
       if (!(price > 0) || !onStep(price, tick)) return badOrder(venue, PM, `a price in ${m.name} moves in steps of ${plain(tick)}`, { priceStep: tick });
     } else {
-      // a market order is FAK at its worst price, snapped to the tick on the safe side; a FAK buy spends size × price and may get more shares
       const book = o.side === "buy" ? m.ask : m.bid;
       const worst = o.worstPrice ?? (book === undefined ? undefined : o.side === "buy" ? book * (1 + ROOM) : book * (1 - ROOM));
       if (worst === undefined) return badOrder(venue, PM, `nothing is on the ${o.side === "buy" ? "ask" : "bid"} side of ${m.name}: a limit order can rest there instead`);
       price = o.side === "buy" ? Math.min(floorTo(worst, tick), floorTo(1 - tick, tick)) : Math.max(ceilTo(worst, tick), tick);
     }
     if (price < tick - 1e-9 || price > 1 - tick + 1e-9) return badOrder(venue, PM, `a price is between ${plain(tick)} and ${plain(1 - tick)}`, { priceStep: tick });
-    const args = ["predict", "place", "--token-id", tokenId, "--side", o.side, "--size", plain(o.qty, 2), "--price", plain(price, 6), "--order-type", o.type === "limit" ? "GTC" : "FAK", "--json"];
+    const args = ["predict", "place", "--token-id", tokenId, "--side", o.side, "--size", plain(o.qty, 2), "--price", plain(price, 6), "--order-type", ot, ...(o.postOnly ? ["--post-only"] : []), "--json"];
     const geo = ["predict", "geoblock", "--json"];
     if (!writesOn()) return off([geo, args]);
     const blocked = await geoblock(geo);
@@ -749,7 +876,7 @@ export function mmTrader(d: MmTraderDeps): LiveTrader {
     try {
       data = await call(args, PM, `${o.side} ${plain(o.qty)} ${m.base} shares in ${m.name}`, "order", { timeoutMs: MM_WRITE_TIMEOUT_MS });
     } catch (e) {
-      return e as Refusal;
+      return isRefusal(e) ? e : asRefusal(venue, "MetaMask", e);
     }
     const res = obj(obj(obj(data)?.result)?.response);
     // an ok envelope is not acceptance: Polymarket can answer 200 with success false and its reason
@@ -761,8 +888,10 @@ export function mmTrader(d: MmTraderDeps): LiveTrader {
     let filled = shares;
     if (st === "matched") {
       if (shares <= 0) filled = o.qty;
-      // a FAK order never rests: what did not fill at once was canceled. A GTC order's remainder rests on the book: partly filled, still open
-      status = shares > 0 && shares < o.qty - 1e-9 ? (o.type === "market" ? "canceled" : "partial") : "filled";
+      // FOK filled whole, or it would have been refused. A FAK order never rests: what did not fill at once was canceled. A GTC order's
+      // remainder rests on the book: partly filled, still open
+      const part = shares > 0 && shares < o.qty - 1e-9;
+      status = !part || ot === "FOK" ? "filled" : ot === "FAK" ? "canceled" : "partial";
     } else if (st === "live") status = shares > 0 ? "partial" : "open";
     // delayed: marketable, matched after the market's delay; unmatched: taken, not matched; anything else Polymarket adds: taken, not known
     else status = "pending";
@@ -796,7 +925,7 @@ export function mmTrader(d: MmTraderDeps): LiveTrader {
     try {
       data = await call(args, PM, `list the open orders in ${short(cid)}`, "track");
     } catch (e) {
-      return e as Refusal;
+      return isRefusal(e) ? e : asRefusal(venue, "MetaMask", e);
     }
     const orders = arr(obj(obj(data)?.result)?.orders).map(obj);
     const o = orders.find((x) => str(x?.id) === ref);
@@ -819,7 +948,7 @@ export function mmTrader(d: MmTraderDeps): LiveTrader {
     try {
       data = await call(args, PM, `cancel ${short(ref)}`, "track");
     } catch (e) {
-      return e as Refusal;
+      return isRefusal(e) ? e : asRefusal(venue, "MetaMask", e);
     }
     const resp = obj(obj(obj(data)?.result)?.response);
     const canceled = arr(resp?.canceled).map(str);
@@ -830,12 +959,329 @@ export function mmTrader(d: MmTraderDeps): LiveTrader {
     return no("E_VENUE_REJECTED", { venue, message: `${PM} did not cancel ${short(ref)}${why ? `: ${said(why)}` : ""}`, native });
   }
 
+  // ---- what is held ------------------------------------------------------------------------------
+
+  /** one of Polymarket's Data API rows as the account's position: shares of one outcome, always held long (no one sells short there), under
+   * the symbol the account gives that outcome, so it is the market market() opens and the one a sell of those shares is placed in */
+  const positionOf = (p: Record<string, unknown>): Position | undefined => {
+    const qty = num(p.size);
+    const tokenId = str(p.asset);
+    const slug = str(p.slug);
+    const outcome = str(p.outcome);
+    const symbol = /^[a-z0-9][a-z0-9-]*$/i.test(slug) && outcome ? `${slug}:${outcome}` : tokenId;
+    if (!(qty > 0) || !symbol) return undefined;
+    const entry = known(p.avgPrice);
+    const mark = known(p.curPrice);
+    const usd = known(p.currentValue);
+    const pnl = known(p.cashPnl);
+    // resolved: no longer traded, waiting for mm predict redeem (a winning share pays 1 pUSD, a losing one nothing)
+    const resolved = p.redeemable === true;
+    return {
+      symbol,
+      name: `${str(p.title) || slug || short(tokenId)}${outcome ? ` · ${outcome}` : ""}${resolved ? " (resolved)" : ""}`,
+      kind: "event",
+      side: "long",
+      qty,
+      ...(entry !== undefined && entry > 0 ? { entryPrice: entry } : {}),
+      ...(mark !== undefined ? { markPrice: mark } : {}),
+      ...(usd !== undefined ? { usd } : {}),
+      ...(pnl !== undefined ? { unrealizedUsd: pnl } : {}),
+      native: { tokenId, conditionId: str(p.conditionId), outcome, size: qty, avgPrice: entry, curPrice: mark, currentValue: usd, cashPnl: pnl, redeemable: resolved, ...(p.mergeable === true ? { mergeable: true } : {}), ...(str(p.endDate) ? { endDate: str(p.endDate) } : {}) },
+    };
+  };
+
+  /** `mm predict positions`: what the Predict deposit wallet holds at Polymarket. mm passes on Polymarket's Data API rows (GET /positions for
+   * the deposit wallet) as they come, asked with the API's own defaults: the 100 largest, each of at least one share. A read: it moves
+   * nothing, so MetaMask's switch is not asked */
+  async function pmPositions(): Promise<Position[] | Refusal> {
+    const args = ["predict", "positions", "--json"];
+    let data: unknown;
+    try {
+      data = await run<unknown>(args);
+    } catch (err) {
+      const f = failureOf(err);
+      // mm asks whether the deposit wallet is deployed before it reads anything: a wallet that never set up Predict holds nothing there
+      if (f.code === "PREDICT_SETUP_REQUIRED") return [];
+      return saidNo(f, PM, "list what the Predict deposit wallet holds", args, "order");
+    }
+    const rows = obj(obj(data)?.result)?.positions;
+    if (!Array.isArray(rows)) return unread(PM, args);
+    return rows.flatMap((r) => {
+      const p = obj(r);
+      const x = p ? positionOf(p) : undefined;
+      return x ? [x] : [];
+    });
+  }
+
+  // ---- perpetuals (Hyperliquid, through mm perps) ------------------------------------------------------------
+
+  let perpList: { at: number; rows: Array<Record<string, unknown>> } | undefined;
+  /** the leverage each perpetual opens at: what was set here (setLeverage), else the open position's, else 1x */
+  const leverageSet = new Map<string, number>();
+  const perpSymbol = (coin: string): string => `${coin}-PERP`;
+  const nextHour = (): string => new Date(Math.floor(now() / 3_600_000) * 3_600_000 + 3_600_000).toISOString();
+
+  /** one row of `mm perps markets` (the SDK's PerpsMarket: symbol, maxLeverage, sizeDecimals, markPrice, oraclePrice, fundingRate,
+   * openInterest, volume24h — Hyperliquid's own asset context, as strings) as the account's market */
+  const perpOf = (r: Record<string, unknown>): { m: Market; spot: PerpSpot } | undefined => {
+    const coin = str(r.symbol);
+    const sz = Number(r.sizeDecimals);
+    if (!/^[A-Za-z0-9]{1,20}$/.test(coin) || !Number.isInteger(sz) || sz < 0 || sz > 10 || r.isHip3 === true) return undefined;
+    const mark = knownFigure(r.markPrice);
+    const maxLev = knownFigure(r.maxLeverage);
+    const funding = knownFigure(r.fundingRate);
+    const volume = knownFigure(r.volume24h);
+    const step = Number((10 ** -sz).toFixed(sz));
+    const m: Market = {
+      symbol: perpSymbol(coin),
+      name: `${coin} perpetual on ${HL}`,
+      kind: "perp",
+      base: coin,
+      quote: "USDC",
+      ...(mark !== undefined && mark > 0 ? { price: mark } : {}),
+      minQty: step,
+      qtyStep: step,
+      priceStep: Number((10 ** -Math.max(0, HL_PRICE_DECIMALS - sz)).toFixed(Math.max(0, HL_PRICE_DECIMALS - sz))),
+      minNotional: HL_MIN_USD,
+      open: true,
+      note: PERP_NOTE,
+      types: ["market", "limit"],
+      ...(maxLev !== undefined && maxLev >= 1 ? { maxLeverage: maxLev } : {}),
+      // Hyperliquid pays funding every hour: the rate is the hour's, and it is paid on the hour
+      ...(funding !== undefined ? { fundingRate: funding, nextFundingAt: nextHour() } : {}),
+      ...(volume !== undefined && volume >= 0 ? { volumeUsd24h: volume } : {}),
+    };
+    return { m, spot: { kind: "perp", coin, szDecimals: sz, maxLeverage: maxLev, mark } };
+  };
+
+  /** `mm perps markets`: every perpetual of Hyperliquid's main market, kept five minutes. A read: no region check, no switch */
+  async function perpRows(): Promise<Array<Record<string, unknown>> | Refusal> {
+    if (perpList && now() - perpList.at < LIST_MS) return perpList.rows;
+    const args = ["perps", "markets", "--venue", "hyperliquid", "--json"];
+    let data: unknown;
+    try {
+      data = await call(args, HL, "list its perpetuals", "order");
+    } catch (e) {
+      return isRefusal(e) ? e : asRefusal(venue, "MetaMask", e);
+    }
+    if (!Array.isArray(data)) return unread(HL, args);
+    perpList = { at: now(), rows: data.map((x) => obj(x)).filter((x): x is Record<string, unknown> => x !== undefined) };
+    return perpList.rows;
+  }
+
+  /** one perpetual, read afresh: `mm perps markets --symbol` */
+  async function perpMarket(asked: string): Promise<Market | Refusal> {
+    // Hyperliquid names a coin in its own case (kPEPE): the listing already read says which, where it has been read
+    const coin = str(perpList?.rows.find((r) => same(str(r.symbol), asked))?.symbol) || asked;
+    const args = ["perps", "markets", "--venue", "hyperliquid", "--symbol", coin, "--json"];
+    let data: unknown;
+    try {
+      data = await call(args, HL, `read ${coin}`, "order");
+    } catch (e) {
+      return isRefusal(e) ? e : asRefusal(venue, "MetaMask", e);
+    }
+    const row = arr(data).map(obj).find((r) => r && same(str(r.symbol), coin));
+    const got = row ? perpOf(row) : undefined;
+    if (!got) return no("E_VENUE_REJECTED", { venue, message: `${HL} lists no perpetual ${coin} on its main market`, native: { command: cmd(args) } });
+    seen.set(got.m.symbol.toUpperCase(), { m: got.m, at: now(), spot: got.spot });
+    return got.m;
+  }
+
+  /** Hyperliquid's own line, held to where this machine is. mm 7.0.0 has no region check for its perpetuals: the place is the one mm says
+   * (`mm predict geoblock`: Polymarket's look-up of this machine's address, of which only the country and the region are kept — never the
+   * address, and never Polymarket's own verdict, which is Polymarket's rule and not Hyperliquid's). Restricted, or not known, and nothing
+   * is sent */
+  async function hlLine(doing: string): Promise<Refusal | undefined> {
+    const args = ["predict", "geoblock", "--json"];
+    let country = "";
+    let region = "";
+    try {
+      const data = await run<unknown>(args);
+      const g = obj(obj(data)?.result) ?? obj(data);
+      country = str(g?.country).toUpperCase();
+      region = str(g?.region).toUpperCase();
+    } catch (err) {
+      const f = failureOf(err);
+      // mm's region guard answers with the place in its words: "… not available in your region (PA, US)"
+      const where = f.code === "PREDICT_GEOBLOCKED" ? /\(([^)]*)\)/.exec(f.message)?.[1]?.split(",").map((x) => x.trim().toUpperCase()) : undefined;
+      if (where?.length) {
+        country = where.at(-1) ?? "";
+        region = where.length > 1 ? where[0]! : "";
+      }
+      if (!/^[A-Z]{2}$/.test(country)) return no("E_VENUE_REJECTED", { venue, message: `mm could not say where this machine is, so ${HL}'s own line (its Terms of Use §1.6) could not be checked: nothing was sent`, native: { command: cmd(args), code: f.code, said: said(f.message) } });
+    }
+    if (!/^[A-Z]{2}$/.test(country)) return no("E_VENUE_REJECTED", { venue, message: `mm did not say where this machine is, so ${HL}'s own line (its Terms of Use §1.6) could not be checked: nothing was sent`, native: { command: cmd(args) } });
+    const at = region ? `${country}-${region}` : country;
+    if (HL_CLOSED.countries.has(country) || HL_CLOSED.regions.has(at)) return no("E_VENUE_GEOBLOCKED", { venue, message: `${HL} does not serve this location (${at}, where mm places this machine): its Terms of Use (§1.6) close it to anyone located in the United States, Ontario or a sanctioned territory. That is its own rule, and the account does not look for a way around it. Nothing was sent to ${doing}`, native: { command: cmd(args), country, ...(region ? { region } : {}), terms: HL_TERMS } });
+    return undefined;
+  }
+
+  /** an order's answer from `mm perps open` or a row of `mm perps close` (the SDK's: venue, symbol, orderId, status filled · resting ·
+   * submitted · rejected, averagePrice, filledSize, error) as the account's order, or Hyperliquid's refusal in its own words */
+  const perpState = (row: Record<string, unknown> | undefined, args: string[], qty: number, doing: string, clientId: string): OrderState | Refusal => {
+    if (!row) return unread(HL, args);
+    const st = str(row.status).toLowerCase();
+    const filled = knownFigure(row.filledSize) ?? 0;
+    const avg = knownFigure(row.averagePrice);
+    const native = { command: cmd(args), answer: { orderId: str(row.orderId), status: st, ...(str(row.averagePrice) ? { averagePrice: str(row.averagePrice) } : {}), ...(str(row.filledSize) ? { filledSize: str(row.filledSize) } : {}), ...(str(row.error) ? { error: said(str(row.error)) } : {}) } };
+    if (st === "rejected") return { ...saidNo({ code: "ORDER_REJECTED", message: str(row.error) || `${HL} rejected it and gave no reason` }, HL, doing, args, "order"), native };
+    const status: OrderStatus = st === "filled" ? (filled > 0 && filled < qty - 1e-12 ? "canceled" : "filled") : st === "resting" ? (filled > 0 ? "partial" : "open") : "pending";
+    // an IOC that filled in part is done: what did not fill at once was canceled. Without an order id the order is the account's own id
+    return { ref: str(row.orderId) || `hl:${clientId}`, status, filledQty: status === "filled" && filled === 0 ? qty : filled, ...(avg !== undefined && avg > 0 ? { avgPrice: avg } : {}), native };
+  };
+
+  /** a limit price as Hyperliquid takes it: five significant figures at most (a whole number always), and no more decimals than the market's */
+  const hlPriceOk = (px: number, szDecimals: number): boolean => {
+    if (Number.isInteger(px)) return true;
+    const decimals = plain(px).split(".")[1]?.length ?? 0;
+    const digits = plain(px).replace(".", "").replace(/^0+/, "").length;
+    return decimals <= Math.max(0, HL_PRICE_DECIMALS - szDecimals) && digits <= 5;
+  };
+
+  async function leverageFor(coin: string): Promise<number> {
+    const set = leverageSet.get(coin.toUpperCase());
+    if (set !== undefined) return set;
+    const held = await perpPositionsRaw();
+    const pos = isRefusal(held) ? undefined : held.find((p) => same(str(p.symbol), coin));
+    const lev = knownFigure(pos?.leverage);
+    return lev !== undefined && lev >= 1 ? Math.floor(lev) : 1;
+  }
+
+  async function placePerp(o: OrderRequest, s: Seen & { spot: PerpSpot }): Promise<OrderState | Refusal> {
+    const { m, spot } = s;
+    if (o.type !== "market" && o.type !== "limit") return badOrder(venue, HL, `mm places market and limit orders here, not ${String(o.type).replace("_", "-")} orders`);
+    if (o.stopPrice !== undefined) return badOrder(venue, HL, "mm places no stop orders here");
+    if (o.tif !== undefined) return badOrder(venue, HL, "mm takes no time in force here: a market order is Hyperliquid's IOC, a limit order rests until canceled (GTC)");
+    if (o.postOnly || o.reduceOnly) return badOrder(venue, HL, "mm takes no post-only or reduce-only flag for an order here (a position is closed with a close)");
+    if (!(o.qty > 0) || !onStep(o.qty, m.qtyStep)) return badOrder(venue, HL, `a size of ${spot.coin} moves in steps of ${plain(m.qtyStep ?? 0)}`, { qtyStep: m.qtyStep });
+    const lev = await leverageFor(spot.coin);
+    if (spot.maxLeverage !== undefined && lev > spot.maxLeverage) return badOrder(venue, HL, `${spot.coin} takes at most ${spot.maxLeverage}x; it is set to ${lev}x here`);
+    const side = o.side === "buy" ? "long" : "short";
+    let how: string[];
+    if (o.type === "limit") {
+      const px = o.limitPrice ?? NaN;
+      if (!(px > 0) || !hlPriceOk(px, spot.szDecimals)) return badOrder(venue, HL, `a price in ${spot.coin} has at most five significant figures and ${Math.max(0, HL_PRICE_DECIMALS - spot.szDecimals)} decimals (a whole number always passes)`, { priceStep: m.priceStep });
+      how = ["--type", "limit", "--limit-px", plain(px)];
+    } else {
+      // a market order is Hyperliquid's IOC within --max-slippage-bps of the mark mm reads; the bound is the account's worst price, from
+      // the mark this trader read a moment ago
+      const mark = m.price;
+      const worst = o.worstPrice ?? (mark === undefined ? undefined : side === "long" ? mark * (1 + ROOM) : mark * (1 - ROOM));
+      if (mark === undefined || worst === undefined) return badOrder(venue, HL, `${HL} shows no mark price for ${spot.coin} right now: a limit order can be placed instead`);
+      const bps = Math.floor((side === "long" ? worst / mark - 1 : 1 - worst / mark) * 10_000 + 1e-9);
+      if (!(bps >= 1)) return no("E_ACCOUNT_REQUOTE", { venue, message: `the mark moved past the worst price (${plain(sig(worst))} against ${plain(sig(mark))}): nothing was placed`, detail: { worstPrice: worst, mark } });
+      how = ["--type", "market", "--max-slippage-bps", String(Math.min(bps, 1000))];
+    }
+    const args = ["perps", "open", "--venue", "hyperliquid", "--symbol", spot.coin, "--side", side, "--size", plain(o.qty, spot.szDecimals), "--leverage", String(lev), ...how, "--wallet-timeout", String(WALLET_TIMEOUT_S), "--json"];
+    const geo = ["predict", "geoblock", "--json"];
+    if (!writesOn()) return off([geo, args]);
+    const line = await hlLine(`${o.side} ${plain(o.qty)} ${spot.coin}`);
+    if (line) return line;
+    let data: unknown;
+    try {
+      data = await call(args, HL, `${o.side} ${plain(o.qty)} ${spot.coin}`, "order", { timeoutMs: MM_WRITE_TIMEOUT_MS });
+    } catch (e) {
+      return isRefusal(e) ? e : asRefusal(venue, "MetaMask", e);
+    }
+    return perpState(obj(data), args, o.qty, `${o.side} ${plain(o.qty)} ${spot.coin}`, o.clientId);
+  }
+
+  /** `mm perps positions`: the SDK's rows (symbol, side, size, entryPrice, positionValue, unrealizedPnl, marginUsed, leverage,
+   * liquidationPrice) of Hyperliquid's main market. An account that never deposited holds nothing there */
+  async function perpPositionsRaw(): Promise<Array<Record<string, unknown>> | Refusal> {
+    const args = ["perps", "positions", "--venue", "hyperliquid", "--json"];
+    let data: unknown;
+    try {
+      data = await call(args, HL, "list what the Hyperliquid account holds", "order");
+    } catch (e) {
+      return isRefusal(e) ? e : asRefusal(venue, "MetaMask", e);
+    }
+    if (!Array.isArray(data)) return unread(HL, args);
+    return data.map((x) => obj(x)).filter((x): x is Record<string, unknown> => x !== undefined);
+  }
+
+  async function perpPositions(): Promise<Position[] | Refusal> {
+    const rows = await perpPositionsRaw();
+    if (isRefusal(rows)) return rows;
+    return rows.flatMap((r) => {
+      const coin = str(r.symbol);
+      const qty = knownFigure(r.size) ?? 0;
+      if (!/^[A-Za-z0-9]{1,20}$/.test(coin) || r.isHip3 === true || !(qty > 0)) return [];
+      const value = knownFigure(r.positionValue);
+      const entry = knownFigure(r.entryPrice);
+      const pnl = knownFigure(r.unrealizedPnl);
+      const lev = knownFigure(r.leverage);
+      const liq = knownFigure(r.liquidationPrice);
+      const p: Position = { symbol: perpSymbol(coin), name: `${coin} perpetual on ${HL}`, kind: "perp", side: str(r.side) === "short" ? "short" : "long", qty, ...(entry !== undefined && entry > 0 ? { entryPrice: entry } : {}), ...(value !== undefined ? { usd: Math.abs(value), markPrice: Math.abs(value) / qty } : {}), ...(pnl !== undefined ? { unrealizedUsd: pnl } : {}), ...(lev !== undefined ? { leverage: lev } : {}), ...(liq !== undefined && liq > 0 ? { liquidationPrice: liq } : {}), native: { coin, side: str(r.side), size: str(r.size), entryPrice: str(r.entryPrice), positionValue: str(r.positionValue), unrealizedPnl: str(r.unrealizedPnl), marginUsed: str(r.marginUsed), leverage: lev, ...(str(r.liquidationPrice) ? { liquidationPrice: str(r.liquidationPrice) } : {}) } };
+      return [p];
+    });
+  }
+
+  /** the order as `mm perps orders` lists it while it rests. mm 7.0.0 has no look-up by id, and lists only the resting ones */
+  async function perpOpen(ref: string, coin: string): Promise<OrderState | Refusal> {
+    const args = ["perps", "orders", "--venue", "hyperliquid", "--json"];
+    let data: unknown;
+    try {
+      data = await call(args, HL, "list the resting orders", "track");
+    } catch (e) {
+      return isRefusal(e) ? e : asRefusal(venue, "MetaMask", e);
+    }
+    const o = arr(data).map(obj).find((x) => str(x?.orderId) === ref);
+    if (!o) return no("E_ACCOUNT_ORDER_UNKNOWN", { venue, message: `${HL} no longer lists ${ref} among the resting orders, and mm has no call that says whether it filled or was canceled: mm perps positions shows what is held`, native: { command: cmd(args), coin } });
+    const size = knownFigure(o.size) ?? 0;
+    const original = knownFigure(o.originalSize) ?? size;
+    const filled = Math.max(0, sig(original - size));
+    return { ref, status: filled > 0 ? "partial" : "open", filledQty: filled, ...(filled > 0 && knownFigure(o.limitPrice) ? { avgPrice: knownFigure(o.limitPrice) } : {}), native: { command: cmd(args), order: { orderId: ref, symbol: str(o.symbol), side: str(o.side), size: str(o.size), originalSize: str(o.originalSize), limitPrice: str(o.limitPrice) } } };
+  }
+
+  /** `mm perps cancel --order-id`: taking an order off the book moves nothing, so neither the switch nor the region is asked */
+  async function cancelPerp(ref: string, coin: string): Promise<OrderState | Refusal> {
+    const before = await perpOpen(ref, coin);
+    if (isRefusal(before) || DONE.has(before.status)) return before;
+    if (!/^\d{1,20}$/.test(ref)) return no("E_ACCOUNT_ORDER_UNKNOWN", { venue, message: `${ref} is not an order id ${HL} gave` });
+    const args = ["perps", "cancel", "--venue", "hyperliquid", "--order-id", ref, "--symbol", coin, "--json"];
+    let data: unknown;
+    try {
+      data = await call(args, HL, `cancel ${ref}`, "track");
+    } catch (e) {
+      return isRefusal(e) ? e : asRefusal(venue, "MetaMask", e);
+    }
+    const r = obj(data);
+    if (r?.ok === true) return { ...before, status: "canceled", native: { command: cmd(args), answer: { orderId: str(r.orderId), ok: true }, before: before.native } };
+    return no("E_VENUE_REJECTED", { venue, message: `${HL} did not cancel ${ref}${str(r?.error) ? `: ${said(str(r?.error))}` : ""}`, native: { command: cmd(args) } });
+  }
+
+  /** `mm perps close --symbol --size`: Hyperliquid's own reduce-only IOC within 2% of the mid. Region first; then MetaMask's switch */
+  async function closePerp(coin: string, qty: number, clientId: string): Promise<OrderState | Refusal> {
+    const held = await perpPositionsRaw();
+    if (isRefusal(held)) return held;
+    const pos = held.find((p) => same(str(p.symbol), coin));
+    const have = knownFigure(pos?.size) ?? 0;
+    if (!(have > 0)) return no("E_ACCOUNT_BAD_ACTION", { venue, message: `${HL} shows no position in ${coin}` });
+    const all = qty >= have - 1e-12;
+    const spot = seen.get(perpSymbol(coin).toUpperCase())?.spot;
+    const sz = spot?.kind === "perp" ? spot.szDecimals : 8;
+    const args = ["perps", "close", "--venue", "hyperliquid", "--symbol", str(pos?.symbol) || coin, ...(all ? [] : ["--size", plain(Math.min(qty, have), sz)]), "--max-slippage-bps", String(ROOM * 10_000), "--wallet-timeout", String(WALLET_TIMEOUT_S), "--json"];
+    const geo = ["predict", "geoblock", "--json"];
+    if (!writesOn()) return off([geo, args]);
+    const line = await hlLine(`close ${plain(qty)} ${coin}`);
+    if (line) return line;
+    let data: unknown;
+    try {
+      data = await call(args, HL, `close ${plain(qty)} ${coin}`, "order", { timeoutMs: MM_WRITE_TIMEOUT_MS });
+    } catch (e) {
+      return isRefusal(e) ? e : asRefusal(venue, "MetaMask", e);
+    }
+    const row = arr(data).map(obj).find((r) => r && same(str(r.symbol), coin));
+    return perpState(row, args, all ? have : qty, `close ${plain(qty)} ${coin}`, clientId);
+  }
+
   // ---- the trader --------------------------------------------------------------------------------------
 
   async function market(symbol: string): Promise<Market | Refusal> {
     const p = parseSymbol(venue, symbol);
     if (isRefusal(p)) return p;
-    return p.kind === "swap" ? swapMarket(p) : pmMarket(p);
+    return p.kind === "swap" ? swapMarket(p) : p.kind === "perp" ? perpMarket(p.coin) : pmMarket(p);
   }
 
   async function fresh(symbol: string): Promise<Seen | Refusal> {
@@ -850,7 +1296,20 @@ export function mmTrader(d: MmTraderDeps): LiveTrader {
     const s = await fresh(o.symbol);
     if (isRefusal(s)) return s;
     if (!s.m.open) return no("E_VENUE_MARKET_CLOSED", { venue, message: `${s.m.name} takes no orders now${s.m.note ? ` (${s.m.note})` : ""}` });
-    return s.spot.kind === "swap" ? placeSwap(o, s as Seen & { spot: SwapSpot }) : placePm(o, s as Seen & { spot: PmSpot });
+    return s.spot.kind === "swap" ? placeSwap(o, s as Seen & { spot: SwapSpot }) : s.spot.kind === "perp" ? placePerp(o, s as Seen & { spot: PerpSpot }) : placePm(o, s as Seen & { spot: PmSpot });
+  }
+
+  /** one order per client id: a retry with the same id is the same order, never a second one */
+  function place(o: OrderRequest): Promise<OrderState | Refusal> {
+    const prior = placing.get(o.clientId);
+    if (prior) return prior;
+    const p = placeOnce(o);
+    placing.set(o.clientId, p);
+    // a refusal placed nothing: the same id may be tried again
+    void p.then((r) => {
+      if (isRefusal(r)) placing.delete(o.clientId);
+    });
+    return p;
   }
 
   /** the chains mm swaps on (`mm chains list`, kept five minutes), among those with a pinned USDC */
@@ -861,7 +1320,7 @@ export function mmTrader(d: MmTraderDeps): LiveTrader {
     try {
       data = await call(args, "MetaMask", "list its chains", "order");
     } catch (e) {
-      return e as Refusal;
+      return isRefusal(e) ? e : asRefusal(venue, "MetaMask", e);
     }
     const ids = new Set(
       arr(obj(data)?.chains)
@@ -876,8 +1335,16 @@ export function mmTrader(d: MmTraderDeps): LiveTrader {
   const listed = (chain: ChainName, token: string): Market => ({ symbol: `${token}/USDC@${chain}`, name: `${token} on ${chain}`, kind: "token", base: token, quote: "USDC", open: true, note: SWAP_NOTE, types: ["market"] });
   const pmListed = (info: PmInfo): Market[] => {
     const why = whyClosed(info);
-    return info.outcomes.map((o) => ({ symbol: info.slug ? `${info.slug}:${o.name}` : o.tokenId, name: `${info.question} · ${o.name}`, kind: "event", base: o.name, quote: "pUSD", price: o.price || undefined, minQty: info.min || undefined, qtyStep: 0.01, priceStep: info.tick || undefined, open: why === undefined, note: why ?? PM_NOTE, types: ["limit", "market"] }));
+    return info.outcomes.map((o, i) => ({ symbol: info.slug ? `${info.slug}:${o.name}` : o.tokenId, name: `${info.question} · ${o.name}`, kind: "event", base: o.name, quote: "pUSD", price: o.price || undefined, minQty: info.min || undefined, qtyStep: 0.01, priceStep: info.tick || undefined, open: why === undefined, note: why ?? PM_NOTE, types: ["limit", "market"], tifs: [...PM_TIFS], postOnly: true, sellsReduce: true, ...pmExtra(info, i, o.name) }));
   };
+  /** a category as Polymarket's tag slug, which `--tag-slug` takes: "Climate & Science" → climate-science (never a leading "-": it is an argv
+   * element, and one that starts with "-" would be read as a flag) */
+  const tagSlug = (category: string): string =>
+    category
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "");
   /** a Polymarket market is found by what `mm predict markets get` takes: its slug or its condition id (a bare number is not taken for
    * Gamma's market id: a search for "2026" would list an unrelated market). Free text is not searched: the output of
    * `mm predict markets search` is not documented */
@@ -889,7 +1356,8 @@ export function mmTrader(d: MmTraderDeps): LiveTrader {
 
   return {
     can: "unknown",
-    what: `token swaps against USDC on ${SWAP_CHAINS.join(", ")}, and Polymarket prediction orders, sent by MetaMask's mm`,
+    what: `token swaps against USDC on ${SWAP_CHAINS.join(", ")}, Polymarket prediction orders and Hyperliquid perpetuals, sent by MetaMask's mm`,
+    kinds: ["token", "event", "perp"],
     async markets(query) {
       const list = await swapChains();
       if (isRefusal(list)) return list;
@@ -901,6 +1369,13 @@ export function mmTrader(d: MmTraderDeps): LiveTrader {
       // a whole swap symbol typed in is offered as it is, priced when it is opened
       const p = q ? parseSymbol(venue, q) : undefined;
       if (p && !isRefusal(p) && p.kind === "swap" && list.includes(p.chain) && !out.some((m) => same(m.symbol, `${p.token}/USDC@${p.chain}`))) out.unshift(listed(p.chain, p.token));
+      // Hyperliquid's perpetuals: the busiest few to start from, or the ones matching what was typed (`BTC`, `BTC-PERP`). A venue that does
+      // not answer leaves them out of the list, and the list stands
+      const rows = await perpRows();
+      if (!isRefusal(rows)) {
+        const perps = rows.map(perpOf).filter((x): x is { m: Market; spot: PerpSpot } => x !== undefined).sort((a, b) => (b.m.volumeUsd24h ?? 0) - (a.m.volumeUsd24h ?? 0)).map((x) => x.m);
+        out.push(...(q ? pick(perps, q.replace(/-PERP$/i, ""), 8) : perps.slice(0, 5)));
+      }
       const key = q ? pmKey(q) : undefined;
       if (key) {
         const info = await pmInfo(key, false);
@@ -909,21 +1384,12 @@ export function mmTrader(d: MmTraderDeps): LiveTrader {
       return out.slice(0, 20);
     },
     market,
-    place(o) {
-      const prior = placing.get(o.clientId);
-      if (prior) return prior;
-      const p = placeOnce(o);
-      placing.set(o.clientId, p);
-      // a refusal placed nothing: the same id may be tried again
-      void p.then((r) => {
-        if (isRefusal(r)) placing.delete(o.clientId);
-      });
-      return p;
-    },
+    place,
     async cancel(ref, symbol) {
       const p = parseSymbol(venue, symbol);
       if (isRefusal(p)) return p;
       if (p.kind === "predict") return cancelPm(ref, symbol);
+      if (p.kind === "perp") return cancelPerp(ref, p.coin);
       const s = await swapStatus(ref, symbol);
       if (isRefusal(s) || DONE.has(s.status)) return s;
       return no("E_VENUE_REJECTED", { venue, message: `${SWAPS} have no cancel: a swap mm sent lands whole or reverts on chain, and one waiting for Guard's approval is stopped by denying it in the email or on MetaMask Mobile`, native: s.native });
@@ -932,8 +1398,334 @@ export function mmTrader(d: MmTraderDeps): LiveTrader {
       const p = parseSymbol(venue, symbol);
       if (isRefusal(p)) return p;
       if (p.kind === "swap") return swapStatus(ref, symbol);
+      if (p.kind === "perp") return perpOpen(ref, p.coin);
       const r = await pmOpen(ref, symbol);
       return isRefusal(r) ? r : r.state;
+    },
+    /** what is held: the shares at Polymarket and the positions at Hyperliquid. Either venue not answering is the answer: a list without
+     * one of them would read as nothing held there */
+    async positions() {
+      const [pm, hl] = await Promise.all([pmPositions(), perpPositions()]);
+      if (isRefusal(pm)) return pm;
+      if (isRefusal(hl)) return hl;
+      return [...pm, ...hl];
+    },
+    /** a position closed: at Hyperliquid by its own close (mm perps close); at Polymarket by selling the shares, a market order at the
+     * account's 2% room under the bid, as the account would send it (no amend: mm has no command that changes an order in place) */
+    async close(symbol, qty, clientId) {
+      const p = parseSymbol(venue, symbol);
+      if (isRefusal(p)) return p;
+      if (p.kind === "perp") return closePerp(p.coin, qty, clientId);
+      if (p.kind === "predict") return place({ symbol, side: "sell", type: "market", qty, clientId });
+      return no("E_VENUE_RAIL_CLOSED", { venue, message: `a token in the wallet is not a position: sell it as a swap (${SWAPS})` });
+    },
+    /** a perpetual's leverage at Hyperliquid (mm perps modify --leverage): what its next order opens at, and its open position's now. mm
+     * sets no margin mode: Hyperliquid's own applies (cross, unless the market is isolated-only) */
+    async setLeverage(symbol, leverage, marginMode) {
+      const p = parseSymbol(venue, symbol);
+      if (isRefusal(p)) return p;
+      if (p.kind !== "perp") return no("E_VENUE_RAIL_CLOSED", { venue, message: "leverage is set on a Hyperliquid perpetual here, nothing else" });
+      if (marginMode !== undefined) return badOrder(venue, HL, "mm sets no margin mode: Hyperliquid's own applies (cross, unless the market is isolated-only)");
+      const s = await fresh(symbol);
+      if (isRefusal(s)) return s;
+      const spot = s.spot as PerpSpot;
+      if (!Number.isInteger(leverage) || leverage < 1 || (spot.maxLeverage !== undefined && leverage > spot.maxLeverage)) return badOrder(venue, HL, `${spot.coin} takes whole leverage from 1x to ${spot.maxLeverage ?? "its maximum"}x`);
+      const args = ["perps", "modify", "--venue", "hyperliquid", "--symbol", spot.coin, "--leverage", String(leverage), "--wallet-timeout", String(WALLET_TIMEOUT_S), "--json"];
+      const geo = ["predict", "geoblock", "--json"];
+      if (!writesOn()) return off([geo, args]);
+      const line = await hlLine(`set ${spot.coin} to ${leverage}x`);
+      if (line) return line;
+      let data: unknown;
+      try {
+        data = await call(args, HL, `set ${spot.coin} to ${leverage}x`, "order", { timeoutMs: MM_WRITE_TIMEOUT_MS });
+      } catch (e) {
+        return isRefusal(e) ? e : asRefusal(venue, "MetaMask", e);
+      }
+      const row = arr(data).map(obj).find((r) => r && same(str(r.symbol), spot.coin));
+      if (!row || str(row.status).toLowerCase() === "rejected") return saidNo({ code: "ORDER_REJECTED", message: str(row?.error) || `${HL} did not take the leverage` }, HL, `set ${spot.coin} to ${leverage}x`, args, "order");
+      leverageSet.set(spot.coin.toUpperCase(), leverage);
+      return { leverage, native: { command: cmd(args), answer: { status: str(row.status) } } };
+    },
+
+    /** Polymarket's event contracts to discover, through `mm predict events list` (predict.md): its events with Gamma's filters — active
+     * ones (--active), the busiest first, in one tag when a category is asked (--tag-slug), ending within the window when one is asked
+     * (--end-date-min, --end-date-max; each market's own end date is held to it too). mm answers {result: {events}}, Gamma's events as they
+     * come with each market's outcomes folded into {name, price, tokenId} (mm 7.0.0's source). Every outcome of every market open for
+     * orders among them is a market, the markets most traded in 24 hours first; a market whose token ids mm could not read is left out. The
+     * category is the event's tag that was asked for, in Polymarket's words, or the event's `category` should Gamma send one. A read: the
+     * region check is for orders, and MetaMask's switch is not asked. No price history: predict.md documents none for an outcome */
+    async events({ category, closingWithinMs, limit }) {
+      const n = Math.min(200, Math.floor(limit));
+      if (!(n > 0)) return [];
+      if (closingWithinMs !== undefined && !(Number.isFinite(closingWithinMs) && closingWithinMs > 0)) return no("E_ACCOUNT_BAD_ACTION", { venue, message: "a window for markets closing soon is a number of milliseconds, more than 0" });
+      const tag = category !== undefined ? tagSlug(category) : undefined;
+      if (tag === "") return no("E_ACCOUNT_BAD_ACTION", { venue, message: `a category at ${PM} is one of its tags, in words ("Sports", "Crypto"), not "${String(category).slice(0, 40)}"` });
+      const at = now();
+      const until = closingWithinMs !== undefined ? at + closingWithinMs : undefined;
+      // mm's help lists "volume_24hr" for --order, which Gamma refuses ("order fields are not valid", OBSERVED 2026-10-05); mm passes the value
+      // on as it is, so Gamma's own field name is sent
+      const args = ["predict", "events", "list", "--active", "--order", "volume24hr", "--limit", String(Math.min(20, Math.max(5, Math.ceil(n / 2)))), ...(tag ? ["--tag-slug", tag] : []), ...(until !== undefined ? ["--end-date-min", new Date(at).toISOString(), "--end-date-max", new Date(until).toISOString()] : []), "--json"];
+      let data: unknown;
+      try {
+        data = await call(args, PM, "list its events", "order");
+      } catch (e) {
+        return isRefusal(e) ? e : asRefusal(venue, "MetaMask", e);
+      }
+      const events = obj(obj(data)?.result)?.events;
+      if (!Array.isArray(events)) return unread(PM, args);
+      const rows: Array<{ m: Market; vol: number }> = [];
+      const have = new Set<string>();
+      for (const e of events.map(obj)) {
+        if (!e) continue;
+        const asked = tag ? arr(e.tags).map(obj).find((t) => t?.slug === tag) : undefined;
+        // an event that lists its tags without the one asked for is not in that category, whatever came back
+        if (tag && Array.isArray(e.tags) && !asked) continue;
+        const cat = str(asked?.label) || str(e.category) || undefined;
+        for (const raw of arr(e.markets).map(obj)) {
+          if (!raw) continue;
+          const info = infoOf(raw, cat);
+          if (!info.conditionId || !info.outcomes.length || !info.outcomes.every((o) => /^\d+$/.test(o.tokenId))) continue;
+          if (until !== undefined && !(info.endDate && Date.parse(info.endDate) > at && Date.parse(info.endDate) <= until)) continue;
+          for (const m of pmListed(info)) {
+            if (!m.open || have.has(m.symbol)) continue;
+            have.add(m.symbol);
+            rows.push({ m, vol: info.volume24h ?? 0 });
+          }
+        }
+      }
+      // the busiest markets first; a market's outcomes stay together, in Gamma's order (the sort is stable)
+      return rows
+        .sort((a, b) => b.vol - a.vol)
+        .map((r) => r.m)
+        .slice(0, n);
+    },
+  };
+}
+
+// ---- earn (DeFi vaults, through mm earn) -------------------------------------------------------------------------
+
+export interface MmEarnerDeps extends MmTraderDeps {
+  /** a dollar price for a vault's asset that is not a dollar stablecoin */
+  price?: Price | undefined;
+}
+
+const EARN = "MetaMask's earn vaults";
+/** the vaults offered to start from: those holding at least this much, the highest yield first (a thin vault's yield is not a yield) */
+const EARN_MIN_TVL = "1000000";
+/** dollars as a vault's size is said: $4,000 · $1,000,000 */
+const usdWords = (n: number): string => `$${Math.round(n).toLocaleString("en-US")}`;
+const VAULT_ID = /^(\d{1,10}):(0x[0-9a-fA-F]{40})$/;
+
+/** The MetaMask Agent Wallet's earn: LI.FI's vaults through `mm earn` (earn.md). A product's id is `<chain id>:<vault address>`. Money goes
+ * in from the wallet on the vault's own chain and comes back to the wallet there: `--from-chain-id` is never sent, and `mm earn withdraw`
+ * takes no destination. mm lists only vaults that take deposits AND withdrawals (its own filter). Every supply and withdrawal waits for
+ * MetaMask's own switch as well as the server's, and MetaMask's Guard may ask the owner to approve it (mm waits up to ten minutes) */
+export function mmEarner(d: MmEarnerDeps): LiveEarner {
+  const { venue, run, env, now } = d;
+  const { said, cmd, writesOn, off, failureOf, saidNo, call, unread, jobOf, mayLand } = mmVoice(venue, run, env);
+  const lists = new Map<string, { at: number; rows: Array<Record<string, unknown>> }>();
+  const apys = new Map<string, number>();
+  const submit = once<EarnState>();
+  const chainOf = (id: number): string => CHAIN_BY_ID.get(id) ?? `chain ${id}`;
+  const landsOn = (id: number): string => `your ${d.name} on ${chainOf(id)}`;
+  const priceOf = async (asset: string): Promise<number | undefined> => {
+    if (isStable(asset)) return 1;
+    try {
+      const p = await d.price?.(asset);
+      return p !== undefined && p > 0 ? p : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+
+  /** one vault of `mm earn markets` (the SDK's Vault: address, chainId, name, protocol {name}, underlyingTokens, apy {base, reward, total} as
+   * fractions, apy7d, apy30d, tvlUsd, isTransactional, isRedeemable) as a product: one asset in, the same asset out */
+  const productOf = async (v: Record<string, unknown>): Promise<EarnProduct | undefined> => {
+    const chainId = Number(v.chainId);
+    const address = str(v.address);
+    const under = arr(v.underlyingTokens).map(obj);
+    if (!Number.isInteger(chainId) || !/^0x[0-9a-fA-F]{40}$/.test(address) || under.length !== 1 || !str(under[0]?.symbol)) return undefined;
+    const asset = str(under[0]!.symbol);
+    const apy = knownFigure(obj(v.apy)?.total) ?? knownFigure(v.apy30d) ?? undefined;
+    const id = `${chainId}:${address.toLowerCase()}`;
+    if (apy !== undefined) apys.set(id, apy);
+    const protocol = str(obj(v.protocol)?.name) || undefined;
+    const tvl = knownFigure(v.tvlUsd);
+    const price = await priceOf(asset);
+    // the floor the list is asked with holds at the door too: a vault named by its id is taken only if it holds as much as the ones shown
+    const thin = tvl === undefined || tvl < Number(EARN_MIN_TVL);
+    const closed = v.isTransactional === false;
+    return {
+      id,
+      asset,
+      name: `${str(v.name) || short(address)}${protocol ? ` · ${protocol}` : ""}`,
+      ...(apy !== undefined ? { apy, rateKind: "apy" as const } : {}),
+      ...(protocol ? { protocol } : {}),
+      chain: chainOf(chainId),
+      ...(tvl !== undefined ? { tvlUsd: tvl } : {}),
+      ...(price !== undefined ? { priceUsd: price } : {}),
+      lands: landsOn(chainId),
+      canSupply: !closed && !thin,
+      canWithdraw: v.isRedeemable !== false,
+      ...(closed ? { why: `${EARN}: this vault takes no deposits now` } : thin ? { why: `${tvl === undefined ? "mm does not say how much this vault holds" : `this vault holds ${usdWords(tvl)}`}: the account puts money only into vaults holding ${usdWords(Number(EARN_MIN_TVL))} or more (a thin vault's yield is not a yield). Money already in it can still come out` } : {}),
+      note: `a DeFi vault on ${chainOf(chainId)}${protocol ? ` (${protocol})` : ""}, through LI.FI: your ${d.name} puts ${asset} in and takes it back out on ${chainOf(chainId)}. Its yield moves with the market, and the vault's contracts carry their own risk. MetaMask's Guard may ask you to approve it first`,
+    };
+  };
+
+  /** `mm earn markets`, kept five minutes for each way it is asked */
+  async function vaults(args: string[], key: string): Promise<Array<Record<string, unknown>> | Refusal> {
+    const hit = lists.get(key);
+    if (hit && now() - hit.at < LIST_MS) return hit.rows;
+    let data: unknown;
+    try {
+      data = await call(args, EARN, "list its vaults", "order");
+    } catch (e) {
+      return isRefusal(e) ? e : asRefusal(venue, "MetaMask", e);
+    }
+    if (!Array.isArray(data)) return unread(EARN, args);
+    const rows = data.map((x) => obj(x)).filter((x): x is Record<string, unknown> => x !== undefined);
+    lists.set(key, { at: now(), rows });
+    return rows;
+  }
+
+  /** `mm earn positions`: the SDK's rows (chainId, vaultAddress, protocolName, asset {address, symbol, decimals}, balanceUsd, balanceNative in
+   * the asset's base units, LI.FI's earn API says) */
+  async function held(): Promise<Array<Record<string, unknown>> | Refusal> {
+    const args = ["earn", "positions", "--json"];
+    let data: unknown;
+    try {
+      data = await call(args, EARN, "list what the wallet holds in vaults", "order");
+    } catch (e) {
+      return isRefusal(e) ? e : asRefusal(venue, "MetaMask", e);
+    }
+    if (!Array.isArray(data)) return unread(EARN, args);
+    return data.map((x) => obj(x)).filter((x): x is Record<string, unknown> => x !== undefined);
+  }
+  const amountOfRow = (r: Record<string, unknown>): number => {
+    const raw = str(r.balanceNative);
+    const decimals = Number(obj(r.asset)?.decimals);
+    if (raw.includes(".") || !Number.isInteger(decimals)) return num(raw);
+    try {
+      return Number(formatUnits(BigInt(raw), decimals));
+    } catch {
+      return 0;
+    }
+  };
+
+  /** money in or out: one wallet job. A job mm stopped waiting for (Guard asking the owner, a timeout) is pending, never refused: it may
+   * still go through, and is not sent twice */
+  const send = (args: string[], doing: string, clientId: string): Promise<EarnState | Refusal> =>
+    submit(clientId, async () => {
+      if (!writesOn()) return off([args]);
+      let data: unknown;
+      try {
+        data = await run<unknown>(args, { timeoutMs: MM_WRITE_TIMEOUT_MS });
+      } catch (err) {
+        const f = failureOf(err);
+        const waits = mayLand(f);
+        if (!waits) return saidNo(f, EARN, doing, args, "order");
+        const job = jobOf(f);
+        return { ref: job ? `job:${job}` : `earn:${clientId}`, status: "pending", native: { command: cmd(args), waiting: waits.mfa ? "MetaMask's Guard asked you to approve this, by email or on MetaMask Mobile: it goes when you approve it" : "mm stopped waiting before it saw the transaction sent: MetaMask may still send it", code: f.code, said: said(f.message), ...(job ? { pollingId: job } : {}) } };
+      }
+      const x = obj(data);
+      const hash = str(x?.hash);
+      const job = str(obj(x?.pendingJob)?.pollingId);
+      if (!hash && !job) return unread(EARN, args);
+      return { ref: hash || `job:${job}`, status: hash ? "done" : "pending", native: { command: cmd(args), answer: { hash, ...(job ? { pollingId: job } : {}), vault: str(x?.vaultName), protocol: str(x?.protocol), symbol: str(x?.symbol), chainId: num(x?.chainId) } } };
+    });
+
+  const vaultOf = (p: EarnProduct): { chainId: number; address: string } | Refusal => {
+    const m = VAULT_ID.exec(p.id);
+    return m ? { chainId: Number(m[1]), address: m[2]! } : no("E_ACCOUNT_BAD_ACTION", { venue, message: `a vault here is <chain id>:<vault address> (for example 8453:0x…), not "${p.id.slice(0, 60)}"` });
+  };
+
+  return {
+    can: "unknown",
+    what: "DeFi vaults through MetaMask's mm earn (LI.FI)",
+    async products(asset) {
+      const token = asset?.trim();
+      if (token !== undefined && token !== "" && !/^[A-Za-z0-9.]{1,20}$/.test(token)) return no("E_ACCOUNT_BAD_ACTION", { venue, message: "an asset is its symbol: USDC, WETH" });
+      const args = ["earn", "markets", ...(token ? ["--token", token] : []), "--min-tvl", EARN_MIN_TVL, "--sort", "apy", "--limit", "40", "--json"];
+      const rows = await vaults(args, `top|${(token ?? "").toUpperCase()}`);
+      if (isRefusal(rows)) return rows;
+      const out: EarnProduct[] = [];
+      for (const r of rows) {
+        const p = await productOf(r);
+        if (p && (!token || same(p.asset, token))) out.push(p);
+      }
+      return out;
+    },
+    async product(id) {
+      const m = VAULT_ID.exec(id.trim());
+      if (!m) return no("E_ACCOUNT_BAD_ACTION", { venue, message: `a vault here is <chain id>:<vault address> (for example 8453:0x…), not "${id.slice(0, 60)}"` });
+      const chainId = m[1]!;
+      lists.delete(`chain|${chainId}`);
+      const rows = await vaults(["earn", "markets", "--chain-id", chainId, "--limit", "200", "--json"], `chain|${chainId}`);
+      if (isRefusal(rows)) return rows;
+      const row = rows.find((r) => same(str(r.address), m[2]!));
+      const listed = row ? await productOf(row) : undefined;
+      if (listed) return listed;
+      // a vault mm no longer lists (it stopped taking deposits): money can still come out of it, where the wallet holds some
+      const mine = await held();
+      if (isRefusal(mine)) return mine;
+      const pos = mine.find((r) => String(r.chainId) === chainId && same(str(r.vaultAddress), m[2]!));
+      if (!pos) return no("E_VENUE_REJECTED", { venue, message: `${EARN}: mm lists no vault ${short(m[2]!)} on ${chainOf(Number(chainId))} that takes deposits and withdrawals, and the wallet holds nothing in it` });
+      const asset = str(obj(pos.asset)?.symbol);
+      const price = await priceOf(asset);
+      return { id: `${chainId}:${m[2]!.toLowerCase()}`, asset, name: `${str(obj(pos.asset)?.name) || asset}${str(pos.protocolName) ? ` · ${str(pos.protocolName)}` : ""}`, ...(str(pos.protocolName) ? { protocol: str(pos.protocolName) } : {}), chain: chainOf(Number(chainId)), ...(price !== undefined ? { priceUsd: price } : {}), lands: landsOn(Number(chainId)), canSupply: false, canWithdraw: true, why: `${EARN}: mm no longer lists this vault as taking deposits` };
+    },
+    async positions() {
+      const rows = await held();
+      if (isRefusal(rows)) return rows;
+      return rows.flatMap((r) => {
+        const chainId = Number(r.chainId);
+        const address = str(r.vaultAddress);
+        const amount = amountOfRow(r);
+        if (!Number.isInteger(chainId) || !/^0x[0-9a-fA-F]{40}$/.test(address) || !(amount > 0)) return [];
+        const id = `${chainId}:${address.toLowerCase()}`;
+        const usd = knownFigure(r.balanceUsd);
+        const apy = apys.get(id);
+        const pos: EarnPosition = { product: id, id, asset: str(obj(r.asset)?.symbol), amount, ...(usd !== undefined ? { usd } : {}), ...(apy !== undefined ? { apy } : {}), name: `${str(obj(r.asset)?.name) || str(obj(r.asset)?.symbol)}${str(r.protocolName) ? ` · ${str(r.protocolName)}` : ""}`, chain: chainOf(chainId), ...(str(r.protocolName) ? { protocol: str(r.protocolName) } : {}) };
+        return [pos];
+      });
+    },
+    async supply(p, amount, clientId) {
+      const v = vaultOf(p);
+      if (isRefusal(v)) return v;
+      // the vault's own chain, from the wallet: never --from-chain-id, so nothing is bridged on the way in
+      const args = ["earn", "supply", "--vault", v.address, "--amount", plain(amount), "--chain-id", String(v.chainId), "--wallet-timeout", String(WALLET_TIMEOUT_S), "--json"];
+      return send(args, `put ${plain(amount)} ${p.asset} into ${p.name}`, clientId);
+    },
+    async withdraw(p, amount, clientId, all) {
+      const v = vaultOf(p);
+      if (isRefusal(v)) return v;
+      // back to the wallet itself, on the vault's chain: mm earn withdraw takes no destination
+      const args = ["earn", "withdraw", "--vault", v.address, "--chain-id", String(v.chainId), ...(all ? ["--all"] : ["--amount", plain(amount)]), "--wallet-timeout", String(WALLET_TIMEOUT_S), "--json"];
+      return send(args, `take ${all ? "all" : plain(amount)} ${p.asset} out of ${p.name}`, clientId);
+    },
+    /** a job that was waiting: `mm wallet requests list` (server-wallet mode) says whether Guard's approval came, was denied or lapsed */
+    async status(ref) {
+      if (/^0x[0-9a-fA-F]{64}$/.test(ref)) return { ref, status: "done", native: { hash: ref } };
+      const job = /^job:([\w-]+)$/.exec(ref)?.[1];
+      if (!job) return { ref, status: "pending", native: { note: "mm stopped waiting without naming its wallet job: mm wallet requests list shows it" } };
+      const args = ["wallet", "requests", "list", "--json"];
+      let data: unknown;
+      try {
+        data = await call(args, "MetaMask", `read wallet request ${job}`, "track");
+      } catch (e) {
+        return isRefusal(e) ? e : asRefusal(venue, "MetaMask", e);
+      }
+      const j = arr(obj(data)?.requests)
+        .map(obj)
+        .find((x) => str(x?.pollingId) === job);
+      if (!j) return { ref, status: "pending", native: { command: cmd(args), job } };
+      const st = str(j.status).toUpperCase();
+      const hash = str(j.txHash);
+      const native = { command: cmd(args), job: { pollingId: job, status: st, ...(hash ? { txHash: hash } : {}), ...(str(obj(j.intent)?.summary) ? { intent: str(obj(j.intent)?.summary) } : {}) } };
+      if (st === "DENIED" || st === "EXPIRED" || st === "FAILED" || st === "BROADCAST_FAILED") return { ref, status: "rejected", native };
+      // an approval's own transaction is not the deposit's: the job is done when its intent is the earn move itself and it has a hash
+      if (hash && !/^approve\b/i.test(str(obj(j.intent)?.summary))) return { ref: hash, status: "done", native };
+      return { ref, status: "pending", native };
     },
   };
 }

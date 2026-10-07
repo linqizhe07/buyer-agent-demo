@@ -56,11 +56,15 @@ export interface LiveWriter {
     swap: boolean | "unknown";
     /** money can be sent to it */
     receive: boolean;
-    /** money leaves it by the user's wallet, by mm, or not by this account */
-    send: "wallet" | "mm" | false;
+    /** money leaves it by the user's wallet, by mm, by a key this account holds (an agent wallet), or not by this account */
+    send: "wallet" | "mm" | "account" | false;
+    /** why a kind that is `false` is, in the venue's words, where the venue (not the key) is the reason: Polymarket's CLOB has no withdrawal
+     * call, Alpaca retired its. The door and the page quote it where they would otherwise speak of the key's permissions */
+    why?: Partial<Record<"withdraw" | "transfer" | "swap" | "send", string>> | undefined;
   };
-  /** where money for this venue goes on a network: the exchange's own deposit address, or the wallet's own address */
-  depositAddress(asset: string, network: ChainName): Promise<{ address: Hex; tag?: string | undefined } | Refusal>;
+  /** where money for this venue goes on a network: the exchange's own deposit address, or the wallet's own address. `note`: what the venue
+   * says of sending there (a minimum, what the money is credited as), for the owner */
+  depositAddress(asset: string, network: ChainName): Promise<{ address: Hex; tag?: string | undefined; note?: string | undefined } | Refusal>;
   /** what the venue charges to withdraw, in the asset, when it says */
   withdrawFee?(asset: string, network: ChainName): Promise<number | undefined>;
   withdraw?(r: { asset: string; amount: number; address: Hex; tag?: string | undefined; network: ChainName; clientId: string }): Promise<LiveReceipt | Refusal>;
@@ -68,7 +72,7 @@ export interface LiveWriter {
   swap?(r: { sell: string; buy: string; amount: number }): Promise<LiveReceipt | Refusal>;
   /** a browser wallet: the transaction the wallet is asked to send */
   walletTx?(r: { asset: string; amount: number; to: Hex; network: ChainName }): Promise<WalletTx | Refusal>;
-  /** the MetaMask Agent Wallet: mm sends it */
+  /** the MetaMask Agent Wallet: mm sends it · an agent wallet: the account signs and sends it */
   send?(r: { asset: string; amount: number; to: Hex; network: ChainName }): Promise<LiveReceipt | Refusal>;
   /** has something this venue started landed? */
   landed?(ref: string, asset: string, sinceMs: number): Promise<Landed>;
@@ -121,6 +125,14 @@ function keyMay(exchange: string, said: string[]): { withdraw: boolean | "unknow
   return { withdraw: /withdraw/.test(all), transfer: "unknown", swap: /trade/.test(all) };
 }
 
+/** the library's answer when an exchange has no deposit address for the asset yet: Kraken's InvalidAddress ("returned no addresses"), KuCoin's
+ * "returned an empty response, you might try to run createDepositAddress() first", or an answer with no address in it */
+const NO_ADDRESS_YET = /returned no addresses|empty response|createDepositAddress|no deposit address|address not found/i;
+
+/** the one call the connection's shape (live/exchange.ts) does not name: the library makes a deposit address where the exchange hands out
+ * none until one is made (Kraken, KuCoin, Coinbase) */
+type Depositing = ExchangeClient & { createDepositAddress?(code: string, params?: Record<string, unknown>): Promise<unknown> };
+
 export function exchangeWriter(client: ExchangeClient, venue: string, name: string, secrets: string[], probe: { can: string[] }, ledgers: string[]): LiveWriter {
   const said = (err: unknown) => redact(String((err as { message?: string })?.message ?? err).replace(/\s+/g, " ").slice(0, 240), secrets);
   const fail = (what: string, err: unknown): Refusal => {
@@ -150,13 +162,32 @@ export function exchangeWriter(client: ExchangeClient, venue: string, name: stri
       const n = await network(asset, chain);
       if ("ok" in n) return n;
       if (n.net.deposit === false) return no("E_VENUE_RAIL_CLOSED", { venue, message: `${name} takes no ${asset} deposits on ${chain} right now` });
-      try {
-        const r = (await client.fetchDepositAddress!(asset, { network: n.code })) as { address?: string; tag?: string | null };
+      type Given = { address?: string; tag?: string | null };
+      const fetch = async (): Promise<Given> => ((await client.fetchDepositAddress!(asset, { network: n.code })) ?? {}) as Given;
+      const shown = (r: Given): { address: Hex; tag?: string | undefined } | Refusal => {
         const address = evm(String(r.address ?? ""));
         if (!address) return no("E_VENUE_REJECTED", { venue, message: `${name} gave a deposit address that is not an EVM address` });
         return { address, ...(r.tag ? { tag: String(r.tag) } : {}) };
+      };
+      // Kraken, KuCoin and Coinbase hand out no address for an asset on a network until one is made: where the library has the call that makes
+      // one, it is made and the address asked for again; where it has not, the exchange's own words say so, and the owner makes it there
+      const none = (err: unknown) => String((err as { name?: string })?.name ?? "") === "InvalidAddress" || NO_ADDRESS_YET.test(said(err));
+      const making = client.has?.createDepositAddress === true && typeof (client as Depositing).createDepositAddress === "function";
+      let first: Given | undefined;
+      try {
+        first = await fetch();
+        if (first.address) return shown(first);
       } catch (err) {
-        return fail(`show its ${asset} deposit address on ${chain}`, err);
+        if (!none(err)) return fail(`show its ${asset} deposit address on ${chain}`, err);
+        if (!making) return no("E_VENUE_REJECTED", { venue, message: `${name} has no ${asset} deposit address on ${chain} yet, and the library has no call that makes one there: make it at ${name} first`, native: { error: String((err as { name?: string })?.name ?? ""), said: said(err) } });
+      }
+      if (!making) return no("E_VENUE_REJECTED", { venue, message: `${name} has no ${asset} deposit address on ${chain} yet, and the library has no call that makes one there: make it at ${name} first` });
+      try {
+        const made = ((await (client as Depositing).createDepositAddress!(asset, { network: n.code })) ?? {}) as Given;
+        const again = await fetch().catch(() => made);
+        return shown(again.address ? again : made);
+      } catch (err) {
+        return fail(`make its ${asset} deposit address on ${chain}`, err);
       }
     },
     async withdrawFee(asset, chain) {
@@ -167,9 +198,11 @@ export function exchangeWriter(client: ExchangeClient, venue: string, name: stri
       const n = await network(r.asset, r.network);
       if ("ok" in n) return n;
       if (n.net.withdraw === false) return no("E_VENUE_RAIL_CLOSED", { venue, message: `${name} takes no ${r.asset} withdrawals on ${r.network} right now` });
-      // the exchange's own id for the request, where it takes one: a retry is then the same withdrawal, not a second one
+      // the exchange's own id for the request, where it takes one: a retry is then the same withdrawal, not a second one (Binance's
+      // withdrawOrderId, OKX's clientId, Coinbase's idem: "if a previous transaction with the same idem parameter already exists for this
+      // sender, that previous transaction will be returned and a new one will not be created")
       const id = r.clientId.replace(/[^A-Za-z0-9]/g, "").slice(0, 32);
-      const idParam = client.id.startsWith("binance") ? { withdrawOrderId: id } : client.id.startsWith("okx") ? { clientId: id } : {};
+      const idParam = client.id.startsWith("binance") ? { withdrawOrderId: id } : client.id.startsWith("okx") ? { clientId: id } : client.id === "coinbase" ? { idem: id } : {};
       try {
         const t = (await client.withdraw!(r.asset, r.amount, r.address, r.tag, { network: n.code, ...idParam })) as { id?: string; txid?: string; status?: string };
         return { ref: String(t.id ?? ""), status: t.status === "ok" ? "settled" : "pending", native: { call: "withdraw", network: n.code, id: t.id ?? null, txid: t.txid ?? null, status: t.status ?? null } };

@@ -47,6 +47,8 @@ export interface Openness {
   blocklist: string[];
   guard: GuardKnobs;
   sessionExpiresAt: string;
+  /** the most leverage an agent may set on a perpetual (live-orders.ts); 1 unless the owner signed more */
+  maxLeverage?: number | undefined;
 }
 
 export function parseOpenness(raw: unknown): Openness {

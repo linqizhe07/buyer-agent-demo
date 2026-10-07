@@ -4,9 +4,18 @@
  * aggregator's transaction for the user's own wallet. This file is the one shape the account sees all of them through:
  *
  *   markets(query)      what can be traded there that matches a few letters
- *   market(symbol)      one market, with a fresh price, the smallest order, the steps of size and price, and whether it is open now
- *   place(order)        one order, at the venue, with the account's id for it (the venue's idempotency key, where it takes one)
+ *   market(symbol)      one market, with a fresh price, the smallest order, the steps of size and price, whether it takes orders now,
+ *                       and — a stock — the venue's trading session (in session now, when it next opens or closes)
+ *   place(order)        one order, at the venue, with the account's id for it (the venue's idempotency key, where it takes one):
+ *                       market, limit, stop (a market order once a trigger price is reached) or stop-limit, with the time in force,
+ *                       post-only and reduce-only flags the venue takes in that market
  *   cancel / status     what became of it: open, partly filled, filled, canceled, rejected
+ *   amend               an open order changed in place — its size, its limit, its stop — where the venue can
+ *   positions / close   what is held there (perpetuals, shares, event contracts), and a position closed at the venue
+ *   setLeverage         a perpetual's leverage and margin mode, where the venue lets it be set
+ *
+ * A trader offers only what its venue really takes: an option a market does not list (`types`, `tifs`, `postOnly`, `reduceOnly`) is
+ * refused by the account before the venue is asked, and a method a trader does not have is a door the account says is closed there.
  *
  * Nothing here decides WHETHER an order is placed. The account's door does that (account/live-orders.ts): the server's switch and cap, the
  * owner's signature or the agent's limit, the mode. A trader only speaks the venue's language, and its refusal is the venue's own.
@@ -16,16 +25,25 @@
  */
 import type { Refusal } from "../../core/errors.ts";
 import { no } from "../refuse.ts";
-import { isStable } from "./types.ts";
+import { isStable, type MarginMode } from "./types.ts";
 
 export type Side = "buy" | "sell";
-export type OrderType = "market" | "limit";
+/** market · limit · stop (a market order once the price reaches `stopPrice`) · stop_limit (a limit order at `limitPrice` once it does) */
+export type OrderType = "market" | "limit" | "stop" | "stop_limit";
+/** how long an order stays: until canceled · what fills at once, the rest canceled · all at once or nothing · until the session's end */
+export type TimeInForce = "gtc" | "ioc" | "fok" | "day";
+export const ORDER_TYPES: readonly OrderType[] = ["market", "limit", "stop", "stop_limit"];
+export const TIFS: readonly TimeInForce[] = ["gtc", "ioc", "fok", "day"];
 export type MarketKind = "spot" | "perp" | "future" | "stock" | "crypto" | "event" | "token";
 
 export interface Market {
   /** the account's name for it — what the owner and an agent type: `BTC/USDT` at an exchange, `AAPL` at a broker, `BTC-USD` at Robinhood
    * Crypto, `KXFED-25DEC-T4.00:YES` at Kalshi, `<token id>` or `<slug>:<outcome>` at Polymarket, `WETH/USDC@Base` from a wallet */
   symbol: string;
+  /** a perpetual's margin modes the venue lets be set from here (none listed: the venue sets none per market, so the page offers none) */
+  marginModes?: MarginMode[] | undefined;
+  /** where the 24-hour figures came from when they are not the venue's own documented reading (an exchange library's unified ticker) */
+  statsFrom?: string | undefined;
   /** in words */
   name: string;
   kind: MarketKind;
@@ -43,13 +61,89 @@ export interface Market {
   minNotional?: number | undefined;
   /** a contract (a perp, a future) is this much base */
   contractSize?: number | undefined;
-  /** open for orders now: a stock market at night, an event past its close, a pair the venue halted is not */
+  /** the venue takes orders in it now. An event past its close, a pair or a stock the venue halted does not; a stock outside its session
+   * may — Alpaca takes an order at night and holds it for the open, Robinhood sends every stock order for the regular session — so
+   * whether the market is in session is `session`, never this */
   open: boolean;
+  /** the venue's trading session, where it keeps one (a stock market): in session now, and when it next opens / closes (ISO 8601). Outside
+   * it a venue may still take an order and hold it for the open: `open` says whether it takes orders now. From the venue's own clock
+   * (Alpaca's GET /v2/clock) or the market calendar the venue sends its orders by (account/calendar.ts); absent where neither said */
+  session?: MarketSession | undefined;
   /** why not, or what the owner should know (extended hours, a market order queued for the open) */
   note?: string | undefined;
   /** the order types the venue takes here */
   types: OrderType[];
+  /** the times in force it takes here (absent: only its own default, which is not chosen) */
+  tifs?: TimeInForce[] | undefined;
+  /** where a venue takes a time in force for some order types only (Robinhood: "day" for a crypto stop, not a crypto limit): per type, the
+   * ones it takes. A type not named takes all of `tifs` */
+  tifsByType?: Partial<Record<OrderType, TimeInForce[]>> | undefined;
+  /** a limit order may be post-only here: it rests on the book as a maker, or is refused rather than taking */
+  postOnly?: boolean | undefined;
+  /** an order may be reduce-only here: it can only shrink a position, never open or grow one */
+  reduceOnly?: boolean | undefined;
+  /** a sell here can only sell what is held (a prediction market's shares, a cash account's coins): it can never open a short, so a plain
+   * sell of what is held closes a long without a reduce-only flag */
+  sellsReduce?: boolean | undefined;
+  /** the most leverage a perpetual takes here, when the venue says */
+  maxLeverage?: number | undefined;
+  // ---- what the venue's own listing already says about it (filled only where it does; never estimated) ----
+  /** the last 24 hours: the change of the price in percent and in `quote` (an event contract: in dollars per contract, so 0.03 = 3¢), and
+   * the value traded, in dollars */
+  changePct24h?: number | undefined;
+  change24h?: number | undefined;
+  volumeUsd24h?: number | undefined;
+  /** the last 24 hours' volume where the venue counts it in contracts and not in dollars (Kalshi's `volume_24h_fp`: each pays $1 at
+   * settlement) — never turned into dollars */
+  contracts24h?: number | undefined;
+  /** when it stops trading — an event's close, a dated future's expiry — ISO 8601 */
+  closeTime?: string | undefined;
+  /** the venue's own category for it, in its own words ("Economics", "Sports", "Crypto") */
+  category?: string | undefined;
+  /** an event contract's question, which its outcomes share — the venue's id for it (Kalshi's market ticker, Polymarket's condition id) and
+   * the question in words — and which outcome this market is ("YES", "NO", a candidate's name). A pre-IPO perpetual's company instead:
+   * `preipo:<slug>` and the company's name (live/preipo.ts), which its contracts at every venue share */
+  group?: { id: string; title: string } | undefined;
+  outcome?: string | undefined;
+  /** a perpetual's funding rate per interval (0.0001 = 0.01%) and when it is next paid, ISO 8601 */
+  fundingRate?: number | undefined;
+  nextFundingAt?: string | undefined;
+  /** a token an issuer stands behind (category RWA_CATEGORY, live/categories.ts): who issues it, and whom the issuer says it is not for, in
+   * the issuer's own words (dex.ts carries them; a venue that says nothing of it leaves them out) */
+  issuer?: string | undefined;
+  eligibility?: string | undefined;
+  /** a PRE-IPO PERPETUAL (category "Pre-IPO", live/preipo.ts): a contract on the venue's estimate of a private company's valuation, not a
+   * share. The venue prices it in a unit of its own — $1 of price for $1,000,000,000 of implied valuation at every venue and instrument but
+   * OKX's ANTHROPIC and OPENAI swaps, $10,000,000,000 there since its 10:1 rebase of 30 June 2026 — so `perPoint` is the dollars of valuation
+   * one dollar of price stands for, `unit` that rule in words, and `usd` the valuation the price implies now (price × perPoint), where a
+   * price is known (a listing's always; a trader's start-from list carries none until the market is read) */
+  implied?: { perPoint: number; unit: string; usd?: number | undefined } | undefined;
 }
+
+/** a venue's trading session (Market.session): in session now, and when it next opens and next closes, ISO 8601 — each where the venue or
+ * the calendar says it */
+export interface MarketSession {
+  open: boolean;
+  opensAt?: string | undefined;
+  closesAt?: string | undefined;
+}
+
+/** a market's last 24 hours, as the venue reports it */
+export interface MarketStats {
+  price?: number | undefined;
+  changePct24h?: number | undefined;
+  change24h?: number | undefined;
+  volumeUsd24h?: number | undefined;
+  high24h?: number | undefined;
+  low24h?: number | undefined;
+  /** where these figures came from when not the venue's own documented reading (see Market.statsFrom) */
+  statsFrom?: string | undefined;
+}
+
+export type CandleInterval = "5m" | "1h" | "1d";
+export const CANDLE_INTERVALS: readonly CandleInterval[] = ["5m", "1h", "1d"];
+/** one bar of price history: its start (ms), open, high, low, close, and the volume when the venue says, in base units */
+export interface Candle { t: number; o: number; h: number; l: number; c: number; v?: number | undefined }
 
 export interface OrderRequest {
   symbol: string;
@@ -65,6 +159,41 @@ export interface OrderRequest {
   /** the account's id for this order: the venue's idempotency key where it takes one, so a retry is the same order and not a second one.
    * Thirty-two lower-case hex digits, new for every order in every run of the account */
   clientId: string;
+  /** a stop or stop-limit order: the price that triggers it (a buy stop when the price rises to it, a sell stop when it falls to it). A STOP
+   * order also carries `worstPrice`: where the venue can, the trader bounds its fill there (a stop-limit at that price) */
+  stopPrice?: number | undefined;
+  /** only when the market lists it in `tifs`; absent: the venue's own default */
+  tif?: TimeInForce | undefined;
+  /** only for a limit order, and only where the market says `postOnly` */
+  postOnly?: boolean | undefined;
+  /** only where the market says `reduceOnly` */
+  reduceOnly?: boolean | undefined;
+}
+
+/** an open order changed in place: what changes, as the venue would take it (the rest stays) */
+export interface OrderChange {
+  qty?: number | undefined;
+  limitPrice?: number | undefined;
+  stopPrice?: number | undefined;
+}
+
+/** something held at a venue: a perpetual's position, shares, event contracts */
+export interface Position {
+  symbol: string;
+  name: string;
+  kind: MarketKind;
+  side: "long" | "short";
+  /** in base units, as orders are sized there (contracts for a perpetual) */
+  qty: number;
+  entryPrice?: number | undefined;
+  markPrice?: number | undefined;
+  /** what it is worth now, in dollars */
+  usd?: number | undefined;
+  unrealizedUsd?: number | undefined;
+  leverage?: number | undefined;
+  marginMode?: "cross" | "isolated" | undefined;
+  liquidationPrice?: number | undefined;
+  native: unknown;
 }
 
 /** `pending`: taken by the venue, not yet on its book (or, from a wallet, waiting for the wallet to send it) */
@@ -92,7 +221,11 @@ export interface LiveTrader {
   whyNot?: string | undefined;
   /** what is traded here, in a few words: "spot and perpetuals", "US stocks and ETFs", "event contracts" */
   what: string;
-  /** a few markets to start from (query empty), or the ones matching a query; at most 20 */
+  /** the kinds of market traded here, where the trader says them itself (the mm trader: tokens, event contracts, perpetuals); absent: the
+   * account reads them from the connector the owner signed (accounts.ts tradeKinds) */
+  kinds?: MarketKind[] | undefined;
+  /** a few markets to start from (query empty), or the ones matching a query; about 20 — an exchange's start-from list carries its pre-IPO
+   * perpetuals too, after the well-known markets, so that Markets groups them with the public venues' (exchange-trade.ts) */
   markets(query: string): Promise<Market[] | Refusal>;
   /** one market, with a fresh price */
   market(symbol: string): Promise<Market | Refusal>;
@@ -105,6 +238,23 @@ export interface LiveTrader {
   /** a wallet's DEX order whose approval is now on chain: the swap built again from a fresh quote, held to the same order (its size, side and
    * worst price), so a slow approval does not leave the wallet a stale swap that reverts */
   requote?(order: OrderRequest): Promise<OrderState | Refusal>;
+  /** an open order changed in place where the venue can (Alpaca's replace, an exchange's edit, Kalshi's amend). `order` is the order as it
+   * was placed, `change` what is to differ. The answer is the order as it stands after: its ref may be new (a replace is a new order) */
+  amend?(ref: string, symbol: string, change: OrderChange, order: OrderRequest): Promise<OrderState | Refusal>;
+  /** what is held here, where the venue lists positions */
+  positions?(): Promise<Position[] | Refusal>;
+  /** a position closed by the venue's own call (Alpaca's DELETE /positions); absent: the account closes it with a reduce-only market order */
+  close?(symbol: string, qty: number, clientId: string): Promise<OrderState | Refusal>;
+  /** a perpetual's leverage, and its margin mode where the venue lets it be set */
+  setLeverage?(symbol: string, leverage: number, marginMode?: "cross" | "isolated"): Promise<{ leverage: number; marginMode?: "cross" | "isolated" | undefined; native: unknown } | Refusal>;
+  // ---- reading the market (no order, nothing signed) ----
+  /** the last 24 hours of many markets in one call where the venue has one: by symbol. `symbols` absent: the venue's well-known markets */
+  stats?(symbols?: string[]): Promise<Map<string, MarketStats> | Refusal>;
+  /** event contracts, each carrying its `group` (the question), `closeTime` and `category`: the open ones, in one category when asked,
+   * closing within `closingWithinMs` when asked, at most `limit`, most traded first */
+  events?(o: { category?: string | undefined; closingWithinMs?: number | undefined; limit: number }): Promise<Market[] | Refusal>;
+  /** price history since `sinceMs`, oldest first */
+  candles?(symbol: string, interval: CandleInterval, sinceMs: number): Promise<Candle[] | Refusal>;
 }
 
 // ---- sizes and prices ------------------------------------------------------------------------------

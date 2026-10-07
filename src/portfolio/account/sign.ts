@@ -89,8 +89,10 @@ export type OwnerAction =
   /** an explicit `validUntil` (ms): Hyperliquid carries the expiry inside the agent's NAME, which is not copied here */
   | { type: "approveAgent"; agentAddress: Hex; agentName: string; validUntil: number; nonce: number }
   | { type: "approveBuilderFee"; builder: Hex; maxFeeRate: string; nonce: number }
-  /** a spending approval: which venues or payees, how much per payment, how much in all, how often, until when. A budget of "0" revokes */
-  | { type: "approveSpend"; agent: Hex; scope: string; allow: string; perPayment: string; budget: string; windowHours: number; validUntil: number; nonce: number }
+  /** a spending approval: which venues or payees, how much per payment, how much in all, how often, until when. A budget of "0" revokes.
+   * `intent`, when given, is the id of the open intent this limit answers (`intent-0003`): it is signed with the rest, and an approval
+   * without it signs exactly as it always has */
+  | { type: "approveSpend"; agent: Hex; scope: string; allow: string; perPayment: string; budget: string; windowHours: number; validUntil: number; intent?: string | undefined; nonce: number }
   | { type: "createSubAccount"; name: string; agent: Hex; float: string; nonce: number }
   | { type: "userSetAbstraction"; abstraction: string; nonce: number }
   | { type: "convertToMultiSigUser"; signers: string; nonce: number }
@@ -110,9 +112,29 @@ export type OwnerAction =
   /** An ORDER at a venue connected live, on the owner's signature: the market, the side, the exact size in the market's own units, the limit
    * price ("" for a market order), the most the order may be worth in dollars when it is placed (a price that has moved past it is a new
    * signature), and the moment after which it is void */
-  | { type: "liveOrder"; venue: string; symbol: string; side: string; orderType: string; qty: string; limitPrice: string; maxNotional: string; deadline: number; nonce: number }
+  | { type: "liveOrder"; venue: string; symbol: string; side: string; orderType: string; qty: string; limitPrice: string; /** a stop or stop-limit order's trigger; "" otherwise */ stopPrice: string; /** "gtc" · "ioc" · "fok" · "day", or "" for the venue's own default */ tif: string; /** "true" or "" */ postOnly: string; reduceOnly: string; maxNotional: string; deadline: number; nonce: number }
   /** cancel an order the account placed (its id on the account, `ord-0001`) */
-  | { type: "liveCancel"; venue: string; order: string; nonce: number };
+  | { type: "liveCancel"; venue: string; order: string; nonce: number }
+  /** change an open order in place: its new size, limit and stop ("" keeps what it was), the most it may then be worth, and ten minutes */
+  | { type: "liveAmend"; venue: string; order: string; qty: string; limitPrice: string; stopPrice: string; maxNotional: string; deadline: number; nonce: number }
+  /** close a position at a venue: all of it ("" ), or this much of it */
+  | { type: "liveClose"; venue: string; symbol: string; qty: string; nonce: number }
+  /** a perpetual's leverage, and its margin mode ("cross" · "isolated" · "" to keep it) */
+  | { type: "liveLeverage"; venue: string; symbol: string; leverage: string; marginMode: string; nonce: number }
+  /** a market the owner keeps an eye on — at a venue on the account or one that is not — which agents read: `on` "true" watches it, "" stops */
+  | { type: "setWatch"; venue: string; symbol: string; on: string; nonce: number }
+  /** The owner's words to an agent (`agent`: its address) or to every agent ("*"): what the owner would like done, where, which way and about
+   * how much. It grants nothing — the agent acts only inside its limits, and its cards are still the owner's to answer; `usd` guides it and
+   * limits nothing. `id` "" is a new intent, an intent's id changes that one, and a `validUntil` of 0 withdraws it */
+  | { type: "setIntent"; id: string; agent: string; venue: string; symbol: string; side: string; usd: string; text: string; validUntil: number; nonce: number }
+  /** EARN at a venue connected live, on the owner's signature: money into one of the venue's products (`kind` supply) or back out of it
+   * (withdraw), in the product's own asset, the exact amount; the most it may be worth in dollars when it runs (a price that has moved past
+   * it is a new signature), where money taken out lands (always the venue it came from), and the moment after which it is void */
+  | { type: "liveEarn"; venue: string; kind: string; product: string; asset: string; amount: string; maxUsd: string; lands: string; deadline: number; nonce: number }
+  /** the owner's answer to an agent's ask (`ask`: its id, `ask-0003`) that is not the thing asked for: `decision` "decline". Granting an
+   * ask is the owner's own action for it (a limit, a venue connected, a top-up …), which closes the ask; this closes it without one. It
+   * moves nothing and widens nothing */
+  | { type: "answerAsk"; ask: string; decision: string; nonce: number };
 
 export type AgentAction =
   | { type: "agentSendAsset"; destination: string; sourceDex: string; destinationDex: string; token: string; amount: string; fromSubAccount: string; maxFee: string; nonce: number }
@@ -121,24 +143,46 @@ export type AgentAction =
    * `fromSubAccount` names the float that pays; "" is the main account, which pays by card. `builder` is Hyperliquid's builder fee: `f` in tenths
    * of a basis point, to address `b`. `cnf` and `mandates` are the agent's part of an AP2 checkout: its P-256 key, then the two closed mandates
    * it signed with it. `close` ends a payment session at this payee and brings the rest of the deposit back. */
-  | { type: "agentPay"; url: string; maxAmount: string; fromSubAccount: string; builder?: { b: Hex; f: number } | undefined; cnf?: Jwk | undefined; mandates?: { checkout: string; payment: string } | undefined; close?: boolean | undefined; nonce: number }
+  | { type: "agentPay"; url: string; maxAmount: string; fromSubAccount: string; builder?: { b: Hex; f: number } | undefined; cnf?: Jwk | undefined; mandates?: { checkout: string; payment: string } | undefined; close?: boolean | undefined; /** how the payee is asked (GET unless said), and a POST's body — part of what the agent signs */ method?: string | undefined; body?: string | undefined; contentType?: string | undefined; nonce: number }
   /** the older single-account write (trade · subscribe · redeem), now under the agent's key */
   | { type: "agentExecute"; account: string; intent: Record<string, unknown>; nonce: number }
   | { type: "agentOrder"; base: string; side: string; qty: number; nonce: number }
-  /** an agent asking for real money to move at venues connected live: it is never done on the agent's word — the owner is asked, every time */
+  /** an agent asking for real money to move at venues connected live, inside the `venues` limit the owner signed for it. Guard:
+   * the owner sees the exact address and fee on a card and signs that; Beast: inside that limit it runs at once — still only to the
+   * user's own places, under the server's cap and the venue's own checks (account/live-moves.ts) */
   | { type: "agentLiveMove"; kind: string; from: string; fromLedger: string; to: string; toLedger: string; asset: string; toAsset: string; network: string; amount: string; maxFee: string; nonce: number }
   /** an agent's ORDER at a venue connected live: a size in the market's units (`qty`) or in dollars (`usd`), one of the two; a limit price, or
-   * "" for a market order. Inside its trading limit: Aggressive places it at once, Conservative asks the owner on a card */
-  | { type: "agentLiveOrder"; venue: string; symbol: string; side: string; orderType: string; qty: string; usd: string; limitPrice: string; nonce: number }
+   * "" for a market order. Inside its trading limit: Beast places it at once, Guard asks the owner on a card */
+  | { type: "agentLiveOrder"; venue: string; symbol: string; side: string; orderType: string; qty: string; usd: string; limitPrice: string; /** optional: a stop's trigger, the time in force, post-only, reduce-only ("true") */ stopPrice?: string | undefined; tif?: string | undefined; postOnly?: string | undefined; reduceOnly?: string | undefined; nonce: number }
   /** an agent cancels an order it placed itself */
-  | { type: "agentLiveCancel"; venue: string; order: string; nonce: number };
+  | { type: "agentLiveCancel"; venue: string; order: string; nonce: number }
+  /** an agent changes an order it placed itself: its new size, limit or stop ("" keeps what it was) */
+  | { type: "agentLiveAmend"; venue: string; order: string; qty: string; limitPrice: string; stopPrice: string; nonce: number }
+  /** an agent closes a position (all of it: qty "") at a venue inside its trading limit */
+  | { type: "agentLiveClose"; venue: string; symbol: string; qty: string; nonce: number }
+  /** an agent sets a perpetual's leverage, up to the most the owner allows agents */
+  | { type: "agentLiveLeverage"; venue: string; symbol: string; leverage: string; marginMode: string; nonce: number }
+  /** an agent tells the owner how an intent addressed to it (or to every agent) stands: `status` taking · done · cannot · note, a note in its
+   * own words, and `refs` — what it did, by id (`ord-0003,pay-0001`, a transaction's hash), comma-separated */
+  | { type: "agentReport"; intent: string; status: string; note: string; refs: string; nonce: number }
+  /** An agent asks the owner for what only the owner signs: `kind` letIn (its key let in) · limit · venue (one connected) · topup (its wallet) ·
+   * session · leverage · mode. Asking grants nothing: the owner's own signed action is the answer, and it closes the ask */
+  | { type: "agentAsk"; kind: string; venue: string; usd: string; text: string; nonce: number }
+  /** an agent puts money into a venue's earn product (`kind` supply) or takes it back out (withdraw: `amount` "all" is all of it), inside
+   * the earn limit the owner signed for it. It names no destination: what comes out lands where it came from. Guard: a card;
+   * Beast: inside its limit, at once */
+  | { type: "agentLiveEarn"; venue: string; kind: string; product: string; asset: string; amount: string; nonce: number };
 
 export type Action = OwnerAction | AgentAction;
 
-export const OWNER_TYPES = ["sendAsset", "swap", "approveAgent", "approveBuilderFee", "approveSpend", "createSubAccount", "userSetAbstraction", "convertToMultiSigUser", "setDestination", "approveCard", "setPolicy", "connectVenue", "disconnectVenue", "liveMove", "liveOrder", "liveCancel"] as const;
-export const AGENT_TYPES = ["agentSendAsset", "agentSwap", "agentPay", "agentExecute", "agentOrder", "agentLiveMove", "agentLiveOrder", "agentLiveCancel"] as const;
-/** an instruction that moves money is good for minutes after it is signed, not for the two days of the nonce window */
-export const MONEY_TYPES: ReadonlySet<string> = new Set(["sendAsset", "swap", "approveCard", "agentSendAsset", "agentSwap", "agentPay", "agentExecute", "agentOrder", "liveMove", "agentLiveMove", "liveOrder", "agentLiveOrder"]);
+export const OWNER_TYPES = ["sendAsset", "swap", "approveAgent", "approveBuilderFee", "approveSpend", "createSubAccount", "userSetAbstraction", "convertToMultiSigUser", "setDestination", "approveCard", "setPolicy", "connectVenue", "disconnectVenue", "liveMove", "liveOrder", "liveCancel", "liveAmend", "liveClose", "liveLeverage", "setWatch", "setIntent", "liveEarn", "answerAsk"] as const;
+export const AGENT_TYPES = ["agentSendAsset", "agentSwap", "agentPay", "agentExecute", "agentOrder", "agentLiveMove", "agentLiveOrder", "agentLiveCancel", "agentLiveAmend", "agentLiveClose", "agentLiveLeverage", "agentReport", "agentAsk", "agentLiveEarn"] as const;
+/** an instruction that moves money — or, like a leverage change, changes what a position risks — is good for minutes after it is signed,
+ * not for the two days of the nonce window */
+export const MONEY_TYPES: ReadonlySet<string> = new Set(["sendAsset", "swap", "approveCard", "agentSendAsset", "agentSwap", "agentPay", "agentExecute", "agentOrder", "liveMove", "agentLiveMove", "liveOrder", "agentLiveOrder", "liveAmend", "agentLiveAmend", "liveClose", "agentLiveClose", "liveLeverage", "agentLiveLeverage", "liveEarn", "agentLiveEarn"]);
+/** how the owner steers and the agents answer: a watchlist, intents, reports, asks. None moves money and none is read by a limit (state.ts
+ * covers, spendFor): they are words between the owner and the agents, and authority still comes only from limits, cards and the cap */
+export const STEER_TYPES: ReadonlySet<string> = new Set(["setWatch", "setIntent", "answerAsk", "agentReport", "agentAsk"]);
 export const MONEY_TTL_MS = 10 * 60_000;
 
 export function isOwnerAction(a: { type: string }): a is OwnerAction {
@@ -185,11 +229,29 @@ const OWNER_FIELDS: Record<OwnerAction["type"], { primary: string; fields: Field
   connectVenue: { primary: "AccountTransaction:ConnectVenue", fields: [{ name: "venue", type: "string" }, { name: "connector", type: "string" }, { name: "label", type: "string" }, { name: "credentialRef", type: "string" }, NONCE] },
   disconnectVenue: { primary: "AccountTransaction:DisconnectVenue", fields: [{ name: "venue", type: "string" }, NONCE] },
   liveMove: { primary: "AccountTransaction:LiveMove", fields: [{ name: "kind", type: "string" }, { name: "from", type: "string" }, { name: "fromLedger", type: "string" }, { name: "to", type: "string" }, { name: "toLedger", type: "string" }, { name: "asset", type: "string" }, { name: "toAsset", type: "string" }, { name: "network", type: "string" }, { name: "amount", type: "string" }, { name: "toAddress", type: "string" }, { name: "maxFee", type: "string" }, { name: "deadline", type: "uint64" }, NONCE] },
-  liveOrder: { primary: "AccountTransaction:LiveOrder", fields: [{ name: "venue", type: "string" }, { name: "symbol", type: "string" }, { name: "side", type: "string" }, { name: "orderType", type: "string" }, { name: "qty", type: "string" }, { name: "limitPrice", type: "string" }, { name: "maxNotional", type: "string" }, { name: "deadline", type: "uint64" }, NONCE] },
+  liveOrder: { primary: "AccountTransaction:LiveOrder", fields: [{ name: "venue", type: "string" }, { name: "symbol", type: "string" }, { name: "side", type: "string" }, { name: "orderType", type: "string" }, { name: "qty", type: "string" }, { name: "limitPrice", type: "string" }, { name: "stopPrice", type: "string" }, { name: "tif", type: "string" }, { name: "postOnly", type: "string" }, { name: "reduceOnly", type: "string" }, { name: "maxNotional", type: "string" }, { name: "deadline", type: "uint64" }, NONCE] },
   liveCancel: { primary: "AccountTransaction:LiveCancel", fields: [{ name: "venue", type: "string" }, { name: "order", type: "string" }, NONCE] },
+  liveAmend: { primary: "AccountTransaction:LiveAmend", fields: [{ name: "venue", type: "string" }, { name: "order", type: "string" }, { name: "qty", type: "string" }, { name: "limitPrice", type: "string" }, { name: "stopPrice", type: "string" }, { name: "maxNotional", type: "string" }, { name: "deadline", type: "uint64" }, NONCE] },
+  liveClose: { primary: "AccountTransaction:LiveClose", fields: [{ name: "venue", type: "string" }, { name: "symbol", type: "string" }, { name: "qty", type: "string" }, NONCE] },
+  liveLeverage: { primary: "AccountTransaction:LiveLeverage", fields: [{ name: "venue", type: "string" }, { name: "symbol", type: "string" }, { name: "leverage", type: "string" }, { name: "marginMode", type: "string" }, NONCE] },
+  setWatch: { primary: "AccountTransaction:SetWatch", fields: [{ name: "venue", type: "string" }, { name: "symbol", type: "string" }, { name: "on", type: "string" }, NONCE] },
+  // `agent` is text, not an address: it may be "*", every agent
+  setIntent: { primary: "AccountTransaction:SetIntent", fields: [{ name: "id", type: "string" }, { name: "agent", type: "string" }, { name: "venue", type: "string" }, { name: "symbol", type: "string" }, { name: "side", type: "string" }, { name: "usd", type: "string" }, { name: "text", type: "string" }, { name: "validUntil", type: "uint64" }, NONCE] },
+  liveEarn: { primary: "AccountTransaction:LiveEarn", fields: [{ name: "venue", type: "string" }, { name: "kind", type: "string" }, { name: "product", type: "string" }, { name: "asset", type: "string" }, { name: "amount", type: "string" }, { name: "maxUsd", type: "string" }, { name: "lands", type: "string" }, { name: "deadline", type: "uint64" }, NONCE] },
+  answerAsk: { primary: "AccountTransaction:AnswerAsk", fields: [{ name: "ask", type: "string" }, { name: "decision", type: "string" }, NONCE] },
 };
+/** a spending approval that answers an intent names it: one more signed field, before the nonce */
+const INTENT_FIELD: Field = { name: "intent", type: "string" };
+
+/** the fields an owner action signs: its type's — and, on a spending approval that names the intent it answers, the intent's id before the
+ * nonce. An approval that names none signs as it always has, so every limit signed before there was an `intent` field still verifies */
+function fieldsOf(action: OwnerAction): Field[] {
+  const fields = OWNER_FIELDS[action.type].fields;
+  return action.type === "approveSpend" && action.intent !== undefined ? [...fields.slice(0, -1), INTENT_FIELD, NONCE] : fields;
+}
+
 /** what reaches a real venue: its signed text says "real money" */
-const LIVE_TYPES: ReadonlySet<string> = new Set(["liveMove", "liveOrder", "liveCancel"]);
+const LIVE_TYPES: ReadonlySet<string> = new Set(["liveMove", "liveOrder", "liveCancel", "liveAmend", "liveClose", "liveLeverage", "liveEarn"]);
 /** what the owner's signature says about the money: a live move is real money, and the signed text says so */
 export const LIVE_CHAIN = "Live · real money";
 
@@ -220,6 +282,16 @@ const AGENT_TEXT: Partial<Record<AgentAction["type"], string[]>> = {
   agentLiveOrder: ["venue", "symbol", "side", "orderType", "qty", "usd", "limitPrice"],
   agentLiveCancel: ["venue", "order"],
   agentLiveMove: ["kind", "from", "fromLedger", "to", "toLedger", "asset", "toAsset", "network", "amount", "maxFee"],
+  agentLiveAmend: ["venue", "order", "qty", "limitPrice", "stopPrice"],
+  agentLiveClose: ["venue", "symbol", "qty"],
+  agentLiveLeverage: ["venue", "symbol", "leverage", "marginMode"],
+  agentReport: ["intent", "status", "note", "refs"],
+  agentAsk: ["kind", "venue", "usd", "text"],
+  agentLiveEarn: ["venue", "kind", "product", "asset", "amount"],
+};
+/** text fields an agent request MAY carry (when it does, they are text too, and signed like the rest) */
+const AGENT_OPTIONAL: Partial<Record<AgentAction["type"], string[]>> = {
+  agentLiveOrder: ["stopPrice", "tif", "postOnly", "reduceOnly"],
 };
 
 export function malformed(action: Action): string | null {
@@ -227,13 +299,14 @@ export function malformed(action: Action): string | null {
   if (!isOwnerAction(action)) {
     const names = AGENT_TEXT[action.type];
     if (!names) return null;
+    const optional = AGENT_OPTIONAL[action.type] ?? [];
     const have = action as unknown as Record<string, unknown>;
-    const wrong = names.find((k) => typeof have[k] !== "string");
+    const wrong = names.find((k) => typeof have[k] !== "string") ?? optional.find((k) => have[k] !== undefined && typeof have[k] !== "string");
     if (wrong) return `"${wrong}" is text`;
-    const extra = Object.keys(have).find((k) => k !== "type" && k !== "nonce" && !names.includes(k));
+    const extra = Object.keys(have).find((k) => k !== "type" && k !== "nonce" && !names.includes(k) && !optional.includes(k));
     return extra === undefined ? null : `"${extra}" is not part of "${action.type}"`;
   }
-  const fields = OWNER_FIELDS[action.type].fields;
+  const fields = fieldsOf(action);
   const have = action as unknown as Record<string, unknown>;
   for (const f of fields) {
     const v = have[f.name];
@@ -246,7 +319,7 @@ export function malformed(action: Action): string | null {
 /** the typed data an owner signs for an action — and what a card shows, field for field */
 export function ownerTypedData(action: OwnerAction): TypedData {
   const def = OWNER_FIELDS[action.type];
-  const fields = [CHAIN_FIELD, ...def.fields];
+  const fields = [CHAIN_FIELD, ...fieldsOf(action)];
   return { domain: ACCOUNT_DOMAIN, types: { [def.primary]: fields }, primaryType: def.primary, message: messageOf(fields, { ...action, accountChain: LIVE_TYPES.has(action.type) ? LIVE_CHAIN : ACCOUNT_CHAIN }) };
 }
 
@@ -416,12 +489,15 @@ export function isJwk(v: unknown): v is Jwk {
 
 // ---- amounts ----------------------------------------------------------------------
 
-/** amounts travel as decimal strings (as Hyperliquid's do) and are added up as integers of one millionth: no float ever decides a limit */
+/** amounts travel as decimal strings (as Hyperliquid's do) and are added up as integers of one millionth: no float ever decides a limit.
+ * An amount a double cannot count exactly — a whole part of more than fifteen digits, or millionths past the safe integers — is not a
+ * plain decimal here: it is NaN, never Infinity, which no limit would ever use up */
 export function micro(amount: string | number): number {
   const s = typeof amount === "number" ? amount.toFixed(6) : amount.trim();
   const m = /^(\d+)(?:\.(\d{1,18}))?$/.exec(s);
-  if (!m) return Number.NaN;
-  return Number(m[1]) * 1_000_000 + Number((m[2] ?? "").padEnd(6, "0").slice(0, 6));
+  if (!m || m[1]!.length > 15) return Number.NaN;
+  const units = Number(m[1]) * 1_000_000 + Number((m[2] ?? "").padEnd(6, "0").slice(0, 6));
+  return Number.isSafeInteger(units) ? units : Number.NaN;
 }
 
 export function unmicro(units: number): string {

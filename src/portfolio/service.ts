@@ -24,13 +24,13 @@
  *   decide(approvalId, …)       the human's answer to a card, as one more leg
  *   read / overview             never gated; one read across every account
  */
-import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Ledger, type LedgerRow } from "../agent/ledger.ts";
 import { isRefusal, type Refusal } from "../core/errors.ts";
 import { no } from "./refuse.ts";
-import { describeIntent, ENFORCER_LABEL, KIND_LABEL, KIND_ORDER, PRICES, qtyText, r2, SCRIPT_AGENT, usdOf, WRITE_CAPS, type Account, type AccountAdapter, type AgentId, type Capability, type ExecOk, type ExecResult, type Holding, type Intent } from "./accounts.ts";
+import { describeIntent, ENFORCER_LABEL, KIND_LABEL, KIND_ORDER, PRICES, qtyText, r2, SCRIPT_AGENT, tradeKinds, usdOf, WRITE_CAPS, type Account, type AccountAdapter, type AgentId, type Capability, type ExecOk, type ExecResult, type Holding, type Intent } from "./accounts.ts";
 import { alpacaAccount, type AlpacaSeed } from "./adapters/alpaca.ts";
 import { binanceAccount, type BinanceSeed } from "./adapters/binance.ts";
 import { hyperliquidAccount, type HyperliquidSeed } from "./adapters/hyperliquid.ts";
@@ -47,23 +47,43 @@ import { eventState, eventSymbol, eventTop, EVENTS, isEventSymbol, PREDICTION_VE
 import { orderPlan, type OrderPlan, type Part } from "./router.ts";
 import type { Side } from "./venues.ts";
 import { cents, detailOf, plainRefusal, routeLine, sayOf, waitWords } from "./words.ts";
-import { AccountEngine, CARD_TTL_MS, type AccountPage, type AccountSeed, type CardOffer, type Outcome } from "./account/exchange.ts";
+import { AccountEngine, CARD_TTL_MS, slug, type AccountPage, type AccountSeed, type AgentAsk, type CardOffer, type DeclinedAsk, type Outcome } from "./account/exchange.ts";
+import { assetKey, byAsset, change24h, withEarn, type AssetRow, type DayChange, type EarnHeld, type MoneySummary } from "./account/holdings.ts";
+import { NetWorthLog, networthPath, type NetWorthHistory, type NetWorthSnapshot } from "./account/networth.ts";
+import { costBasis, ordersOf, type CostBasis, type LoggedOrder, type VenuePosition } from "./account/costbasis.ts";
+import type { LiveOrder } from "./account/live-orders.ts";
+import type { LiveEarn } from "./account/live-earn.ts";
+import type { Payment } from "./account/payments.ts";
+import { exploreAcross, type Exploration, type ExploreSort, type ExploreVenue } from "./live/explore.ts";
+import { holdBackMs, publicSources, type PublicSource } from "./live/public-markets.ts";
+import { TABS, type TabId } from "./live/categories.ts";
+import { CHAIN_BY_ID, CHAINS, type ChainName } from "./live/chain.ts";
 import { mountPayees, type PayeeWorld } from "./account/payees.ts";
 import { doorOf, EXCHANGES } from "./account/doors.ts";
 import { isSelfCustody, plug, type PlugSeed } from "./adapters/exchange.ts";
 import { liveAccount } from "./adapters/live.ts";
-import { keyFileStatus, liveOptions, openLive, type LiveDeps } from "./live/index.ts";
+import { KEY_SHAPES, keyFileStatus, liveOptions, openLive, parseConnector, type LiveDeps } from "./live/index.ts";
+import { exchangeEarner, type EarnPosition, type EarnProduct, type LiveEarner } from "./live/earn.ts";
+import { exchangeEarnHook } from "./live/exchange-trade.ts";
 import type { LiveVenue } from "./account/live-moves.ts";
-import type { LiveTrader, Market } from "./live/trade.ts";
-import { compareAcross, type Comparison } from "./live/compare.ts";
+import { CANDLE_INTERVALS, DONE, floorTo, inDollars, type Candle, type CandleInterval, type LiveTrader, type Market, type MarketKind, type MarketStats, type Position } from "./live/trade.ts";
+import { compareAcross, normalBase, type Comparison } from "./live/compare.ts";
 import { fold, type StatementLine } from "./account/statement.ts";
 import { WalletProofs } from "./live/proof.ts";
+import { proofHolds, readHistory, rebuild, runOf, type DialSnapshot, type Rebuilt, type RunMark } from "./account/restore.ts";
+import { RealPayer } from "./account/pay-real.ts";
+import { agentWalletKey, agentWalletKeyPath, hasKey } from "./account/keystore.ts";
+import { agentWalletSource, agentWalletVenue } from "./live/agent-wallet.ts";
+import { guardedHttp, type PayHttp } from "./live/guarded-http.ts";
+import { publicSender } from "./live/chain.ts";
+import type { SubAccount } from "./account/state.ts";
 import { publicChain } from "./live/chain.ts";
 import { realMm } from "./live/metamask.ts";
 import { publicPrices } from "./live/prices.ts";
 import { ROBINHOOD_MCP } from "./live/robinhood.ts";
 import { OAuthSignIn } from "./live/signin.ts";
-import { realHttp } from "./live/types.ts";
+import { isStable, realHttp } from "./live/types.ts";
+import { isPlain } from "./account/state.ts";
 import type { AgentAction, Envelope, Hex } from "./account/sign.ts";
 
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
@@ -99,6 +119,10 @@ export interface ServiceOptions {
   openness?: unknown;
   /** start from an empty ledger even when a file with this name exists: a scripted run on a fixed clock gets the same file name every time and would otherwise append to its previous run */
   freshLedger?: boolean;
+  /** a real account starts from nothing instead of continuing its ledgers (account/restore.ts): `--fresh` */
+  fresh?: boolean | undefined;
+  /** how a payee is asked when an agent pays with real money (live/guarded-http.ts); a stand-in in tests */
+  payHttp?: PayHttp | undefined;
   /** the venues the owner could plug in (default: fixtures `connectable.json`) */
   connectable?: Record<string, PlugSeed> | undefined;
   /** stand-ins for what a live connection reaches — the exchange library, HTTP, the chain, the real clock — so tests never leave the process */
@@ -106,9 +130,15 @@ export interface ServiceOptions {
   /** REAL money at venues connected live (the server's `--live-writes`): the most one movement may be, and the code the first owner types.
    * Absent: live venues are read, and nothing moves at them */
   liveWrites?: { capUsd: number; pairingCode: string } | undefined;
+  /** the code the first owner types when nothing moves money either (a read-only real account): an owner paired without one would own the
+   * account's later runs, money and all. With liveWrites, its own code is the one */
+  pairingCode?: string | undefined;
   /** REAL accounts only (the server's default): no simulated venue is mounted, and the account layer has no simulated payee, plug-in
    * or clock. What is on the service is what the owner connected through each venue's own interface */
   real?: boolean | undefined;
+  /** the keyless public market data Markets reads beside the connected venues (default: live/public-markets.ts publicSources over the live
+   * connection's network and exchange library); stand-ins in tests */
+  publicMarkets?: PublicSource[] | undefined;
 }
 
 /** one slice of an order (or any step an agent flies): where, what, and the agent's words for it */
@@ -219,14 +249,16 @@ export interface Overview {
   /** liquidity as amount × time × cost: how soon each holding can be at the hub chain, and for how much */
   ladder: Ladder;
   accounts: AccountView[];
-  compiled: OpennessRow[];
-  openness: Openness;
+  /** the simulation's dial, compiled per account, and the agent's day against its cap: the original statement's. A real account has none
+   * of them (its venues are real, its limits are the owner's signed ones), so they are left out there */
+  compiled?: OpennessRow[] | undefined;
+  openness?: Openness | undefined;
   approvals: Approval[];
   flights: Flight[];
   agents: Array<AgentId & { flights: number }>;
   ledger: LedgerRow[];
   chain: { ok: boolean; rows: number; at?: number };
-  daily: { used: number; cap: number };
+  daily?: { used: number; cap: number } | undefined;
   counters: { writes: number; refusals: number; cards: number };
   ledgerPath: string;
 }
@@ -265,6 +297,8 @@ export class PortfolioService {
   readonly payees: PayeeWorld | undefined;
   /** the page's scripted agent, when a server has one: the owner talks to it through a signed instruction */
   sayHandler: ((text: string) => Promise<unknown>) | undefined;
+  /** told when the owner connects or disconnects a venue: the server takes a net worth snapshot then (account/networth.ts) */
+  onConnection: ((e: NonNullable<NetWorthSnapshot["event"]>) => void) | undefined;
   /** how far the simulated clock has been pushed ahead of the one the service was given */
   private skewMs = 0;
   /** venues the owner can plug into the account, by id */
@@ -275,8 +309,15 @@ export class PortfolioService {
   private readonly shadowed = new Map<string, AccountAdapter>();
   /** what real money can be asked of each venue connected live, and how */
   private readonly liveVenues = new Map<string, LiveVenue>();
+  /** each venue connected live that has earn products (live/earn.ts), and how they are reached */
+  private readonly earners = new Map<string, LiveEarner>();
   /** wallets that proved an address is the user's, by signing the sentence the account wrote */
   readonly proofs: WalletProofs;
+  /** a real account restarted: what it brought back from its ledgers, and the restore still under way (venues connecting again) */
+  restored: RestoreReport | undefined;
+  restoring: Promise<void> | undefined;
+  /** the venues of a restarted account are being connected again: what they hold is not on the account yet */
+  private reconnecting = false;
 
   private constructor(
     private readonly opts: ServiceOptions,
@@ -290,14 +331,15 @@ export class PortfolioService {
     this.live = liveAccounts !== undefined;
     this.proofs = opts.liveDeps?.proofs ?? new WalletProofs(opts.liveDeps?.clock);
     this.openness = parseOpenness(opts.openness ?? loadOpenness());
-    // real money starts Conservative: every move an agent asks for waits for the owner until the owner signs the dial open
+    // real money starts Guard: every move an agent asks for waits for the owner until the owner signs the dial open
     if (opts.real) this.openness = { ...this.openness, mode: "guard" };
     this.ledger = this.openLedger();
     this.mount();
     this.account = opts.account !== undefined || opts.venues === "frontline" ? new AccountEngine(this.host(), opts.account ?? {}) : undefined;
     if (this.account) this.catalog = opts.connectable ?? loadConnectable();
-    // the payees are simulated hosts: a real account has none
+    // the payees are simulated hosts: a real account has none. A real account pays real ones, from agent wallets (account/pay-real.ts)
     this.payees = this.account && !opts.real ? mountPayees(this.account) : undefined;
+    if (this.account && opts.real && opts.liveWrites) this.account.usePayer(new RealPayer(this.account, { http: opts.payHttp ?? guardedHttp, chain: this.liveDeps().chain, wallet: (name) => agentWalletKey(opts.home, name), clock: () => this.liveDeps().clock(), capUsd: () => opts.liveWrites?.capUsd ?? 0 }));
     if (this.account && !opts.freshLedger) this.rememberNonces(this.account);
   }
 
@@ -354,8 +396,10 @@ export class PortfolioService {
         if (signer && isPending(r)) r.approval.signer = signer;
         return r;
       },
-      order: async (base, side, qty, agent) => {
+      order: async (base, side, qty, agent, signer) => {
         const r = await this.order(base, side, qty, agent);
+        // the card a routed order raised remembers which agent key asked for it, as an executed intent's does
+        if (signer) for (const o of r.outcomes) if (isPending(o)) o.approval.signer = signer;
         return { flight: r.flight.no, legs: r.flight.legs.map((l) => `${l.mark === "ok" ? "✓" : l.mark === "no" ? "✗" : l.mark === "wait" ? "▣" : "·"} ${l.text}`), outcomes: r.outcomes };
       },
       decide: (id, decision) => this.decide(id, decision),
@@ -383,7 +427,22 @@ export class PortfolioService {
         }
         if (change === "mode" && value === "open") {
           this.setMode("open");
-          return { ok: true, summary: "Aggressive: agents trade and move inside their limits without asking" };
+          return { ok: true, summary: "Beast: agents trade and move inside their limits without asking" };
+        }
+        if (change === "maxLeverage") {
+          // the most leverage an agent may set on a perpetual: widening, so it is the owner's to sign
+          const lev = Number(value);
+          if (!/^\d{1,3}$/.test(value) || !(lev >= 1)) return no("E_ACCOUNT_BAD_ACTION", { message: "the agents' leverage cap is a whole number, 1 or more" });
+          this.openness = { ...this.openness, maxLeverage: lev };
+          this.ledger.append({ kind: "note", venue: "*", reason: `agents may set leverage up to ${lev}x`, detail: this.dialNow() });
+          return { ok: true, summary: `agents may set leverage up to ${lev}x` };
+        }
+        if (change === "session") {
+          // a new session for the agents: thirty days from now. Widening, so it is the owner's to sign
+          this.openness = { ...this.openness, sessionExpiresAt: new Date(Date.parse(this.now()) + 30 * 86_400_000).toISOString() };
+          this.ledger.append({ kind: "note", venue: "*", reason: `a new session for the agents, until ${this.openness.sessionExpiresAt}`, detail: this.dialNow() });
+          // the day as the page writes dates (New York, no year); the exact moment is the dial's, on the account page
+          return { ok: true, summary: `agents may act again, until ${nyDay(this.openness.sessionExpiresAt)}` };
         }
         if (change === "restore") {
           const r = this.restore(value);
@@ -400,11 +459,31 @@ export class PortfolioService {
         }
         return no("E_ACCOUNT_BAD_ACTION", { message: `"${change}" is not a policy change the owner signs here` });
       },
-      connect: (venue, connector, label, credentialRef) => (connector.startsWith("live:") ? this.plugLive(venue, connector, label, credentialRef) : this.plugIn(venue, connector, label, credentialRef)),
-      disconnect: (venue) => this.unplug(venue),
+      // a venue connected or disconnected is said to whoever keeps the net worth curve: the total moves, and that is not a gain or a loss
+      connect: async (venue, connector, label, credentialRef) => {
+        const r = connector.startsWith("live:") ? await this.plugLive(venue, connector, label, credentialRef) : this.plugIn(venue, connector, label, credentialRef);
+        if (!isRefusal(r)) this.onConnection?.({ kind: "connect", venue, name: this.nameOf(venue) });
+        return r;
+      },
+      disconnect: (venue) => {
+        const name = this.nameOf(venue);
+        const r = this.unplug(venue);
+        if (!isRefusal(r)) this.onConnection?.({ kind: "disconnect", venue, name });
+        return r;
+      },
       live: () => ({ ...liveOptions(this.opts.home), writes: this.liveWritesView() }),
       liveMoney: () => ({ writes: () => this.liveWritesView(), venue: (id) => (this.adapters.get(id)?.account.watchOnly ? this.liveVenues.get(id) : undefined), realNow: () => this.liveDeps().clock() }),
-      pairingCode: () => this.opts.liveWrites?.pairingCode,
+      liveEarn: () => ({ earner: (id) => (this.adapters.get(id)?.account.watchOnly ? this.earners.get(id) : undefined) }),
+      pairingCode: () => this.opts.liveWrites?.pairingCode ?? this.opts.pairingCode,
+      ...(real && this.opts.liveWrites
+        ? {
+            agentWalletAddress: (name: string) => {
+              const k = agentWalletKey(this.opts.home, name);
+              return isRefusal(k) ? k : (k.address as Hex);
+            },
+            agentWalletUp: (sub: SubAccount) => this.plugAgentWallet(sub),
+          }
+        : {}),
       connectable: () =>
         Object.entries(real ? {} : this.catalog)
           .filter(([id]) => !this.adapters.has(id))
@@ -439,43 +518,552 @@ export class PortfolioService {
 
   /** what a venue connected live trades: a few markets, or the ones matching a query (a minute old at most) */
   async liveMarkets(venue: string, query: string): Promise<Market[] | Refusal> {
-    const v = this.adapters.get(venue)?.account.watchOnly ? this.liveVenues.get(venue) : undefined;
-    if (!v) return no("E_WALLET_ACCOUNT_UNKNOWN", { venue, message: `"${venue}" is not a venue connected live` });
-    if (!v.trader) return no("E_VENUE_RAIL_CLOSED", { venue, message: `${v.name}: ${v.noTradeBecause ?? "no orders are placed here from the account"}` });
-    const trader = v.trader;
-    return this.marketReads.get(`markets|${venue}|${query.trim().toUpperCase()}`, 60_000, () => trader.markets(query));
+    const v = this.tradingVenue(venue);
+    return isRefusal(v) ? v : this.kept(v).markets(query);
+  }
+
+  /** what is held at a venue connected live, fifteen seconds old at most (the page asks often; the venue is asked once) */
+  async livePositions(venue: string): Promise<Position[] | Refusal> {
+    if (!this.account) return no("E_ACCOUNT_BAD_ACTION", { message: "the account layer is not mounted" });
+    const engine = this.account;
+    return this.marketReads.get(`positions|${venue}`, 15_000, () => engine.trade.positions(venue).catch((err: unknown) => thrownBy(venue, this.nameOf(venue), err)), this.liveVenues.has(venue) ? venue : undefined);
   }
 
   /** one market at a venue connected live, with a price a few seconds old at most. An order itself is always valued at a fresh one */
   async liveMarket(venue: string, symbol: string): Promise<Market | Refusal> {
-    const v = this.adapters.get(venue)?.account.watchOnly ? this.liveVenues.get(venue) : undefined;
-    if (!v) return no("E_WALLET_ACCOUNT_UNKNOWN", { venue, message: `"${venue}" is not a venue connected live` });
-    if (!v.trader) return no("E_VENUE_RAIL_CLOSED", { venue, message: `${v.name}: ${v.noTradeBecause ?? "no orders are placed here from the account"}` });
-    const trader = v.trader;
-    return this.marketReads.get(`market|${venue}|${symbol}`, 3_000, () => trader.market(symbol));
+    const v = this.tradingVenue(venue);
+    return isRefusal(v) ? v : this.kept(v).market(symbol);
   }
   /** The same thing at every venue connected live that trades it — a coin, a stock — ranked by the price an order would take there (the ask
    * for a buy, the bid for a sell). Kept fifteen seconds. A price far from the others' (more than 10% from their middle) is marked: it may be
-   * another token under the same name */
-  async liveCompare(base: string, side: "buy" | "sell", usd?: number): Promise<Comparison | Refusal> {
+   * another token under the same name. `asset` says which is meant where a name is both a coin and a stock */
+  async liveCompare(base: string, side: "buy" | "sell", usd?: number, asset?: "crypto" | "stock"): Promise<Comparison | Refusal> {
     const b = base.trim();
     if (!b || b.length > 40) return no("E_ACCOUNT_BAD_ACTION", { message: "name what to compare: BTC, ETH, AAPL" });
     if (side !== "buy" && side !== "sell") return no("E_ACCOUNT_BAD_ACTION", { message: "compare a buy or a sell" });
     // each venue's reads go through the same short-lived cache as the order ticket's: a new amount or the other side asks no venue again
-    const venues = [...this.liveVenues.values()].filter((v) => v.trader && this.adapters.get(v.id)?.account.watchOnly).map((v) => {
-      const t = v.trader!;
-      const trader: LiveTrader = Object.assign(Object.create(t) as LiveTrader, {
-        markets: (q: string) => this.marketReads.get(`markets|${v.id}|${q.trim().toUpperCase()}`, 60_000, () => t.markets(q)),
-        market: (sym: string) => this.marketReads.get(`market|${v.id}|${sym}`, 3_000, () => t.market(sym)),
-      });
-      return { id: v.id, name: v.name, trader };
-    });
-    return this.marketReads.get(`compare|${b.toUpperCase()}|${side}|${usd ?? ""}`, 15_000, () => compareAcross(venues, b, side, { timeoutMs: 4_000, ...(usd !== undefined ? { usd } : {}) }));
+    const venues = this.tradingVenues().map((v) => ({ id: v.id, name: v.name, trader: this.kept(v) }));
+    return this.marketReads.get(`compare|${b.toUpperCase()}|${side}|${usd ?? ""}|${asset ?? ""}`, 15_000, () => compareAcross(venues, b, side, { timeoutMs: 4_000, ...(usd !== undefined ? { usd } : {}), ...(asset ? { asset } : {}) }));
   }
 
   /** the order ticket's reads, kept for a moment and shared while they are in flight: a page (or anything else on this machine) asking
    * again and again costs the venue one request, not one each — the venue's rate limit is for the orders */
   private readonly marketReads = new ReadCache();
+
+  /** a venue connected live that orders are placed through, or why it is not one */
+  private tradingVenue(venue: string): LiveVenue | Refusal {
+    const v = this.adapters.get(venue)?.account.watchOnly ? this.liveVenues.get(venue) : undefined;
+    if (!v) return no("E_WALLET_ACCOUNT_UNKNOWN", { venue, message: `"${venue}" is not a venue connected live` });
+    if (!v.trader) return no("E_VENUE_RAIL_CLOSED", { venue, message: `${v.name}: ${v.noTradeBecause ?? "no orders are placed here from the account"}` });
+    return v;
+  }
+
+  /** every venue connected live that orders are placed through */
+  private tradingVenues(): LiveVenue[] {
+    return [...this.liveVenues.values()].filter((v) => v.trader && this.adapters.get(v.id)?.account.watchOnly);
+  }
+
+  /** A venue's trader as every read here asks it: each answer kept a while (a market's price three seconds; its listings, its 24 hours and
+   * its price history a minute; its events five), at most two of its reads on their way at once, and how it answered remembered for the
+   * venue's health. A trader that throws has answered in a way the account cannot read: that is a refusal like any other (held back as a
+   * venue that did not answer), never an exception that takes a whole read down. Orders never pass through this: they are the account's
+   * door's (account/live-orders.ts) */
+  private kept(v: LiveVenue): LiveTrader {
+    const t = v.trader!;
+    const c = this.marketReads;
+    const id = v.id;
+    const read = <T>(key: string, ttlMs: number, load: () => Promise<T | Refusal>): Promise<T | Refusal> => c.get(key, ttlMs, () => load().catch((err: unknown) => thrownBy(id, v.name, err)), id);
+    return Object.assign(Object.create(t) as LiveTrader, {
+      markets: (q: string) => read(`markets|${id}|${q.trim().toUpperCase()}`, 60_000, () => t.markets(q)),
+      market: (sym: string) => read(`market|${id}|${sym}`, 3_000, () => t.market(sym)),
+      ...(t.stats ? { stats: (symbols?: string[]) => read(`stats|${id}|${symbols ? [...symbols].sort().join(",") : ""}`, 60_000, () => t.stats!(symbols)) } : {}),
+      ...(t.events ? { events: (o: { category?: string | undefined; closingWithinMs?: number | undefined; limit: number }) => read(`events|${id}|${o.category ?? ""}|${o.closingWithinMs ?? ""}|${o.limit}`, 300_000, () => t.events!(o)) } : {}),
+      ...(t.candles ? { candles: (sym: string, interval: CandleInterval, sinceMs: number) => read(`candles|${id}|${sym}|${interval}`, 60_000, () => t.candles!(sym, interval, sinceMs)) } : {}),
+    });
+  }
+
+  /** A keyless public source as Markets, the Portfolio's 24 hours and the Market sheet read it: through the same cache as a venue's reads,
+   * under the source's id — so an answer on its way is shared, a source that refuses this location (451), rate-limits this machine (429)
+   * or does not answer is not asked again for the keep (a geoblock holds it back ten minutes), and a throw is a refusal. The source's own
+   * keeping of the bodies it downloads (live/public-markets.ts) sits under this */
+  private keptPublic(s: PublicSource): PublicSource {
+    const c = this.marketReads;
+    const id = s.id;
+    const read = <T>(key: string, ttlMs: number, load: () => Promise<T | Refusal>): Promise<T | Refusal> => c.get(key, ttlMs, () => load().catch((err: unknown) => thrownBy(id, s.name, err)), id);
+    return {
+      ...s,
+      listings: (o) => read(`public-listings|${id}|${(o.q ?? "").trim().toUpperCase()}|${o.limit}`, PUBLIC_KEEP_MS, () => s.listings(o)),
+      ...(s.stats ? { stats: (symbols?: string[]) => read(`public-stats|${id}|${symbols ? [...symbols].sort().join(",") : ""}`, PUBLIC_KEEP_MS, () => s.stats!(symbols)) } : {}),
+      ...(s.events ? { events: (o: { category?: string | undefined; closingWithinMs?: number | undefined; limit: number }) => read(`public-events|${id}|${o.category ?? ""}|${o.closingWithinMs ?? ""}|${o.limit}`, PUBLIC_KEEP_MS, () => s.events!(o)) } : {}),
+      ...(s.candles ? { candles: (sym: string, interval: CandleInterval, sinceMs: number) => read(`public-candles|${id}|${sym}|${interval}`, 60_000, () => s.candles!(sym, interval, sinceMs)) } : {}),
+    };
+  }
+
+  // ---- the wallet: what you own (Portfolio), what there is to trade (Markets), what can be sold (Trade) --------------------------------
+
+  /** how each venue connected live has answered the account's reads lately: when it last answered, when it last failed and in its own
+   * words, how long its last read took. A venue not read since it was connected has no entry yet */
+  venueHealth(): Record<string, VenueHealth> {
+    const out: Record<string, VenueHealth> = {};
+    for (const id of this.liveVenues.keys()) {
+      const h = this.adapters.get(id)?.account.watchOnly ? this.marketReads.healthOf(id) : undefined;
+      if (h) out[id] = h;
+    }
+    return out;
+  }
+
+  /** the real clock: what venues, public markets and the net worth curve are timed by (a stand-in's in tests) */
+  private realNow(): number {
+    return (this.opts.liveDeps?.clock ?? Date.now)();
+  }
+
+  private publicMade: PublicSource[] | undefined;
+  /** the keyless public sources, made once and kept (what each keeps — its answers for a while, its exchange client — lives in it), each
+   * read through the account's own cache (`keptPublic`) */
+  private publicMarkets(): PublicSource[] {
+    if (!this.publicMade) {
+      const deps = this.liveDeps();
+      this.publicMade = (this.opts.publicMarkets ?? publicSources({ http: deps.http, open: deps.openExchange, clock: deps.clock })).map((s) => this.keptPublic(s));
+    }
+    return this.publicMade;
+  }
+
+  /** MARKETS: everything there is to trade — what the connected venues list, and what the venues not connected publish without a key
+   * (marked "Connect to trade") — as one list, with its tabs, its movers, what closes soon and what trades most (live/explore.ts). A public
+   * source is left out when its venue is connected: the connected venue speaks for itself. Robinhood's Stock Tokens, which no connection
+   * trades, are always read. The same question is answered from what was found for thirty seconds; each venue's reads are kept as `kept`
+   * keeps them. Nothing is ordered or signed */
+  async explore(o: { tab?: string | undefined; q?: string | undefined; sort?: string | undefined; limit?: number | undefined } = {}): Promise<Exploration | Refusal> {
+    if (!this.account) return no("E_ACCOUNT_BAD_ACTION", { message: "the account layer is not mounted" });
+    const tab = o.tab?.trim() || undefined;
+    if (tab !== undefined && !TABS.some((t) => t.id === tab)) return no("E_ACCOUNT_BAD_ACTION", { message: `a tab is one of ${TABS.map((t) => t.id).join(", ")}` });
+    const sort = o.sort?.trim() || undefined;
+    if (sort !== undefined && !EXPLORE_SORTS.includes(sort as ExploreSort)) return no("E_ACCOUNT_BAD_ACTION", { message: `markets are sorted by ${EXPLORE_SORTS.join(", ")}` });
+    const q = (o.q ?? "").trim();
+    if (q.length > 60) return no("E_ACCOUNT_BAD_ACTION", { message: "a search is at most 60 characters" });
+    const limit = o.limit === undefined ? 60 : Math.floor(o.limit);
+    if (!(limit >= 1 && limit <= 200)) return no("E_ACCOUNT_BAD_ACTION", { message: "a limit is 1 to 200 markets" });
+    // each connected venue with the connection it was made with: exploreAcross leaves out the public source that connection speaks for
+    const connected: ExploreVenue[] = this.tradingVenues().map((v) => {
+      const connector = this.adapters.get(v.id)?.account.connector;
+      return { id: v.id, name: v.name, trader: this.kept(v), ...(connector ? { connector } : {}) };
+    });
+    return this.marketReads.get(`explore|${tab ?? ""}|${q.toUpperCase()}|${sort ?? ""}|${limit}`, 30_000, () => exploreAcross({ connected, public: this.publicMarkets() }, { q, limit, clock: () => this.realNow(), ...(tab ? { tab: tab as TabId } : {}), ...(sort ? { sort: sort as ExploreSort } : {}) }));
+  }
+
+  /** PORTFOLIO: what the account holds, by asset across every venue (account/holdings.ts), the dollars that are ready and where they can go,
+   * and what the holdings did in the last 24 hours — each coin's and share's own 24-hour change as a venue reports it (the connected
+   * venues' first, then the exchanges' public tickers), never estimated: what no venue reports is `missing`. `cost`: also what was paid for
+   * what is held (account/costbasis.ts), from the account's own orders and each venue's positions */
+  async holdings(opts: { cost?: boolean | undefined } = {}): Promise<HoldingsView | Refusal> {
+    const h = await this.held(opts);
+    return isRefusal(h) ? h : h.view;
+  }
+
+  private async held(opts: { cost?: boolean | undefined }): Promise<{ view: HoldingsView; page: AccountPage } | Refusal> {
+    const page = await this.accountView();
+    if (!page) return no("E_ACCOUNT_BAD_ACTION", { message: "the account layer is not mounted" });
+    const { rows, money } = byAsset(page.venues, { writes: page.connectLive?.writes?.on === true });
+    const [day, pos] = await Promise.all([this.dayStats(rows), opts.cost ? this.allPositions() : undefined]);
+    const held: HeldRow[] = rows.map((r) => {
+      const s = day.stats.get(r.key);
+      const pct = s ? pctOf(s) : undefined;
+      return pct === undefined || !s ? r : { ...r, changePct24h: Number(pct.toFixed(4)), changeFrom: { venue: s.venue, venueName: s.venueName } };
+    });
+    const view: HoldingsView = { asOf: page.now, totalUsd: page.totalUsd, rows: held, money, change24h: change24h(rows, day.stats), missing: day.missing };
+    if (pos && !isRefusal(pos)) {
+      view.positions = pos.positions;
+      // money in an earn product was not bought: what was paid is its asset's own row's
+      view.cost = costBasis(this.allOrders(), rows.filter((r) => r.class !== "earn"), pos.positions);
+      view.missing = [...view.missing, ...pos.missing];
+    }
+    return { view, page };
+  }
+
+  /** Each held coin's and share's last 24 hours, as a venue reports them: the connected venues' well-known markets first, then the shares
+   * still without a figure at the venues that trade shares, then the coins still without one in the exchanges' public tickers. Every source
+   * has four seconds; a figure is taken only where it says a change */
+  private async dayStats(rows: readonly AssetRow[]): Promise<{ stats: Map<string, MarketStats & { venue: string; venueName: string }>; missing: ReadMissing[] }> {
+    const want = new Set(rows.filter((r) => r.usd > 0 && (r.class === "crypto" || r.class === "equity")).map((r) => r.key));
+    // money in an earn product changes as its coin does: the coin's 24 hours are asked for too
+    for (const r of rows) if (r.class === "earn" && r.usd > 0 && r.earn && !isStable(r.earn.asset)) want.add(assetKey(r.earn.asset, "crypto"));
+    const stats = new Map<string, MarketStats & { venue: string; venueName: string }>();
+    const missing: ReadMissing[] = [];
+    if (!want.size) return { stats, missing };
+    const take = (key: string | undefined, s: MarketStats | undefined, venue: string, venueName: string) => {
+      if (key !== undefined && s && want.has(key) && !stats.has(key) && pctOf(s) !== undefined) stats.set(key, { ...s, venue, venueName });
+    };
+    const ask = async (v: { id: string; name: string }, run: () => Promise<Map<string, MarketStats> | Refusal>, keyOf: (symbol: string) => string | undefined) => {
+      const got = await within(STATS_MS, run(), v.id, v.name);
+      if (isRefusal(got)) return void missing.push({ venue: v.id, venueName: v.name, why: got.message, code: got.code, part: "stats" });
+      for (const [symbol, s] of got) take(keyOf(symbol), s, v.id, v.name);
+    };
+    // a venue trades shares when its connector's kinds say so, or its trader says it in words ("US stocks and ETFs")
+    const venues = this.tradingVenues().filter((v) => v.trader!.stats).map((v) => ({ v, shares: (v.trader!.kinds ?? tradeKinds(this.adapters.get(v.id)?.account.connector, v.trader!.what)).includes("stock") || /\b(stocks?|shares?|ETFs?)\b/i.test(v.trader!.what) }));
+    // a pair (BTC/USDT, BTC-USD, WETH/USDC@Base) is a coin's; a bare ticker is a share's, and only at a venue that trades shares. A
+    // perpetual's, a future's or an event's (with a colon) speaks for nothing held
+    const statKey = (shares: boolean) => (symbol: string): string | undefined => {
+      if (symbol.includes(":")) return undefined;
+      if (/[/@]/.test(symbol) || /-(USD|USDT|USDC)$/i.test(symbol)) return `crypto:${normalBase(symbol, "spot")}`;
+      return shares ? `equity:${symbol.toUpperCase()}` : undefined;
+    };
+    await Promise.all(venues.map(({ v, shares }) => ask(v, () => this.kept(v).stats!(), statKey(shares))));
+    const tickers = [...want].filter((k) => k.startsWith("equity:") && !stats.has(k)).map((k) => k.slice("equity:".length)).slice(0, 40);
+    if (tickers.length) await Promise.all(venues.filter((x) => x.shares).map(({ v }) => ask(v, () => this.kept(v).stats!(tickers), statKey(true))));
+    const coins = [...want].filter((k) => k.startsWith("crypto:") && !stats.has(k)).map((k) => k.slice("crypto:".length));
+    if (coins.length) {
+      // a source's ticker call takes forty symbols at a time: the coins go in lots of thirteen (three dollar pairs each), so every held
+      // coin gets its 24 hours, however many are held. Each lot is kept under the source's id (`keptPublic`), as a venue's reads are
+      const lots: string[][] = [];
+      for (let i = 0; i < coins.length; i += 13) lots.push(coins.slice(i, i + 13).flatMap((c) => ["USD", "USDT", "USDC"].map((q) => `${c}/${q}`)));
+      const exchanges = this.publicMarkets().filter((s) => s.kind === "exchange" && s.stats);
+      const got = await Promise.all(exchanges.map(async (s) => ({ s, rs: await Promise.all(lots.map((symbols) => within(STATS_MS, s.stats!(symbols), s.id, s.name))) })));
+      // in the sources' own order: the first that says a change for a coin is the one shown; a source that refused is named once
+      for (const { s, rs } of got) {
+        let said = false;
+        for (const r of rs) {
+          if (isRefusal(r)) {
+            if (!said) missing.push({ venue: s.id, venueName: s.name, why: r.message, code: r.code, part: "stats" });
+            said = true;
+          } else for (const [symbol, x] of r) take(`crypto:${normalBase(symbol, "spot")}`, x, s.id, s.name);
+        }
+      }
+    }
+    return { stats, missing };
+  }
+
+  /** every position at every venue connected live that lists them, each venue's read kept fifteen seconds and all of them asked at once;
+   * a venue that could not be read is in `missing` */
+  async allPositions(): Promise<{ positions: VenuePosition[]; missing: ReadMissing[] } | Refusal> {
+    if (!this.account) return no("E_ACCOUNT_BAD_ACTION", { message: "the account layer is not mounted" });
+    const venues = this.tradingVenues().filter((v) => v.trader!.positions);
+    const got = await Promise.all(venues.map(async (v) => ({ v, r: await this.livePositions(v.id) })));
+    const positions: VenuePosition[] = [];
+    const missing: ReadMissing[] = [];
+    for (const { v, r } of got) {
+      if (isRefusal(r)) missing.push({ venue: v.id, venueName: v.name, why: r.message, code: r.code, part: "positions" });
+      else positions.push(...r.map((p) => ({ ...p, venue: v.id, venueName: v.name })));
+    }
+    return { positions, missing };
+  }
+
+  /** EARN: the products the venues connected live offer (DeFi vaults through the MetaMask Agent Wallet's mm, OKX's Simple Earn, Kraken
+   * Earn), in one asset when asked, and what the user has in them — at one venue, or at every venue that earns. Products are kept a minute
+   * and what is held fifteen seconds, read through the same short-lived cache as the venues' markets; a venue that could not be read is in
+   * `missing` with its own words. A read: what goes in or out is the account's earn door's (account/live-earn.ts) */
+  async earn(o: { venue?: string | undefined; asset?: string | undefined } = {}): Promise<EarnView | Refusal> {
+    if (!this.account) return no("E_ACCOUNT_BAD_ACTION", { message: "the account layer is not mounted" });
+    const asset = o.asset?.trim().toUpperCase() ?? "";
+    if (asset !== "" && !/^[A-Z0-9.]{1,20}$/.test(asset)) return no("E_ACCOUNT_BAD_ACTION", { message: "an asset is its symbol: USDC, BTC" });
+    const ids = [...this.earners.keys()].filter((id) => this.adapters.get(id)?.account.watchOnly && (!o.venue || id === o.venue));
+    if (o.venue && !ids.length) return no("E_VENUE_RAIL_CLOSED", { venue: o.venue, message: this.adapters.get(o.venue)?.account.watchOnly ? `${this.nameOf(o.venue)} offers no earn products to the account` : `"${o.venue}" is not a venue connected live` });
+    const products: EarnView["products"] = [];
+    const positions: EarnView["positions"] = [];
+    const missing: ReadMissing[] = [];
+    await Promise.all(ids.map(async (id) => {
+      const x = this.earners.get(id)!;
+      const name = this.nameOf(id);
+      const c = this.marketReads;
+      const [ps, held] = await Promise.all([
+        within(STATS_MS * 2, c.get(`earn-products|${id}|${asset}`, 60_000, () => x.products(asset || undefined), id), id, name),
+        within(STATS_MS * 2, c.get(`earn-positions|${id}`, 15_000, () => x.positions(), id), id, name),
+      ]);
+      if (isRefusal(ps)) missing.push({ venue: id, venueName: name, why: ps.message, code: ps.code, part: "earn" });
+      else products.push(...ps.filter((p) => !asset || p.asset.toUpperCase() === asset).map((p) => ({ ...p, venue: id, venueName: name })));
+      if (isRefusal(held)) missing.push({ venue: id, venueName: name, why: held.message, code: held.code, part: "earn" });
+      else positions.push(...held.filter((h) => !asset || h.asset.toUpperCase() === asset || products.some((p) => p.venue === id && p.id === h.product)).map((h) => ({ ...h, venue: id, venueName: name })));
+    }));
+    // the highest yield first; what is held, the most dollars first
+    products.sort((a, b) => (b.apy ?? -1) - (a.apy ?? -1));
+    positions.sort((a, b) => (b.usd ?? 0) - (a.usd ?? 0));
+    const venues = ids.map((id) => {
+      const x = this.earners.get(id)!;
+      return { venue: id, venueName: this.nameOf(id), can: x.can, what: x.what, ...(x.whyNot ? { whyNot: x.whyNot } : {}) };
+    });
+    return { asOf: new Date(this.realNow()).toISOString(), venues, products, positions, missing, writes: this.liveWritesView() };
+  }
+
+  /** Where to send `asset` on `network` so that it lands at `venue`: an exchange's own deposit address, as the exchange gives it (asked of it
+   * now, kept a minute); a wallet's own address, when a wallet signed to show it is the user's (or the account holds its key). A watched
+   * address, or a venue the account sends nothing to, gives none */
+  async receive(venue: string, asset: string, network: string): Promise<ReceiveAddress | Refusal> {
+    if (!this.account) return no("E_ACCOUNT_BAD_ACTION", { message: "the account layer is not mounted" });
+    const v = this.adapters.get(venue)?.account.watchOnly ? this.liveVenues.get(venue) : undefined;
+    if (!v) return no("E_WALLET_ACCOUNT_UNKNOWN", { venue, message: `"${venue}" is not a venue connected live` });
+    const a = asset.trim().toUpperCase();
+    if (!/^[A-Z0-9.]{1,15}$/.test(a)) return no("E_ACCOUNT_BAD_ACTION", { message: "name what is to be received: USDC, USDT, ETH" });
+    if (!Object.hasOwn(CHAINS, network)) return no("E_ACCOUNT_BAD_ACTION", { message: `a network is one of ${Object.keys(CHAINS).join(", ")}` });
+    const chain = network as ChainName;
+    const base = { venue: v.id, venueName: v.name, asset: a, network: chain };
+    // a venue that is an address of the user's own: only when a wallet signed for it. A Polymarket wallet lives on Polygon alone and takes
+    // pUSD, so it is not "the same on every EVM chain" (Polymarket connected by its key carries no address: its writer answers below)
+    if (v.address !== undefined) {
+      if (!v.proven) return no("E_ACCOUNT_DESTINATION", { venue: v.id, message: `${v.name} is watched, not proven yours: the account gives no address to send to it. Connect it again from the wallet itself` });
+      if (v.kind === "prediction") {
+        if (chain !== "Polygon" || a !== "PUSD") return no("E_ACCOUNT_BAD_ACTION", { venue: v.id, message: `${v.name}'s wallet lives on Polygon and holds pUSD: send pUSD on Polygon, nothing on another chain` });
+        return { ...base, address: v.address, whose: v.proven, note: "the Polymarket wallet, on Polygon: pUSD only" };
+      }
+      return { ...base, address: v.address, whose: v.proven, note: "the wallet's own address: the same on every EVM chain" };
+    }
+    if (!v.writer) return no("E_VENUE_RAIL_CLOSED", { venue: v.id, message: `${v.name}: ${v.readOnlyBecause ?? "the account reads it and sends it nothing"}` });
+    if (!v.writer.can.receive) return no("E_VENUE_RAIL_CLOSED", { venue: v.id, message: `${v.name} takes nothing sent from here` });
+    const writer = v.writer;
+    const r = await this.marketReads.get(`receive|${v.id}|${a}|${chain}`, 60_000, () => writer.depositAddress(a, chain).catch((err: unknown) => thrownBy(v.id, v.name, err)), v.id);
+    if (isRefusal(r)) return r;
+    // the venue's own words about sending there (a bridge's minimum, what it is credited as) travel with the address
+    return { ...base, address: r.address, ...(r.tag ? { tag: r.tag } : {}), ...(r.note ? { note: r.note } : {}), whose: `${v.name}'s own deposit address, as ${v.name} gives it` };
+  }
+
+  /** One point on the net worth curve (account/networth.ts): the account page's total, by class and by venue (every venue connected, with
+   * what it holds, 0 included), and which venues' numbers are stale; with `event`, the venue connected or disconnected just now. None while
+   * a restart is still connecting the venues again: a venue that is not back yet is not money gone */
+  async snapshot(event?: NetWorthSnapshot["event"]): Promise<{ written: boolean; at: string } | Refusal | undefined> {
+    if (!this.account || this.reconnecting) return undefined;
+    const page = await this.accountView();
+    if (!page) return undefined;
+    const byClass: Record<string, number> = {};
+    const byVenue: Record<string, number> = {};
+    for (const v of page.venues) {
+      byVenue[v.id] = v.usd;
+      for (const h of v.holdings) if (h.usd > 0) byClass[h.class] = r2((byClass[h.class] ?? 0) + h.usd);
+    }
+    // what the account itself has paid out to someone else, in all, from every run's statement: the curve's change adds it back
+    const paidOutUsd = r2(this.statement().filter((l) => l.kind === "pay" && l.status === "settled").reduce((sum, l) => sum + Math.abs(l.amountUsd), 0));
+    return this.netWorth().append({ usd: page.totalUsd, byClass, byVenue, stale: page.venues.filter((v) => v.stale).map((v) => v.id), paidOutUsd, ...(event ? { event } : {}) });
+  }
+
+  private netWorthLog: NetWorthLog | undefined;
+  private netWorth(): NetWorthLog {
+    return (this.netWorthLog ??= new NetWorthLog(networthPath(this.opts.home), () => this.realNow()));
+  }
+
+  /** the net worth curve over the last day (1d), week (1w) or month (1m), or all of it: one point per bucket, the connections and
+   * disconnections in it, and how the holdings changed — connections left out, the account's own payments to payees added back, a venue's
+   * own deposits and withdrawals in it (account/networth.ts). It starts at the first snapshot: nothing before is known */
+  history(range: string): NetWorthHistory | Refusal {
+    if (!this.account) return no("E_ACCOUNT_BAD_ACTION", { message: "the account layer is not mounted" });
+    return this.netWorth().read(range, this.realNow());
+  }
+
+  /** One asset, as the Asset sheet shows it: its holdings row (when it is held), the same thing at every connected venue (live/compare.ts),
+   * its price history at the first of them that keeps one, its positions, the account's open orders in it, its statement lines and what was
+   * paid for it. `key` is a holdings key (`crypto:BTC`, `equity:AAPL`, `stable:USDC`, `event:<symbol>`); `coin:` and `stock:` are taken for
+   * `crypto:` and `equity:`. A read */
+  async asset(key: string, interval = "1h"): Promise<AssetDetail | Refusal> {
+    const k = assetKeyOf(key);
+    if (!k) return no("E_ACCOUNT_BAD_ACTION", { message: "an asset is named by its key: crypto:BTC, equity:AAPL, stable:USDC, rwa:USDY, event:<symbol>" });
+    if (!(CANDLE_INTERVALS as readonly string[]).includes(interval)) return no("E_ACCOUNT_BAD_ACTION", { message: `price history is by ${CANDLE_INTERVALS.join(", ")}` });
+    const h = await this.held({ cost: true });
+    if (isRefusal(h)) return h;
+    const row = h.view.rows.find((r) => r.key === k.key);
+    const positions = (h.view.positions ?? []).filter((p) => sameThing(k, p.kind, p.symbol, p.symbol));
+    const orders = h.page.orders.filter((o) => !DONE.has(o.status) && sameThing(k, o.kind, o.base, o.symbol));
+    const missing: ReadMissing[] = [];
+    let compare: Comparison | undefined;
+    if (k.cls === "crypto" || k.cls === "equity") {
+      const c = await this.liveCompare(k.name, "buy", undefined, k.cls === "equity" ? "stock" : "crypto");
+      if (isRefusal(c)) missing.push({ venue: "*", venueName: "every venue", why: c.message, code: c.code, part: "compare" });
+      else compare = c;
+    }
+    const candles = await this.candlesFor(k, interval as CandleInterval, compare, positions, row);
+    if (candles.missing) missing.push(candles.missing);
+    // the statement's lines about it: its orders, and for a dollar the movements of that dollar
+    const keys = new Set<string>();
+    const { before, now } = this.statementRows();
+    for (const r of [...before, ...now]) {
+      const n = (r.native ?? {}) as { order?: Partial<LiveOrder>; payment?: Partial<Payment> };
+      if (n.order && typeof n.order.kind === "string" && sameThing(k, n.order.kind as MarketKind, String(n.order.base ?? ""), String(n.order.symbol ?? ""))) keys.add(r.detail.key);
+      else if (n.payment && (k.cls === "stable" || k.cls === "cash") && [n.payment.token, n.payment.sourceToken].some((t) => typeof t === "string" && t.toUpperCase() === k.name)) keys.add(r.detail.key);
+    }
+    const lines = keys.size ? this.statement().filter((l) => keys.has(l.key)).slice(0, 50) : [];
+    const held = new Set(positions.map((p) => `position:${p.venue}:${p.symbol}`));
+    const cost = (h.view.cost ?? []).filter((c) => c.key === k.key || held.has(c.key));
+    return { key: k.key, ...(row ? { row } : {}), ...(compare ? { compare } : {}), ...(candles.got ? { candles: candles.got } : {}), positions, orders, lines, cost, missing };
+  }
+
+  /** ONE MARKET'S PRICE HISTORY, as the Market sheet and the Asset sheet draw it: at a venue connected live, its trader's own (live/trade.ts
+   * candles); at a venue not connected, its public source's, without a key (live/public-markets.ts: the exchanges' keyless OHLCV, Kalshi's
+   * public candlesticks, Polymarket's prices-history). `venue` is a venue's id on the account or a public source's id as Markets lists it;
+   * `symbol` the market as that venue names it. Bars of 5m, 1h or 1d, about three hundred, each answer kept a minute. The symbol is only ever
+   * handed to the venue's own client or put in a fixed host's query string, encoded: nothing here is asked of a host the symbol names */
+  async candles(venue: string, symbol: string, interval: string): Promise<CandlesView | Refusal> {
+    if (!this.account) return no("E_ACCOUNT_BAD_ACTION", { message: "the account layer is not mounted" });
+    const id = venue.trim();
+    const sym = symbol.trim();
+    if (!/^[a-z0-9][a-z0-9-]{0,59}$/.test(id)) return no("E_ACCOUNT_BAD_ACTION", { message: "a venue is named by its id: lower-case letters, digits and dashes" });
+    if (!sym || sym.length > 160 || !isPlain(sym)) return no("E_ACCOUNT_BAD_ACTION", { message: "a market is named by its symbol at that venue: 1 to 160 characters of plain text" });
+    if (!(CANDLE_INTERVALS as readonly string[]).includes(interval)) return no("E_ACCOUNT_BAD_ACTION", { message: `price history is by ${CANDLE_INTERVALS.join(", ")}` });
+    const iv = interval as CandleInterval;
+    const since = this.realNow() - CANDLE_SPAN[iv];
+    const live = this.adapters.get(id)?.account.watchOnly ? this.liveVenues.get(id) : undefined;
+    if (live) {
+      if (!live.trader) return no("E_VENUE_RAIL_CLOSED", { venue: id, message: `${live.name}: ${live.noTradeBecause ?? "no markets are read here from the account"}` });
+      if (!live.trader.candles) return no("E_VENUE_RAIL_CLOSED", { venue: id, message: `${live.name} keeps no price history the account can read` });
+      const got = await within(CANDLE_MS, this.kept(live).candles!(sym, iv, since), id, live.name);
+      return isRefusal(got) ? got : { venue: id, venueName: live.name, symbol: sym, interval: iv, candles: got };
+    }
+    const src = this.publicMarkets().find((x) => x.id === id);
+    if (!src) return no("E_WALLET_ACCOUNT_UNKNOWN", { venue: id, message: `"${id.slice(0, 40)}" is neither a venue connected live nor a public market source: Markets names both` });
+    if (!src.candles) return no("E_VENUE_RAIL_CLOSED", { venue: id, message: `${src.name} publishes no price history` });
+    // kept a minute under the source's id (`keptPublic`): a source that refused this location is not asked again for ten minutes
+    const got = await within(CANDLE_MS, src.candles(sym, iv, since), id, src.name);
+    return isRefusal(got) ? got : { venue: id, venueName: src.name, symbol: sym, interval: iv, candles: got, public: true };
+  }
+
+  /** price history for the Asset sheet: at the first venue in the comparison whose trader keeps it (its spot or stock market before a
+   * perpetual), or — an event contract — at a venue that holds it; at most two venues are asked, each within its time. A coin no connected
+   * venue keeps a history of (a wallet's, a by-address venue's) is then asked of the exchanges' keyless public bars, as the Market sheet
+   * reads them — its dollar pair at the first two sources that publish one. Only when every source refused is there none, in their words */
+  private async candlesFor(k: AssetKey, interval: CandleInterval, compare: Comparison | undefined, positions: VenuePosition[], row: HeldRow | undefined): Promise<{ got?: CandleSeries; missing?: ReadMissing }> {
+    const tries: Array<{ v: LiveVenue; symbol: string }> = [];
+    const add = (venue: string, symbol: string) => {
+      const v = this.liveVenues.get(venue);
+      if (v?.trader?.candles && this.adapters.get(venue)?.account.watchOnly && !tries.some((t) => t.v.id === venue && t.symbol === symbol)) tries.push({ v, symbol });
+    };
+    for (const r of compare?.rows ?? []) if (r.kind !== "perp") add(r.venue, r.symbol);
+    for (const r of compare?.rows ?? []) if (r.kind === "perp") add(r.venue, r.symbol);
+    if (k.cls === "event") {
+      for (const p of positions) add(p.venue, p.symbol);
+      for (const l of row?.venues ?? []) add(l.venue, row!.asset);
+    }
+    const since = this.realNow() - CANDLE_SPAN[interval];
+    let missing: ReadMissing | undefined;
+    for (const t of tries.slice(0, 2)) {
+      const got = await within(CANDLE_MS, this.kept(t.v).candles!(t.symbol, interval, since), t.v.id, t.v.name);
+      if (isRefusal(got)) missing ??= { venue: t.v.id, venueName: t.v.name, why: got.message, code: got.code, part: "candles" };
+      else if (got.length) return { got: { venue: t.v.id, venueName: t.v.name, symbol: t.symbol, interval, bars: got } };
+    }
+    if (k.cls === "crypto") {
+      for (const s of this.publicMarkets().filter((x) => x.kind === "exchange" && x.candles).slice(0, 2)) {
+        for (const quote of ["USD", "USDT", "USDC"]) {
+          const symbol = `${k.name}/${quote}`;
+          const got = await within(CANDLE_MS, s.candles!(symbol, interval, since), s.id, s.name);
+          if (isRefusal(got)) missing ??= { venue: s.id, venueName: s.name, why: got.message, code: got.code, part: "candles" };
+          else if (got.length) return { got: { venue: s.id, venueName: s.name, symbol, interval, bars: got, public: true } };
+        }
+      }
+    }
+    return missing ? { missing } : {};
+  }
+
+  /** TRADE · Sell many: everything held that is not a dollar, venue by venue, with what selling all of it there would sign — a sell order in
+   * a dollar market at that venue (a wallet's token in its pair with USDC on the chain it is held on), its size down to the market's step;
+   * a perpetual or a future, its close; an event contract, its shares sold. Each says whether an order could go now, and if not why.
+   * Nothing is placed: each one is still an order the owner signs, or an agent places inside its limit */
+  async sellable(): Promise<{ items: Sellable[]; missing: ReadMissing[] } | Refusal> {
+    const page = await this.accountView();
+    if (!page) return no("E_ACCOUNT_BAD_ACTION", { message: "the account layer is not mounted" });
+    const writes = page.connectLive?.writes?.on === true;
+    const { rows } = byAsset(page.venues, { writes });
+    const pos = await this.allPositions();
+    if (isRefusal(pos)) return pos;
+    const listsPositions = new Set(this.tradingVenues().filter((v) => v.trader!.positions).map((v) => v.id));
+    const jobs: Array<Promise<Sellable>> = [];
+    for (const row of rows) {
+      // a dollar is not sold; money in an earn product is taken out first (a liveEarn withdraw), then sold
+      if (row.class === "stable" || row.class === "cash" || row.class === "earn") continue;
+      // an event contract at a venue that lists positions is sold from its position, below
+      for (const line of row.venues) if (!(row.class === "event" && listsPositions.has(line.venue))) jobs.push(this.sellLine(row, line, writes));
+    }
+    for (const p of pos.positions) if (p.kind === "perp" || p.kind === "future" || p.kind === "event") jobs.push(this.sellPosition(p, writes));
+    const items = (await Promise.all(jobs)).sort((a, b) => Number(b.ready) - Number(a.ready) || (b.usd ?? 0) - (a.usd ?? 0));
+    return { items, missing: pos.missing };
+  }
+
+  /** what selling one venue's part of a holding would sign there */
+  private async sellLine(row: AssetRow, line: AssetRow["venues"][number], writes: boolean): Promise<Sellable> {
+    const base = { key: row.key, asset: row.asset, venue: line.venue, venueName: line.venueName, action: "sell" as const, held: line.amount };
+    const not = (why: string): Sellable => ({ ...base, sellQty: 0, ready: false, why });
+    if (line.inTransit) return not("on its way: it is not at the venue yet");
+    if (line.watched) return not("a watched address: nothing is sold from it here");
+    const v = this.liveVenues.get(line.venue);
+    if (!v?.trader || !this.adapters.get(line.venue)?.account.watchOnly) return not(v?.noTradeBecause ?? "no orders are placed here from the account");
+    const t = this.kept(v);
+    const found = row.class === "event" ? await t.market(row.asset) : await dollarMarket(t, row, line);
+    if (isRefusal(found)) return not(found.message);
+    if (!found) return not(`${v.name} lists no dollar market for ${row.asset}${line.note ? ` (${line.note.split(" · ")[0]})` : ""}`);
+    const fresh = row.class === "event" ? found : await t.market(found.symbol);
+    const m = isRefusal(fresh) ? found : fresh;
+    return this.sellOf(base, v, m, line.amount, writes);
+  }
+
+  /** a position's way out: a perpetual or a future closed at its venue, an event contract's shares sold */
+  private async sellPosition(p: VenuePosition, writes: boolean): Promise<Sellable> {
+    const v = this.liveVenues.get(p.venue)!;
+    const base = { key: `position:${p.venue}:${p.symbol}`, asset: p.kind === "event" ? p.name : normalBase(p.symbol, p.kind) || p.symbol, venue: p.venue, venueName: p.venueName ?? v.name, held: p.qty };
+    if (p.kind === "event") {
+      const m = await this.kept(v).market(p.symbol);
+      if (isRefusal(m)) return { ...base, action: "sell", symbol: p.symbol, kind: p.kind, side: p.side, sellQty: 0, ready: false, why: m.message };
+      return this.sellOf({ ...base, action: "sell" }, v, m, p.qty, writes);
+    }
+    const why = !writes ? "this server was started read-only" : v.trader!.can === false ? (v.trader!.whyNot ?? "this key may not trade") : undefined;
+    return { ...base, action: "close", symbol: p.symbol, kind: p.kind, side: p.side, sellQty: p.qty, ...(p.markPrice !== undefined ? { price: p.markPrice } : {}), ...(p.usd !== undefined ? { usd: r2(p.usd) } : {}), ready: why === undefined, ...(why ? { why } : {}) };
+  }
+
+  /** a sell of `held` in market `m`: down to its step, at its bid (its price where it shows no book), and whether it could go now */
+  private sellOf(base: Omit<Sellable, "sellQty" | "ready" | "symbol" | "kind" | "price" | "usd" | "why">, v: LiveVenue, m: Market, held: number, writes: boolean): Sellable {
+    const qty = floorTo(held, m.qtyStep);
+    const price = m.bid ?? m.price;
+    const usd = price !== undefined ? r2(qty * price * (m.contractSize ?? 1)) : undefined;
+    const why = !writes ? "this server was started read-only" : v.trader!.can === false ? (v.trader!.whyNot ?? "this key may not trade") : !m.open ? (m.note ?? "the market is closed now") : !(qty > 0) ? "less than one step of size" : m.minQty !== undefined && qty < m.minQty ? `below the smallest order there (${m.minQty} ${m.base})` : m.minNotional !== undefined && usd !== undefined && usd < m.minNotional ? `below the smallest order there ($${m.minNotional})` : undefined;
+    return { ...base, symbol: m.symbol, kind: m.kind, sellQty: qty, ...(price !== undefined ? { price } : {}), ...(usd !== undefined ? { usd } : {}), ready: why === undefined, ...(why ? { why } : {}) };
+  }
+
+  /** a fresh price for each of a few markets at venues connected live (each kept three seconds, as the order ticket's): what the page polls
+   * for the cards it shows */
+  async quotes(pairs: Array<{ venue: string; symbol: string }>): Promise<Array<{ venue: string; symbol: string; market?: Market; refusal?: Refusal }> | Refusal> {
+    if (!this.account) return no("E_ACCOUNT_BAD_ACTION", { message: "the account layer is not mounted" });
+    if (!pairs.length || pairs.length > 12) return no("E_ACCOUNT_BAD_ACTION", { message: "quotes are asked for 1 to 12 markets at once, each venue|symbol" });
+    return Promise.all(pairs.map(async (p) => {
+      const r = await this.liveMarket(p.venue, p.symbol);
+      return isRefusal(r) ? { ...p, refusal: r } : { ...p, market: r };
+    }));
+  }
+
+  /** THE AGENTS, one by one — what the Agent module reads: each key's standing and expiry, each limit the owner signed for it with what is
+   * spent, held and left, the cards it is waiting on, its orders, its payments, its wallets, the owner's intents addressed to it (or to
+   * every agent) and what it has asked the owner for, and its recent flights. Keys that asked to be let in are in `requests`. A read: what
+   * an agent may do is still only what its limits and the owner's cards say */
+  async agents(): Promise<AgentsView | Refusal> {
+    const page = await this.accountView();
+    if (!page) return no("E_ACCOUNT_BAD_ACTION", { message: "the account layer is not mounted" });
+    // a key approved again after its first approval ran out is listed twice: the later approval is the one that stands
+    const keys = new Map<string, AccountPage["keys"][number]>();
+    for (const k of page.keys) {
+      const was = keys.get(k.address);
+      if (!was || Date.parse(k.approvedAt) >= Date.parse(was.approvedAt)) keys.set(k.address, k);
+    }
+    const agents: AgentView[] = [...keys.values()].map((k) => ({
+      address: k.address,
+      name: k.name,
+      code: k.code,
+      status: k.status,
+      validUntil: k.validUntil,
+      approvedAt: k.approvedAt,
+      limits: page.spend.filter((s) => s.agent === k.address).map((s) => ({ id: s.id, scope: s.scope, allow: s.allow, perPaymentUsd: s.perPaymentUsd, budgetUsd: s.budgetUsd, spentUsd: s.spentUsd, reservedUsd: s.reservedUsd, leftUsd: Number(Math.max(0, s.budgetUsd - s.spentUsd - s.reservedUsd).toFixed(6)), windowHours: s.windowHours, validUntil: s.validUntil, expired: s.expired })),
+      cards: page.cards.filter((c) => c.agent === k.address),
+      orders: page.orders.filter((o) => o.agent === k.address).slice(0, 20),
+      payments: page.payments.filter((p) => p.agent === k.address).slice(0, 20),
+      earns: page.earns.filter((e) => e.agent === k.address).slice(0, 20),
+      wallets: page.subAccounts.filter((s) => s.agent === k.address).map((s) => {
+        const venue = agentWalletVenue(s.name);
+        const live = page.venues.find((v) => v.id === venue);
+        return { ...s, venue, ...(live ? { usd: live.usd } : {}) };
+      }),
+      intents: page.intents.filter((i) => i.agent === k.address || i.agent === "*"),
+      asks: page.asks.filter((a) => a.agent === k.address),
+      declinedAsks: page.declinedAsks.filter((a) => a.agent === k.address),
+      flights: this.flights.filter((f) => f.agent.name === k.name && f.agent.code === k.code).slice(-10).reverse().map((f) => ({ no: f.no, at: f.at, request: f.request, legs: f.legs.map((l) => `${l.mark === "ok" ? "✓" : l.mark === "no" ? "✗" : l.mark === "wait" ? "▣" : "·"} ${l.text}`) })),
+    }));
+    // the mode as every other read wires it (`guard` is Guard, `open` is Beast): the page puts the words on it
+    return { asOf: page.now, mode: this.openness.mode === "open" ? "open" : "guard", agents, requests: page.requests };
+  }
+
+  /** every order the account ever placed, as last logged, with each row at which more of it filled (account/costbasis.ts ordersOf): every run's */
+  private allOrders(): LoggedOrder[] {
+    const { before, now } = this.statementRows();
+    return ordersOf([...before, ...now].map((r) => ({ kind: "statement", native: r.native })));
+  }
 
   /** what a live connection reaches: the real network, unless a test handed in stand-ins */
   private liveDeps(): LiveDeps {
@@ -522,24 +1110,44 @@ export class PortfolioService {
     Object.assign(adapter.account, { ...(proven ? { proven } : {}), ...(src.writer ? { liveCan: src.writer.can } : {}), ...(src.noTradeBecause ? { noTradeBecause: src.noTradeBecause } : {}), ...(src.readOnlyBecause ? { readOnlyBecause: src.readOnlyBecause } : {}) });
     // what the key may do is read from the trader each time: a venue can say it only after connecting (Kalshi's key scopes)
     const trader = src.trader;
-    if (trader) Object.defineProperty(adapter.account, "liveTrade", { get: () => ({ can: trader.can, what: trader.what }), enumerable: true, configurable: true });
+    // the kinds of market its trader offers, where it says them itself (the mm trader: tokens, event contracts, perpetuals); the page falls
+    // back to the connector's own (accounts.ts tradeKinds) where it does not
+    if (trader) Object.defineProperty(adapter.account, "liveTrade", { get: () => ({ can: trader.can, what: trader.what, ...(trader.kinds ? { kinds: [...trader.kinds] } : {}), positions: !!trader.positions, amend: !!trader.amend, leverage: !!trader.setLeverage, close: !!trader.close }), enumerable: true, configurable: true });
     this.liveVenues.set(venue, { id: venue, name: adapter.account.name, kind: adapter.account.kind, ...(src.address ? { address: src.address } : {}), ...(proven ? { proven } : {}), ...(src.writer ? { writer: src.writer } : {}), ...(src.readOnlyBecause ? { readOnlyBecause: src.readOnlyBecause } : {}), ...(src.trader ? { trader: src.trader } : {}), ...(src.noTradeBecause ? { noTradeBecause: src.noTradeBecause } : {}), via: src.via });
+    // its earn: the source's own (the mm wallet's vaults), or — at OKX and Kraken — the exchange's, through the trader's own client and key
+    const hook = exchangeEarnHook(src.trader);
+    const earner = src.earner ?? (hook ? exchangeEarner({ ...hook, price: deps.price, now: deps.clock }) : undefined);
+    if (earner) this.earners.set(venue, earner);
+    else this.earners.delete(venue);
     if (sim) this.shadowed.set(venue, sim);
     this.adapters.set(venue, adapter);
+    // Markets and the comparison were answered from what the venues listed before this one: they are asked again
+    this.marketReads.forgetAll(["explore", "compare"]);
     const usd = r2((await adapter.read()).reduce((s, h) => s + h.usd, 0));
     // what this connection may do with the money there: nothing unless the server moves real money, and then only what the owner signs
     const writes = this.opts.liveWrites;
     const can = src.writer?.can;
     const leaves = !!can && (can.withdraw !== false || (can.ledgers.length > 1 && can.transfer !== false) || can.swap !== false || !!can.send);
     const mode = !src.writer ? `read only: ${src.readOnlyBecause ?? "nothing is sent to it from here"}` : !writes ? "read only: this server was started without real-money writes" : src.address !== undefined && !proven && src.writer.can.send === "wallet" ? "watched: no wallet signed for this address, so nothing is sent to or from it" : !leaves ? "this key only reads: money can be sent to it, nothing leaves it from here" : `real money moves only when you sign it, at most ${cents(writes.capUsd)} a movement`;
-    return { ok: true, summary: `${adapter.account.name} connected live · ${cents(usd)} there now · ${opened.summary} · ${mode}${sim && !this.opts.real ? " · it stands in for the simulated one until it is unplugged" : ""}`, native: { connector, probe: opened.source.probe.native ?? null } };
+    // the wallet's proof rides on the connection's row: a restarted account checks the signature again rather than forgetting it was given
+    const proof = src.address !== undefined && connector !== "live:metamask" ? deps.proofs.proven(src.address) : undefined;
+    const kept = proof?.message && proof.signature ? { address: proof.address, wallet: proof.wallet, at: proof.at, message: proof.message, signature: proof.signature } : undefined;
+    return { ok: true, summary: `${adapter.account.name} connected live · ${cents(usd)} there now · ${opened.summary} · ${mode}${sim && !this.opts.real ? " · it stands in for the simulated one until it is unplugged" : ""}`, native: { connector, probe: opened.source.probe.native ?? null, ...(kept ? { proof: kept } : {}) } };
   }
 
   private unplug(venue: string): Refusal | { ok: true; summary: string } {
     const a = this.adapters.get(venue);
     if (!a) return no("E_WALLET_ACCOUNT_UNKNOWN", { venue });
     if (!a.account.plugged) return no("E_ACCOUNT_BAD_ACTION", { venue, message: `${a.account.name} is one of the venues the account opened with: only a venue that was plugged in can be unplugged` });
+    // an agent wallet is the account's own: this account holds its key, and the money in it is the owner's. Disconnecting it would only
+    // hide that money (and leave the wallet with no way back on the page); it is emptied instead, and goes with the agent's sub-account
+    if (a.account.connector === "live:agent-wallet") return no("E_ACCOUNT_BAD_ACTION", { venue, message: `${a.account.name} is an agent wallet: it is not disconnected, because it holds money this account has the key for. Empty it with Take back… first; it leaves the account with the agent's sub-account` });
     this.liveVenues.delete(venue);
+    this.earners.delete(venue);
+    this.earnSeen.delete(venue);
+    this.marketReads.forget(venue);
+    // Markets and the comparison were answered with this venue among the connected ones: they are asked again
+    this.marketReads.forgetAll(["explore", "compare"]);
     // a live connection that stood in for a simulated venue: the simulated one comes back
     const sim = this.shadowed.get(venue);
     if (sim) {
@@ -550,7 +1158,9 @@ export class PortfolioService {
     }
     if (a.account.watchOnly) {
       this.adapters.delete(venue);
-      return { ok: true, summary: `${a.account.name} disconnected: the account no longer reads it. ${a.account.address ? "Nothing was ever held for it here" : "The key at the venue is untouched: delete it there"}` };
+      // what it holds stays where it is, at the venue or at the address: only the account's reading of it ends. A venue read by its
+      // address had no key here to delete; one connected by a key keeps that key at the venue
+      return { ok: true, summary: `${a.account.name} disconnected: the account no longer reads it. ${a.account.address ? "What is at the address stays there; it was read by its address, so there is no key to delete" : "The key at the venue is untouched: delete it there"}` };
     }
     this.adapters.delete(venue);
     const listed = this.walletAllow.indexOf(a.account.address ?? venue);
@@ -558,18 +1168,154 @@ export class PortfolioService {
     return { ok: true, summary: `${a.account.name} unplugged: the account no longer reads it or routes through it. The credential at the venue is untouched: delete it there` };
   }
 
-  /** the account layer's front door: one signed instruction */
+  /** the account layer's front door: one signed instruction. A write that reached a venue changes what that venue's reads say, so what was
+   * kept of them goes (positions, prices, earn): the next page read sees the new position, leverage or balance within one poll, not when
+   * the keep runs out. A card changes nothing at the venue yet; a refusal changes nothing at all */
   async exchange(envelope: Envelope): Promise<Outcome> {
     if (!this.account) return no("E_ACCOUNT_BAD_ACTION", { message: "the account layer is not mounted on this service" });
-    return this.account.exchange(envelope);
+    const r = await this.account.exchange(envelope);
+    if (!isRefusal(r) && r.kind !== "card") for (const v of this.venuesWritten(envelope.action)) this.marketReads.drop(v);
+    return r;
   }
 
-  /** what the Account page reads */
+  /** the venues a signed instruction writes at, when it is one that writes at a venue: an order and what is done to it, a movement's two
+   * ends, money into or out of earn, and a card the owner approved (the venue of what it released) */
+  private venuesWritten(action: unknown): string[] {
+    const a = (action && typeof action === "object" ? action : {}) as { type?: unknown; venue?: unknown; from?: unknown; to?: unknown; card?: unknown };
+    const text = (x: unknown): string[] => (typeof x === "string" && x ? [x] : []);
+    switch (a.type) {
+      case "liveOrder":
+      case "agentLiveOrder":
+      case "liveCancel":
+      case "agentLiveCancel":
+      case "liveAmend":
+      case "agentLiveAmend":
+      case "liveClose":
+      case "agentLiveClose":
+      case "liveLeverage":
+      case "agentLiveLeverage":
+      case "liveEarn":
+      case "agentLiveEarn":
+        return text(a.venue);
+      case "liveMove":
+      case "agentLiveMove":
+        return [...new Set([...text(a.from), ...text(a.to)])];
+      case "approveCard": {
+        const card = this.approvals.find((x) => x.id === a.card);
+        return card ? [...new Set([...text(card.account), ...(card.action ? this.venuesWritten(card.action) : [])])] : [];
+      }
+      default:
+        return [];
+    }
+  }
+
+  /** what the Account page reads: the engine's page, with what each venue connected live has in its earn products added to that venue
+   * (account/holdings.ts withEarn) — so the venue's total, the live total and the net worth curve count it, once */
   async accountView(): Promise<AccountPage | undefined> {
     const page = await this.account?.view();
     // a real account's page waits only on cards about its real venues; the statement page answers the simulation's own
     if (page && this.opts.real) page.cards = page.cards.filter((c) => this.adapters.get(this.approvals.find((a) => a.id === c.id)?.account ?? "")?.account.watchOnly);
+    if (page && this.restored) page.restore = this.restored;
+    if (page) await this.withEarnings(page);
+    // the key file a venue connected by API key reads, as the owner signed it (a path, never what is in it): a new key for the venue goes
+    // in the same file, and connecting it again starts from that file — a second account at an exchange never from the first one's
+    if (page) {
+      for (const v of page.venues) {
+        const kind = v.live && v.connector ? parseConnector(v.connector)?.kind : undefined;
+        const ref = this.adapters.get(v.id)?.account.credentialRef;
+        if (kind && KEY_SHAPES[kind] && ref) v.keyFile = ref;
+      }
+    }
     return page;
+  }
+
+  /** what each venue connected live had in its earn products when it last answered, with the balance it was read beside (that read's `asOf`,
+   * and its lines as the engine gave them, before any earn was added): a read that fails or is late keeps these, marked stale, so a venue
+   * that blinks does not look like money gone — and while they are young, the two are shown together, one moment's pair */
+  private readonly earnSeen = new Map<string, { asOf: string; base: AccountPage["venues"][number]["holdings"]; held: EarnHeld[] }>();
+  /** an earn vault's share token's symbol, by product id, as its chain gave it (read once: a token does not rename itself) */
+  private readonly shareSymbols = new Map<string, string>();
+
+  /** Each venue connected live that earns: its earn positions, added to its holdings with the balance lines that are the same money left
+   * out, and the venue's total, the live total and the account's total moved by what that changes. The positions are read again whenever
+   * the venue's balance is (they are kept under the balance's own `asOf`), so the two are always one moment's pair: money that went from
+   * the balance into a product is never counted in both, or in neither, for the half minute one of them is older than the other. The page
+   * waits at most three seconds for a venue's earn; when it is slower, or does not answer, the venue is marked stale (so a net worth point
+   * taken then is `partial`) and shows the last pair the two were read in together — its balance from then as well as its earn, while that
+   * pair is under two minutes old — so money that just moved between them is not counted twice or not at all. An older pair is not shown in
+   * place of a newer balance: the newer balance stands, beside the earn as last read, and the venue stays marked. The read carries on for
+   * next time */
+  private async withEarnings(page: AccountPage): Promise<void> {
+    const venues = page.venues.filter((v) => v.live && this.earners.has(v.id) && this.adapters.get(v.id)?.account.watchOnly);
+    if (!venues.length) return;
+    const now = this.realNow();
+    const got = await Promise.all(venues.map(async (v) => {
+      const id = v.id;
+      const x = this.earners.get(id)!;
+      const asOf = this.adapters.get(id)?.account.asOf ?? "";
+      const base = v.holdings;
+      // a pair is kept only if it is not older than the one already kept: a late answer to an older read does not push out a newer pair
+      const keep = (r: EarnPosition[]): EarnHeld[] => {
+        const held = r.map(heldOf);
+        const was = this.earnSeen.get(id);
+        if (!was || was.asOf <= asOf) this.earnSeen.set(id, { asOf, base, held });
+        return held;
+      };
+      const read = this.marketReads.get(`earn-held|${id}|${asOf}`, KEEP_HELD_MS, () => x.positions(), id);
+      // whenever it answers, the next page has it, beside the balance it was read with
+      void read.then((r) => (isRefusal(r) ? undefined : keep(r))).catch(() => undefined);
+      const r = await within(3_000, read, id, this.nameOf(id));
+      if (!isRefusal(r)) {
+        const held = keep(r);
+        return { v, base, held, stale: false, shares: await this.vaultShares(held) };
+      }
+      const seen = this.earnSeen.get(id);
+      // its earn has never answered: there is nothing of it to show, and no pair — and the venue is marked, so a net worth point taken now
+      // is partial and what later turns up in its earn products is money that appeared, not a gain
+      if (!seen) return { v, base, held: [] as EarnHeld[], stale: true, shares: new Map<string, string>(), why: "its earn has not answered yet: what is in its earn products is not counted" };
+      const shares = await this.vaultShares(seen.held);
+      // the earn last answered beside this very balance read: the two are one moment's, only that moment is not now
+      if (seen.asOf === asOf) return { v, base, held: seen.held, stale: seen.held.length > 0, shares };
+      const at = Date.parse(seen.asOf);
+      if (Number.isFinite(at) && now - at <= PAIR_MS) return { v, base: seen.base, held: seen.held, stale: true, shares, asOf: seen.asOf, why: `its earn did not answer in time, so its balance and its earn are both as read together at ${new Date(at).toISOString().slice(11, 19)} UTC` };
+      return { v, base, held: seen.held, stale: true, shares, why: "its earn did not answer: what is in its earn products is the last read, beside a newer balance" };
+    }));
+    let delta = 0;
+    for (const { v, base, held, stale, shares, asOf, why } of got) {
+      if (why) {
+        v.stale ??= why;
+        if (asOf) v.asOf = asOf;
+      }
+      if (!held.length && base === v.holdings) continue;
+      const before = v.usd;
+      v.holdings = withEarn({ name: v.name, holdings: base }, held, { stale, shares }).holdings;
+      v.usd = Number(v.holdings.reduce((s, h) => s + h.usd, 0).toFixed(2));
+      v.cashUsd = Number(v.holdings.filter((h) => (h.class === "stable" || h.class === "cash") && !h.inTransit).reduce((s, h) => s + h.usd, 0).toFixed(2));
+      delta += v.usd - before;
+    }
+    if (delta === 0) return;
+    page.liveUsd = Number((page.liveUsd + delta).toFixed(2));
+    page.totalUsd = Number((page.totalUsd + delta).toFixed(2));
+  }
+
+  /** the share token's symbol of each vault held (`<chain id>:<vault>` products), read from its chain once and kept; at most two seconds */
+  private async vaultShares(held: EarnHeld[]): Promise<Map<string, string>> {
+    const out = new Map<string, string>();
+    const chain = this.liveDeps().chain;
+    await Promise.all(held.map(async (p) => {
+      const m = /^(\d{1,9}):(0x[0-9a-fA-F]{40})$/.exec(p.product);
+      if (!m) return;
+      const known = this.shareSymbols.get(p.product);
+      if (known) return void out.set(p.product, known);
+      const name = CHAIN_BY_ID.get(Number(m[1]));
+      if (!name || !chain.symbol) return;
+      const sym = await within(2_000, chain.symbol(name, m[2] as Hex).then((x) => x ?? no("E_VENUE_UNREACHABLE", { message: "no symbol" })), "chain", name);
+      if (typeof sym === "string") {
+        this.shareSymbols.set(p.product, sym);
+        out.set(p.product, sym);
+      }
+    }));
+    return out;
   }
 
   /** push the simulated clock ahead and land whatever came due on the way */
@@ -585,7 +1331,96 @@ export class PortfolioService {
     const seeds = opts.seeds ?? loadSeeds(opts.venues);
     // the `mm` reads stand in for two simulated accounts; a real service has none to stand in for (MetaMask is connected like any account)
     const live = opts.live && !opts.real ? { metamask: await metamaskLiveAccount(opts.mm), polymarket: await polymarketLiveAccount(opts.mm) } : undefined;
-    return new PortfolioService(opts, seeds, live);
+    const svc = new PortfolioService(opts, seeds, live);
+    if (opts.real && svc.account && !opts.freshLedger) await svc.continueRuns();
+    return svc;
+  }
+
+  /** A real account continues its earlier runs (account/restore.ts): this run's first row says which file it continues; the owner, the agents,
+   * their limits, the dial and the ids come back at once — every signature checked again — and the venues are connected again in the
+   * background, the door holding every instruction until they have been. `--fresh` starts from nothing instead */
+  private async continueRuns(): Promise<void> {
+    const engine = this.account!;
+    const history = readHistory(join(this.opts.home, "portfolio"), this.ledger.path(), this.now);
+    const fresh = this.opts.fresh === true || history.last === null;
+    const mark: RunMark = { v: 1, continues: fresh ? null : history.last, fresh, n: history.lastRun + 1 };
+    // a fresh account's first row also holds its dial, so that a restart keeps the session it started with rather than starting a new one
+    this.ledger.append({ kind: "note", venue: "*", reason: fresh ? `account run started fresh${this.opts.fresh ? " (--fresh): nothing earlier is brought back" : ""}` : `account run started: it continues ${history.last}`, detail: { run: mark, ...(fresh ? this.dialNow() : {}) } });
+    // the statement reads these files, the account's other runs and this run's — and no ledger that no account run wrote
+    this.ledgerChain = fresh ? [] : history.files;
+    if (fresh) return;
+    // a replayed agent wallet is the key file it was made with: one that is gone is not made again under the same name (the wallet is
+    // named, never the file: the message reaches the page and the agents' seats)
+    const home = this.opts.home;
+    const r = await rebuild(history.rows, engine.state, { ...engine.applyOptions(), codeRequired: (this.opts.liveWrites?.pairingCode ?? this.opts.pairingCode) !== undefined, walletAddress: (name) => (hasKey(agentWalletKeyPath(home, name)) ? (() => { const k = agentWalletKey(home, name); return isRefusal(k) ? k : (k.address as Hex); })() : no("E_ACCOUNT_CREDENTIAL", { message: `the agent wallet "${name}" is not brought back: its key file is gone from this account's home, and an agent wallet is the key it was made with`, detail: { wallet: name } })) });
+    engine.adopt(r.state, r.ids);
+    this.seq = Math.max(this.seq, r.ids.card);
+    if (r.dial) this.adoptDial(r.dial);
+    const report: RestoreReport = { runs: history.files.length, from: history.files[0] ?? "", owner: r.owner, agents: r.state.agents.filter((a) => a.revokedAt === undefined && a.validUntil > Date.parse(this.now())).length, limits: r.state.spends.filter((x) => x.revokedAt === undefined && x.validUntil > Date.parse(this.now())).length, mode: this.openness.mode === "open" ? "Beast" : "Guard", venues: r.connections.map((c) => ({ venue: c.venue, ok: false, why: "connecting again" })), orders: r.orders.length, payments: r.payments.length + r.authorisations.length + r.earns.length, skipped: [...r.skipped, ...(history.broken ? [`${history.broken.file}: its hash chain breaks${history.broken.at ? ` at row ${history.broken.at}` : ""}, so nothing after the break (and nothing older) was brought back`] : [])], state: "restoring" };
+    this.restored = report;
+    this.reconnecting = true;
+    this.restoring = engine
+      .serially(() => this.reconnect(r, report))
+      .catch(() => undefined)
+      .finally(() => void (this.reconnecting = false));
+  }
+
+  /** an agent wallet on the account: read from the chains, proven the user's (the account holds its key), a place money can be sent to */
+  private async plugAgentWallet(sub: SubAccount): Promise<void> {
+    const venue = agentWalletVenue(sub.name);
+    if (this.adapters.get(venue)?.account.watchOnly) return;
+    const key = agentWalletKey(this.opts.home, sub.name);
+    if (isRefusal(key)) return void this.ledger.append({ kind: "note", venue, reason: `the agent wallet "${sub.name}" is not shown: ${key.message}` });
+    const deps = this.liveDeps();
+    const opened = await agentWalletSource({ venue, label: `Agent wallet · ${sub.name}`, key, chain: deps.chain, sender: deps.sender ?? publicSender() });
+    if (isRefusal(opened)) return void this.ledger.append({ kind: "note", venue, reason: `the agent wallet "${sub.name}" could not be read: ${opened.message}` });
+    const adapter = await liveAccount(venue, opened.source, { connector: "live:agent-wallet", first: opened.first, clock: deps.clock, price: deps.price });
+    const proven = "this account holds its key";
+    Object.assign(adapter.account, { proven, liveCan: opened.source.writer!.can, noTradeBecause: opened.source.noTradeBecause, plugged: true });
+    this.liveVenues.set(venue, { id: venue, name: adapter.account.name, kind: adapter.account.kind, address: key.address, proven, writer: opened.source.writer!, noTradeBecause: opened.source.noTradeBecause!, via: opened.source.via });
+    this.adapters.set(venue, adapter);
+    // one more venue on the account: Markets and the comparison are asked again
+    this.marketReads.forgetAll(["explore", "compare"]);
+  }
+
+  /** the restore's second half: the venues, from the same credential references the owner signed; then what was in flight, followed again */
+  private async reconnect(r: Rebuilt, report: RestoreReport): Promise<void> {
+    const engine = this.account!;
+    // the agent wallets the owner made: their keys are where they were made, in this home
+    for (const sub of r.state.subAccounts) await this.plugAgentWallet(sub);
+    for (const [i, c] of r.connections.entries()) {
+      // a wallet's proof is the signature it gave, checked again; one that no longer checks out connects the address as watched
+      if (c.proof && (await proofHolds(c.proof))) this.proofs.keep(c.proof);
+      let out: Awaited<ReturnType<PortfolioService["plugLive"]>>;
+      try {
+        out = c.connector.startsWith("live:") ? await this.plugLive(c.venue, c.connector, c.label, c.credentialRef) : no("E_ACCOUNT_BAD_ACTION", { venue: c.venue, message: "not a live connection" });
+      } catch (err) {
+        out = no("E_VENUE_UNREACHABLE", { venue: c.venue, message: String((err as Error)?.message ?? err).slice(0, 160) });
+      }
+      report.venues[i] = isRefusal(out) ? { venue: c.venue, ok: false, why: out.message } : { venue: c.venue, ok: true };
+      this.ledger.append({ kind: "note", venue: c.venue, reason: isRefusal(out) ? `not connected again after the restart: ${out.message}` : `connected again after the restart · ${out.summary}` });
+    }
+    for (const o of r.orders) engine.trade.adopt(o);
+    for (const p of r.payments) engine.live.adopt(p);
+    for (const e of r.earns) engine.earn.adopt(e);
+    for (const k of r.authorisations) engine.adoptAuthorisation(k);
+    report.state = "done";
+    const back = report.venues.filter((v) => v.ok).length;
+    this.ledger.append({ kind: "note", venue: "*", reason: `restored after a restart: ${report.owner ? "your device is still the owner" : "no owner yet"} · ${report.agents} agent${report.agents === 1 ? "" : "s"} · ${report.limits} limit${report.limits === 1 ? "" : "s"} · ${back} of ${report.venues.length} venue${report.venues.length === 1 ? "" : "s"} connected again · ${report.orders} order${report.orders === 1 ? "" : "s"} and ${report.payments} movement${report.payments === 1 ? "" : "s"} followed again · ${report.mode}${report.skipped.length ? ` · ${report.skipped.length} not brought back` : ""}`, detail: { restore: report } });
+  }
+
+  /** the dial as the ledger last recorded it, the agents' session included: a restart neither opens a session the owner ended nor lengthens one
+   * (a new session is the owner's to sign) */
+  private adoptDial(d: DialSnapshot): void {
+    // never later than this start would give a new account: a row cannot lengthen the session past what a restart grants anyway
+    const session = d.sessionExpiresAt && (!this.openness.sessionExpiresAt || Date.parse(d.sessionExpiresAt) < Date.parse(this.openness.sessionExpiresAt)) ? d.sessionExpiresAt : this.openness.sessionExpiresAt;
+    this.openness = { ...this.openness, mode: d.mode, revoked: d.revoked, reach: d.reach as Openness["reach"], ...(session ? { sessionExpiresAt: session } : {}), ...(d.maxLeverage !== undefined ? { maxLeverage: d.maxLeverage } : {}) };
+  }
+
+  /** the dial now, as the note rows record it after each change: a restart reads the last one */
+  private dialNow(): { dial: DialSnapshot } {
+    const ended = !!this.openness.sessionExpiresAt && Date.parse(this.openness.sessionExpiresAt) <= Date.parse(this.now());
+    return { dial: { mode: this.openness.mode === "open" ? "open" : "guard", revoked: [...this.openness.revoked], reach: { ...this.openness.reach }, ...(this.openness.sessionExpiresAt ? { sessionExpiresAt: this.openness.sessionExpiresAt } : {}), ...(ended ? { ended: true } : {}), ...(this.openness.maxLeverage !== undefined ? { maxLeverage: this.openness.maxLeverage } : {}) } };
   }
 
   private openLedger(): Ledger {
@@ -601,6 +1436,7 @@ export class PortfolioService {
     // a fresh mount is the simulation from its seeds: whatever was connected live is gone with the rest
     this.shadowed.clear();
     this.liveVenues?.clear();
+    this.earners?.clear();
     // a real service starts empty: the owner connects what is there
     if (this.opts.real) return void (this.adapters = new Map());
     // the simulated wallet reads its allowlist from this array, so a venue plugged in later can be added to it
@@ -663,10 +1499,27 @@ export class PortfolioService {
     );
   }
 
+  /** the account holds real accounts only (the server's default): no simulated venue, dial or payee is on it */
+  get real(): boolean {
+    return this.opts.real === true;
+  }
+
+  /** The statement page's whole view. On a real account every venue is read as the account page reads it (`accountView`: what is in its
+   * earn products counted, once, with its balance), so the totals here are the ones /api/account and /holdings give; the simulation's dial,
+   * its compiled openness and the agent's day against its cap are left out, and `live` says whether venues connected live are on it */
   async overview(): Promise<Overview> {
     const now = this.now();
     const accounts = this.accounts();
     const views = await this.views();
+    const page = this.real && this.account ? await this.accountView() : undefined;
+    if (page) {
+      for (const v of views) {
+        const pv = page.venues.find((x) => x.id === v.id);
+        if (!pv) continue;
+        v.usd = pv.usd;
+        v.holdings = pv.holdings.map((h) => ({ account: v.id, asset: h.asset, amount: h.amount, usd: h.usd, class: h.class, ...(h.note ? { note: h.note } : {}), ...(h.inTransit ? { inTransit: true } : {}) }));
+      }
+    }
     const holdings = views.flatMap((v) => v.holdings);
     const agents = new Map<string, AgentId & { flights: number }>();
     for (const f of this.flights) {
@@ -674,23 +1527,26 @@ export class PortfolioService {
       a.flights++;
       agents.set(f.agent.id, a);
     }
+    const portfolio = aggregate(accounts, holdings);
+    // the account page's total also counts money in flight between venues and what open payment sessions hold: the same number here
+    if (page) portfolio.totalUsd = page.totalUsd;
     return {
       now,
-      live: this.live,
+      live: page ? views.some((v) => v.live === true) : this.live,
       mode: this.openness.mode,
       session: { expiresAt: this.openness.sessionExpiresAt, expired: isExpired(now, this.openness.sessionExpiresAt) },
-      portfolio: aggregate(accounts, holdings),
-      liquidity: liquidity(views),
-      ladder: ladder(views),
+      portfolio,
+      // a real account's dollars move as each venue's own writer says they can (account/holdings.ts movesOut), and no route to a hub is
+      // quoted from the simulation's rail table: the ladder is empty there. The simulated statement keeps both as they were
+      liquidity: page ? liveLiquidity(page) : liquidity(views),
+      ladder: page ? ladder([]) : ladder(views),
       accounts: views,
-      compiled: compileOpenness(accounts, this.openness),
-      openness: this.openness,
+      ...(page ? {} : { compiled: compileOpenness(accounts, this.openness), openness: this.openness, daily: { used: this.dailyOutUsd(now), cap: this.openness.guard.dailyCapUsd } }),
       approvals: [...this.approvals],
       flights: this.flights.slice(-40),
       agents: [...agents.values()],
       ledger: [...this.ledger.all()].reverse().slice(0, 80),
       chain: this.ledger.verifyChain(),
-      daily: { used: this.dailyOutUsd(now), cap: this.openness.guard.dailyCapUsd },
       counters: { ...this.counters },
       ledgerPath: this.ledger.path(),
     };
@@ -829,8 +1685,10 @@ export class PortfolioService {
     return { flight: f, plan, outcomes };
   }
 
-  /** the event contracts an agent can trade: each question, its state, and every venue's top of book */
+  /** the event contracts an agent can trade on the simulated statement: each question, its state, and every venue's top of book. A real
+   * account has no fixture: its event markets are what its venues list (explore) */
   markets(): MarketView[] {
+    if (this.real) return [];
     const now = this.now();
     return EVENTS.map((e) => ({
       id: e.id,
@@ -1038,7 +1896,7 @@ export class PortfolioService {
 
   setMode(mode: Mode): void {
     this.openness = { ...this.openness, mode };
-    this.ledger.append({ kind: "note", venue: "*", reason: `mode → ${mode}` });
+    this.ledger.append({ kind: "note", venue: "*", reason: `mode → ${mode}`, detail: this.dialNow() });
   }
 
   /** narrow (or restore) what the agent may do at one account; `read` is always on, and a full set means "maximal" (the entry is dropped) */
@@ -1050,28 +1908,28 @@ export class PortfolioService {
     if (a.account.scope.can.filter((c) => c !== "read").every((c) => writes.includes(c))) delete reach[accountId];
     else reach[accountId] = writes;
     this.openness = { ...this.openness, reach };
-    this.ledger.append({ kind: "note", venue: accountId, reason: `reach → ${writes.join(", ") || "read"}` });
+    this.ledger.append({ kind: "note", venue: accountId, reason: `reach → ${writes.join(", ") || "read"}`, detail: this.dialNow() });
     return { ok: true, reach: effectiveReach(a.account, this.openness) };
   }
 
   revoke(accountId: string): Refusal | { ok: true; revoked: string[] } {
     if (!this.adapters.has(accountId)) return no("E_WALLET_ACCOUNT_UNKNOWN", { venue: accountId });
     this.openness = { ...this.openness, revoked: [...new Set([...this.openness.revoked, accountId])] };
-    this.ledger.append({ kind: "note", venue: accountId, reason: "revoked: the agent keeps reads only; deleting the key at the exchange or freezing the token at the issuer is an operator action" });
+    this.ledger.append({ kind: "note", venue: accountId, reason: "revoked: the agent keeps reads only; deleting the key at the exchange or freezing the token at the issuer is an operator action", detail: this.dialNow() });
     return { ok: true, revoked: this.openness.revoked };
   }
 
   restore(accountId: string): Refusal | { ok: true; revoked: string[] } {
     if (!this.adapters.has(accountId)) return no("E_WALLET_ACCOUNT_UNKNOWN", { venue: accountId });
     this.openness = { ...this.openness, revoked: this.openness.revoked.filter((x) => x !== accountId) };
-    this.ledger.append({ kind: "note", venue: accountId, reason: "restored" });
+    this.ledger.append({ kind: "note", venue: accountId, reason: "restored", detail: this.dialNow() });
     return { ok: true, revoked: this.openness.revoked };
   }
 
   /** end the agent's session: every write stops now, every read continues */
   revokeAll(): { ok: true; sessionExpiresAt: string } {
     this.openness = { ...this.openness, sessionExpiresAt: this.now() };
-    this.ledger.append({ kind: "note", venue: "*", reason: "session ended: every write stops, reads continue" });
+    this.ledger.append({ kind: "note", venue: "*", reason: "session ended: every write stops, reads continue", detail: this.dialNow() });
     return { ok: true, sessionExpiresAt: this.openness.sessionExpiresAt };
   }
 
@@ -1103,23 +1961,53 @@ export class PortfolioService {
   /** The statement: every transaction at the real venues, read back from every ledger in this home — this run's and the earlier ones' — the
    * last line written for each, newest first */
   statement(): StatementLine[] {
+    const rows = this.statementRows();
+    const lines: StatementLine[] = [...rows.before, ...rows.now].map((r) => r.detail);
+    const before = new Set(rows.before.map((r) => r.detail.key));
+    const now = new Set(rows.now.map((r) => r.detail.key));
+    // a line an earlier run left unfinished is not followed by this one: it says so, and counts only what had happened. Finished is each
+    // line type's own last word: an order's (live/trade.ts DONE), a movement's (settled, failed, stranded), an earn request's (done, rejected)
+    return fold(lines).map((l) => (before.has(l.key) && !now.has(l.key) && !STATEMENT_FINAL.has(l.status) ? { ...l, status: "not followed since a restart", ...(l.status === "waiting for wallet" ? { amountUsd: 0 } : {}) } : l));
+  }
+
+  /** the ledger files this run continues (account/restore.ts readHistory, oldest first). Unknown until a real account has read its
+   * history: a service that keeps no history reads every ledger in the home, as before */
+  private ledgerChain: string[] | undefined;
+
+  /** the statement rows of the account's earlier runs (`before`, oldest file first) and this run's (`now`) — with what each row carries
+   * whole (`native`: the order or the payment). An earlier run is a ledger this run continues, or any other ledger in the home that an
+   * account run wrote (its first row carries the run mark: an earlier line of runs, one `--fresh` left behind); a ledger no account run
+   * wrote — a demo's, a test's, another program's — is not the account's and is not read. An earlier run's file is read once and kept while
+   * its size stays the same: the page asks for the statement every few seconds, and an old ledger only grows when another process shares
+   * the home */
+  private statementRows(): { before: StatementRow[]; now: StatementRow[] } {
     const dir = join(this.opts.home, "portfolio");
-    const lines: StatementLine[] = [];
     const current = this.ledger.path();
+    const before: StatementRow[] = [];
+    const seen = new Set<string>();
+    const chain = this.ledgerChain === undefined ? undefined : new Set(this.ledgerChain);
     for (const name of existsSync(dir) ? readdirSync(dir).sort() : []) {
       if (!/^ledger-.*\.jsonl$/.test(name) || join(dir, name) === current) continue;
-      for (const row of new Ledger(join(dir, name), this.now).all()) if (row.kind === "statement" && row.detail) lines.push(row.detail as StatementLine);
+      let size: number;
+      try {
+        size = statSync(join(dir, name)).size;
+      } catch {
+        continue;
+      }
+      seen.add(name);
+      let hit = this.oldLedgers.get(name);
+      if (!hit || hit.size !== size) {
+        const rows = new Ledger(join(dir, name), this.now).all();
+        const ours = chain === undefined || chain.has(name) || runOf(rows[0]) !== undefined;
+        hit = { size, rows: ours ? statementOf(rows) : [] };
+        this.oldLedgers.set(name, hit);
+      }
+      before.push(...hit.rows);
     }
-    const before = new Set(lines.map((l) => l.key));
-    const now = new Set<string>();
-    for (const row of this.ledger.all()) if (row.kind === "statement" && row.detail) {
-      lines.push(row.detail as StatementLine);
-      now.add((row.detail as StatementLine).key);
-    }
-    // a line an earlier run left unfinished is not followed by this one: it says so, and counts only what had happened
-    const final = new Set(["filled", "canceled", "rejected", "expired", "settled", "failed", "returned"]);
-    return fold(lines).map((l) => (before.has(l.key) && !now.has(l.key) && !final.has(l.status) ? { ...l, status: "not followed since a restart", ...(l.status === "waiting for wallet" ? { amountUsd: 0 } : {}) } : l));
+    for (const name of [...this.oldLedgers.keys()]) if (!seen.has(name)) this.oldLedgers.delete(name);
+    return { before, now: statementOf(this.ledger.all()) };
   }
+  private readonly oldLedgers = new Map<string, { size: number; rows: StatementRow[] }>();
 
   /** this run's ledger rows, oldest first */
   ledgerRows(): readonly LedgerRow[] {
@@ -1127,26 +2015,418 @@ export class PortfolioService {
   }
 }
 
-/** answers kept for a short while, and one request in flight per key */
+/** a statement row of a ledger: the line as the statement shows it, and the order or payment it was written for */
+interface StatementRow {
+  detail: StatementLine;
+  native: unknown;
+}
+const statementOf = (rows: readonly LedgerRow[]): StatementRow[] => rows.filter((r) => r.kind === "statement" && r.detail).map((r) => ({ detail: r.detail as StatementLine, native: r.native }));
+
+// ---- what the wallet's reads answer -----------------------------------------------------------------------------------------------
+
+/** a venue, or a part of one, that could not be read for an answer: why, in its own words where it gave some */
+export interface ReadMissing {
+  venue: string;
+  venueName: string;
+  why: string;
+  code?: string | undefined;
+  /** which read: its 24 hours, its positions, its price history, the comparison, its earn */
+  part?: "stats" | "positions" | "candles" | "compare" | "earn" | undefined;
+}
+
+/** EARN across the venues connected live: which venues earn (and whether the key or wallet may put money in), the products they offer, what
+ * is in them, the venues that could not be read, and whether this server moves money at all */
+export interface EarnView {
+  asOf: string;
+  venues: Array<{ venue: string; venueName: string; can: boolean | "unknown"; what: string; whyNot?: string }>;
+  products: Array<EarnProduct & { venue: string; venueName: string }>;
+  positions: Array<EarnPosition & { venue: string; venueName: string }>;
+  missing: ReadMissing[];
+  writes: { on: boolean; capUsd: number; turnOn: string };
+}
+
+/** a holdings row with its market's last 24 hours, from the venue that reports them */
+export interface HeldRow extends AssetRow {
+  changePct24h?: number | undefined;
+  changeFrom?: { venue: string; venueName: string } | undefined;
+}
+
+export interface HoldingsView {
+  asOf: string;
+  /** the account page's total: the venues, and what is in flight or held in escrow between them */
+  totalUsd: number;
+  rows: HeldRow[];
+  /** the dollars that are ready, and where they can go (account/holdings.ts) */
+  money: MoneySummary;
+  /** what the rows did in the last 24 hours, and how much of them that covers */
+  change24h: DayChange;
+  missing: ReadMissing[];
+  /** asked with `cost`: what was paid (account/costbasis.ts), and the positions it was read with */
+  cost?: CostBasis[] | undefined;
+  positions?: VenuePosition[] | undefined;
+}
+
+export interface ReceiveAddress {
+  venue: string;
+  venueName: string;
+  asset: string;
+  network: ChainName;
+  address: string;
+  /** a memo the venue needs with it, when it does */
+  tag?: string | undefined;
+  /** whose address it is, in words: the venue's own deposit address, or the wallet that showed it is the user's */
+  whose: string;
+  note?: string | undefined;
+}
+
+/** one market's price history, as GET /api/account/candles answers it */
+export interface CandlesView {
+  venue: string;
+  venueName: string;
+  symbol: string;
+  interval: CandleInterval;
+  /** oldest first */
+  candles: Candle[];
+  /** read from the venue's public market data, without a key: the venue is not connected */
+  public?: true | undefined;
+}
+
+export interface CandleSeries {
+  venue: string;
+  venueName: string;
+  symbol: string;
+  interval: CandleInterval;
+  /** oldest first */
+  bars: Candle[];
+  /** read from an exchange's keyless public bars: the venue is not connected */
+  public?: true | undefined;
+}
+
+export interface AssetDetail {
+  key: string;
+  /** its holdings row, when the account holds it */
+  row?: HeldRow | undefined;
+  /** the same thing at every connected venue, priced for a buy */
+  compare?: Comparison | undefined;
+  candles?: CandleSeries | undefined;
+  positions: VenuePosition[];
+  /** the account's open orders in it */
+  orders: LiveOrder[];
+  /** its lines on the statement, newest first */
+  lines: StatementLine[];
+  /** what was paid for it: its row's, and its positions' */
+  cost: CostBasis[];
+  missing: ReadMissing[];
+}
+
+export interface Sellable {
+  /** its holdings row, or its position (`position:<venue>:<symbol>`) */
+  key: string;
+  asset: string;
+  venue: string;
+  venueName: string;
+  /** what selling it signs: a sell order in a dollar market there, or — a perpetual, a future — the position's close */
+  action: "sell" | "close";
+  /** the market, as an order there names it */
+  symbol?: string | undefined;
+  kind?: MarketKind | undefined;
+  side?: "long" | "short" | undefined;
+  /** what is held there, and what a sell of all of it is, down to the market's step */
+  held: number;
+  sellQty: number;
+  /** the bid (the price where the market shows no book), and what the sell is worth at it */
+  price?: number | undefined;
+  usd?: number | undefined;
+  /** an order could go now: the server trades, the key may, the market is open and the size is at least its smallest */
+  ready: boolean;
+  why?: string | undefined;
+}
+
+export interface AgentView {
+  address: string;
+  name: string;
+  code: string;
+  /** ok · expired · revoked */
+  status: string;
+  validUntil: string;
+  approvedAt: string;
+  /** each limit the owner signed for it: `trade` (orders), `venues` (moving money between the user's own places), `payees` (paying others),
+   * `earn` (money put into venues' earn products) */
+  limits: Array<{ id: string; scope: string; allow: string[]; perPaymentUsd: number; budgetUsd: number; spentUsd: number; reservedUsd: number; leftUsd: number; windowHours: number; validUntil: string; expired: boolean }>;
+  /** the cards it is waiting on the owner for */
+  cards: AccountPage["cards"];
+  orders: LiveOrder[];
+  payments: Payment[];
+  /** what it put into earn products, or took out */
+  earns: LiveEarn[];
+  /** its agent wallets, with what the chains say they hold where they are read */
+  wallets: Array<AccountPage["subAccounts"][number] & { venue: string; usd?: number | undefined }>;
+  /** the owner's open intents addressed to it or to every agent: words, none of them a limit */
+  intents: AccountPage["intents"];
+  asks: AgentAsk[];
+  /** what the owner declined of its asks in the last day */
+  declinedAsks: DeclinedAsk[];
+  flights: Array<{ no: string; at: string; request: string; legs: string[] }>;
+}
+
+export interface AgentsView {
+  asOf: string;
+  /** guard (Guard: every agent order waits for the owner) · open (Beast: inside their limits, at once) */
+  mode: "guard" | "open";
+  agents: AgentView[];
+  /** keys that asked to be let in, with the name they gave */
+  requests: AccountPage["requests"];
+}
+
+const EXPLORE_SORTS: readonly ExploreSort[] = ["volume", "movers", "closing"];
+/** how long a venue has for its 24 hours, and for its price history */
+const STATS_MS = 4_000;
+const CANDLE_MS = 6_000;
+/** how far back the Asset sheet's price history goes, by bar: about three hundred bars */
+const CANDLE_SPAN: Readonly<Record<CandleInterval, number>> = { "5m": 86_400_000, "1h": 12 * 86_400_000, "1d": 300 * 86_400_000 };
+
+/** an answer within `ms`, or the venue's not answering as a refusal; a throw is a refusal too. The call is not stopped (nothing here can
+ * stop one): its answer is just not waited for */
+function within<T>(ms: number, p: Promise<T | Refusal>, venue: string, name: string): Promise<T | Refusal> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<Refusal>((resolve) => {
+    timer = setTimeout(() => resolve(no("E_VENUE_UNREACHABLE", { venue, message: `${name} did not answer in ${ms / 1000} seconds` })), ms);
+  });
+  const said = p.catch((err: unknown) => no("E_VENUE_UNREACHABLE", { venue, message: `${name}: ${String((err as Error)?.message ?? err).slice(0, 160)}` }));
+  return Promise.race([said, late]).finally(() => clearTimeout(timer));
+}
+
+/** an earn position as the holdings read it */
+const heldOf = (p: EarnPosition): EarnHeld => ({ product: p.product, asset: p.asset, amount: p.amount, ...(p.usd !== undefined ? { usd: p.usd } : {}), ...(p.apy !== undefined ? { apy: p.apy } : {}), ...(p.accrued !== undefined ? { accrued: p.accrued } : {}), ...(p.accruedUsd !== undefined ? { accruedUsd: p.accruedUsd } : {}), ...(p.name ? { name: p.name } : {}), ...(p.chain ? { chain: p.chain } : {}) });
+
+/** a market's 24-hour change in percent: the venue's own, or its change in price against its own price a day ago. Never a guess */
+function pctOf(s: MarketStats): number | undefined {
+  if (typeof s.changePct24h === "number" && Number.isFinite(s.changePct24h) && s.changePct24h > -100) return s.changePct24h;
+  if (typeof s.change24h === "number" && Number.isFinite(s.change24h) && typeof s.price === "number" && s.price > 0 && s.price - s.change24h > 0) return (s.change24h / (s.price - s.change24h)) * 100;
+  return undefined;
+}
+
+type AssetKey = { key: string; cls: string; name: string };
+/** a holdings key as account/holdings.ts writes it (a coin by its one name, anything else by its symbol in capitals); Markets' `coin:` and
+ * `stock:` are its `crypto:` and `equity:` */
+function assetKeyOf(raw: string): AssetKey | undefined {
+  const m = /^(crypto|coin|stable|cash|equity|stock|rwa|event):(.{1,120})$/.exec(raw.trim());
+  if (!m || /[\u0000-\u001f\u007f]/.test(m[2]!)) return undefined;
+  const cls = m[1] === "coin" ? "crypto" : m[1] === "stock" ? "equity" : m[1]!;
+  const name = cls === "crypto" ? normalBase(m[2]!, "crypto") || m[2]!.trim().toUpperCase() : m[2]!.trim().toUpperCase();
+  return name ? { key: `${cls}:${name}`, cls, name } : undefined;
+}
+
+/** is a market (an order's, a position's) the asset `k`: a coin by its one name in any market but a stock's or an event's (a perpetual on it
+ * included), a share by its ticker, an event contract by its symbol */
+function sameThing(k: AssetKey, kind: MarketKind, base: string, symbol: string): boolean {
+  const b = base || symbol;
+  if (k.cls === "event") return kind === "event" && symbol.toUpperCase() === k.name;
+  if (k.cls === "equity") return kind === "stock" && normalBase(b, "stock") === k.name;
+  if (k.cls === "rwa") return kind === "token" && b.toUpperCase() === k.name;
+  return kind !== "stock" && kind !== "event" && normalBase(b, kind) === k.name;
+}
+
+/** a holding's dollar market at its venue: the same thing (a coin by its one name, a share by its ticker, a token by its symbol), priced in
+ * dollars, not a perpetual, a future or an event; from a wallet, the pair on the chain it is held on, and none on another */
+async function dollarMarket(t: LiveTrader, row: AssetRow, line: AssetRow["venues"][number]): Promise<Market | Refusal | undefined> {
+  const list = await t.markets(row.asset);
+  if (isRefusal(list)) return list;
+  const want = row.asset.toUpperCase();
+  const fits = list.filter((m) => {
+    if (!inDollars(m.quote) || m.kind === "perp" || m.kind === "future" || m.kind === "event") return false;
+    if (row.class === "equity") return m.kind === "stock" && normalBase(m.base || m.symbol, "stock") === want;
+    if (row.class === "rwa") return m.kind !== "stock" && (m.base || "").toUpperCase() === want;
+    return m.kind !== "stock" && normalBase(m.base || m.symbol, m.kind) === want;
+  });
+  if (fits.some((m) => m.symbol.includes("@"))) {
+    const chain = (line.note ?? "").split(" · ")[0]!.trim();
+    return chain ? fits.find((m) => m.symbol.endsWith(`@${chain}`)) : undefined;
+  }
+  return fits.find((m) => m.quote.toUpperCase() === "USD") ?? fits[0];
+}
+
+/** what a restarted account brought back from its ledgers (account/restore.ts), as the page and the log say it */
+export interface RestoreReport {
+  /** how many earlier runs the account continues, and the first of them */
+  runs: number;
+  from: string;
+  owner: boolean;
+  agents: number;
+  limits: number;
+  mode: "Guard" | "Beast";
+  venues: Array<{ venue: string; ok: boolean; why?: string }>;
+  orders: number;
+  payments: number;
+  skipped: string[];
+  state: "restoring" | "done";
+}
+
+/** how a venue has answered the account's reads lately */
+export interface VenueHealth {
+  /** when it last answered (a refusal about the request itself is an answer) */
+  lastOkAt?: string | undefined;
+  /** when it last failed — it did not answer, it is rate-limiting this machine, it does not serve this location, the key may not read —
+   * the code of that failure and the venue's words for it */
+  lastFailAt?: string | undefined;
+  code?: string | undefined;
+  message?: string | undefined;
+  /** how long its last read took, in milliseconds */
+  ms?: number | undefined;
+}
+
+/** what a venue's earn positions are kept for at most, beside the balance read they belong to */
+const KEEP_HELD_MS = 120_000;
+/** how old a venue's last balance-and-earn pair may be and still be shown whole when its earn is late: past it, the newer balance stands */
+const PAIR_MS = 120_000;
+
+/** how long a venue that cannot be asked just now is not asked again: it did not answer, it is rate-limiting this machine, or it does not
+ * serve this location — and ten minutes when it does not serve this location, a rule that does not change by the minute */
+const FAIL_KEEP_MS = 20_000;
+/** how long a public source's listings, tickers and events are kept here (its own keeping of the bodies it downloads sits under it) */
+const PUBLIC_KEEP_MS = 20_000;
+/* the one rule for how long a refusal holds a venue back lives with the public sources (live/public-markets.ts holdBackMs): the same rule
+   for a venue connected with a key and for a keyless source */
+const holdsBack = (r: Refusal): boolean => holdBackMs(r) > 0;
+/** a read that failed because of the venue or the key, not because of what was asked */
+const venueFailed = (r: Refusal): boolean => holdsBack(r) || r.code === "E_VENUE_PERMISSION";
+/** how many of one venue's reads are on their way at once: the rest wait their turn */
+const PER_VENUE = 2;
+/** the longest anything is kept */
+const KEEP_MAX_MS = 300_000;
+/** the last word of each statement line type: an order's, a movement's (account/payments.ts), an earn request's (live/earn.ts EarnState) */
+const STATEMENT_FINAL: ReadonlySet<string> = new Set([...DONE, "settled", "failed", "stranded", "done"]);
+
+/** a connector that threw has answered in a way the account cannot read: the venue's refusal for it, with no word of the exception on the
+ * wire (the exception is written to the server's log, once per throw; a thrower is held back like a venue that did not answer) */
+function thrownBy(venue: string, name: string, err: unknown): Refusal {
+  if (isRefusal(err)) return err;
+  console.error(`${venue}: a read threw: ${String((err as Error)?.message ?? err).slice(0, 300)}`);
+  return no("E_VENUE_UNREACHABLE", { venue, message: `${name} answered in a way the account could not read` });
+}
+
+/** a day as the page writes one: New York, weekday, day and month — "Thu Nov 5" */
+const nyDay = (iso: string): string => new Date(iso).toLocaleDateString("en-US", { timeZone: "America/New_York", weekday: "short", day: "numeric", month: "short" }).replace(",", "");
+
+/** the liquidity map of a real account: each venue's ready dollars, movable or not as that venue's own writer says (account/holdings.ts
+ * movesOut and why), never by the kind of venue it is. A wallet's line names the chain the dollars are on */
+function liveLiquidity(page: AccountPage): Liquidity {
+  const { money } = byAsset(page.venues, { writes: page.connectLive?.writes?.on === true });
+  const out: Liquidity = { mobileUsd: 0, stuckUsd: 0, mobile: [], stuck: [] };
+  for (const v of money.venues) {
+    for (const l of v.lines) {
+      const first = (l.note ?? "").split(" · ")[0]!.trim();
+      const src = { account: v.venue, name: v.venueName, asset: l.asset, ...(Object.hasOwn(CHAINS, first) ? { chain: first } : {}), usd: l.usd };
+      if (v.movesOut) out.mobile.push(src);
+      else out.stuck.push({ ...src, why: v.why ?? "stays where it is" });
+    }
+  }
+  out.mobileUsd = r2(out.mobile.reduce((s, x) => s + x.usd, 0));
+  out.stuckUsd = r2(out.stuck.reduce((s, x) => s + x.usd, 0));
+  return out;
+}
+
+/** Answers kept for a short while, and one request in flight per key: an answer still on its way is waited for whatever its age, so a venue
+ * that takes ten seconds to say no is asked once, not once per poll. A refusal is not kept — the next ask asks the venue again — except one
+ * that says the venue cannot be asked just now, which is kept twenty seconds (ten minutes for a geoblock) and holds back EVERY read of that
+ * venue for as long, so a page polling every few seconds does not hammer a venue that is down, rate-limiting or refusing this location.
+ * With a venue named: at most two of its reads on their way at once, and how each one went is its health */
 class ReadCache {
-  private readonly kept = new Map<string, { at: number; value: Promise<unknown> }>();
-  get<T>(key: string, ttlMs: number, load: () => Promise<T>): Promise<T> {
+  private readonly kept = new Map<string, { at: number; value: Promise<unknown>; failed: boolean; settled: boolean }>();
+  private readonly slots = new Map<string, { busy: number; waiting: Array<() => void> }>();
+  private readonly health = new Map<string, VenueHealth>();
+  /** a venue that said it cannot be asked just now: until when, and the refusal that stands for every read of it meanwhile */
+  private readonly down = new Map<string, { until: number; refusal: Refusal }>();
+
+  get<T>(key: string, ttlMs: number, load: () => Promise<T>, venue?: string): Promise<T> {
     const now = Date.now();
     const hit = this.kept.get(key);
-    if (hit && now - hit.at < ttlMs) return hit.value as Promise<T>;
-    // a refusal is not kept: the next ask asks the venue again
-    const value = load().then(
+    if (hit && (!hit.settled || now - hit.at < (hit.failed ? FAIL_KEEP_MS : ttlMs))) return hit.value as Promise<T>;
+    const held = venue === undefined ? undefined : this.down.get(venue);
+    if (held && now < held.until) return Promise.resolve(held.refusal as unknown as T);
+    const entry: { at: number; value: Promise<unknown>; failed: boolean; settled: boolean } = { at: now, value: Promise.resolve(), failed: false, settled: false };
+    const run = venue === undefined ? load : () => this.slot(venue, () => this.timed(venue, load));
+    const value = run().then(
       (v) => {
-        if (isRefusal(v)) this.kept.delete(key);
+        entry.settled = true;
+        if (isRefusal(v) && this.kept.get(key) === entry) {
+          if (holdsBack(v)) Object.assign(entry, { at: Date.now(), failed: true });
+          else this.kept.delete(key);
+        }
         return v;
       },
       (err: unknown) => {
-        this.kept.delete(key);
+        entry.settled = true;
+        if (this.kept.get(key) === entry) this.kept.delete(key);
         throw err;
       },
     );
-    this.kept.set(key, { at: now, value });
-    if (this.kept.size > 500) for (const [k, v] of this.kept) if (now - v.at >= 60_000) this.kept.delete(k);
+    entry.value = value;
+    this.kept.set(key, entry);
+    if (this.kept.size > 500) for (const [k, v] of this.kept) if (v.settled && now - v.at >= KEEP_MAX_MS) this.kept.delete(k);
     return value;
+  }
+
+  /** a venue disconnected: what was kept of its answers, its hold-back and its health go with it (a venue connected again under the same
+   * id starts afresh) */
+  forget(venue: string): void {
+    this.drop(venue);
+    this.health.delete(venue);
+  }
+
+  /** a write landed at a venue: what was kept of its reads goes, so the next read sees what the write changed; it answered, so it is not
+   * held back either. Its health stays */
+  drop(venue: string): void {
+    for (const k of [...this.kept.keys()]) if (k.split("|")[1] === venue) this.kept.delete(k);
+    this.down.delete(venue);
+  }
+
+  /** every answer kept under these first segments (`explore`, `compare`): what a venue connected or disconnected changes */
+  forgetAll(prefixes: readonly string[]): void {
+    for (const k of [...this.kept.keys()]) if (prefixes.some((p) => k.startsWith(`${p}|`))) this.kept.delete(k);
+  }
+
+  /** the venue's health, as its reads through here went */
+  healthOf(venue: string): VenueHealth | undefined {
+    const h = this.health.get(venue);
+    return h ? { ...h } : undefined;
+  }
+
+  /** one of the venue's two places in line, handed straight to the next read waiting when it is done */
+  private async slot<T>(venue: string, run: () => Promise<T>): Promise<T> {
+    let s = this.slots.get(venue);
+    if (!s) this.slots.set(venue, (s = { busy: 0, waiting: [] }));
+    const line = s;
+    if (line.busy < PER_VENUE) line.busy++;
+    else await new Promise<void>((go) => line.waiting.push(go));
+    try {
+      return await run();
+    } finally {
+      const next = line.waiting.shift();
+      if (next) next();
+      else line.busy--;
+    }
+  }
+
+  /** one read, timed for the venue's health; a venue that said it cannot be asked just now is held back for the keep, whenever it said so */
+  private async timed<T>(venue: string, load: () => Promise<T>): Promise<T> {
+    const start = Date.now();
+    const note = (h: VenueHealth) => this.health.set(venue, { ...this.health.get(venue), ...h, ms: Date.now() - start });
+    const hold = (r: Refusal) => this.down.set(venue, { until: Date.now() + holdBackMs(r), refusal: r });
+    try {
+      const v = await load();
+      if (isRefusal(v) && venueFailed(v)) {
+        note({ lastFailAt: new Date().toISOString(), code: v.code, message: v.message });
+        if (holdsBack(v)) hold(v);
+      } else note({ lastOkAt: new Date().toISOString() });
+      return v;
+    } catch (err) {
+      // the readers above turn a throw into a refusal before it gets here; one that still throws is held back the same way, and the
+      // exception's words stay in the server's log
+      const r = thrownBy(venue, venue, err);
+      note({ lastFailAt: new Date().toISOString(), code: r.code, message: r.message });
+      hold(r);
+      throw err;
+    }
   }
 }

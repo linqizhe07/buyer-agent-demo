@@ -1,0 +1,237 @@
+/* The Portfolio pane (ui/portfolio.js), the Account drawer, Receive and Move money (ui/money.js), and the Earn and Sell many sheets
+   (ui/earn.js), in the Clean cards look (M2): each part of the pane a white card on the ground (shell.css .card, which a .sec in a pane
+   is), what waits for the owner a warm card with a soft orange edge, numbers in Manrope 800, labels in sentence case. Colours, radii and
+   shadows only from ui/tokens.css, so Cream and Black alike; up and down always with their glyph. Motion: transform and opacity only
+   (and an outline's colour), none under prefers-reduced-motion. */
+
+.pf { min-width: 0; }
+.pf-fresh { display: flex; flex-direction: column; gap: 20px; max-width: 760px; }
+
+/* the net worth card: its label, the number (52, 800), ONE change line (today's, or the range's) with the ⓘ at its end, the range, and
+   the curve (140 high, the line in the text colour, the area under it barely) */
+.pane .sec.pf-worth { padding: 20px; gap: 16px; }
+.pf-worth-h { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.pf-worth-n { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.pf-today { font-size: 14px; display: flex; flex-wrap: wrap; gap: 0 6px; align-items: baseline; min-height: 20px; }
+.pf-today .skel { display: inline-block; vertical-align: middle; }
+/* the footnotes behind one ⓘ: a round target in the line, its notes under it when opened */
+.pf-info { display: inline-block; position: relative; }
+.pf-info > summary { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; border-radius: 50%; text-decoration: none; font-size: 13px; font-weight: 700; color: var(--dim); background: var(--surface-2); vertical-align: middle; }
+.pf-info > summary:hover { color: var(--text); }
+.pf-info[open] > summary { color: var(--text); }
+.pf-info-l { margin: 6px 0 0; padding-left: 18px; font-size: 12px; color: var(--dim); display: flex; flex-direction: column; gap: 4px; line-height: 1.45; }
+.pf-note { margin: 0; }
+.pf-note .link { font-size: 12px; }
+.pf-skel-curve { height: 140px; border-radius: var(--radius-s); }
+.pf-plot { position: relative; }
+.pf-curve { height: 140px; }
+.pf-curve .pf-ev { stroke: var(--warn); stroke-width: 1; stroke-dasharray: 3 3; vector-effect: non-scaling-stroke; }
+/* the cursor: a hairline over the curve on a layer of its own, moved by a transform as the pointer moves (portfolio.js pfHoverDraw) */
+.pf-plot .pf-cursor { position: absolute; top: 0; left: 0; width: 1px; height: 140px; background: var(--dim); opacity: 0; transform: translateX(-10px); will-change: transform; pointer-events: none; }
+.pf-curve:hover ~ .pf-cursor { opacity: 1; }
+/* the pointer finds the curve by its box: the line and the area under it are not hit-tested shape by shape on every move (the ticks of a
+   connection keep their own words on hover) */
+.pf-curve path { pointer-events: none; }
+/* the point under the pointer, in figures, on the card's own white */
+.pf-read { position: absolute; top: 0; right: 0; background: var(--surface); color: var(--text); padding: 2px 0 2px 10px; font-weight: 600; pointer-events: none; will-change: transform; }
+.pf-read:empty { display: none; }
+
+/* the rules between the parts of a warm card: the orange itself, faint, so they read on its fill in Cream and in Black */
+.pf-steps, .pf-wait { --pf-warm-rule: color-mix(in srgb, var(--warn) 28%, transparent); }
+
+/* the three first steps (a warm card): a round white tick per step, green with a ✓ once done */
+.pf-steps ol { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.pf-steps li { display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 12px 0; border-top: 1px solid var(--pf-warm-rule); }
+.pf-steps li:first-child { border-top: 0; padding-top: 4px; }
+.pf-steps li > div:nth-child(2) { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.pf-steps li > div:nth-child(2) b { font-weight: 600; }
+.pf-steps li.done b { color: var(--dim); font-weight: 500; text-decoration: line-through; text-decoration-color: var(--dim); }
+.pf-tick { width: 28px; height: 28px; border-radius: 50%; border: 1px solid var(--card-border); background: var(--surface); color: var(--text); box-shadow: var(--shadow-card); display: inline-flex; align-items: center; justify-content: center; font-family: var(--font-sans); font-size: 12px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.pf-steps li.done .pf-tick { background: var(--up); border-color: var(--up); color: var(--surface); box-shadow: none; }
+.pf-step-acts { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.pf-steps-h, .pf-wait-h { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.pf-steps-h h2, .pf-wait-h h2 { margin: 0; }
+
+/* waiting for you (a warm card): agent by agent, a round tile and its name, then its cards and its asks, each with Reject (a pill on the
+   second surface) and Approve (filled) side by side */
+.pf-grp { display: flex; flex-direction: column; gap: 12px; padding-top: 12px; border-top: 1px solid var(--pf-warm-rule); }
+.pf-wait-h + .pf-grp { border-top: 0; padding-top: 0; }
+.pf-grp-h { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.pf-grp-h .av { width: 36px; height: 36px; font-size: 10px; }
+.pf-grp-h .who b { font-weight: 600; }
+.pf-item { display: flex; flex-direction: column; gap: 10px; }
+.pf-item-t { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.pf-item-t b { font-weight: 600; overflow-wrap: anywhere; }
+.pf-item-t > .dim.small { font-size: 13px; }
+.pf-item-t > .dim.small .mono { font-size: 12px; }
+.pf-item-t details.more { margin-top: 2px; }
+.pf-item-t details.more pre { margin: 6px 0 0; font-family: var(--font-mono); font-size: 11px; white-space: pre-wrap; word-break: break-all; color: var(--dim); }
+.pf-btns { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.pf-item .pf-btns .btn { flex: 1 1 0; }
+.pf-ask .pf-btns .btn { flex: 0 0 auto; }
+/* an answer to give is a full target */
+.pf-wait .pf-item .pf-btns .btn { min-height: 44px; padding: 0 18px; font-size: 14px; }
+.pf-wait > .pf-item { padding-top: 12px; border-top: 1px solid var(--pf-warm-rule); }
+/* a card named from elsewhere ("Review"): ringed for a moment in the warm colour — the ring's colour alone moves, nothing else */
+.pf-hi { outline: 2px solid transparent; outline-offset: 6px; border-radius: 10px; transition: outline-color 220ms cubic-bezier(0.2, 0.8, 0.2, 1); }
+.pf-hi.on { outline-color: var(--warn); }
+@media (prefers-reduced-motion: reduce) { .pf-hi { transition: none; } }
+
+/* agents at work: the owner's words to them (ui/intent.js draws the list), then what they did — the mark says it, its colour only repeats it */
+.pane .sec.pf-agents { gap: 10px; }
+.pf-agents .hta-list { border-top: 0; }
+.pf-agents .hta-it:first-child { padding-top: 0; }
+.feed .pf-mk.ok { color: var(--up); }
+.feed .pf-mk.no { color: var(--dim); }
+.feed .t1 { overflow-wrap: anywhere; }
+
+/* cash ready: the label with Earn… at the top right, the number (28, 800), one line */
+.pane .sec.pf-cash > .sec-head { align-items: center; }
+.pf-cash-l { margin: 0; }
+.pf-det-v { display: flex; flex-direction: column; gap: 4px; }
+
+/* Assets · Positions · Accounts: a card that is mostly a table, its toggle and a few words or tools on the first row */
+.pane .sec.pf-table { padding: 18px 18px 8px; gap: 10px; }
+.pf-tabs { align-items: center; }
+.pf-tabs .tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.pf-name { border: 0; padding: 0; background: none; border-radius: 0; font: inherit; font-weight: 600; color: var(--text); text-align: left; min-height: 24px; }
+.pf-name:hover { background: none; text-decoration: underline; text-underline-offset: 3px; }
+/* the price has a column of its own where the card has the room for five (from about 1320 wide, the rail and the side column beside it);
+   narrower, it sits on the line under the asset's name, and the table stays inside its card instead of scrolling */
+.pf-px-l { display: none; }
+@media (max-width: 1319px) {
+  .pf-table .t th.pf-px, .pf-table .t td.pf-px { display: none; }
+  .pf-table .t .pf-px-l { display: inline; }
+}
+.t .who .dim { white-space: normal; }
+.pf-chips { display: inline-flex; flex-wrap: wrap; gap: 6px; }
+/* the health chip: its glyph first (✓ · ✗), the chip in the text colour when the venue is not answering (shell.css .chip.bad) */
+.chip.pf-health > span[aria-hidden] { font-weight: 800; }
+.pf-miss, .pf-miss-l { margin: 4px 0 0; }
+.pf-miss-l { padding-left: 18px; font-size: 12px; color: var(--dim); display: flex; flex-direction: column; gap: 4px; }
+.pf-miss-l b { color: var(--text); font-weight: 600; }
+/* the accounts: the name has room to read; Details on the right */
+.pf-acct-t .who { min-width: 150px; }
+/* a narrow window: a name keeps room to read, and the figures scroll inside the card (.t-wrap) instead of squeezing it word by word */
+.pf-table .t .who { min-width: 150px; }
+.pf-acts { flex-wrap: wrap; margin-left: auto; }
+/* "Open to agents": a pill track on the second surface with a knob in the dim colour; open, the track is filled in the text colour and the
+   knob slides over (a transform, nothing else). The word beside it (Open · Closed) says the same, never the colour alone */
+.pf-switch { display: inline-flex; align-items: center; gap: 10px; min-height: 44px; border: 0; padding: 0; border-radius: var(--radius-pill); background: none; color: var(--text); font-size: 13px; font-weight: 600; white-space: nowrap; }
+.pf-switch .track { width: 40px; height: 24px; border-radius: var(--radius-pill); border: 0; background: var(--surface-2); position: relative; flex: none; }
+.pf-switch .track::after { content: ""; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: var(--dim); transform: translateX(0); transition: transform 150ms cubic-bezier(0.2, 0.8, 0.2, 1); }
+.pf-switch[aria-checked="true"] .track { background: var(--primary); }
+.pf-switch[aria-checked="true"] .track::after { transform: translateX(16px); background: var(--on-primary); }
+@media (prefers-reduced-motion: reduce) { .pf-switch .track::after { transition: none; } }
+
+/* where a limit may act: a label over its boxes, the boxes in a field of their own, like every other field in the sheet */
+fieldset.pf-allow { border: 0; padding: 0; margin: 0; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+fieldset.pf-allow legend { float: left; width: 100%; padding: 0; margin: 0 0 4px; font-family: var(--font-sans); font-size: 12px; font-weight: 600; letter-spacing: 0; text-transform: none; color: var(--dim); }
+.pf-allow-box { clear: both; border: 1px solid var(--border); border-radius: var(--radius-s); background: var(--bg); padding: 8px 12px; display: flex; flex-wrap: wrap; gap: 4px 16px; }
+.pf-allow-box > p { flex-basis: 100%; margin: 0; }
+
+/* one account, in the drawer: its parts under hairlines, its actions as pills that share the row */
+.pf-det { display: flex; flex-direction: column; gap: 16px; }
+.pf-det-acts { display: flex; gap: 8px; flex-wrap: wrap; }
+.pf-det-acts .btn { flex: 1 1 110px; }
+.pf-det-sec { gap: 10px; }
+/* a part's name: the same heading as the market drawer's parts (markets.css .mk-d .sec .h2), so the two drawers read as one */
+.pf-det-sec > .label:first-child { font-size: 17px; font-weight: 700; color: var(--text); letter-spacing: -0.01em; }
+.pf-notes { margin: 0; padding-left: 18px; font-size: 13px; display: flex; flex-direction: column; gap: 4px; }
+#drawer .t td, #drawer .t th { padding: 10px 8px; }
+#drawer .t td:first-child, #drawer .t th:first-child { padding-left: 0; }
+#drawer .t td:last-child, #drawer .t th:last-child { padding-right: 0; }
+
+/* ---- the Receive sheet (money.js): a search pill on top, one warning line, then one row an account × network under light rules — the
+   avatar, the account, its network words, an asset chip on an exchange row, the full address in mono, Copy, the venue's note ------------ */
+.rcv { display: flex; flex-direction: column; gap: 14px; }
+/* the search is a label in the sheet, so it is named after the sheet's own field rules (shell.css dialog label / dialog input): a pill in a row */
+#modal label.rcv-search { display: flex; flex-direction: row; align-items: center; gap: 10px; height: 44px; padding: 0 14px; border-radius: var(--radius-pill); border: 1px solid var(--border); background: var(--bg); color: var(--dim); font: inherit; min-width: 0; }
+#modal label.rcv-search:focus-within { outline: 2px solid var(--text); outline-offset: 2px; }
+#modal .rcv-search input { border: 0; background: transparent; font-family: var(--font-sans); font-size: 14px; font-weight: 500; flex: 1; width: 0; min-width: 0; min-height: 0; padding: 0; outline: none; box-shadow: none; color: var(--text); }
+#modal .rcv-search input:focus { border: 0; box-shadow: none; outline: none; }
+#modal .rcv-search input::placeholder { color: var(--dim); }
+/* what may not arrive, in the warning's own colour (.path alone would dim it) */
+.rcv-warn { color: var(--warn-text); font-weight: 600; margin: 0; font-size: 13px; }
+.rcv-only { margin: 0; }
+.rcv-list { display: flex; flex-direction: column; }
+.rcv-row { display: flex; flex-direction: column; gap: 8px; padding: 14px 0; border-top: 1px solid var(--border); }
+.rcv-row:first-child { border-top: 0; padding-top: 0; }
+.rcv-head { display: flex; align-items: center; gap: 12px; }
+.rcv-who { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.rcv-who b { font-weight: 600; }
+.rcv-who .dim { font-size: 12px; line-height: 1.4; }
+/* the asset chip on an exchange row: a small pill select, like the statement's filters */
+#modal select.rcv-asset { width: auto; min-height: 36px; padding: 4px 32px 4px 12px; font-size: 13px; font-weight: 600; border: 0; border-radius: var(--radius-pill); background: var(--surface-2); color: var(--text); }
+.rcv-addr { font-size: 14px; font-weight: 500; line-height: 1.5; word-break: break-all; color: var(--text); }
+.rcv-addr.mono { user-select: all; }
+.rcv-acts { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.rcv-tag { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.rcv-tag .mono { word-break: break-all; user-select: all; }
+.rcv-row .path:empty { display: none; }
+/* the accounts that give no address, each in its venue's words */
+.rcv-foot { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--dim); border-top: 1px solid var(--border); padding-top: 12px; line-height: 1.45; }
+.rcv-foot b { color: var(--text); font-weight: 600; }
+
+/* ---- Earn (earn.js openEarn): Put in | Take out, one row a product (pressed: the one the money goes to or comes from), the amount with
+   Max (and All of it, on Take out), the quote and the signature ---------------------------------------------------------------------- */
+.en { display: flex; flex-direction: column; gap: 14px; }
+.en-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.en-where { display: flex; flex-direction: column; gap: 6px; }
+.en-at { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 44px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-s); font-size: 14px; text-align: left; background: transparent; color: var(--text); width: 100%; }
+.en-at > span:first-child { display: block; min-width: 0; }
+.en-at b { font-weight: 600; }
+button.en-at:hover:not(:disabled) { border-color: var(--dim); }
+.en-at[aria-pressed="true"] { border: 1.5px solid var(--rule); padding: 9.5px 11.5px; }
+.en-at.off { border-style: dashed; color: var(--dim); }
+.en-at .tag { background: none; padding: 0; margin-left: 6px; font-size: 11px; font-weight: 700; color: var(--dim); }
+.en-at-r { display: flex; flex-direction: column; align-items: flex-end; font-weight: 600; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.en-form { display: flex; flex-direction: column; gap: 14px; }
+.en-max { display: flex; flex-direction: column; justify-content: flex-end; gap: 4px; padding-bottom: 6px; }
+.en-max-l { font-size: 13px; color: var(--dim); }
+.en-max .link { min-height: 24px; }
+
+/* ---- Sell many (earn.js openSellMany): one row a holding, a box to pick it and how much — light rules between the rows; then the legs ---- */
+.sm { display: flex; flex-direction: column; gap: 14px; }
+.sm-body { display: flex; flex-direction: column; gap: 12px; }
+.sm-form { display: flex; flex-direction: column; gap: 14px; }
+.sm-list { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--border); }
+.sm-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border); }
+.sm-row:last-child { border-bottom: 0; }
+.sm-rn { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.sm-rn b { font-weight: 600; }
+.sm-rn .dim { white-space: normal; }
+.sm-row .chk1 { min-height: 44px; min-width: 32px; justify-content: center; }
+#modal input.sm-q { width: 96px; flex: none; font-family: var(--font-sans); font-size: 15px; font-weight: 600; min-height: 44px; padding: 6px 10px; border: 1px solid var(--border); border-radius: var(--radius-s); background: var(--bg); color: var(--text); text-align: right; font-variant-numeric: tabular-nums; }
+#modal input.sm-q:focus { border-color: var(--rule); outline: none; box-shadow: 0 0 0 1px var(--rule); }
+.sm-legs { margin: 0; padding: 0 0 0 20px; display: flex; flex-direction: column; gap: 12px; }
+.sm-legs li { display: flex; flex-direction: column; gap: 6px; }
+.sm-legs li::marker { font-family: var(--font-sans); font-size: 12px; font-weight: 700; color: var(--dim); }
+
+/* a window too narrow for the side column beside the main one, yet with the rail (901 to 1243): what waits for the owner comes first, at
+   the pane's width, then the main column, then Cash ready and Allocation side by side, and Agents at work under them */
+@media (min-width: 901px) and (max-width: 1243px) {
+  .pf.cols { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+  .pf.cols > .col-main { grid-column: 1 / -1; }
+  .pf.cols > .col-side { display: contents; }
+  .pf.cols > .col-side > [data-pf-part="waiting"] { grid-column: 1 / -1; order: -1; }
+  .pf.cols > .col-side > [data-pf-part="waiting"]:empty { display: none; }
+  .pf.cols > .col-side > .pf-agents { grid-column: 1 / -1; order: 1; }
+  /* at that width an item's answer sits beside it, not stretched under it */
+  .pf-wait .pf-item { flex-direction: row; align-items: center; justify-content: space-between; gap: 16px; }
+  .pf-wait .pf-item .pf-btns { flex: none; }
+  .pf-wait .pf-item .pf-btns .btn { flex: 0 0 auto; min-width: 116px; }
+}
+
+@media (max-width: 900px) {
+  .pf-steps li { grid-template-columns: 28px minmax(0, 1fr); }
+  .pf-step-acts { grid-column: 2; justify-content: flex-start; }
+  .pane .sec.pf-worth { padding: 18px; }
+}
+
+/* ---- Move money (money.js openLiveMove): the fields each kind of move needs ----------------------------------------------------- */
+.mv-body { display: flex; flex-direction: column; gap: 14px; }
+.mv-body .path .link { font-size: 12px; }
+/* money in an earn product: its way out sits under its name, so the table needs no column of its own for it */
+.pf-earn-act { display: block; }
+.pf-earn-act .link { min-height: 44px; display: inline-flex; align-items: center; }

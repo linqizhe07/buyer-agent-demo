@@ -4,13 +4,18 @@
  *                      an agent read access to every Robinhood account and lets it trade only in a separate Agentic account. Reading calls
  *                      three of its tools — get_accounts, get_portfolio, get_equity_positions — and never review_equity_order,
  *                      place_equity_order or cancel_equity_order. An order the account places (the owner signed it, or an agent asked inside
- *                      its limit) calls get_equity_quotes, get_equity_tradability, place_equity_order, get_equity_orders and
- *                      cancel_equity_order, in the Agentic account and no other.
+ *                      its limit: market, limit, stop or stop-limit) calls get_equity_quotes, get_equity_tradability, place_equity_order,
+ *                      get_equity_orders and cancel_equity_order, in the Agentic account and no other; what that account holds is read with
+ *                      get_equity_positions and priced with get_equity_quotes.
  *   Robinhood Crypto   trading.robinhood.com/api/v2/crypto/ — an API key and an Ed25519 signature over api key + timestamp (seconds) + path
  *                      (with its query) + method + body, made with the private key the user created, whose public half Robinhood holds.
- *                      It reads accounts, holdings and the best bid and ask, and places, follows and cancels orders (v2: the fee-tier orders).
+ *                      It reads accounts, holdings and the best bid and ask, and places (market, limit, stop and stop-limit), follows and
+ *                      cancels orders (v2: the fee-tier orders).
  *   Stock Tokens       api.robinhood.com/rhj/assets and /rhj/prices/{symbol} — no key: each token's contract on Robinhood Chain (4663),
- *                      and its bid in dollars per token. A wallet's tokens are read from the chain (address.ts).
+ *                      and its bid in dollars per token. A wallet's tokens are read from the chain (address.ts), and traded from a proven
+ *                      wallet against USDG on Robinhood Chain through LI.FI (dex.ts), which Robinhood names among the aggregators that
+ *                      quote them (docs.robinhood.com/chain/building-with-stock-tokens). This list is what makes a token on that chain a
+ *                      Stock Token: an address it does not name is not one, whatever its symbol.
  *
  * None of the three moves money in or out: Robinhood's deposits and withdrawals are made in Robinhood's own app. An order moves money
  * between what the user holds at Robinhood: dollars into BTC, shares into dollars.
@@ -18,10 +23,11 @@
 import { createHash, createPrivateKey, sign as cryptoSign, type KeyObject } from "node:crypto";
 import { getAddress, isAddress, type Hex } from "viem";
 import { isRefusal, type Refusal } from "../../core/errors.ts";
+import { regularSession } from "../account/calendar.ts";
 import { no } from "../refuse.ts";
 import { CHAIN_BY_ID, type ChainName, type ChainReader, type TokenRef } from "./chain.ts";
 import type { KeyFile, KeyShape } from "./credentials.ts";
-import { badOrder, ceilTo, floorTo, inDollars, onStep, pick as pickMarkets, plain, type LiveTrader, type Market, type OrderRequest, type OrderState, type OrderStatus } from "./trade.ts";
+import { badOrder, ceilTo, floorTo, inDollars, onStep, ORDER_TYPES, pick as pickMarkets, plain, type LiveTrader, type Market, type OrderRequest, type OrderState, type OrderStatus, type Position, type TimeInForce } from "./trade.ts";
 import { asRefusal, isStable, num, redact, REGION, unreachable, venueSaidNo, type Http, type HttpReply, type LiveBalance, type LiveSource } from "./types.ts";
 
 // ---- Robinhood Crypto ----------------------------------------------------------------------
@@ -97,6 +103,12 @@ const CRYPTO_FIRST = ["BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "DOGE-USD", "L
 const PAIR = /^[A-Z0-9]{1,16}-[A-Z0-9]{2,8}$/;
 /** v1's trading_pairs say `sellonly`; v2's status is free text, read the same way */
 const SELL_ONLY = /^sell_?only$/;
+/** The times in force Robinhood's crypto orders take. Its API lists gtc, gfd, gfw and gfm for the limit, stop_loss and stop_limit configs
+ * (docs.robinhood.com/crypto/trading, AddOrderV2's TimeInForce; a market config has none), and Robinhood's own Trading MCP says which go with
+ * which type: "market and limit: 'gtc' (good till canceled) only … limit orders are always for 90 days", a stop gtc, gfd, gfw or gfm and gfd
+ * when none is given, and "'ioc' is NEVER supported for crypto orders" (place_crypto_order, as its tools/list gives it). The account's gtc is
+ * Robinhood's gtc and its day is gfd; a week or a month has no name in the account, and there is no immediate-or-cancel or fill-or-kill. */
+const CRYPTO_TIFS: TimeInForce[] = ["gtc", "day"];
 
 /** the account's name for a pair is Robinhood's own, `BTC-USD`; `btc/usd` and `BTC` are read as it */
 function pairSymbol(s: string): string {
@@ -122,13 +134,19 @@ function saidBy(r: HttpReply, secrets: Array<string | undefined>): { status: num
   return { status: r.status, said: redact(parts.join("; ") || r.text, secrets).replace(/\s+/g, " ").trim().slice(0, 220) };
 }
 
-/** Robinhood's crypto order states — open, partially_filled, filled, canceled, failed, and `pending`, which its order list filters by — as the
- * account's. A state it adds later is still working, and is asked again. */
+/** Robinhood's crypto order states — open (a limit on the book, or a stop waiting for its price), partially_filled, filled, canceled, failed,
+ * and `pending`, which its order list filters by — as the account's. The states Robinhood's Trading MCP gives the same orders are read too:
+ * confirmed is working, voided is done with nothing more to fill. A state it adds later is still working, and is asked again. */
 function cryptoState(b: Record<string, unknown>): OrderState {
   const filled = num(b.filled_asset_quantity);
   const s = String(b.state ?? "").toLowerCase();
   const status: OrderStatus =
-    s === "filled" ? "filled" : s === "canceled" || s === "cancelled" ? "canceled" : s === "failed" || s === "rejected" ? "rejected" : s === "partially_filled" ? "partial" : s === "open" ? (filled > 0 ? "partial" : "open") : filled > 0 ? "partial" : "pending";
+    s === "filled" ? "filled"
+    : s === "canceled" || s === "cancelled" ? "canceled"
+    : s === "failed" || s === "rejected" || s === "voided" ? "rejected"
+    : s === "partially_filled" ? "partial"
+    : s === "open" || s === "confirmed" ? (filled > 0 ? "partial" : "open")
+    : filled > 0 ? "partial" : "pending";
   const fee = b.fee_charged;
   // the order as Robinhood said it, its account named by the last four digits
   const native = { ...b, ...(typeof b.account_number === "string" ? { account_number: tail4(b.account_number) } : {}) };
@@ -255,11 +273,15 @@ export async function robinhoodCryptoSource(req: { venue: string; label: string;
       ...(tradable?.status === "sell_only" ? ["Robinhood has this crypto account on sell only: it refuses buys"] : []),
       tradable?.feeRatio !== undefined ? `Robinhood's fee is ${plain(tradable.feeRatio * 100, 4)}% of each order at this account's fee tier` : "Robinhood charges the fee of the account's fee tier on each order",
       ...(max > 0 ? [`at most ${plain(max)} ${base} an order`] : []),
-      // Robinhood's crypto orders have no immediate-or-cancel, so this is how a market order is held to its worst price (see place)
-      "a market order goes as a limit at its worst price, good till canceled: what does not fill at once waits on the book",
+      // Robinhood's crypto orders have no immediate-or-cancel, so this is how a market order, and a stop once it triggers, is held to its worst
+      // price (see place)
+      "a market order goes as a limit at its worst price, a stop as a stop-limit at its worst price: what does not fill at once waits on the book",
+      "market and limit orders are good till canceled (Robinhood keeps them 90 days); a stop is good for the day, Robinhood's default, unless good till canceled is chosen",
       "crypto trades every day, all day",
     ].join(" · ");
-    return { symbol, name: `${base} / ${quote}`, kind: "crypto", base, quote, ...(book ? { price: book.price, bid: book.bid > 0 ? book.bid : undefined, ask: book.ask > 0 ? book.ask : undefined } : {}), qtyStep: num(p.asset_increment) || undefined, priceStep: num(p.quote_increment) || undefined, minNotional: num(p.min_order_amount) || undefined, open: !why, note, types: ["market", "limit"] };
+    // the four order types Robinhood's crypto orders come in (AddOrderV2: market, limit, stop_loss, stop_limit), and no post-only, reduce-only
+    // or leverage: its API has none of them
+    return { symbol, name: `${base} / ${quote}`, kind: "crypto", base, quote, ...(book ? { price: book.price, bid: book.bid > 0 ? book.bid : undefined, ask: book.ask > 0 ? book.ask : undefined } : {}), qtyStep: num(p.asset_increment) || undefined, priceStep: num(p.quote_increment) || undefined, minNotional: num(p.min_order_amount) || undefined, open: !why, note, types: ["market", "limit", "stop", "stop_limit"], tifs: [...CRYPTO_TIFS], tifsByType: { market: ["gtc"], limit: ["gtc"], stop: ["gtc", "day"], stop_limit: ["gtc", "day"] }, sellsReduce: true };
   };
   const market = async (symbol: string): Promise<Market | Refusal> => {
     try {
@@ -317,6 +339,12 @@ export async function robinhoodCryptoSource(req: { venue: string; label: string;
       const sym = pairSymbol(o.symbol);
       if (!PAIR.test(sym)) return badOrder(req.venue, name, `"${o.symbol}" is not a crypto pair: Robinhood names them like BTC-USD`);
       if (!inDollars(sym.split("-")[1]!)) return unpriced(sym);
+      // what a Robinhood crypto order cannot carry is said before Robinhood is asked anything
+      if (!ORDER_TYPES.includes(o.type)) return badOrder(req.venue, name, `Robinhood takes market, limit, stop and stop-limit crypto orders, not ${String(o.type)} orders`);
+      if (o.postOnly || o.reduceOnly) return badOrder(req.venue, name, "Robinhood's crypto orders have no post-only or reduce-only flag");
+      const stopped = o.type === "stop" || o.type === "stop_limit";
+      if (o.tif !== undefined && !CRYPTO_TIFS.includes(o.tif)) return badOrder(req.venue, name, `Robinhood's crypto orders are good till canceled or good for the day, never ${o.tif}`);
+      if (o.tif === "day" && !stopped) return badOrder(req.venue, name, "a market or limit crypto order at Robinhood is good till canceled only (Robinhood keeps it 90 days): good for the day is for a stop");
       const p = await pairOf(sym);
       if (!p) return badOrder(req.venue, name, `Robinhood lists no crypto pair ${sym}`);
       const m = marketOf(p);
@@ -325,21 +353,39 @@ export async function robinhoodCryptoSource(req: { venue: string; label: string;
       if (!(o.qty > 0) || !onStep(o.qty, m.qtyStep)) return badOrder(req.venue, name, `a size in ${sym} moves in steps of ${plain(m.qtyStep ?? 0)} ${m.base}`, { qtyStep: m.qtyStep });
       const max = num(p.max_order_size);
       if (max > 0 && o.qty > max + 1e-12) return badOrder(req.venue, name, `the largest order in ${sym} is ${plain(max)} ${m.base}`, { maxQty: max });
-      if (o.type === "limit" && !(o.limitPrice !== undefined && Number.isFinite(o.limitPrice) && o.limitPrice > 0 && onStep(o.limitPrice, m.priceStep))) return badOrder(req.venue, name, `a limit price in ${sym} moves in steps of ${plain(m.priceStep ?? 0)}`, { priceStep: m.priceStep });
+      // a limit price and a stop price are on the pair's quote_increment, refused here when they are not, never rounded: a rounded trigger
+      // fires at another price than the one signed
+      const onGrid = (x: number | undefined): x is number => x !== undefined && Number.isFinite(x) && x > 0 && onStep(x, m.priceStep);
+      if ((o.type === "limit" || o.type === "stop_limit") && !onGrid(o.limitPrice)) return badOrder(req.venue, name, `a limit price in ${sym} moves in steps of ${plain(m.priceStep ?? 0)}`, { priceStep: m.priceStep });
+      if (stopped && !onGrid(o.stopPrice)) return badOrder(req.venue, name, `a stop price in ${sym} moves in steps of ${plain(m.priceStep ?? 0)}`, { priceStep: m.priceStep });
+      // A market order with a worst price goes as a limit at that price, and a stop with one as a stop-limit at it (a buy's rounded down, a
+      // sell's up). Robinhood's crypto API has no other way to bound a market order and no immediate-or-cancel; and a stop it triggers becomes a
+      // market order it lets fill up to 1% above the price on a buy and 5% below on a sell (Robinhood's "Buying and selling crypto"). Held at
+      // the worst price, what does not fill at once rests on the book, never past it
+      const bounds = o.type === "market" || o.type === "stop";
+      if (bounds && o.worstPrice !== undefined && !(Number.isFinite(o.worstPrice) && o.worstPrice > 0)) return badOrder(req.venue, name, `a ${o.type} order's worst price is a price more than zero`);
+      const bound = bounds && o.worstPrice !== undefined ? (o.side === "buy" ? floorTo(o.worstPrice, m.priceStep) : ceilTo(o.worstPrice, m.priceStep)) : undefined;
+      if (bound !== undefined && !(bound > 0)) return badOrder(req.venue, name, `a price in ${sym} moves in steps of ${plain(m.priceStep ?? 0)}`, { priceStep: m.priceStep });
       const acct = await account();
       if (isRefusal(acct)) return acct;
       const id = uuidFrom(`${CRYPTO}/${acct.number}/${o.clientId}`);
-      const quantity = fixed(o.qty, p.asset_increment);
-      // a market order with a worst price goes as a limit at that price (a buy's rounded down, a sell's up): Robinhood's crypto API has no
-      // other way to bound a market order and no immediate-or-cancel, so what does not fill at once rests on the book, never past it
-      if (o.type === "market" && o.worstPrice !== undefined && !(Number.isFinite(o.worstPrice) && o.worstPrice > 0)) return badOrder(req.venue, name, "a market order's worst price is a price more than zero");
-      const bound = o.type === "market" && o.worstPrice !== undefined ? (o.side === "buy" ? floorTo(o.worstPrice, m.priceStep) : ceilTo(o.worstPrice, m.priceStep)) : undefined;
-      if (bound !== undefined && !(bound > 0)) return badOrder(req.venue, name, `a price in ${sym} moves in steps of ${plain(m.priceStep ?? 0)}`, { priceStep: m.priceStep });
-      const limitPrice = o.type === "limit" ? o.limitPrice! : bound;
-      // AddOrderV2: exactly one order config, the one the type names. Robinhood's crypto limit orders are good till canceled. The amounts go
-      // as decimal strings, as every example in Robinhood's docs sends them, never as a float that could print as 1e-7
-      const config = limitPrice === undefined ? { market_order_config: { asset_quantity: quantity } } : { limit_order_config: { asset_quantity: quantity, limit_price: fixed(limitPrice, p.quote_increment), time_in_force: "gtc" } };
-      const body = JSON.stringify({ client_order_id: id, side: o.side, type: limitPrice === undefined ? "market" : "limit", symbol: sym, ...config });
+      const limitPrice = o.type === "limit" || o.type === "stop_limit" ? o.limitPrice! : bound;
+      const stopPrice = stopped ? o.stopPrice! : undefined;
+      // AddOrderV2: Robinhood's type, and exactly one order config, named for it as Robinhood's own sample client names it
+      // (`${type}_order_config`): market {asset_quantity} · limit {asset_quantity, limit_price, time_in_force} · stop_loss {asset_quantity,
+      // stop_price, time_in_force} · stop_limit {asset_quantity, limit_price, stop_price, time_in_force}. stop_loss is Robinhood's stop, a buy's
+      // as much as a sell's. Market and limit orders are good till canceled; a stop is good for the day unless good till canceled was chosen,
+      // the default Robinhood gives its stops, sent rather than left out. The amounts go as decimal strings, as every example in Robinhood's
+      // docs sends them, never as a float that could print as 1e-7
+      const type = stopPrice === undefined ? (limitPrice === undefined ? "market" : "limit") : limitPrice === undefined ? "stop_loss" : "stop_limit";
+      const tif = o.tif === "day" ? "gfd" : o.tif === "gtc" ? "gtc" : stopped ? "gfd" : "gtc";
+      const config = {
+        asset_quantity: fixed(o.qty, p.asset_increment),
+        ...(limitPrice !== undefined ? { limit_price: fixed(limitPrice, p.quote_increment) } : {}),
+        ...(stopPrice !== undefined ? { stop_price: fixed(stopPrice, p.quote_increment) } : {}),
+        ...(type === "market" ? {} : { time_in_force: tif }),
+      };
+      const body = JSON.stringify({ client_order_id: id, side: o.side, type, symbol: sym, [`${type}_order_config`]: config });
       const at = req.clock();
       let r: HttpReply;
       try {
@@ -388,8 +434,29 @@ export async function robinhoodCryptoSource(req: { venue: string; label: string;
       return asRefusal(req.venue, name, err, secrets);
     }
   };
+  /** What the account the API trades holds (GET /api/v2/crypto/trading/holdings/?account_number=, docs.robinhood.com/crypto/trading:
+   * total_quantity, and quantity_available_for_trading net of what open orders lock, both strings in v2), as long positions in the pairs the
+   * account names them by (BTC as BTC-USD), priced at Robinhood's own midpoint in one request. Robinhood gives no cost basis here, so no
+   * entry price; it has no call that closes a position, nor one that changes an order in place: a sell is placed, an order canceled. */
+  const positions = async (): Promise<Position[] | Refusal> => {
+    try {
+      const acct = await account();
+      if (isRefusal(acct)) return acct;
+      const held = (await all(`/api/v2/crypto/trading/holdings/?account_number=${acct.number}`))
+        .map((h) => ({ h, asset: String(h.asset_code ?? "").toUpperCase(), qty: num(h.total_quantity) }))
+        .filter((x) => x.qty > 0 && /^[A-Z0-9]{1,16}$/.test(x.asset));
+      // positions without a price are still positions
+      const book = await books([...new Set(held.filter((x) => !isStable(x.asset)).map((x) => `${x.asset}-USD`))]).catch(() => new Map<string, { bid: number; ask: number; price: number }>());
+      return held.map(({ h, asset, qty }): Position => {
+        const mark = isStable(asset) ? 1 : book.get(`${asset}-USD`)?.price;
+        return { symbol: `${asset}-USD`, name: `${asset} / USD`, kind: "crypto", side: "long", qty, ...(mark ? { markPrice: mark, usd: qty * mark } : {}), native: { ...h, ...(typeof h.account_number === "string" ? { account_number: tail4(h.account_number) } : {}) } };
+      });
+    } catch (err) {
+      return asRefusal(req.venue, name, err, secrets);
+    }
+  };
   // Robinhood has no call that says which actions a key was made with: its first refusal of an order says it
-  const trader: LiveTrader = { can: "unknown", what: "crypto", markets, market, place, cancel, status };
+  const trader: LiveTrader = { can: "unknown", what: "crypto", markets, market, place, cancel, status, positions };
   try {
     const first = await read();
     const source: LiveSource = {
@@ -421,7 +488,16 @@ export interface StockToken {
   name: string;
   chain: ChainName;
   address: Hex;
+  /** as Robinhood's list says (`tokenDecimals`); a swap still reads them from the token itself */
+  decimals?: number | undefined;
 }
+
+/** Who issues the Stock Tokens and whom they are not for, in the issuer's own words (docs.robinhood.com/chain/stock-tokens, read
+ * 2026-10-06). The account knows nothing of where its owner lives: these words go with every Stock Token market, so the owner reads them
+ * before signing, and the account never looks for a way around them */
+export const STOCK_TOKEN_ISSUER = "Robinhood Assets (Jersey) Limited";
+export const STOCK_TOKEN_TERMS =
+  "Robinhood: Stock Tokens “may not be offered, sold, or delivered, directly or indirectly, in the United States or to, or for the account or benefit of, U.S. persons”, and are restricted in other places, Canada, the United Kingdom and Switzerland among them";
 
 /** the token list changes slowly: asked again after ten minutes, kept per network so a test's stand-in is never handed another's list */
 const lists = new WeakMap<Http, { at: number; tokens: StockToken[] }>();
@@ -437,7 +513,7 @@ export async function stockTokens(http: Http, now: number): Promise<StockToken[]
     if (a.status !== "ASSET_STATUS_ACTIVE" || typeof a.tokenSymbol !== "string") continue;
     for (const d of (Array.isArray(a.deployments) ? a.deployments : []) as Array<Record<string, unknown>>) {
       const chain = CHAIN_BY_ID.get(Number(d.chainId));
-      if (chain && typeof d.contractAddress === "string" && isAddress(d.contractAddress, { strict: false })) tokens.push({ symbol: a.tokenSymbol, name: String(a.tokenName ?? a.tokenSymbol), chain, address: getAddress(d.contractAddress) });
+      if (chain && typeof d.contractAddress === "string" && isAddress(d.contractAddress, { strict: false })) tokens.push({ symbol: a.tokenSymbol, name: String(a.tokenName ?? a.tokenSymbol), chain, address: getAddress(d.contractAddress), ...(Number.isInteger(a.tokenDecimals) ? { decimals: Number(a.tokenDecimals) } : {}) });
     }
   }
   lists.set(http, { at: now, tokens });
@@ -475,7 +551,9 @@ export async function stockTokenBids(http: Http, symbols: string[], now: number)
   return out;
 }
 
-/** the Stock Tokens an address holds, priced; a list or a chain that does not answer is said, not thrown */
+/** the Stock Tokens an address holds, priced; a list or a chain that does not answer is said, not thrown. A Stock Token is held as an RWA:
+ * it is Robinhood's debt security that tracks a share, not the share, and it is sold from the wallet as `<SYMBOL>/USDG@Robinhood Chain`
+ * (dex.ts), the market the holding's row finds by its symbol and its chain */
 export async function stockTokenHoldings(holder: Hex, chain: ChainReader, http: Http, now: number): Promise<{ rows: LiveBalance[]; unread?: string }> {
   let tokens: StockToken[];
   try {
@@ -489,7 +567,7 @@ export async function stockTokenHoldings(holder: Hex, chain: ChainReader, http: 
   const held = read.rows.filter((b) => b.amount > 0);
   const bid = await stockTokenBids(http, [...new Set(held.map((b) => b.asset))], now);
   return {
-    rows: held.map((b) => ({ asset: b.asset, amount: b.amount, ...(bid.has(b.asset) ? { usd: b.amount * bid.get(b.asset)! } : {}), where: `${b.chain} · Stock Token`, class: "equity" })),
+    rows: held.map((b) => ({ asset: b.asset, amount: b.amount, ...(bid.has(b.asset) ? { usd: b.amount * bid.get(b.asset)! } : {}), where: `${b.chain} · Stock Token`, class: "rwa" })),
     ...(read.failed.length ? { unread: `${read.failed.join(", ")} did not answer` } : {}),
   };
 }
@@ -498,8 +576,9 @@ export async function stockTokenHoldings(holder: Hex, chain: ChainReader, http: 
 
 export const ROBINHOOD_MCP = "https://agent.robinhood.com/mcp/trading";
 
-/** The only tools a read calls. Orders are placed, followed and cancelled with TRADE_TOOLS (and the two tools below them, when offered);
- * review_equity_order, the crypto and option tools, and the watchlist tools that write are never called from here. */
+/** The only tools a read calls. Orders are placed, followed and cancelled with TRADE_TOOLS (and the two tools below them, when offered), and
+ * what the Agentic account holds is read with get_equity_positions; review_equity_order, the crypto and option tools, and the watchlist tools
+ * that write are never called from here. */
 export const READ_TOOLS = ["get_accounts", "get_portfolio", "get_equity_positions"] as const;
 type ReadTool = (typeof READ_TOOLS)[number];
 
@@ -509,7 +588,7 @@ type ReadTool = (typeof READ_TOOLS)[number];
 export const TRADE_TOOLS = ["get_equity_quotes", "place_equity_order", "get_equity_orders", "cancel_equity_order"] as const;
 /** asked when the server offers them: a stock's tradability for the account, and a search by name */
 const MORE_TOOLS = ["get_equity_tradability", "search"] as const;
-type TradeTool = (typeof TRADE_TOOLS)[number] | (typeof MORE_TOOLS)[number] | "get_accounts";
+type TradeTool = (typeof TRADE_TOOLS)[number] | (typeof MORE_TOOLS)[number] | "get_accounts" | "get_equity_positions";
 
 export interface McpTool {
   name: string;
@@ -674,7 +753,10 @@ const lastOf = (q: Record<string, unknown>): number | undefined => {
 };
 
 /** Robinhood's equity order states (cancelled has two Ls here) as the account's. Queued, new, unconfirmed and locating are taken and not yet
- * working; pending_cancelled still works until Robinhood confirms the cancel; a state it adds later is still working, and is asked again. */
+ * working; pending_cancelled still works until Robinhood confirms the cancel; a state it adds later is still working, and is asked again. A
+ * stop comes back as Robinhood's market or limit order with trigger "stop" (place_equity_order's own answer), under the same id and the same
+ * states: while it waits for its price it is still working (queued is pending here, confirmed is open), and it fills, is cancelled or is
+ * rejected as any other order does. */
 function equityState(o: Record<string, unknown>): OrderState {
   const filled = num(o.cumulative_quantity);
   const s = String(o.state ?? "").toLowerCase();
@@ -810,7 +892,13 @@ export async function robinhoodStocksSource(req: { venue: string; label: string;
     }
     return agentic;
   };
-  const stockOf = (symbol: string, q: Record<string, unknown> | undefined, t: Record<string, unknown> | undefined): Market => {
+  /** whether place_equity_order, as the server lists it now, takes a stop: Robinhood's stop_market and stop_limit need its stop_price, so a
+   * server whose schema has none is offered no stops rather than refused them at the last moment */
+  const takesStops = (t: Tools): boolean => {
+    const props = t.offered.get("place_equity_order")?.inputSchema?.properties;
+    return !props || "stop_price" in props;
+  };
+  const stockOf = (symbol: string, q: Record<string, unknown> | undefined, t: Record<string, unknown> | undefined, stops: boolean): Market => {
     const price = q ? lastOf(q) : undefined;
     const bid = num(q?.bid_price);
     const ask = num(q?.ask_price);
@@ -828,11 +916,17 @@ export async function robinhoodStocksSource(req: { venue: string; label: string;
     const note = why ?? [
       agentic ? `orders go to your Robinhood Agentic account ${tail4(agentic.number)}, the one account an agent may trade in` : "Robinhood shows no account this sign-in may trade in: an agent trades only in the Robinhood Agentic account",
       ...(forAccount === "position_closing_only" ? [`Robinhood takes only sells of ${symbol} in that account`] : []),
-      "a market order goes as a limit at its worst price; orders are for the regular session (9:30 to 16:00 New York), good for the day, and outside it wait for the next open",
+      `a market order goes as a limit at its worst price${stops ? ", a stop as a stop-limit at its worst price" : ""}; orders are for the regular session (9:30 to 16:00 New York) and outside it wait for the next open`,
+      "good for the day, Robinhood's default, unless good till canceled is chosen (Robinhood keeps such an order 90 days); a market order is good for the day only",
       fractional ? "whole shares only: Robinhood takes a fraction of a share only as a plain market order, which cannot be held to a worst price" : "whole shares only",
     ].join(" · ");
-    // the tick is the US market's ($0.01, or $0.0001 under a dollar): Robinhood's tools do not say it
-    return { symbol, name: String(t?.simple_name ?? t?.name ?? symbol), kind: "stock", base: symbol, quote: "USD", ...(price !== undefined ? { price } : {}), bid: bid > 0 ? bid : undefined, ask: ask > 0 ? ask : undefined, minQty: 1, qtyStep: 1, priceStep: (price ?? 1) < 1 ? 0.0001 : 0.01, open: !why, note, types: ["market", "limit"] };
+    // The tick is the US market's ($0.01, or $0.0001 under a dollar): Robinhood's tools do not say it. The order types are place_equity_order's
+    // (market, limit, stop_market, stop_limit; Robinhood's page "Trading with your agent" lists the same four), its time_in_force gfd or gtc —
+    // "Market orders are Good-for-Day (GFD) orders and you can enter other order types as GFD or Good-til-Canceled (GTC)" (Robinhood's
+    // "Order types"), which place() holds a market order to. No post-only, reduce-only or leverage: the tool has none. The session is the
+    // regular one every order here is sent for (market_hours "regular_hours"), from the market calendar (account/calendar.ts): Robinhood's
+    // tools give no clock
+    return { symbol, name: String(t?.simple_name ?? t?.name ?? symbol), kind: "stock", base: symbol, quote: "USD", ...(price !== undefined ? { price } : {}), bid: bid > 0 ? bid : undefined, ask: ask > 0 ? ask : undefined, minQty: 1, qtyStep: 1, priceStep: (price ?? 1) < 1 ? 0.0001 : 0.01, open: !why, session: regularSession(clock()), note, types: stops ? ["market", "limit", "stop", "stop_limit"] : ["market", "limit"], tifs: ["gtc", "day"], tifsByType: { market: ["day"], limit: ["gtc", "day"], stop: ["gtc", "day"], stop_limit: ["gtc", "day"] }, sellsReduce: true };
   };
   const market = async (symbol: string): Promise<Market | Refusal> => {
     const sym = symbol.trim().toUpperCase();
@@ -842,7 +936,7 @@ export async function robinhoodStocksSource(req: { venue: string; label: string;
       const q = quoteIn(await t.call("get_equity_quotes", { symbols: [sym] }), sym);
       const tr = acct && t.offered.has("get_equity_tradability") ? tradabilityIn(await t.call("get_equity_tradability", { account_number: acct.number, symbols: [sym] }), sym) : undefined;
       if (!q && !tr) return badOrder(req.venue, name, `Robinhood has no stock ${sym}`);
-      return stockOf(sym, q, tr);
+      return stockOf(sym, q, tr, takesStops(t));
     });
   };
   /** search answers per query; each kept five minutes */
@@ -873,38 +967,58 @@ export async function robinhoodStocksSource(req: { venue: string; label: string;
         // a list without prices is still a list
         quotes = undefined;
       }
-      return found.map((m) => ({ ...stockOf(m.symbol, quotes ? quoteIn(quotes, m.symbol) : undefined, undefined), name: m.name }));
+      return found.map((m) => ({ ...stockOf(m.symbol, quotes ? quoteIn(quotes, m.symbol) : undefined, undefined, takesStops(t)), name: m.name }));
     });
   const place = async (o: OrderRequest): Promise<OrderState | Refusal> => {
     const sym = o.symbol.trim().toUpperCase();
     if (!TICKER.test(sym)) return badOrder(req.venue, name, `"${o.symbol}" is not a stock symbol`);
+    // what place_equity_order cannot carry is said before Robinhood is asked: its types are market, limit, stop_market and stop_limit, its
+    // time_in_force gfd or gtc (a market order gfd only, as Robinhood's "Order types" says), and it has no post-only or reduce-only flag
+    if (!ORDER_TYPES.includes(o.type)) return badOrder(req.venue, name, `Robinhood takes market, limit, stop and stop-limit orders, not ${String(o.type)} orders`);
+    if (o.postOnly || o.reduceOnly) return badOrder(req.venue, name, "Robinhood's stock orders have no post-only or reduce-only flag");
+    if (o.tif !== undefined && o.tif !== "gtc" && o.tif !== "day") return badOrder(req.venue, name, `Robinhood's stock orders are good for the day or good till canceled, never ${o.tif}`);
+    if (o.type === "market" && o.tif === "gtc") return badOrder(req.venue, name, "a market order at Robinhood is good for the day only");
     if (!(o.qty > 0) || !onStep(o.qty, 0.000001)) return badOrder(req.venue, name, "a size at Robinhood is shares, to six decimal places at most");
-    if (o.type === "limit" && !onStep(o.qty, 1)) return badOrder(req.venue, name, "Robinhood takes a fraction of a share only in a market order: a limit order is whole shares");
-    if (o.type === "limit" && !(o.limitPrice !== undefined && Number.isFinite(o.limitPrice) && o.limitPrice > 0)) return badOrder(req.venue, name, "a limit order has a limit price");
-    // the US tick of the price itself: a price off it is refused here, never rounded (a rounded-up buy would pay more than was signed)
+    const limited = o.type === "limit" || o.type === "stop_limit";
+    const stopped = o.type === "stop" || o.type === "stop_limit";
+    const words = o.type === "stop_limit" ? "a stop-limit order" : `a ${o.type} order`;
+    // a fraction of a share goes "only on type=market with market_hours=regular_hours" (place_equity_order's own rule)
+    if (o.type !== "market" && !onStep(o.qty, 1)) return badOrder(req.venue, name, `Robinhood takes a fraction of a share only in a market order: ${words} is whole shares`);
+    if (limited && !(o.limitPrice !== undefined && Number.isFinite(o.limitPrice) && o.limitPrice > 0)) return badOrder(req.venue, name, `${words} has a limit price`);
+    // the US tick of the price itself: a price off it is refused here, never rounded (a rounded-up buy would pay more than was signed, a
+    // rounded trigger fires at another price than the one signed)
     const tick = (x: number) => (x < 1 ? 0.0001 : 0.01);
-    if (o.type === "limit" && !onStep(o.limitPrice!, tick(o.limitPrice!))) return badOrder(req.venue, name, "a limit price at Robinhood is in cents (in hundredths of a cent under $1)");
-    // a market order with a worst price goes as a marketable limit at it (a buy's rounded down, a sell's up), as Robinhood's own tool advises
-    // for price protection: it never fills past it. A fraction of a share goes only as a plain market order, so it cannot be held there
-    if (o.type === "market" && o.worstPrice !== undefined) {
-      if (!(Number.isFinite(o.worstPrice) && o.worstPrice > 0)) return badOrder(req.venue, name, "a market order's worst price is a price more than zero");
+    if (limited && !onStep(o.limitPrice!, tick(o.limitPrice!))) return badOrder(req.venue, name, "a limit price at Robinhood is in cents (in hundredths of a cent under $1)");
+    if (stopped && !(o.stopPrice !== undefined && Number.isFinite(o.stopPrice) && o.stopPrice > 0)) return badOrder(req.venue, name, `${words} has a stop price`);
+    if (stopped && !onStep(o.stopPrice!, tick(o.stopPrice!))) return badOrder(req.venue, name, "a stop price at Robinhood is in cents (in hundredths of a cent under $1)");
+    // A market order with a worst price goes as a marketable limit at it, as Robinhood's own tool advises for price protection, and a stop
+    // with one as a stop-limit at it (a buy's rounded down, a sell's up): it never fills past it. A fraction of a share goes only as a plain
+    // market order, so it cannot be held there
+    const bounds = o.type === "market" || o.type === "stop";
+    if (bounds && o.worstPrice !== undefined) {
+      if (!(Number.isFinite(o.worstPrice) && o.worstPrice > 0)) return badOrder(req.venue, name, `${words}'s worst price is a price more than zero`);
       if (!onStep(o.qty, 1)) return badOrder(req.venue, name, "Robinhood takes a fraction of a share only as a plain market order, which cannot be held to a worst price: order whole shares");
     }
-    const bound = o.type === "market" && o.worstPrice !== undefined ? (o.side === "buy" ? floorTo(o.worstPrice, tick(o.worstPrice)) : ceilTo(o.worstPrice, tick(o.worstPrice))) : undefined;
-    if (bound !== undefined && !(bound > 0)) return badOrder(req.venue, name, "a market order's worst price is under the smallest tick");
-    const limitPrice = o.type === "limit" ? o.limitPrice! : bound;
+    const bound = bounds && o.worstPrice !== undefined ? (o.side === "buy" ? floorTo(o.worstPrice, tick(o.worstPrice)) : ceilTo(o.worstPrice, tick(o.worstPrice))) : undefined;
+    if (bound !== undefined && !(bound > 0)) return badOrder(req.venue, name, `${words}'s worst price is under the smallest tick`);
+    const limitPrice = limited ? o.limitPrice! : bound;
+    const stopPrice = stopped ? o.stopPrice! : undefined;
     return withTools(async (t) => {
       const acct = await accountFor(t);
       if (!acct) return noAgentic();
-      // place_equity_order as its schema has it: shares, a day order in the regular session, and ref_id — Robinhood keeps one order per ref_id
+      // place_equity_order as its schema has it: shares; Robinhood's type; the regular session, the only one a market or stop order may be
+      // tagged to (a limit could go to another, which the account does not choose); good for the day, the tool's default, unless good till
+      // canceled was chosen; and ref_id — Robinhood keeps one order per ref_id
+      const price = (x: number) => x.toFixed(x < 1 ? 4 : 2);
       const args: Record<string, unknown> = {
         account_number: acct.number,
         symbol: sym,
         side: o.side,
-        type: limitPrice === undefined ? "market" : "limit",
+        type: stopPrice === undefined ? (limitPrice === undefined ? "market" : "limit") : limitPrice === undefined ? "stop_market" : "stop_limit",
         quantity: plain(o.qty, 6),
-        ...(limitPrice !== undefined ? { limit_price: limitPrice.toFixed(limitPrice < 1 ? 4 : 2) } : {}),
-        time_in_force: "gfd",
+        ...(limitPrice !== undefined ? { limit_price: price(limitPrice) } : {}),
+        ...(stopPrice !== undefined ? { stop_price: price(stopPrice) } : {}),
+        time_in_force: o.tif === "gtc" ? "gtc" : "gfd",
         market_hours: "regular_hours",
         ref_id: uuidFrom(`${ROBINHOOD_MCP}/${acct.number}/${o.clientId}`),
       };
@@ -942,6 +1056,59 @@ export async function robinhoodStocksSource(req: { venue: string; label: string;
       return hit ? equityState(hit) : unknownOrder(ref);
     });
   };
+  /** the cursor in a page's `next`: get_equity_positions says to "pass the cursor query param from the prior response's next URL" */
+  const cursorIn = (next: unknown): string | undefined => {
+    if (typeof next !== "string" || !next) return undefined;
+    try {
+      return new URL(next).searchParams.get("cursor") || undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  /** What the Agentic account holds, the one account an order from here can change (every account's holdings come with the read): its
+   * get_equity_positions — symbol, quantity ("negative for short positions"), average_buy_price, a page at a time, five pages at most — priced
+   * by get_equity_quotes in one call, since "No market price here — for current value or PnL, call get_equity_quotes and multiply by
+   * quantity". Robinhood's tools have no call that closes a position, nor one that changes an order in place: a sell is placed, an order
+   * canceled. */
+  const positions = (): Promise<Position[] | Refusal> =>
+    withTools(async (t) => {
+      const acct = await accountFor(t);
+      if (!acct) return noAgentic();
+      const props = t.offered.get("get_equity_positions")?.inputSchema?.properties;
+      const rows: Array<Record<string, unknown>> = [];
+      let cursor: string | undefined;
+      for (let page = 0; page < 5; page++) {
+        const d = await t.call("get_equity_positions", { account_number: acct.number, ...(cursor ? { cursor } : {}) });
+        for (const x of Array.isArray(d.positions) ? d.positions : []) if (x && typeof x === "object") rows.push(x as Record<string, unknown>);
+        cursor = !props || "cursor" in props ? cursorIn(d.next) : undefined;
+        if (!cursor) break;
+      }
+      const held = rows.map((p) => ({ p, symbol: String(p.symbol ?? "").toUpperCase(), q: num(p.quantity) })).filter((x) => TICKER.test(x.symbol) && x.q !== 0);
+      let quotes: Record<string, unknown> | undefined;
+      try {
+        quotes = held.length ? await t.call("get_equity_quotes", { symbols: [...new Set(held.map((x) => x.symbol))] }) : undefined;
+      } catch {
+        // positions without a price are still positions
+        quotes = undefined;
+      }
+      return held.map(({ p, symbol, q }): Position => {
+        const quote = quotes ? quoteIn(quotes, symbol) : undefined;
+        const mark = quote ? lastOf(quote) : undefined;
+        const entry = num(p.average_buy_price);
+        // a short's quantity is negative: what it is worth, and what it has made, carry the sign
+        return {
+          symbol,
+          name: symbol,
+          kind: "stock",
+          side: q < 0 ? "short" : "long",
+          qty: Math.abs(q),
+          ...(entry > 0 ? { entryPrice: entry } : {}),
+          ...(mark !== undefined ? { markPrice: mark, usd: q * mark } : {}),
+          ...(mark !== undefined && entry > 0 ? { unrealizedUsd: q * (mark - entry) } : {}),
+          native: { ...p, ...(typeof p.account_number === "string" ? { account_number: tail4(p.account_number) } : {}) },
+        };
+      });
+    });
   const trader: LiveTrader = {
     // get_accounts marks the one account this agent may trade in agentic_allowed: none marked is no; accounts that do not say are unknown
     get can() {
@@ -956,6 +1123,7 @@ export async function robinhoodStocksSource(req: { venue: string; label: string;
     place,
     cancel: (ref) => cancel(ref),
     status: (ref) => status(ref),
+    positions,
   };
   try {
     const first = await read();

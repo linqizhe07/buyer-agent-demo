@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { achArrival, et, etDate, fromEt, isBankDay, isMarketDay, marketSession, navArrival, sameDayAchArrival, settlementArrival, whenLabel } from "../../src/portfolio/account/calendar.ts";
+import { achArrival, et, etDate, fromEt, isBankDay, isMarketDay, marketSession, navArrival, nextRegularSession, regularSession, sameDayAchArrival, settlementArrival, whenLabel } from "../../src/portfolio/account/calendar.ts";
 
 const at = (iso: string) => Date.parse(iso);
 const iso = (ms: number) => new Date(ms).toISOString();
@@ -112,6 +112,60 @@ describe("the stock market's sessions", () => {
 
   it("trades on a bank holiday that is not its own", () => {
     expect(marketSession(at("2026-10-12T15:00:00Z"))).toBe("regular");
+  });
+});
+
+describe("the regular session a market carries (Market.session), from this calendar", () => {
+  it("in session on a weekday: open, and it closes at 16:00 New York that day", () => {
+    // Tuesday 6 October 2026, 11:00 EDT
+    expect(regularSession(at("2026-10-06T15:00:00Z"))).toEqual({ open: true, closesAt: "2026-10-06T20:00:00.000Z" });
+    expect(nextRegularSession(at("2026-10-06T15:00:00Z"))).toEqual({ open: true, opensAt: at("2026-10-06T13:30:00Z"), closesAt: at("2026-10-06T20:00:00Z") });
+  });
+
+  it("before the open and after the close: closed, and when it next opens — the same morning, or the next market day's", () => {
+    // 09:29:59 and 09:30 sharp; 15:59:59 and 16:00 sharp, EDT
+    expect(regularSession(at("2026-10-06T13:29:59Z"))).toEqual({ open: false, opensAt: "2026-10-06T13:30:00.000Z" });
+    expect(regularSession(at("2026-10-06T13:30:00Z"))).toEqual({ open: true, closesAt: "2026-10-06T20:00:00.000Z" });
+    expect(regularSession(at("2026-10-06T19:59:59Z"))).toEqual({ open: true, closesAt: "2026-10-06T20:00:00.000Z" });
+    expect(regularSession(at("2026-10-06T20:00:00Z"))).toEqual({ open: false, opensAt: "2026-10-07T13:30:00.000Z" });
+    // pre-market and after-hours trade at some venues, but they are not the regular session
+    expect(marketSession(at("2026-10-06T21:00:00Z"))).toBe("after-hours");
+    expect(regularSession(at("2026-10-06T21:00:00Z"))).toEqual({ open: false, opensAt: "2026-10-07T13:30:00.000Z" });
+    // the next session in full: its open, and its close
+    expect(nextRegularSession(at("2026-10-06T21:00:00Z"))).toEqual({ open: false, opensAt: at("2026-10-07T13:30:00Z"), closesAt: at("2026-10-07T20:00:00Z") });
+  });
+
+  it("over a weekend: Monday's open — Columbus Day too, which the market trades", () => {
+    // Saturday 10 October, noon EDT; Friday 9 October at the close
+    expect(regularSession(at("2026-10-10T16:00:00Z"))).toEqual({ open: false, opensAt: "2026-10-12T13:30:00.000Z" });
+    expect(regularSession(at("2026-10-09T20:00:00Z"))).toEqual({ open: false, opensAt: "2026-10-12T13:30:00.000Z" });
+  });
+
+  it("on the market's holidays: closed, and the next market day's open", () => {
+    // Thanksgiving, Thursday 26 November 2026, 11:00 EST: Friday's open (the market's early close that Friday is not known here)
+    expect(regularSession(at("2026-11-26T16:00:00Z"))).toEqual({ open: false, opensAt: "2026-11-27T14:30:00.000Z" });
+    expect(regularSession(at("2026-11-25T21:30:00Z"))).toEqual({ open: false, opensAt: "2026-11-27T14:30:00.000Z" });
+    // Independence Day on a Saturday closes the market on Friday 3 July: after Thursday's close, Monday 6 July
+    expect(regularSession(at("2026-07-02T20:30:00Z"))).toEqual({ open: false, opensAt: "2026-07-06T13:30:00.000Z" });
+    // Christmas on a Friday: Thursday's close to Monday's open
+    expect(regularSession(at("2026-12-24T21:00:00Z"))).toEqual({ open: false, opensAt: "2026-12-28T14:30:00.000Z" });
+  });
+
+  it("across the November clock change: Friday's close in EDT, Monday's open in EST", () => {
+    // Friday 30 October 2026, 16:30 EDT; the clocks go back on Sunday 1 November; 09:30 EST is 14:30 UTC
+    expect(regularSession(at("2026-10-30T20:30:00Z"))).toEqual({ open: false, opensAt: "2026-11-02T14:30:00.000Z" });
+    expect(regularSession(at("2026-11-02T14:29:00Z"))).toEqual({ open: false, opensAt: "2026-11-02T14:30:00.000Z" });
+    expect(regularSession(at("2026-11-02T15:00:00Z"))).toEqual({ open: true, closesAt: "2026-11-02T21:00:00.000Z" });
+  });
+
+  it("agrees with marketSession at every quarter hour of a fortnight across the clock change", () => {
+    for (let t = at("2026-10-24T00:00:00Z"); t < at("2026-11-07T00:00:00Z"); t += 15 * 60_000) {
+      const s = regularSession(t);
+      expect([iso(t), s.open]).toEqual([iso(t), marketSession(t) === "regular"]);
+      expect(nextRegularSession(t).open).toBe(s.open);
+      // what it says is always ahead: the close while open, the open while not
+      expect(Date.parse((s.open ? s.closesAt : s.opensAt)!)).toBeGreaterThan(t);
+    }
   });
 });
 

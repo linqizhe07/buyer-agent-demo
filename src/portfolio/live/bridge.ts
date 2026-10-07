@@ -28,13 +28,17 @@
  *     its least is LI.FI's, held under what is burned less the call's fee cap;
  *   · the coin it carries is exactly the fees LI.FI says are paid on top (Stargate's LayerZero fee), and nothing else.
  *
+ * Robinhood Chain (4663) is bridged to and from in USDG, Paxos's dollar there (dex.ts USDG_ROBINHOOD), through Across — the one bridge
+ * here LI.FI routes to it — and through LI.FI's own contract on THAT chain, which is not the one on the others (dex.ts diamondOn): every
+ * check above names the contract of the chain the money leaves. Where no bridge carries a transfer, LI.FI's own reason is the refusal.
+ *
  * LI.FI answers 75 quotes in two hours to a machine without a key, shared with the swaps (dex.ts): one set of routes costs two.
  */
 import { decodeEventLog, decodeFunctionData, encodeFunctionData, erc20Abi, formatUnits, getAddress, isAddress, pad, parseAbi, parseUnits, toEventSelector, type Hex } from "viem";
 import { isRefusal, type Refusal } from "../../core/errors.ts";
 import { no } from "../refuse.ts";
 import { CHAIN_BY_ID, CHAINS, STABLECOINS, type ChainName, type ChainReader } from "./chain.ts";
-import { LIFI_DIAMOND } from "./dex.ts";
+import { diamondOn, USDG_ROBINHOOD } from "./dex.ts";
 import { REGION, isStable, num, redact, unreachable, venueSaidNo, type Http, type HttpReply } from "./types.ts";
 import { tokenOn, type WalletTx } from "./writes.ts";
 
@@ -57,8 +61,17 @@ const NON_EVM: Hex = "0x11f111f111f111F111f111f111F111f111f111F1";
 const HASH = /^0x[0-9a-fA-F]{64}$/;
 const ALLOWANCE = "function allowance(address owner, address spender) view returns (uint256)";
 
-/** the chains that carry a dollar stablecoin this account knows (Robinhood Chain is read, not paid on) */
-export const BRIDGE_CHAINS: ChainName[] = [...new Set(STABLECOINS.map((s) => s.chain))];
+/** the dollars a bridge carries: the stablecoins the account pays in (chain.ts) and USDG on Robinhood Chain, where Robinhood's Stock Tokens
+ * are bought (dex.ts). USDG is not in chain.ts's list because the wallet reads it beside that list already (address.ts): listed twice, it
+ * would be read twice */
+const BRIDGED = [...STABLECOINS, USDG_ROBINHOOD];
+/** the chains that carry a dollar this account bridges */
+export const BRIDGE_CHAINS: ChainName[] = [...new Set(BRIDGED.map((s) => s.chain))];
+/** a dollar stablecoin on a chain, as a bridge carries it: chain.ts's (writes.ts tokenOn), or USDG on Robinhood Chain */
+function dollarOn(asset: string, chain: ChainName): { asset: string; address: Hex } | undefined {
+  if (chain === USDG_ROBINHOOD.chain) return asset.toUpperCase() === USDG_ROBINHOOD.asset ? { asset: USDG_ROBINHOOD.asset, address: USDG_ROBINHOOD.address } : undefined;
+  return tokenOn(asset, chain);
+}
 /** where the USDC in chain.ts is Circle's own, so Circle's CCTP burns and mints it (BNB Chain's is Binance-pegged) */
 const CCTP_CHAINS: ChainName[] = ["Ethereum", "Optimism", "Polygon", "Base", "Arbitrum"];
 /** LayerZero V2 endpoint ids, which Stargate's `dstEid` names (Base's 30184 seen in a live quote; the rest are LayerZero's published ids) */
@@ -321,8 +334,8 @@ function verify(q: Obj, w: Want): Checked | string {
   const fromId = chainId(w.fromChain);
   const toId = chainId(w.toChain);
   if (num(tx.chainId) !== fromId || num(action.fromChainId) !== fromId || num(action.toChainId) !== toId) return `it is not a transfer from ${w.fromChain} to ${w.toChain}`;
-  if (!same(tx.to, LIFI_DIAMOND)) return "it is not addressed to LI.FI's own contract";
-  if (!same(est.approvalAddress, LIFI_DIAMOND)) return "it asks the wallet to approve a spender that is not LI.FI's own contract";
+  if (!same(tx.to, diamondOn(w.fromChain))) return `it is not addressed to LI.FI's own contract on ${w.fromChain}`;
+  if (!same(est.approvalAddress, diamondOn(w.fromChain))) return `it asks the wallet to approve a spender that is not LI.FI's own contract on ${w.fromChain}`;
   if (!same(action.fromAddress, w.from)) return "it is not from this wallet";
   if (!same(action.toAddress, w.to)) return `it pays ${str(action.toAddress) || "no address"}, not ${w.to}`;
   for (const s of arr(q.includedSteps)) {
@@ -453,10 +466,11 @@ export async function bridgeRoutes(req: BridgeRouteRequest): Promise<BridgeRoute
   const to = evm(req.to);
   if (!from) return bad("the sending wallet is not an EVM address");
   if (!to || to === ZERO || same(to, NON_EVM)) return bad("the destination is not an address money can be sent to");
-  const send = isStable(req.asset) ? tokenOn(req.asset, req.fromChain) : undefined;
-  const arrive = isStable(req.toAsset) ? tokenOn(req.toAsset, req.toChain) : undefined;
-  if (!send) return no("E_ACCOUNT_UNPRICED", { venue, message: `${req.asset} is not a dollar stablecoin this account knows on ${req.fromChain}: real money is bridged in dollar stablecoins only, so that every limit means dollars` });
-  if (!arrive) return no("E_ACCOUNT_UNPRICED", { venue, message: `${req.toAsset} is not a dollar stablecoin this account knows on ${req.toChain}: real money is bridged in dollar stablecoins only, so that every limit means dollars` });
+  const send = isStable(req.asset) ? dollarOn(req.asset, req.fromChain) : undefined;
+  const arrive = isStable(req.toAsset) ? dollarOn(req.toAsset, req.toChain) : undefined;
+  const usdgOnly = (c: ChainName) => (c === USDG_ROBINHOOD.chain ? ` (on ${c} the dollar bridged is ${USDG_ROBINHOOD.asset})` : "");
+  if (!send) return no("E_ACCOUNT_UNPRICED", { venue, message: `${req.asset} is not a dollar stablecoin this account knows on ${req.fromChain}${usdgOnly(req.fromChain)}: real money is bridged in dollar stablecoins only, so that every limit means dollars` });
+  if (!arrive) return no("E_ACCOUNT_UNPRICED", { venue, message: `${req.toAsset} is not a dollar stablecoin this account knows on ${req.toChain}${usdgOnly(req.toChain)}: real money is bridged in dollar stablecoins only, so that every limit means dollars` });
   if (!(Number.isFinite(req.amount) && req.amount > 0) || Math.abs(Number(req.amount.toFixed(6)) - req.amount) > 1e-9) return bad("the amount is dollars, more than zero, with at most six places");
   const integrator = req.integrator ?? INTEGRATOR;
   if (!/^[A-Za-z0-9._-]{1,64}$/.test(integrator)) return bad("an integrator name is letters, digits, dot, dash or underscore");
@@ -544,10 +558,11 @@ export async function bridgeRoutes(req: BridgeRouteRequest): Promise<BridgeRoute
   }
 
   // the wallet's allowance to LI.FI's contract: an approval of exactly the amount goes first when it is short (unread: approve anyway)
-  const allowance = chain ? await chain.uint(req.fromChain, send.address, ALLOWANCE, [from, LIFI_DIAMOND]) : undefined;
+  const diamond = diamondOn(req.fromChain);
+  const allowance = chain ? await chain.uint(req.fromChain, send.address, ALLOWANCE, [from, diamond]) : undefined;
   const id = chainId(req.fromChain);
   const chainIdHex = hexOf(BigInt(id));
-  const approve = (n: bigint): WalletTx => ({ chainId: id, chainIdHex, from, to: send.address, data: encodeFunctionData({ abi: erc20Abi, functionName: "approve", args: [LIFI_DIAMOND, n] }), value: "0x0" });
+  const approve = (n: bigint): WalletTx => ({ chainId: id, chainIdHex, from, to: send.address, data: encodeFunctionData({ abi: erc20Abi, functionName: "approve", args: [diamond, n] }), value: "0x0" });
 
   const routes = payable.map((k): BridgeRoute => {
     const { quote, c } = k;
@@ -557,7 +572,7 @@ export async function bridgeRoutes(req: BridgeRouteRequest): Promise<BridgeRoute
     const gasLimit = big(tx.gasLimit) ?? big(arr(est.gasCosts)[0]?.limit);
     const reset = est.approvalReset === true;
     const approval: BridgeApproval | undefined =
-      allowance !== undefined && allowance >= fromAmount ? undefined : { token: send.address, spender: LIFI_DIAMOND, amount: fromAmount.toString(), txs: [...(reset && (allowance === undefined || allowance > 0n) ? [approve(0n)] : []), approve(fromAmount)] };
+      allowance !== undefined && allowance >= fromAmount ? undefined : { token: send.address, spender: diamond, amount: fromAmount.toString(), txs: [...(reset && (allowance === undefined || allowance > 0n) ? [approve(0n)] : []), approve(fromAmount)] };
     return {
       id: str(quote.id) || c.transactionId,
       tool: bridge.name,
@@ -566,7 +581,7 @@ export async function bridgeRoutes(req: BridgeRouteRequest): Promise<BridgeRoute
       receiveUsd: k.receiveUsd,
       etaSec: num(est.executionDuration),
       ...(approval ? { approval } : {}),
-      tx: { chainId: id, chainIdHex, from, to: LIFI_DIAMOND, data: str(tx.data) as Hex, value: hexOf(c.value), ...(gasLimit !== undefined && gasLimit > 0n ? { gas: hexOf(gasLimit) } : {}) },
+      tx: { chainId: id, chainIdHex, from, to: diamond, data: str(tx.data) as Hex, value: hexOf(c.value), ...(gasLimit !== undefined && gasLimit > 0n ? { gas: hexOf(gasLimit) } : {}) },
       native: {
         route: str(quote.id),
         tool: c.key,
@@ -630,7 +645,7 @@ export async function bridgeStatus(req: { http: Http; hash: Hex; fromChain: Chai
     if (!req.chain) return { status: "pending", note: `${base}: normal for a minute or two after it is sent`, native: { lifi } };
     const rc = await req.chain.receipt(fromChain, hash).catch(() => undefined);
     if (!rc) return { status: "pending", note: `${base}, and ${fromChain} does not show it mined yet`, native: { lifi, chain: "not mined yet" } };
-    const ours = same(rc.to, LIFI_DIAMOND) && (req.from === undefined || same(rc.from, req.from));
+    const ours = same(rc.to, diamondOn(fromChain)) && (req.from === undefined || same(rc.from, req.from));
     if (rc.status === "reverted" && ours) return { status: "failed", note: `the transaction reverted on ${fromChain}: nothing left the wallet but the network fee`, native: { lifi, receipt: "reverted" } };
     return { status: "pending", note: `${base}; it is mined on ${fromChain}, and LI.FI usually indexes it within a minute or two`, native: { lifi, receipt: rc.status } };
   };
@@ -753,7 +768,7 @@ export async function confirmSent(req: { chain?: Partial<Pick<ChainReader, "tran
   if (!built) return no("E_ACCOUNT_BAD_ACTION", { venue, message: `the transaction built is not a LI.FI bridge call, so ${hash} cannot be judged by its receipt alone` });
   const bd = built.bridgeData;
   const logged = rc.logs.some((l) => {
-    if (!same(l.address, LIFI_DIAMOND) || !same(l.topics[0], TRANSFER_STARTED_TOPIC)) return false;
+    if (!same(l.address, diamondOn(c)) || !same(l.topics[0], TRANSFER_STARTED_TOPIC)) return false;
     try {
       const e = (decodeEventLog({ abi: STARTED, data: l.data, topics: l.topics as [Hex, ...Hex[]] }).args as unknown as { bridgeData: BridgeData }).bridgeData;
       // every field of LI.FI's record but `minAmount`, which the contract rewrites to what the legs left (at least the built one)

@@ -26,7 +26,9 @@ export type LedgerKind =
   | "payment"
   | "order"
   /** one line of the account's statement: a transaction as it stands now (account/statement.ts) */
-  | "statement";
+  | "statement"
+  /** what a spending or trading limit has used, after it changed: a restarted account reads the last one (account/restore.ts) */
+  | "spend";
 
 export interface LedgerRowInput {
   kind: LedgerKind;

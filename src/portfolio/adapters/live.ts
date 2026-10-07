@@ -1,9 +1,10 @@
-/** A LIVE venue on the account: a real source (live/), wrapped in the same adapter shape as every other venue — and watch-only.
+/** A LIVE venue on the account: a real source (live/), wrapped in the same adapter shape as every other venue.
  *
- * It reads. `execute` refuses, and there is no `credit`, `debit`, `convert` or `shift`: nothing the account does can reach the real venue,
- * and the doors compiled for it are all shut (account/doors.ts reads `watchOnly`). Reads are cached, because a real venue counts requests:
- * the page asks for the account every few seconds, the venue is asked at most once per `ttlMs`. When a refresh fails the last good numbers
- * stay, with the time they were read and what went wrong.
+ * It reads. Real orders, moves and earn go through the account's live doors (account/live-orders.ts, live-moves.ts, live-earn.ts), on the
+ * owner's signature or inside a limit the owner signed — never through the simulated door this adapter wraps: `execute` refuses, in the
+ * venue's words, and there is no `credit`, `debit`, `convert` or `shift`; the simulated doors compiled for it are shut (account/doors.ts
+ * reads `watchOnly`). Reads are cached, because a real venue counts requests: the page asks for the account every few seconds, the venue is
+ * asked at most once per `ttlMs`. When a refresh fails the last good numbers stay, with the time they were read and what went wrong.
  *
  * Prices: a dollar stablecoin counts one for one; anything else is worth what the source or the injected price says, and nothing when
  * neither does. The simulation's fixed price table is never applied to a real balance.
@@ -58,7 +59,9 @@ export async function liveAccount(id: string, source: LiveSource, opts: LiveAcco
     const note = [b.where, usd === undefined ? "no price" : undefined].filter(Boolean).join(" · ");
     return { account: id, asset: b.asset, amount: b.amount, usd: r2(usd ?? 0), class: b.class ?? (isStable(b.asset) ? (b.asset.toUpperCase() === "USD" ? "cash" : "stable") : "crypto"), ...(note ? { note } : {}) };
   };
-  const shape = async (rows: LiveBalance[]): Promise<Holding[]> => (await Promise.all(rows.filter((b) => b.amount > 0).map(toHolding))).sort((a, b) => b.usd - a.usd);
+  // what is held, and a short as the venue carries it (a negative amount, worth what buying it back costs): the venue's total is net of it,
+  // as the venue's own equity is; the holdings by asset (account/holdings.ts) list only what is held
+  const shape = async (rows: LiveBalance[]): Promise<Holding[]> => (await Promise.all(rows.filter((b) => b.amount > 0 || (b.amount < 0 && b.usd !== undefined && b.usd < 0)).map(toHolding))).sort((a, b) => b.usd - a.usd);
 
   let cached: Holding[] = [];
   let readAt = 0;
@@ -92,7 +95,17 @@ export async function liveAccount(id: string, source: LiveSource, opts: LiveAcco
       return pending;
     },
     async execute(i: Intent) {
-      return no("E_VENUE_RAIL_CLOSED", { venue: id, message: `${source.name} is connected read-only: the account reads it and sends it nothing`, detail: { want: i.kind } });
+      // the simulated door: what a live venue does is done through its live doors, so the answer is where that is — or, where the venue
+      // has no interface for it, the venue's own reason, and failing that which connection gives none
+      const trading = i.kind === "trade";
+      const why = trading
+        ? source.trader
+          ? "orders here are placed through the account's live door (a signed liveOrder), not this one"
+          : (source.noTradeBecause ?? `${source.via} gives no interface for orders here`)
+        : source.writer
+          ? "money here moves through the account's live door (a signed liveMove), not this one"
+          : (source.readOnlyBecause ?? `${source.via} gives no interface for moving money here`);
+      return no("E_VENUE_RAIL_CLOSED", { venue: id, message: `${source.name}: ${why}`, detail: { want: i.kind } });
     },
   };
 }

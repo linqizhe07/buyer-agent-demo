@@ -136,6 +136,9 @@ export interface CompareRow {
   minUsd?: number;
   /** the venue's own note on the market (its fees, its slippage, why it is closed), passed on as it is */
   note?: string;
+  /** the venue's own category for the market, where it says one (RWA for a token an issuer stands behind, dex.ts): the ticket tells a
+   * tokenised share from a coin by it */
+  category?: string;
   /** how much worse than the best, in percent (negative: it looks better, but no order could go there now, or it is a last price) */
   worse?: number;
   best?: true;
@@ -323,6 +326,7 @@ function rowOf(v: CompareVenue, m: Market, side: Side, canTrade: boolean | "unkn
     sized = { qty, fits, ...(minUsd > 0 ? { minUsd: round4(minUsd) } : {}) };
   }
   const note = typeof m.note === "string" && m.note ? m.note : listed.note;
+  const category = typeof m.category === "string" && m.category ? m.category : listed.category;
   // the fresh answer's name for the market is what an order there names; the listed one if it gave none
   const symbol = typeof m.symbol === "string" && m.symbol ? m.symbol : listed.symbol;
   return {
@@ -343,6 +347,7 @@ function rowOf(v: CompareVenue, m: Market, side: Side, canTrade: boolean | "unkn
     ready: open && canTrade !== false && sized?.fits !== false,
     ...(sized ? { qty: sized.qty, fits: sized.fits, ...(sized.minUsd !== undefined ? { minUsd: sized.minUsd } : {}) } : {}),
     ...(note ? { note } : {}),
+    ...(category ? { category } : {}),
   };
 }
 

@@ -20,7 +20,7 @@ import { no } from "../refuse.ts";
 import type { LiveOption, LiveOptions } from "../account/exchange.ts";
 import { hyperliquidSource, ondoSource, polymarketSource, walletSource, type AddressRequest } from "./address.ts";
 import { ALPACA_KEY, alpacaSource } from "./alpaca.ts";
-import type { ChainReader } from "./chain.ts";
+import type { ChainReader, ChainSender } from "./chain.ts";
 import { defaultKeyRef, loadKeyFile, type KeyShape } from "./credentials.ts";
 import { EXCHANGE_KEY, exchangeSource, type OpenExchange } from "./exchange.ts";
 import { KALSHI_KEY, kalshiSource } from "./kalshi.ts";
@@ -51,6 +51,8 @@ export interface LiveDeps {
   signIn?: ((kind: string) => OAuthSignIn | undefined) | undefined;
   /** an MCP client to a venue's own server; a stand-in in tests */
   openMcp?: OpenMcp | undefined;
+  /** what sends a transfer from an agent wallet the account holds the key of (chain.ts publicSender); a stand-in in tests */
+  sender?: ChainSender | undefined;
 }
 
 export interface LiveRequest {
@@ -111,7 +113,7 @@ const alpaca: Connector = {
   async open(req, deps) {
     const key = loadKeyFile(deps.home, req.reference, ALPACA_KEY, req.venue);
     if (isRefusal(key)) return key;
-    const opened = await alpacaSource({ venue: req.venue, label: req.label, reference: req.reference || defaultKeyRef(req.venue), key, http: deps.http });
+    const opened = await alpacaSource({ venue: req.venue, label: req.label, reference: req.reference || defaultKeyRef(req.venue), key, http: deps.http, clock: deps.clock });
     return isRefusal(opened) ? opened : { ...opened, summary: said(opened.source) };
   },
 };
@@ -197,7 +199,8 @@ const metamask: Connector = {
   example: "Reads through MetaMask's own mm command line, signed in on this machine: nothing to paste. Check that mm wallet show works in a terminal first.",
   venues: ["metamask"],
   async open(req, deps) {
-    const opened = await metamaskSource({ venue: req.venue, label: req.label, run: deps.mm });
+    // the price values an earn vault whose asset is not a dollar stablecoin (without one, only stablecoin vaults are valued)
+    const opened = await metamaskSource({ venue: req.venue, label: req.label, run: deps.mm, price: deps.price });
     return isRefusal(opened) ? opened : { ...opened, summary: opened.source.probe.note };
   },
 };

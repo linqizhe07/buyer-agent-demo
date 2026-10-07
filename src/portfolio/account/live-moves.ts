@@ -6,8 +6,8 @@
  *
  *   1. the server was started with real-money writes on (`--live-writes`); otherwise nothing here moves anything;
  *   2. the OWNER signed it: the exact destination address, the most the venue may charge, and the moment after which it is void. An agent
- *      asks: in Conservative mode (the dial at Guard, a real account's default) its request is a card, every time; in Aggressive mode (the
- *      dial at Open, which only the owner's signature sets) a request inside its spending approval runs without one;
+ *      asks: in Guard (the dial at `guard`, a real account's default) its request is a card, every time; in Beast (the dial at `open`,
+ *      which only the owner's signature sets) a request inside its spending approval runs without one;
  *   3. it is no more than the most one movement may be on this server (`--live-cap`, $100 unless the server was started otherwise);
  *   4. money leaves for the user's own places only: an exchange's own deposit address (asked of that exchange when the owner signs, and
  *      asked again when it runs), or a wallet that signed the account's sentence to show it is the user's. Never an address someone typed;
@@ -29,6 +29,7 @@ import { randomBytes } from "node:crypto";
 import type { CardLike, Outcome } from "./exchange.ts";
 import { paymentLine } from "./statement.ts";
 import type { Payment, PaymentKind } from "./payments.ts";
+import { CARD_TTL_MS } from "./mode-rules.ts";
 import { micro, type AgentAction, type Envelope, type OwnerAction } from "./sign.ts";
 import { covers, spendFor, type AgentKey, type SpendApproval } from "./state.ts";
 import { isExpired, type Openness } from "../openness.ts";
@@ -72,7 +73,7 @@ export interface LiveEngine {
     raiseCard: (flight: string, card: Parameters<import("./exchange.ts").Host["raiseCard"]>[1]) => CardLike;
     openFlight(agent: { id: string; name: string; code: string }, request: string): { no: string };
     say(flight: string, text: string, mark?: "ok" | "no" | "wait" | "note"): void;
-    /** the dial: `guard` is Conservative, `open` is Aggressive; and the agents' session, the venues switched off, what is opened where */
+    /** the dial: `guard` is Guard, `open` is Beast; and the agents' session, the venues switched off, what is opened where */
     policy(): Openness;
   };
   /** does a spending approval's own owner signature still check out against the owners now */
@@ -83,7 +84,8 @@ export interface LiveEngine {
 }
 
 const KINDS = ["withdraw", "send", "transfer", "swap", "bridge"] as const;
-/** real money moves in dollar stablecoins, so on the chains that carry one (Robinhood Chain is read, not paid on) */
+/** real money moves in dollar stablecoins, so on the chains that carry one. A bridge goes by its own chains (bridge.ts BRIDGE_CHAINS), which
+ * add Robinhood Chain in USDG: money crosses into it and out of it, but is not sent or withdrawn on it */
 const NETWORKS = [...new Set(STABLECOINS.map((s) => s.chain))] as ChainName[];
 const TTL_MS = 10 * 60_000;
 const POLL_MS = 20_000;
@@ -114,11 +116,23 @@ export class LiveMoves {
   private readonly runId = randomBytes(6).toString("hex");
   constructor(private readonly e: LiveEngine) {}
 
-  /** the payment's line on the statement, as it stands now */
+  /** the payment's line on the statement, as it stands now — and the payment itself, so that a restarted account follows it again. A payment
+   * keeps the run that made it: its line is the same line whichever run writes it */
   private line(p: Payment): void {
     const names = (id: string) => this.money()?.venue(id)?.name ?? id;
-    const l = paymentLine(p, this.runId, names, (address) => this.e.state.agents.find((k) => k.address === address)?.name ?? address);
-    this.e.host.log({ kind: "statement", venue: p.from, reason: `${l.id} · ${l.description} · ${l.status}`, detail: l });
+    const run = p.run ?? this.runId;
+    const l = paymentLine(p, run, names, (address) => this.e.state.agents.find((k) => k.address === address)?.name ?? address);
+    this.e.host.log({ kind: "statement", venue: p.from, reason: `${l.id} · ${l.description} · ${l.status}`, detail: l, native: { payment: p, run } });
+  }
+
+  /** A movement an earlier run started and did not see land (account/restore.ts): followed again. Nothing is sent: the venue or the chain is
+   * only asked whether it has landed. One handed to a wallet keeps the ten minutes it was given, and no more */
+  adopt(p: Payment & { run: string }): void {
+    if (this.e.payments.some((x) => x.id === p.id && (x.run ?? this.runId) === p.run)) return;
+    const back: Payment = { ...p };
+    this.e.payments.push(back);
+    this.polled.delete(p.id);
+    this.line(back);
   }
 
   private money(): LiveMoney | undefined {
@@ -154,12 +168,13 @@ export class LiveMoves {
       }
       return { f, kind, src: from, dst: src, amount, fee: 0 };
     }
-    // money that leaves the venue: to the user's own place, on a network both ends know
+    // money that leaves the venue: to the user's own place, on a network both ends know (a bridge: one of the bridge's own chains)
+    if (kind === "bridge") return this.planBridge(f, from, f.network as ChainName, amount);
     if (!(NETWORKS as string[]).includes(f.network)) return no("E_ACCOUNT_BAD_ACTION", { message: `a network is one of ${NETWORKS.join(", ")}` });
     const network = f.network as ChainName;
-    if (kind === "bridge") return this.planBridge(f, from, network, amount);
-    if (kind === "withdraw" && (!from.writer.withdraw || from.writer.can.withdraw === false)) return no("E_VENUE_RAIL_CLOSED", { venue: src.id, message: `${src.name}: this key may not withdraw. That is set on the key at the exchange` });
-    if (kind === "send" && !from.writer.can.send) return no("E_VENUE_RAIL_CLOSED", { venue: src.id, message: `${src.name}: money leaves it at the venue, not from here` });
+    // the venue's own reason when it gave one (Polymarket: money leaves by a transfer made at Polymarket; Alpaca: its withdrawal call is sunset)
+    if (kind === "withdraw" && (!from.writer.withdraw || from.writer.can.withdraw === false)) return no("E_VENUE_RAIL_CLOSED", { venue: src.id, message: `${src.name}: ${from.writer.can.why?.withdraw ?? "this key may not withdraw. That is set on the key at the exchange"}` });
+    if (kind === "send" && !from.writer.can.send) return no("E_VENUE_RAIL_CLOSED", { venue: src.id, message: `${src.name}: ${from.writer.can.why?.send ?? "money leaves it at the venue, not from here"}` });
     // a pasted address is only watched: the account sends nothing from it, as it sends nothing to it
     if (kind === "send" && from.address !== undefined && !from.proven) return no("E_VENUE_RAIL_CLOSED", { venue: src.id, message: `${src.name} is watched, not proven yours: nothing is sent from it here. Connect it again from the wallet itself` });
     if (f.from === f.to) return no("E_ACCOUNT_BAD_ACTION", { message: "the money leaves for another venue" });
@@ -183,6 +198,7 @@ export class LiveMoves {
     const bridge = from.writer.bridge;
     if (!bridge || from.writer.can.send !== "wallet") return no("E_VENUE_RAIL_CLOSED", { venue: from.id, message: `${from.name}: money crosses chains here only from a wallet of yours, which sends it itself` });
     if (from.address === undefined || !from.proven) return no("E_VENUE_RAIL_CLOSED", { venue: from.id, message: `${from.name} is watched, not proven yours: nothing is sent from it here. Connect it again from the wallet itself` });
+    if (!(bridge.chains as string[]).includes(network)) return no("E_ACCOUNT_BAD_ACTION", { message: `a bridge leaves one of ${bridge.chains.join(", ")}` });
     if (!(bridge.chains as string[]).includes(f.toLedger) || f.toLedger === network) return no("E_ACCOUNT_BAD_ACTION", { message: `a bridge lands on another chain: one of ${bridge.chains.filter((c) => c !== network).join(", ")}` });
     const toNetwork = f.toLedger as ChainName;
     let dst: LiveVenue = from;
@@ -250,7 +266,7 @@ export class LiveMoves {
     return null;
   }
 
-  /** An agent asks. Conservative: the owner sees the exact address and fee on a card, and signs that. Aggressive: inside its spending
+  /** An agent asks. Guard: the owner sees the exact address and fee on a card, and signs that. Beast: inside its spending
    * approval it runs at once — still only to the user's own places, under the server's cap and the venue's own checks */
   /** the agent's spending approval as it stands now: its owner signature still good, the dial open at both ends, both ends named, the
    * amount inside its lines. Asked when the agent asks, and again when the owner answers its card */
@@ -285,15 +301,15 @@ export class LiveMoves {
       const out = await this.run(p, { signer: who.signer, authority: "agent", agent: who.agent.address, action: who.hash });
       if (isRefusal(out)) return out;
       this.e.patchSpend(spend.id, (x) => ({ ...x, spentMicro: x.spentMicro + amountMicro }));
-      this.e.host.log({ kind: "action", venue: a.from, tool: a.type, signer: who.signer, envelope: who.envelope, outcome: "accepted", notionalUsd: p.amount, reason: `aggressive mode: ${this.words(p)}, inside the approval`, flight: flight.no });
-      this.e.host.say(flight.no, `${who.agent.name} ${this.words(p)}: inside its limit, so it went without a card (Aggressive)`, "ok");
+      this.e.host.log({ kind: "action", venue: a.from, tool: a.type, signer: who.signer, envelope: who.envelope, outcome: "accepted", notionalUsd: p.amount, reason: `Beast: ${this.words(p)}, inside the approval`, flight: flight.no });
+      this.e.host.say(flight.no, `${who.agent.name} ${this.words(p)}: inside its limit, so it went without a card (Beast)`, "ok");
       return out.kind === "payment" || out.kind === "result" ? { ...out, flight: flight.no } : out;
     }
     // the fee on the card is the most the owner's yes lets it cost, rounded up to the cent
     const offer = { payee: p.dst.name, payTo: p.toAddress ?? `${p.f.fromLedger} → ${p.f.toLedger}`, amount: `${a.amount} ${a.asset}${a.kind === "swap" ? ` → ${a.toAsset}` : ""}`, protocol: `real money · ${this.protocol(p)}`, network: p.toNetwork ? `${p.network} → ${p.toNetwork}` : (p.network ?? p.src.name), fee: `${(Math.ceil(p.fee * 100 - 1e-6) / 100).toFixed(2)} ${a.asset}` };
     // the owner's answer signs the card's hash: here that hash covers the agent's request AND the address and fee the owner is shown
     const actionHash = keccak256(stringToHex(canonical({ action: who.hash, offer })));
-    const card = this.e.host.raiseCard(flight.no, { account: a.from, intent: { kind: "move", asset: a.asset, amount: p.amount, to: p.toAddress ?? a.to }, usd: p.amount, reason: `${who.agent.name} asks to ${this.words(p)}`, why: "live", action: a, actionHash, signer: who.signer, expiresAt: new Date(now + 30 * 60_000).toISOString(), offer: { payee: offer.payee, payTo: offer.payTo, amount: offer.amount, protocol: offer.protocol, network: offer.network, fee: offer.fee }, approval: spend.id });
+    const card = this.e.host.raiseCard(flight.no, { account: a.from, intent: { kind: "move", asset: a.asset, amount: p.amount, to: p.toAddress ?? a.to }, usd: p.amount, reason: `${who.agent.name} asks to ${this.words(p)}`, why: "live", action: a, actionHash, signer: who.signer, expiresAt: new Date(now + CARD_TTL_MS).toISOString(), offer: { payee: offer.payee, payTo: offer.payTo, amount: offer.amount, protocol: offer.protocol, network: offer.network, fee: offer.fee }, approval: spend.id });
     this.e.patchSpend(spend.id, (x) => ({ ...x, reservedMicro: x.reservedMicro + amountMicro }));
     this.e.host.log({ kind: "action", venue: a.from, tool: a.type, signer: who.signer, envelope: who.envelope, outcome: "card", notionalUsd: p.amount, reason: `${card.id} · ${this.words(p)}`, flight: flight.no, intentId: card.id });
     return { ok: true, kind: "card", pending: true, card, flight: flight.no };
@@ -320,7 +336,7 @@ export class LiveMoves {
   }
 
   private protocol(p: Plan): string {
-    return p.kind === "bridge" ? `${p.route?.tool ?? "a bridge"}, routed by LI.FI, sent by your wallet` : p.kind === "withdraw" ? `${p.src.via} withdrawal` : p.kind === "transfer" ? `${p.src.via} transfer` : p.kind === "swap" ? `${p.src.via} market order` : p.src.writer.can.send === "mm" ? "mm transfer" : "a transaction your wallet sends";
+    return p.kind === "bridge" ? `${p.route?.tool ?? "a bridge"}, routed by LI.FI, sent by your wallet` : p.kind === "withdraw" ? `${p.src.via} withdrawal` : p.kind === "transfer" ? `${p.src.via} transfer` : p.kind === "swap" ? `${p.src.via} market order` : p.src.writer.can.send === "mm" ? "mm transfer" : p.src.writer.can.send === "account" ? "a transfer the account signs with the agent wallet's key" : "a transaction your wallet sends";
   }
 
   private words(p: Plan): string {
@@ -337,10 +353,11 @@ export class LiveMoves {
     // a bridge: the approval (when one is needed) and the transfer, for the wallet to send in that order
     const bridgeTxs = p.kind === "bridge" && p.route ? [...(p.route.approval?.txs ?? []), { ...p.route.tx, what: "bridge" } satisfies WalletTx] : undefined;
     if (bridgeTxs) r = bridgeTxs[bridgeTxs.length - 1]!;
-    else if (p.kind === "withdraw") r = await p.src.writer.withdraw!({ asset: f.asset, amount: p.amount, address: p.toAddress!, tag: p.tag, network: p.network!, clientId: id });
+    // the exchange's idempotency key: the payment's id AND this run's, since a later run can hand the same payment id out again
+    else if (p.kind === "withdraw") r = await p.src.writer.withdraw!({ asset: f.asset, amount: p.amount, address: p.toAddress!, tag: p.tag, network: p.network!, clientId: `${id}-${this.runId}` });
     else if (p.kind === "transfer") r = await p.src.writer.transfer!({ asset: f.asset, amount: p.amount, from: f.fromLedger, to: f.toLedger });
     else if (p.kind === "swap") r = await p.src.writer.swap!({ sell: f.asset, buy: f.toAsset, amount: p.amount });
-    else if (p.src.writer.can.send === "mm") r = await p.src.writer.send!({ asset: f.asset, amount: p.amount, to: p.toAddress!, network: p.network! });
+    else if (p.src.writer.can.send === "mm" || p.src.writer.can.send === "account") r = await p.src.writer.send!({ asset: f.asset, amount: p.amount, to: p.toAddress!, network: p.network! });
     else r = await p.src.writer.walletTx!({ asset: f.asset, amount: p.amount, to: p.toAddress!, network: p.network! });
     if (isRefusal(r)) {
       this.e.host.log({ kind: "account-refusal", venue: p.src.id, tool: `live ${p.kind}`, code: r.code, reason: r.message, native: r.native, signer: who.signer });
@@ -370,7 +387,7 @@ export class LiveMoves {
       ...(who.agent ? { agent: who.agent } : {}),
       ...(who.action ? { action: who.action } : {}),
       ...(who.card ? { card: who.card } : {}),
-      live: { kind: p.kind, ...(p.toAddress ? { toAddress: p.toAddress } : {}), ...(p.network ? { network: p.network } : {}), ...(p.toNetwork ? { toNetwork: p.toNetwork } : {}), ...(p.route ? { tool: p.route.tool } : {}), ...(wallet ? { sendBy: new Date(Math.min(who.deadline ?? Infinity, this.money()!.realNow() + TTL_MS)).toISOString() } : {}) },
+      live: { kind: p.kind, ...(p.toAddress ? { toAddress: p.toAddress } : {}), ...(p.network ? { network: p.network } : {}), ...(p.src.writer.can.send === "account" && receipt ? { txHash: receipt.ref as Hex } : {}), ...(p.toNetwork ? { toNetwork: p.toNetwork } : {}), ...(p.route ? { tool: p.route.tool } : {}), ...(wallet ? { sendBy: new Date(Math.min(who.deadline ?? Infinity, this.money()!.realNow() + TTL_MS)).toISOString() } : {}) },
       note: wallet ? `waiting for your wallet to send it: ${p.src.name} asks you to confirm` : status === "settled" ? `done at ${p.src.name}` : `${p.src.name} took it; waiting for it to land`,
     };
     this.e.payments.unshift(payment);

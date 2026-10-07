@@ -150,7 +150,7 @@ describe("orders at venues connected live", () => {
     const p = await x.prepared({ symbol: "BTC/USDT", side: "buy", orderType: "market", usd: "30" });
     if (isRefusal(p)) throw new Error(p.message);
     // $30 at the ask of 60,010 is 0.000499… BTC, down to the step: 0.0004; worth $24.00, and up to 2% more for a market buy
-    expect([p.action, p.accountChain, p.quote?.order?.notionalUsd]).toEqual([{ type: "liveOrder", venue: "ex", symbol: "BTC/USDT", side: "buy", orderType: "market", qty: "0.0004", limitPrice: "", maxNotional: "24.49", deadline: 5_600_000, nonce: p.action.nonce }, "Live · real money", 24]);
+    expect([p.action, p.accountChain, p.quote?.order?.notionalUsd]).toEqual([{ type: "liveOrder", venue: "ex", symbol: "BTC/USDT", side: "buy", orderType: "market", qty: "0.0004", limitPrice: "", stopPrice: "", tif: "", postOnly: "", reduceOnly: "", maxNotional: "24.49", deadline: 5_600_000, nonce: p.action.nonce }, "Live · real money", 24]);
     const o = placed(await x.order({ symbol: "BTC/USDT", side: "buy", orderType: "market", usd: "30" }));
     // the venue gets the worst price it may fill at (2% over the ask, down to the price step) and a client id no other run sends
     expect(x.venue.placed).toEqual([{ symbol: "BTC/USDT", side: "buy", type: "market", qty: 0.0004, worstPrice: 61_210.2, clientId: o.clientId }]);
@@ -222,7 +222,7 @@ describe("orders at venues connected live", () => {
     expect(x.venue.placed).toHaveLength(0);
   });
 
-  it("Conservative: an agent's order is a card every time; the owner's yes places it, and it counts against the limit", async () => {
+  it("Guard: an agent's order is a card every time; the owner's yes places it, and it counts against the limit", async () => {
     const x = await boot();
     await x.letIn();
     const r = await x.ag(ask());
@@ -242,7 +242,7 @@ describe("orders at venues connected live", () => {
     expect([x.venue.placed.length, x.trade().reservedMicro]).toEqual([1, 0]);
   });
 
-  it("Aggressive: inside its limit an agent's order is placed at once, and nothing outside it is", async () => {
+  it("Beast: inside its limit an agent's order is placed at once, and nothing outside it is", async () => {
     const x = await boot();
     await x.letIn({ perOrder: "50", budget: "60" });
     await x.own({ type: "setPolicy", change: "mode", value: "open" });
@@ -250,12 +250,12 @@ describe("orders at venues connected live", () => {
     expect([o.status, o.authority, o.card, o.usd, x.trade().spentMicro]).toEqual(["open", "agent", undefined, 29, 29_000_000]);
     expect(code(await x.ag(ask({ orderType: "limit", usd: "", qty: "0.0006", limitPrice: "58000" })))).toBe("E_MANDATE_BUDGET");
     expect(x.venue.placed).toHaveLength(1);
-    // back to Conservative needs no signature, and from then on it is a card again
+    // back to Guard needs no signature, and from then on it is a card again
     x.svc.setMode("guard");
     expect(code(await x.ag(ask({ usd: "10" })))).toBe("card");
   });
 
-  it("cancelling: an agent its own orders, without a card even in Conservative; the owner any; what never filled goes back to the limit", async () => {
+  it("cancelling: an agent its own orders, without a card even in Guard; the owner any; what never filled goes back to the limit", async () => {
     const x = await boot();
     await x.letIn({ perOrder: "50", budget: "100" });
     await x.own({ type: "setPolicy", change: "mode", value: "open" });
@@ -296,7 +296,9 @@ describe("orders at venues connected live", () => {
   it("the page knows where orders can be placed and what is traded there", async () => {
     const x = await boot();
     const v = (await x.page()).venues.find((y) => y.id === "ex")!;
-    expect(v.trade).toEqual({ can: true, what: "spot" });
+    // and what else it does there: this stand-in lists no positions, changes no order in place, sets no leverage, closes nothing itself
+    // (its kinds of market are read from the connector: a stand-in's is one the account names none for)
+    expect(v.trade).toEqual({ can: true, what: "spot", kinds: [], positions: false, amend: false, leverage: false, close: false });
     expect(await x.svc.liveMarkets("ex", "btc")).toEqual([BTC]);
     expect(code((await x.svc.liveMarket("nowhere", "BTC/USDT")) as Refusal)).toBe("E_WALLET_ACCOUNT_UNKNOWN");
   });

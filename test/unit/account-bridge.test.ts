@@ -75,24 +75,28 @@ register({ kind: "standin-bridge-exchange", label: "an exchange that takes depos
   return { source: { name: req.label || "Exchange", kind: "cex", reference: "standin", via: "a stand-in", probe: { can: [], note: "" }, read: async () => [], writer }, first: [], summary: "connected" };
 } });
 
-async function boot(o: { proven?: boolean; home?: string; nonceFrom?: number; laterMs?: number } = {}) {
+async function boot(o: { proven?: boolean; home?: string; nonceFrom?: number; laterMs?: number; fresh?: boolean } = {}) {
   let real = 5_000_000;
   let n = o.nonceFrom ?? 0;
   const home = o.home ?? mkdtempSync(join(tmpdir(), "account-bridge-"));
   if (!o.home) homes.push(home);
   const liveDeps: Partial<LiveDeps> = { clock: () => real, http: async () => ({ status: 599, body: undefined, text: "" }), price: async () => undefined };
   // a later run starts later: its ledger is a file of its own
-  const svc = await PortfolioService.create({ home, now: () => new Date(START + (o.laterMs ?? 0)).toISOString(), venues: "frontline", real: true, liveDeps, liveWrites: { capUsd: 100, pairingCode: "K7QX-M2PA" }, account: { owners: [{ id: owner.address, kind: "eoa", label: "owner", addedAt: new Date(START).toISOString() }] } });
-  const own = async (a: NoNonce<OwnerAction>) => svc.exchange(await signOwner(owner, { ...a, nonce: START + ++n } as OwnerAction));
-  const w = privateKeyToAccount(generatePrivateKey());
-  const bridge = standInBridge(w.address);
+  // a later run of the same home continues the account (its venues connect again); `fresh` starts it from nothing
+  const continuing = o.home !== undefined && !o.fresh && pending !== undefined;
+  const w = continuing ? { address: pending!.address, signMessage: async () => "0x" as Hex } : privateKeyToAccount(generatePrivateKey());
+  const bridge = continuing ? pending!.bridge : standInBridge(w.address);
   pending = { address: w.address, bridge };
-  if (o.proven !== false) {
+  const svc = await PortfolioService.create({ home, now: () => new Date(START + (o.laterMs ?? 0)).toISOString(), venues: "frontline", real: true, liveDeps, liveWrites: { capUsd: 100, pairingCode: "K7QX-M2PA" }, fresh: o.fresh === true, account: { owners: [{ id: owner.address, kind: "eoa", label: "owner", addedAt: new Date(START).toISOString() }] } });
+  await svc.restoring;
+  const own = async (a: NoNonce<OwnerAction>) => svc.exchange(await signOwner(owner, { ...a, nonce: START + ++n } as OwnerAction));
+  if (o.proven !== false && !continuing) {
     const c = svc.proofs.challenge(w.address, "OKX Wallet", { domain: "127.0.0.1:4820", uri: "http://127.0.0.1:4820/account" });
     if (isRefusal(c)) throw new Error(c.message);
     await svc.proofs.prove(w.address, await w.signMessage({ message: c.message }));
   }
   for (const [venue, connector] of [["wallet", "live:standin-bridge-wallet"], ["ex", "live:standin-bridge-exchange"]] as const) {
+    if (svc.account!.host.adapter(venue)) continue;
     const r = await own({ type: "connectVenue", venue, connector, label: "", credentialRef: venue === "wallet" ? w.address : "" });
     if (isRefusal(r)) throw new Error(r.message);
   }
@@ -229,14 +233,48 @@ describe("across chains: what the review found", () => {
     expect(!isRefusal(late) && late.kind === "payment" && late.payment.status).toBe("pending");
   });
 
-  it("a line an earlier run left on its way says this run does not follow it", async () => {
+  it("a bridge on its way when the account stopped is followed by the next run, to the end", async () => {
     const x = await boot();
     const out = handed(await x.move());
     x.bridge.statusAnswer = { status: "pending", note: "on its way", native: {} };
     await x.engine.live.sent(out.payment.id, `0x${"ab".repeat(32)}`);
     expect(x.svc.statement()[0]!.status).toBe("pending");
     const next = await boot({ home: x.home, nonceFrom: 100, laterMs: 3_600_000 });
+    // the wallet is connected again from the same address and its proof, checked again; the bridge is followed under its own id
+    expect(next.svc.restored).toMatchObject({ runs: 1, venues: [{ venue: "wallet", ok: true }, { venue: "ex", ok: true }], payments: 1, state: "done" });
+    expect(next.svc.statement().map((l) => [l.kind, l.status])).toEqual([["bridge", "pending"]]);
+    expect(next.engine.payments.map((p) => [p.id, p.status, p.live?.txHash])).toEqual([[out.payment.id, "pending", `0x${"ab".repeat(32)}`]]);
+    next.bridge.statusAnswer = { status: "settled", received: 24.9, note: "landed on Base: 24.9 arrived", native: {} };
+    next.tick(60_000);
+    await next.engine.settle();
+    expect(next.svc.statement().map((l) => [l.kind, l.status])).toEqual([["bridge", "settled"]]);
+    // a new movement in the new run does not take the old one's id
+    expect(next.engine.nextPaymentId()).toBe("pay-0002");
+  });
+
+  it("--fresh: a line an earlier run left on its way says this run does not follow it", async () => {
+    const x = await boot();
+    const out = handed(await x.move());
+    x.bridge.statusAnswer = { status: "pending", note: "on its way", native: {} };
+    await x.engine.live.sent(out.payment.id, `0x${"ab".repeat(32)}`);
+    const next = await boot({ home: x.home, nonceFrom: 100, laterMs: 3_600_000, fresh: true });
+    expect(next.svc.restored).toBeUndefined();
     expect(next.svc.statement().map((l) => [l.kind, l.status])).toEqual([["bridge", "not followed since a restart"]]);
   });
 });
 
+
+describe("a bridge goes by the bridge's own chains", () => {
+  it("out of Robinhood Chain in USDG: the door asks the bridge for routes from there (it is not a network money is sent or withdrawn on)", async () => {
+    const x = await boot();
+    x.bridge.chains.push("Robinhood Chain");
+    const p = await x.engine.prepare({ type: "liveMove", ...x.draft, network: "Robinhood Chain", asset: "USDG", toAsset: "USDC", toLedger: "Arbitrum" });
+    if (isRefusal(p)) throw new Error(p.message);
+    expect(x.bridge.asked.at(-1)).toEqual({ to: x.wallet.address, fromChain: "Robinhood Chain", toChain: "Arbitrum", asset: "USDG", toAsset: "USDC", amount: 25 });
+    // a chain the bridge does not carry is refused before anything is asked
+    const asked = x.bridge.asked.length;
+    x.bridge.chains.pop();
+    expect(refusal(await x.engine.prepare({ type: "liveMove", ...x.draft, network: "Robinhood Chain", asset: "USDG", toAsset: "USDC", toLedger: "Arbitrum" })).message).toMatch(/^a bridge leaves one of /);
+    expect(x.bridge.asked.length).toBe(asked);
+  });
+});

@@ -41,7 +41,7 @@ beforeAll(async () => {
   svc = await PortfolioService.create({ home, now: () => new Date(t).toISOString(), venues: "frontline", account: { owners: [{ id: owner.address, kind: "eoa", label: "owner", addedAt: new Date(START).toISOString() }] } });
   server = await startPortfolioServer({ port: 0, service: svc });
   client = new Client({ name: "vitest", version: "0" });
-  await client.connect(new StdioClientTransport({ command: join(ROOT, "node_modules", ".bin", "tsx"), args: [join(ROOT, "src", "portfolio", "mcp.ts")], env: { ...(process.env as Record<string, string>), PORTFOLIO_URL: server.url, PORTFOLIO_AGENT: "Claude Code" }, stderr: "ignore" }));
+  await client.connect(new StdioClientTransport({ command: join(ROOT, "node_modules", ".bin", "tsx"), args: [join(ROOT, "src", "portfolio", "mcp.ts")], env: { ...(process.env as Record<string, string>), PORTFOLIO_URL: server.url, PORTFOLIO_AGENT: "Claude Code", PORTFOLIO_SEAT_KEYS: "sim", BUYER_HOME: home }, stderr: "ignore" }));
 }, 30_000);
 
 afterAll(async () => {

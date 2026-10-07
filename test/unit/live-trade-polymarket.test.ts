@@ -8,7 +8,7 @@ import { isRefusal, type Refusal } from "../../src/core/errors.ts";
 import type { ChainReader } from "../../src/portfolio/live/chain.ts";
 import { KEY_SHAPES, keyFileStatus, liveOptions, openLive, type LiveDeps } from "../../src/portfolio/live/index.ts";
 import { polyHmac, polymarketTradeSource } from "../../src/portfolio/live/polymarket-clob.ts";
-import { inDollars, type LiveTrader, type OrderRequest, type OrderState } from "../../src/portfolio/live/trade.ts";
+import { inDollars, type Candle, type LiveTrader, type OrderRequest, type OrderState } from "../../src/portfolio/live/trade.ts";
 import type { Http, HttpReply, LiveBalance, LiveSource } from "../../src/portfolio/live/types.ts";
 
 /** TRADING at Polymarket's CLOB, against stand-ins for the CLOB, Gamma, the Data API and polymarket.com's location check that record every
@@ -126,7 +126,12 @@ interface Opts {
   clock?: () => number;
 }
 
-/** Polymarket as a stand-in: an answer by "METHOD url" (a list is answered in turn, its last one from then on); anything not set up is a 404 */
+const DATA = "https://data-api.polymarket.com/v2";
+/** the Data API's positions when a test sets up none: one holding, in the fields the address connection reads */
+const SOME_POSITIONS = { data: [{ title: "Will the U.S. invade Iran before 2027?", outcome: "Yes", current_size: 40, current_value: 6.4 }], pagination: { next_cursor: null } };
+
+/** Polymarket as a stand-in: an answer by "METHOD url" (a list is answered in turn, its last one from then on); anything not set up is a 404,
+ * except the Data API's positions, which answer SOME_POSITIONS unless a test sets them up */
 function stand(opts: Opts, seen: Req[]): Http {
   const answers: Record<string, Answer | Answer[]> = {
     [`GET ${GEO}`]: opts.geo ?? json({ blocked: false, ip: "203.0.113.7", country: "IE", region: "L" }),
@@ -136,8 +141,7 @@ function stand(opts: Opts, seen: Req[]): Http {
   return async (url, init = {}) => {
     const req: Req = { method: init.method ?? "GET", url, headers: { ...(init.headers ?? {}) }, ...(init.body !== undefined ? { body: init.body } : {}) };
     seen.push(req);
-    if (url.startsWith("https://data-api.polymarket.com/v2/positions")) return json({ data: [{ title: "Will the U.S. invade Iran before 2027?", outcome: "Yes", current_size: 40, current_value: 6.4 }], pagination: { next_cursor: null } });
-    const a = answers[`${req.method} ${url}`];
+    const a = answers[`${req.method} ${url}`] ?? (url.startsWith(`${DATA}/positions`) ? json(SOME_POSITIONS) : undefined);
     const next = Array.isArray(a) ? (a.length > 1 ? a.shift() : a[0]) : a;
     if (next === undefined) return json({ error: `not set up in this test: ${req.method} ${url}` }, 404);
     if (next instanceof Error) throw next;
@@ -178,7 +182,7 @@ const calls = (seen: Req[]) => seen.map((r) => `${r.method} ${r.url}`);
 const posted = (seen: Req[]) => {
   const p = seen.filter((r) => r.method === "POST" && r.url === `${CLOB}/order`);
   expect(p).toHaveLength(1);
-  return { req: p[0]!, body: JSON.parse(p[0]!.body!) as { order: Record<string, string | number>; orderType: string; owner: string; deferExec: boolean } };
+  return { req: p[0]!, body: JSON.parse(p[0]!.body!) as { order: Record<string, string | number>; orderType: string; owner: string; deferExec: boolean; postOnly?: boolean } };
 };
 const order = (over: Partial<OrderRequest> = {}): OrderRequest => ({ symbol: `${IRAN_SLUG}:Yes`, side: "buy", type: "limit", qty: 10, limitPrice: 0.52, clientId: CLIENT_ID, ...over });
 /** the signed message, read back from the body as the CLOB would */
@@ -272,8 +276,19 @@ describe("one market, with a fresh price", () => {
   it("<slug>:<outcome>: Gamma for what it is, the book for its price — the best bid and ask computed, not read off the ends", async () => {
     const { t, seen } = await pm({ answers: MARKET_ANSWERS });
     const m = ok(await t.market(`${IRAN_SLUG}:yes`));
-    expect(m).toEqual({ symbol: `${IRAN_SLUG}:Yes`, name: "Will the U.S. invade Iran before 2027? · Yes", kind: "event", base: "Yes", quote: "pUSD", price: 0.155, bid: 0.15, ask: 0.16, minQty: 5, qtyStep: 0.01, priceStep: 0.01, open: true, note: "Polymarket restricts this market in some places", types: ["market", "limit"] });
+    expect(m).toEqual({ symbol: `${IRAN_SLUG}:Yes`, name: "Will the U.S. invade Iran before 2027? · Yes", kind: "event", base: "Yes", quote: "pUSD", price: 0.155, bid: 0.15, ask: 0.16, minQty: 5, qtyStep: 0.01, priceStep: 0.01, open: true, note: "Polymarket restricts this market in some places", types: ["market", "limit"], tifs: ["gtc", "ioc", "fok"], postOnly: true, sellsReduce: true, volumeUsd24h: 349164.43, group: { id: IRAN_CID, title: "Will the U.S. invade Iran before 2027?" }, outcome: "Yes" });
     expect(calls(seen)).toEqual([`GET ${GAMMA}/markets/slug/${IRAN_SLUG}`, `GET ${CLOB}/book?token_id=${YES}`]);
+  });
+
+  it("declares what the CLOB takes and nothing else: limit and market orders, gtc, ioc and fok, post-only — no stop, reduce-only or leverage, and no amend, close or leverage call", async () => {
+    const { t } = await pm({ answers: MARKET_ANSWERS });
+    for (const s of [`${IRAN_SLUG}:Yes`, `${FED_SLUG}:Yes`, `${V2_SLUG}:Yes`]) {
+      const m = ok(await t.market(s));
+      expect([m.types, m.tifs, m.postOnly]).toEqual([["market", "limit"], ["gtc", "ioc", "fok"], true]);
+      expect(Object.keys(m).filter((k) => ["reduceOnly", "maxLeverage", "contractSize"].includes(k))).toEqual([]);
+    }
+    expect([t.amend, t.close, t.setLeverage]).toEqual([undefined, undefined, undefined]);
+    expect(typeof t.positions).toBe("function");
   });
 
   it("an outcome's token id: the book first, then its market by condition id; the token stays the symbol", async () => {
@@ -318,6 +333,7 @@ describe("the markets to choose from", () => {
     expect(first).toHaveLength(20);
     expect(first.slice(0, 4).map((m) => m.symbol)).toEqual([`${FED_SLUG}:Yes`, `${FED_SLUG}:No`, `${IRAN_SLUG}:Yes`, `${IRAN_SLUG}:No`]);
     expect(first.every((m) => m.quote === "pUSD" && inDollars(m.quote) && m.open && m.kind === "event")).toBe(true);
+    expect(first.every((m) => m.tifs?.join() === "gtc,ioc,fok" && m.postOnly === true && !("reduceOnly" in m) && !("maxLeverage" in m))).toBe(true);
     expect(first.some((m) => /paused-market|no-book-market|unknown-version-market|no-ids-market/.test(m.symbol))).toBe(false);
     expect(first[2]).toMatchObject({ name: "Will the U.S. invade Iran before 2027? · Yes", price: 0.155, minQty: 5, priceStep: 0.01, qtyStep: 0.01 });
     expect(ok(await t.markets("iran")).map((m) => m.symbol)).toEqual([`${IRAN_SLUG}:Yes`, `${IRAN_SLUG}:No`]);
@@ -493,6 +509,114 @@ describe("an order, signed as the official clients sign it", () => {
   });
 });
 
+// ---- times in force and post-only ---------------------------------------------------------------------------
+
+describe("the time in force and post-only, as the CLOB takes them", () => {
+  /** a book whose best ask is 0.52, deep enough for any order here */
+  const DEEP_AT_52 = json({ ...IRAN_BOOK, asks: [{ price: "0.99", size: "100000" }, { price: "0.52", size: "100000" }] });
+
+  it("gtc goes as GTC, ioc as FAK, fok as FOK; with none asked, a limit order is GTC and a market order FAK, as before", async () => {
+    const { t, seen } = await pm({ answers: withPost(LIVE(), { [`GET ${CLOB}/book?token_id=${YES}`]: DEEP_AT_52 }) });
+    const sent = async (o: Partial<OrderRequest>) => {
+      seen.splice(0);
+      const st = ok(await t.place(order(o)));
+      const { req, body } = posted(seen);
+      expect((st.native as { orderType: string }).orderType).toBe(body.orderType);
+      expect([body.order.expiration, "postOnly" in body]).toEqual(["0", false]);
+      return { req, body };
+    };
+    // a limit order with no time in force, or gtc: the spec's GTC body, byte for byte
+    expect((await sent({})).req.body).toBe(V.postOrderBody);
+    expect((await sent({ tif: "gtc" })).req.body).toBe(V.postOrderBody);
+    // ioc and fok, where the best ask is the limit: the same signed order (the order type is not signed), sent as FAK and as FOK
+    expect((await sent({ tif: "ioc" })).req.body).toBe(V.postOrderBody.replace('"orderType":"GTC"', '"orderType":"FAK"'));
+    const fok = await sent({ tif: "fok" });
+    expect(fok.req.body).toBe(V.postOrderBody.replace('"orderType":"GTC"', '"orderType":"FOK"'));
+    expect(fok.req.headers.POLY_SIGNATURE).toBe(polyHmac(SECRET, 1791225442, "POST", "/order", fok.req.body));
+    // a market order: $10.00 at 0.52 for at least 19.2308 shares, whichever way it is killed
+    for (const [tif, want] of [[undefined, "FAK"], ["ioc", "FAK"], ["fok", "FOK"]] as const) {
+      const { body } = await sent({ type: "market", limitPrice: undefined, qty: 19.24, worstPrice: 0.52, tif });
+      expect([body.orderType, body.order.side, body.order.makerAmount, body.order.takerAmount]).toEqual([want, "BUY", "10000000", "19230800"]);
+    }
+  });
+
+  it("a limit order that is fill-and-kill or fill-or-kill is built as a price-protected market order bounded at its limit: a buy in pUSD to the cent, for what its shares cost now", async () => {
+    const THIN = json({ ...IRAN_BOOK, asks: [{ price: "0.53", size: "1000" }, { price: "0.52", size: "10" }] });
+    // the first book is market()'s; each buy that fills at once walks the book again
+    const { t, seen } = await pm({ answers: withPost(LIVE(), { [`GET ${CLOB}/book?token_id=${YES}`]: [json(IRAN_BOOK), DEEP_AT_52, json(IRAN_BOOK), THIN] }) });
+    const sent = async (o: Partial<OrderRequest>) => {
+      seen.splice(0);
+      ok(await t.place(order(o)));
+      const b = posted(seen).body;
+      return [b.orderType, b.order.side, b.order.makerAmount, b.order.takerAmount];
+    };
+    // resting, 12.34 shares at 0.52 is $6.4168 exactly; filling at once, the CLOB is sent $6.41 for at least 12.327 shares at 0.52
+    expect(await sent({ qty: 12.34 })).toEqual(["GTC", "BUY", "6416800", "12340000"]);
+    expect(await sent({ qty: 12.34, tif: "ioc" })).toEqual(["FAK", "BUY", "6410000", "12327000"]);
+    // a limit above the book: what the 10 shares cost now ($1.60 at the 0.16 ask), at no more than 0.17 a share, not $1.70 of shares
+    expect(await sent({ limitPrice: 0.17, tif: "ioc" })).toEqual(["FAK", "BUY", "1600000", "9411800"]);
+    // a thin best ask, up to the limit: 10 at 0.52 and 9.24 at 0.53 cost $10.0972, sent as $10.09, at least 19.0378 shares at 0.53
+    expect(await sent({ qty: 19.24, limitPrice: 0.53, tif: "fok" })).toEqual(["FOK", "BUY", "10090000", "19037800"]);
+    // a sell is its shares either way, for at least the limit
+    expect(await sent({ side: "sell", limitPrice: 0.49, tif: "ioc" })).toEqual(["FAK", "SELL", "10000000", "4900000"]);
+    expect(await sent({ symbol: `${FED_SLUG}:Yes`, side: "sell", qty: 12.34, limitPrice: 0.517, tif: "fok" })).toEqual(["FOK", "SELL", "12340000", "6379780"]);
+  });
+
+  it("post-only goes on a GTC limit order as `postOnly: true`, last in the body as the unified client sends it, and outside the signed order", async () => {
+    const { t, seen } = await pm({ answers: withPost() });
+    const st = ok(await t.place(order({ postOnly: true })));
+    const { req, body } = posted(seen);
+    expect(req.body).toBe(`${V.postOrderBody.slice(0, -1)},"postOnly":true}`);
+    expect(req.headers.POLY_SIGNATURE).toBe(polyHmac(SECRET, 1791225442, "POST", "/order", req.body));
+    expect([body.orderType, body.postOnly, body.order.signature]).toEqual(["GTC", true, V.eoaOrderSig]);
+    expect(st.native).toMatchObject({ clientId: CLIENT_ID, orderType: "GTC", postOnly: true });
+    seen.splice(0);
+    ok(await t.place(order({ tif: "gtc", postOnly: true, side: "sell" })));
+    expect(posted(seen).body).toMatchObject({ orderType: "GTC", postOnly: true, order: { side: "SELL", signature: V.sellOrderSig } });
+    // false is not sent at all
+    seen.splice(0);
+    ok(await t.place(order({ postOnly: false })));
+    expect(posted(seen).req.body).toBe(V.postOrderBody);
+  });
+
+  it("what the CLOB does not take is refused before anything is sent, the location check included: post-only that takes, a market order that rests, stops, reduce-only, day", async () => {
+    const { t, seen } = await pm({ answers: withPost() });
+    const refused = async (o: Partial<OrderRequest>) => {
+      const r = refusal(await t.place(order(o)));
+      expect(r.code).toBe("E_VENUE_ORDER_INVALID");
+      return r.message;
+    };
+    const market = { type: "market" as const, limitPrice: undefined, worstPrice: 0.17 };
+    expect(await refused({ tif: "ioc", postOnly: true })).toBe("Polymarket: post-only is for an order that rests (gtc): a fill-and-kill or fill-or-kill order takes from the book at once");
+    expect(await refused({ tif: "fok", postOnly: true })).toBe("Polymarket: post-only is for an order that rests (gtc): a fill-and-kill or fill-or-kill order takes from the book at once");
+    expect(await refused({ ...market, postOnly: true })).toBe("Polymarket: a market order takes from the book: only a limit order may be post-only");
+    expect(await refused({ ...market, tif: "gtc" })).toBe("Polymarket: a market order here fills at once, fill-and-kill (ioc) or fill-or-kill (fok): an order that rests is a limit order");
+    expect(await refused({ tif: "day" })).toBe("Polymarket: an order here is good till canceled (gtc), fill-and-kill (ioc) or fill-or-kill (fok), not day");
+    expect(await refused({ tif: "constructor" as never })).toBe("Polymarket: an order here is good till canceled (gtc), fill-and-kill (ioc) or fill-or-kill (fok), not constructor");
+    expect(await refused({ type: "stop", limitPrice: undefined, stopPrice: 0.6, worstPrice: 0.62 })).toBe("Polymarket: the CLOB takes limit and market orders, not stop orders: it has no stop or trigger order");
+    expect(await refused({ type: "stop_limit", stopPrice: 0.6 })).toBe("Polymarket: the CLOB takes limit and market orders, not stop-limit orders: it has no stop or trigger order");
+    expect(await refused({ stopPrice: 0.6 })).toBe("Polymarket: the CLOB has no stop orders, so an order there carries no stop price");
+    expect(await refused({ side: "sell", reduceOnly: true })).toBe("Polymarket: the CLOB has no reduce-only flag (a sell there can only be of shares the wallet holds, so it never opens a position)");
+    expect(seen).toHaveLength(0);
+  });
+
+  it("the CLOB's own no to them: a post-only order that would cross the book, a fill-or-kill it cannot fill, post-only mode after a restart", async () => {
+    const placeWith = async (answer: Answer, o: Partial<OrderRequest>) => {
+      const { t, seen } = await pm({ answers: withPost(answer, { [`GET ${CLOB}/book?token_id=${YES}`]: DEEP_AT_52 }) });
+      return { r: refusal(await t.place(order(o))), seen };
+    };
+    const cross = await placeWith(json({ error: "invalid post-only order: order crosses book" }, 400), { postOnly: true });
+    expect([cross.r.code, cross.r.message]).toEqual(["E_VENUE_ORDER_INVALID", "Polymarket: invalid post-only order: order crosses book"]);
+    expect((await placeWith(json({ error: "order couldn't be fully filled. FOK orders are fully filled or killed." }, 400), { tif: "fok" })).r.code).toBe("E_VENUE_REJECTED");
+    // the matching engine's 500 for a fill-or-kill is an answer, not silence: the order is not looked up under its hash
+    const killed = await placeWith(json({ error: "FOK orders are filled or killed" }, 500), { tif: "fok" });
+    expect(killed.r.code).toBe("E_VENUE_REJECTED");
+    expect(calls(killed.seen).at(-1)).toBe(`POST ${CLOB}/order`);
+    const restart = await placeWith(json({ error: "post-only mode: only post-only orders and cancels are allowed", code: "post_only_mode", retry_after_seconds: 79 }, 503), { tif: "ioc" });
+    expect([restart.r.code, restart.r.native]).toEqual(["E_VENUE_UNREACHABLE", { status: 503, said: "post-only mode: only post-only orders and cancels are allowed", code: "post_only_mode", retryAfterSeconds: 79 }]);
+  });
+});
+
 // ---- what became of it ------------------------------------------------------------------------------------
 
 describe("what became of an order", () => {
@@ -598,6 +722,58 @@ describe("Polymarket's refusals, in its own words", () => {
   });
 });
 
+// ---- what is held -----------------------------------------------------------------------------------------
+
+/** one row of the Data API's positions, every field its OpenAPI requires (data-api.polymarket.com/v2/openapi.json, Position); values made up */
+const ROW = (over: Record<string, unknown> = {}) => ({ proxy_wallet: EOA.toLowerCase(), token_id: YES, condition_id: IRAN_CID, current_size: 40, avg_price: 0.15, entry_cost_usdc: 6, entry_fees_usdc: 0.12, total_cost_usdc: 6.12, current_price: 0.155, current_value: 6.2, total_size: 40, realized_pnl: 0, unrealized_pnl: 0.2, total_pnl: 0.2, percent_pnl: 3.333, percent_realized_pnl: 3.333, status: "OPEN", redeemable: false, mergeable: false, negative_risk: false, archived: false, title: "Will the U.S. invade Iran before 2027?", slug: IRAN_SLUG, icon: "https://example.com/made-up-icon.png", event_id: "16085", event_slug: IRAN_SLUG, outcome: "Yes", outcome_index: 0, opposite_outcome: "No", opposite_token_id: NO, end_date: "2026-12-31", last_event_at: 1791225000, first_entry_at: 1791000000, name: "made-up-profile-name", profile_image: "", verified: false, ...over });
+const positionsPage = (data: unknown[], next: string | null = null) => json({ data, pagination: { limit: 200, offset: 0, has_more: next !== null, next_cursor: next } });
+
+describe("what is held", () => {
+  const FIRST = `${DATA}/positions?user=${EOA}&limit=200`;
+
+  it("the Data API's positions for the wallet that holds the money, in the account's words: long, in shares, entry and mark, worth and unrealized", async () => {
+    const fedNo = ROW({ token_id: FED_NO, condition_id: FED_CID, title: FED.question, slug: FED_SLUG, outcome: "No", outcome_index: 1, current_size: 12.5, avg_price: 0.5, current_price: 0.48, current_value: 6, unrealized_pnl: -0.25, negative_risk: true });
+    const lost = ROW({ token_id: "3333333333333333333333", title: "A made-up market that resolved?", slug: "a-made-up-market-that-resolved", outcome: "No", current_size: 10, avg_price: 0.3, current_price: 0, current_value: 0, unrealized_pnl: -3, status: "REDEEMABLE", redeemable: true });
+    const exited = ROW({ slug: "a-made-up-market-exited", current_size: 0, current_value: 0, status: "CLOSED" });
+    // a row Gamma did not enrich: the token names it, and what the Data API leaves out stays unknown rather than zero
+    const unnamed = ROW({ token_id: "4444444444444444444444", title: "", slug: "", outcome: "", current_size: 2, avg_price: 0, current_price: null, current_value: null, unrealized_pnl: null });
+    const { t, seen } = await pm({ answers: { [`GET ${FIRST}`]: positionsPage([ROW(), fedNo, lost, exited, unnamed]), ...MARKET_ANSWERS } });
+    const held = ok(await t.positions!());
+    // a public read: no location check, nothing to the CLOB, nothing signed
+    expect(calls(seen)).toEqual([`GET ${FIRST}`]);
+    expect(seen[0]!.headers).toEqual({ accept: "application/json" });
+    expect(held.map((p) => ({ ...p, native: undefined }))).toEqual([
+      { symbol: `${IRAN_SLUG}:Yes`, name: "Will the U.S. invade Iran before 2027? · Yes", kind: "event", side: "long", qty: 40, entryPrice: 0.15, markPrice: 0.155, usd: 6.2, unrealizedUsd: 0.2 },
+      { symbol: `${FED_SLUG}:No`, name: `${FED.question} · No`, kind: "event", side: "long", qty: 12.5, entryPrice: 0.5, markPrice: 0.48, usd: 6, unrealizedUsd: -0.25 },
+      { symbol: "a-made-up-market-that-resolved:No", name: "A made-up market that resolved? · No", kind: "event", side: "long", qty: 10, entryPrice: 0.3, markPrice: 0, usd: 0, unrealizedUsd: -3 },
+      { symbol: "4444444444444444444444", name: "4444444444444444444444 · ?", kind: "event", side: "long", qty: 2, entryPrice: undefined, markPrice: undefined, usd: undefined, unrealizedUsd: undefined },
+    ]);
+    expect(held[0]!.native).toEqual({ token_id: YES, condition_id: IRAN_CID, slug: IRAN_SLUG, outcome: "Yes", outcome_index: 0, status: "OPEN", redeemable: false, mergeable: false, negative_risk: false, end_date: "2026-12-31", current_size: 40, avg_price: 0.15, current_price: 0.155, current_value: 6.2, entry_cost_usdc: 6, entry_fees_usdc: 0.12, realized_pnl: 0, unrealized_pnl: 0.2 });
+    expect(held[2]!.native).toMatchObject({ status: "REDEEMABLE", redeemable: true });
+    expect(JSON.stringify(held)).not.toContain("made-up-profile-name");
+    // the symbol is one market() takes
+    expect(ok(await t.market(held[0]!.symbol)).symbol).toBe(held[0]!.symbol);
+  });
+
+  it("page after page by the cursor with the same `user`: the wallet that holds the money (a Proxy wallet here), not the key that signs", async () => {
+    const first = `${DATA}/positions?user=${WALLET}&limit=200`;
+    const next = `${first}&cursor=${encodeURIComponent("eyJrIjoicG9zIn0=")}`;
+    const { t, seen } = await pm({ key: { privateKey: HARDHAT_0, funderAddress: WALLET, signatureType: "1" }, answers: { [`GET ${first}`]: positionsPage([ROW({ proxy_wallet: WALLET.toLowerCase() })], "eyJrIjoicG9zIn0="), [`GET ${next}`]: positionsPage([ROW({ proxy_wallet: WALLET.toLowerCase(), token_id: NO, outcome: "No", outcome_index: 1, current_size: 3, current_price: 0.845, current_value: 2.535 })]) } });
+    const held = ok(await t.positions!());
+    expect(calls(seen)).toEqual([`GET ${first}`, `GET ${next}`]);
+    expect(held.map((p) => [p.symbol, p.qty, p.usd])).toEqual([[`${IRAN_SLUG}:Yes`, 40, 6.2], [`${IRAN_SLUG}:No`, 3, 2.535]]);
+  });
+
+  it("nothing held is an empty list; the Data API's no is said in its words: busy, down, a request it will not serve", async () => {
+    // the first answer is the connection's own read of the balances
+    const { t } = await pm({ answers: { [`GET ${FIRST}`]: [json(SOME_POSITIONS), positionsPage([]), json({ error: "rate limited", code: "rate_limited", retryable: true, trace_id: "t-1" }, 429), json({ error: "request timed out", code: "request_timeout", retryable: true, trace_id: "t-2" }, 503), json({ error: "invalid user", code: "invalid_request", retryable: false, trace_id: "t-3", parameter: "user" }, 400)] } });
+    expect(ok(await t.positions!())).toEqual([]);
+    expect(refusal(await t.positions!())).toMatchObject({ code: "E_VENUE_UNREACHABLE", message: "Polymarket is rate-limiting this machine: try again in a minute" });
+    expect(refusal(await t.positions!())).toMatchObject({ code: "E_VENUE_UNREACHABLE", message: "Polymarket did not answer" });
+    expect(refusal(await t.positions!())).toMatchObject({ code: "E_VENUE_REJECTED", message: "Polymarket: invalid user", native: { status: 400, said: "invalid user", code: "invalid_request" } });
+  });
+});
+
 describe("the L2 HMAC", () => {
   it("matches the spec's vectors: seconds, method, path without its query, the exact body; URL-safe base64 that keeps its padding", () => {
     const ts = 1791225442;
@@ -610,5 +786,176 @@ describe("the L2 HMAC", () => {
     // the secret without its padding, or in plain base64, is the same key
     expect(polyHmac(SECRET.replace(/=+$/, ""), ts, "GET", "/data/orders")).toBe(V.getOpenOrdersHmac);
     expect(polyHmac(SECRET.replace(/-/g, "+").replace(/_/g, "/"), ts, "GET", "/data/orders")).toBe(V.getOpenOrdersHmac);
+  });
+});
+
+// ---- reading the market: what Gamma says of a market, events to discover, price history ----------------------------------------
+
+describe("what Gamma's market says beyond the order rules", () => {
+  it("its end, the pUSD traded in 24 hours (the market's, on every outcome), the day's change (the first outcome's: Gamma's price is that outcome's), and its question by condition id", async () => {
+    const { t } = await pm({ answers: { ...MARKET_ANSWERS, [`GET ${GAMMA}/markets/slug/${IRAN_SLUG}`]: json({ ...IRAN, endDate: "2026-12-31T00:00:00Z", oneDayPriceChange: 0.012 }) } });
+    const yes = ok(await t.market(`${IRAN_SLUG}:Yes`));
+    const no = ok(await t.market(`${IRAN_SLUG}:No`));
+    expect([yes.closeTime, yes.volumeUsd24h, yes.change24h, yes.group, yes.outcome]).toEqual(["2026-12-31T00:00:00Z", 349164.43, 0.012, { id: IRAN_CID, title: "Will the U.S. invade Iran before 2027?" }, "Yes"]);
+    expect([no.closeTime, no.volumeUsd24h, "change24h" in no, no.group, no.outcome]).toEqual(["2026-12-31T00:00:00Z", 349164.43, false, yes.group, "No"]);
+    // no percent: Gamma does not say which price its change is of
+    expect(["changePct24h" in yes, "category" in yes]).toEqual([false, false]);
+  });
+});
+
+describe("events(): event contracts to discover at Polymarket", () => {
+  const FED_EVENT = { id: "60001", slug: "fed-decision-in-october", title: "Fed decision in October?", active: true, closed: false, volume24hr: 3100000, tags: [{ id: "100328", label: "Economy", slug: "economy" }, { id: "159", label: "Fed Rates", slug: "fed-rates" }], markets: [{ ...FED, endDate: "2026-10-28T18:00:00Z", oneDayPriceChange: -0.02 }, { ...FED, slug: "fed-hike-in-october", conditionId: `0x${"0f".repeat(32)}`, closed: true, volume24hr: 9_000_000 }] };
+  const IRAN_EVENT = { id: "60002", slug: "us-x-iran", title: "US x Iran", active: true, closed: false, volume24hr: 400000, tags: [{ id: "2", label: "Politics", slug: "politics" }], markets: [{ ...IRAN, endDate: "2026-12-31T00:00:00Z", oneDayPriceChange: 0.012 }] };
+  const URL = `${GAMMA}/events?closed=false&order=volume24hr&ascending=false&limit=5`;
+  const iso = (ms: number) => encodeURIComponent(new Date(ms).toISOString());
+
+  it("Gamma's open events, busiest first: every outcome of every open order-book market, most traded first, each with its question, end and volume — a read, with no location check or credentials", async () => {
+    const { t, seen } = await pm({ answers: { [`GET ${URL}`]: json([IRAN_EVENT, FED_EVENT]) } });
+    const list = ok(await t.events!({ limit: 6 }));
+    expect(calls(seen)).toEqual([`GET ${URL}`]);
+    expect(list.map((m) => [m.symbol, m.group?.id, m.outcome, m.volumeUsd24h, m.change24h, m.closeTime])).toEqual([
+      [`${FED_SLUG}:Yes`, FED_CID, "Yes", 2862125.26, -0.02, "2026-10-28T18:00:00Z"],
+      [`${FED_SLUG}:No`, FED_CID, "No", 2862125.26, undefined, "2026-10-28T18:00:00Z"],
+      [`${IRAN_SLUG}:Yes`, IRAN_CID, "Yes", 349164.43, 0.012, "2026-12-31T00:00:00Z"],
+      [`${IRAN_SLUG}:No`, IRAN_CID, "No", 349164.43, undefined, "2026-12-31T00:00:00Z"],
+    ]);
+    // a closed market of an open event is not offered; without a tag asked, Gamma's events say no category
+    expect(list.some((m) => m.symbol.startsWith("fed-hike-in-october"))).toBe(false);
+    expect(list.every((m) => !("category" in m) && m.quote === "pUSD" && m.open && m.types.join() === "market,limit")).toBe(true);
+    expect(ok(await t.events!({ limit: 3 })).map((m) => m.symbol)).toEqual([`${FED_SLUG}:Yes`, `${FED_SLUG}:No`, `${IRAN_SLUG}:Yes`]);
+    expect(seen.some((r) => r.url === GEO || r.url.includes("/auth/"))).toBe(false);
+  });
+
+  it("one category is Gamma's tag (tag_slug), said in its own words; a window holds the events' and each market's end to it", async () => {
+    const tagged = `${GAMMA}/events?closed=false&order=volume24hr&ascending=false&limit=5&tag_slug=economy`;
+    const windowed = `${URL}&end_date_min=${iso(TS_MS)}&end_date_max=${iso(TS_MS + 30 * 86_400_000)}`;
+    const { t, seen } = await pm({ answers: { [`GET ${tagged}`]: json([FED_EVENT]), [`GET ${windowed}`]: json([IRAN_EVENT, FED_EVENT]) } });
+    const economy = ok(await t.events!({ category: "Economy", limit: 10 }));
+    expect(economy.map((m) => [m.symbol, m.category])).toEqual([[`${FED_SLUG}:Yes`, "Economy"], [`${FED_SLUG}:No`, "Economy"]]);
+    // the Iran market ends past the window, though Gamma listed its event: it is not offered
+    const soon = ok(await t.events!({ closingWithinMs: 30 * 86_400_000, limit: 10 }));
+    expect(soon.map((m) => m.symbol)).toEqual([`${FED_SLUG}:Yes`, `${FED_SLUG}:No`]);
+    expect(calls(seen)).toEqual([`GET ${tagged}`, `GET ${windowed}`]);
+    expect(refusal(await t.events!({ category: "!!!", limit: 10 })).code).toBe("E_ACCOUNT_BAD_ACTION");
+    expect(refusal(await t.events!({ closingWithinMs: 0, limit: 10 })).code).toBe("E_ACCOUNT_BAD_ACTION");
+    expect(ok(await t.events!({ limit: 0 }))).toEqual([]);
+    expect(calls(seen)).toHaveLength(2);
+  });
+});
+
+describe("candles(): an outcome's price history at Polymarket", () => {
+  const H = Math.floor(TS_MS / 3_600_000) * 3600 - 7200;
+  const END = Math.floor(TS_MS / 1000);
+
+  it("GET /prices-history for the outcome's token: five-minute prices folded into hourly bars — first, highest, lowest, last — and no volume, which Polymarket does not give", async () => {
+    const history = `${CLOB}/prices-history?market=${YES}&startTs=${H}&endTs=${END}&fidelity=5`;
+    const points = [{ t: H + 17, p: 0.15 }, { t: H + 317, p: 0.17 }, { t: H + 617, p: 0.14 }, { t: H + 3317, p: 0.16 }, { t: H + 3617, p: 0.155 }];
+    const { t, seen } = await pm({ answers: { ...MARKET_ANSWERS, [`GET ${history}`]: json({ history: points }) } });
+    const bars = ok(await t.candles!(`${IRAN_SLUG}:Yes`, "1h", H * 1000));
+    expect(calls(seen)).toEqual([`GET ${GAMMA}/markets/slug/${IRAN_SLUG}`, `GET ${CLOB}/book?token_id=${YES}`, `GET ${history}`]);
+    expect(bars).toEqual<Candle[]>([
+      { t: H * 1000, o: 0.15, h: 0.17, l: 0.14, c: 0.16 },
+      { t: (H + 3600) * 1000, o: 0.155, h: 0.155, l: 0.155, c: 0.155 },
+    ]);
+  });
+
+  it("five-minute bars from one-minute prices; a range too long for them is Polymarket's no, in its words; what cannot be a history is refused first", async () => {
+    const since = (END - 600) * 1000;
+    const history = `${CLOB}/prices-history?market=${YES}&startTs=${END - 600}&endTs=${END}&fidelity=1`;
+    const { t, seen } = await pm({ answers: { ...MARKET_ANSWERS, [`GET ${history}`]: [json({ history: [] }), json({ error: "invalid filters: 'startTs' and 'endTs' interval is too long" }, 400)] } });
+    expect(ok(await t.candles!(`${IRAN_SLUG}:Yes`, "5m", since))).toEqual([]);
+    const long = refusal(await t.candles!(`${IRAN_SLUG}:Yes`, "5m", since));
+    expect([long.code, long.message]).toEqual(["E_VENUE_REJECTED", "Polymarket: invalid filters: 'startTs' and 'endTs' interval is too long"]);
+    const n = seen.length;
+    expect(refusal(await t.candles!(`${IRAN_SLUG}:Yes`, "4h" as never, since)).code).toBe("E_ACCOUNT_BAD_ACTION");
+    expect(refusal(await t.candles!(`${IRAN_SLUG}:Yes`, "1h", TS_MS + 1)).code).toBe("E_ACCOUNT_BAD_ACTION");
+    expect(seen.length).toBe(n);
+  });
+  it("the Asset sheet's daily bars, three hundred days of them: a startTs alone, which Polymarket answers up to now — never a startTs-to-endTs range longer than the fifteen days or so it refuses, whatever the fidelity", async () => {
+    const DAY = 86_400;
+    const since = TS_MS - 300 * DAY * 1000;
+    const start = Math.floor(since / 1000);
+    const history = `${CLOB}/prices-history?market=${YES}&startTs=${start}&fidelity=60`;
+    // the first whole day in the range: hourly prices folded into its bar, then the next day's
+    const day0 = Math.ceil(start / DAY) * DAY;
+    const points = [{ t: day0 + 3_600, p: 0.1 }, { t: day0 + 7_200, p: 0.12 }, { t: day0 + DAY + 60, p: 0.11 }];
+    const { t, seen } = await pm({ answers: { ...MARKET_ANSWERS, [`GET ${history}`]: json({ history: points }) } });
+    const bars = ok(await t.candles!(`${IRAN_SLUG}:Yes`, "1d", since));
+    const asked = seen.filter((r) => r.url.includes("/prices-history")).map((r) => r.url);
+    expect(asked).toEqual([history]);
+    expect(bars).toEqual<Candle[]>([
+      { t: day0 * 1000, o: 0.1, h: 0.12, l: 0.1, c: 0.12 },
+      { t: (day0 + DAY) * 1000, o: 0.11, h: 0.11, l: 0.11, c: 0.11 },
+    ]);
+    // twelve days of hourly bars stay a range with its end: it is under the limit
+    const hourly = `${CLOB}/prices-history?market=${YES}&startTs=${END - 12 * DAY}&endTs=${END}&fidelity=5`;
+    const h = await pm({ answers: { ...MARKET_ANSWERS, [`GET ${hourly}`]: json({ history: [] }) } });
+    expect(ok(await h.t.candles!(`${IRAN_SLUG}:Yes`, "1h", (END - 12 * DAY) * 1000))).toEqual([]);
+    expect(h.seen.filter((r) => r.url.includes("/prices-history")).map((r) => r.url)).toEqual([hourly]);
+  });
+});
+
+// ---- money in: pUSD on Polygon to the wallet, Polymarket's bridge from the other chains (review2 F3) --------------------------------------
+
+describe("money into Polymarket: pUSD on Polygon to the wallet the orders are made by, Polymarket's bridge from the other chains", () => {
+  const BRIDGE = "https://bridge.polymarket.com";
+  /** GET /supported-assets, as Polymarket's docs show it: on Polygon the bridge lists pUSD's own contract under the name USDC */
+  const SUPPORTED = json({ supportedAssets: [
+    { chainId: "137", chainName: "Polygon", token: { name: "USD Coin", symbol: "USDC", address: "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB", decimals: 6 }, minCheckoutUsd: 2 },
+    { chainId: "1", chainName: "Ethereum", token: { name: "USD Coin", symbol: "USDC", address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", decimals: 6 }, minCheckoutUsd: 7 },
+    { chainId: "42161", chainName: "Arbitrum", token: { name: "Tether USD", symbol: "USDT", address: "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9", decimals: 6 }, minCheckoutUsd: 2 },
+    { chainId: "8453", chainName: "Base", token: { name: "Ether", symbol: "ETH", address: "0x0000000000000000000000000000000000000000", decimals: 18 }, minCheckoutUsd: 2 },
+  ] });
+  const BRIDGE_EVM = "0x9999999999999999999999999999999999999999";
+  /** POST /deposit (201): one address per kind of chain, unique to the wallet */
+  const DEPOSIT = json({ address: { evm: BRIDGE_EVM.toLowerCase(), svm: "So11111111111111111111111111111111111111112", btc: "bc1qmadeup", tron: "TMadeUp" }, note: "Send only supported assets." }, 201);
+
+  it("the writer receives and never withdraws (the CLOB has no withdrawal call: the words say how money does leave); pUSD on Polygon goes to the wallet the orders are made by — the key's own address, or the funder wallet the key file names", async () => {
+    const { source } = await pm();
+    const w = source.writer!;
+    expect(w.can).toMatchObject({ receive: true, withdraw: false, transfer: false, swap: false, send: false, ledgers: [] });
+    expect(w.can.why?.withdraw).toBe('money leaves Polymarket by a pUSD transfer from the Polymarket wallet to one of its bridge addresses (POST bridge.polymarket.com/withdraw: "Send pUSD from your Polymarket wallet to the appropriate bridge address"), made at polymarket.com: the CLOB has no withdrawal call, and this account signs no transaction with the key file\'s key');
+    expect([w.withdraw, w.send, w.walletTx, w.transfer, w.swap]).toEqual([undefined, undefined, undefined, undefined, undefined]);
+    expect(source.readOnlyBecause).toBeUndefined();
+    expect(source.probe.note).toContain("money comes in to that wallet as pUSD on Polygon, or through Polymarket's bridge from the other chains; it leaves Polymarket at Polymarket");
+    const here = ok(await w.depositAddress("pUSD", "Polygon"));
+    expect(here.address).toBe(EOA);
+    expect(here.note).toContain("the wallet Polymarket trades from: pUSD on Polygon sent to it is the cash the account reads there");
+    const proxy = await pm({ key: { privateKey: HARDHAT_0, funderAddress: WALLET.toLowerCase(), signatureType: "1" } });
+    expect(ok(await proxy.source.writer!.depositAddress("PUSD", "Polygon")).address.toLowerCase()).toBe(WALLET.toLowerCase());
+    const elsewhere = refusal(await w.depositAddress("pUSD", "Ethereum"));
+    expect([elsewhere.code, elsewhere.message]).toEqual(["E_VENUE_RAIL_CLOSED", "pUSD is a token on Polygon only (Polymarket's collateral): from Ethereum, send USDC or USDT to Polymarket's bridge address instead"]);
+  });
+
+  it("from another chain: GET /supported-assets says what the bridge takes there and the least it takes, POST /deposit gives this wallet's bridge address, kept ten minutes; a token the bridge names at another contract than the account's is refused", async () => {
+    const { source, seen } = await pm({ answers: { [`GET ${BRIDGE}/supported-assets`]: SUPPORTED, [`POST ${BRIDGE}/deposit`]: DEPOSIT } });
+    const w = source.writer!;
+    const eth = ok(await w.depositAddress("USDC", "Ethereum"));
+    expect(eth.address).toBe(BRIDGE_EVM);
+    expect(eth.note).toBe(`Polymarket's bridge address, unique to this wallet: USDC sent to it on Ethereum is bridged and credited as pUSD to ${EOA}. Polymarket takes at least $7 a deposit there, and says deposits below the minimum are not processed · Polymarket says: Send only supported assets.`);
+    expect(calls(seen)).toEqual([`GET ${BRIDGE}/supported-assets`, `POST ${BRIDGE}/deposit`]);
+    expect([seen[1]!.headers["content-type"], JSON.parse(seen[1]!.body!)]).toEqual(["application/json", { address: EOA }]);
+    // the answers are kept: the next asks nothing of the bridge. USDT on Arbitrum is USDT0 there, at the contract the bridge lists
+    const arb = ok(await w.depositAddress("USDT", "Arbitrum"));
+    expect([arb.address, seen.length]).toEqual([BRIDGE_EVM, 2]);
+    // a coin the account has no contract for is taken on the bridge's word
+    expect(ok(await w.depositAddress("ETH", "Base")).address).toBe(BRIDGE_EVM);
+    // USDC on Polygon: the bridge lists it at pUSD's contract, not the USDC this account sends
+    const poly = refusal(await w.depositAddress("USDC", "Polygon"));
+    expect([poly.code, poly.message]).toEqual(["E_VENUE_RAIL_CLOSED", "Polymarket's bridge lists USDC on Polygon at 0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB, not the USDC this account sends (0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359): that is pUSD, which goes straight to the wallet"]);
+    // what the bridge does not list there, and a chain it does not take from
+    expect(refusal(await w.depositAddress("DAI", "Ethereum")).message).toBe("Polymarket's bridge lists no DAI on Ethereum: there it takes USDC");
+    expect(refusal(await w.depositAddress("USDC", "Robinhood Chain")).message).toBe("Polymarket's bridge takes deposits from Ethereum, Polygon, Arbitrum, Base, Optimism, BNB Chain, not Robinhood Chain");
+    expect(seen.length).toBe(2);
+  });
+
+  it("the bridge's no is its own: its error words; a 500 is not answering; an answer without an EVM address is said so", async () => {
+    const a = await pm({ answers: { [`GET ${BRIDGE}/supported-assets`]: SUPPORTED, [`POST ${BRIDGE}/deposit`]: json({ error: "invalid address" }, 400) } });
+    const r = refusal(await a.source.writer!.depositAddress("USDC", "Ethereum"));
+    expect([r.code, r.message]).toEqual(["E_VENUE_REJECTED", "Polymarket's bridge refused to give a deposit address for this wallet: invalid address"]);
+    const b = await pm({ answers: { [`GET ${BRIDGE}/supported-assets`]: json({ error: "boom" }, 500) } });
+    expect(refusal(await b.source.writer!.depositAddress("USDC", "Ethereum")).code).toBe("E_VENUE_UNREACHABLE");
+    const c = await pm({ answers: { [`GET ${BRIDGE}/supported-assets`]: SUPPORTED, [`POST ${BRIDGE}/deposit`]: json({ address: { svm: "x" } }, 201) } });
+    expect(refusal(await c.source.writer!.depositAddress("USDC", "Ethereum")).message).toBe("Polymarket's bridge answered without an EVM deposit address");
   });
 });

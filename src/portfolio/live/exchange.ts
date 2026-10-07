@@ -2,7 +2,8 @@
  *
  * Three calls are made when it is connected, in this order:
  *   1. the exchange's public clock — no key involved. If the exchange does not serve this location, or cannot be reached, this is where
- *      that is learned, before the key is shown to anyone;
+ *      that is learned, before the key is shown to anyone. An exchange the library has no clock call for (Kraken Futures, Phemex: its base
+ *      class answers NotSupported) skips this step, and the key's permissions or the balances meet the exchange's rule instead;
  *   2. what the key may do, where the exchange has a call that says (Binance: GET /sapi/v1/account/apiRestrictions; OKX, its US and EEA
  *      hosts too: GET /api/v5/account/config; Bybit: GET /v5/user/query-api; Coinbase: GET /api/v3/brokerage/key_permissions; KuCoin: GET
  *      /api/v1/user/api-key). Elsewhere the library has no such call, and the connection says so instead of guessing. Binance.US documents
@@ -30,7 +31,9 @@ export interface ExchangeClient {
   loadMarkets?(reload?: boolean): Promise<unknown>;
   fetchTime?(): Promise<unknown>;
   fetchBalance(params?: Record<string, unknown>): Promise<Record<string, unknown>>;
-  fetchTickers?(symbols?: string[]): Promise<Record<string, { last?: number | undefined; close?: number | undefined }>>;
+  /** `params`: the kind of market where the exchange lists its tickers by kind (`{ type: "swap" }`); the trader also reads a ticker's last
+   * 24 hours (percentage, change, quoteVolume, high, low) */
+  fetchTickers?(symbols?: string[], params?: Record<string, unknown>): Promise<Record<string, { last?: number | undefined; close?: number | undefined; [field: string]: unknown }>>;
   /** Binance: GET /sapi/v1/account/apiRestrictions */
   sapiGetAccountApiRestrictions?(): Promise<Record<string, unknown>>;
   /** OKX: GET /api/v5/account/config */
@@ -45,6 +48,8 @@ export interface ExchangeClient {
   has?: Record<string, unknown> | undefined;
   currencies?: Record<string, { networks?: Record<string, unknown> | undefined } | undefined> | undefined;
   fetchDepositAddress?(code: string, params?: Record<string, unknown>): Promise<unknown>;
+  /** some exchanges give no deposit address until one is made (Kraken, KuCoin, Coinbase): live/writes.ts calls this first, then fetches again */
+  createDepositAddress?(code: string, params?: Record<string, unknown>): Promise<unknown>;
   withdraw?(code: string, amount: number, address: string, tag?: string, params?: Record<string, unknown>): Promise<unknown>;
   fetchWithdrawals?(code?: string, since?: number): Promise<unknown[]>;
   transfer?(code: string, amount: number, fromAccount: string, toAccount: string): Promise<unknown>;
@@ -68,6 +73,13 @@ export interface ExchangeClient {
   fetchOrders?(symbol?: string, since?: number, limit?: number, params?: Record<string, unknown>): Promise<unknown[]>;
   /** Bybit: whether the account is unified, which decides how a spot market buy is sized; the library caches the answer */
   isUnifiedEnabled?(): Promise<unknown>;
+  // what reads the market for the account (no key needed by the exchange) — used only by exchange-trade.ts
+  /** the bar sizes the library knows for this exchange, by its own names ("5m", "1h", "1d") */
+  timeframes?: Record<string, unknown> | undefined;
+  /** bars as [start ms, open, high, low, close, volume], oldest first */
+  fetchOHLCV?(symbol: string, timeframe?: string, since?: number, limit?: number, params?: Record<string, unknown>): Promise<unknown[]>;
+  /** a perpetual's funding: `fundingRate` and `fundingTimestamp`, when it is paid */
+  fetchFundingRate?(symbol: string, params?: Record<string, unknown>): Promise<unknown>;
 }
 
 /** the library's ids for one exchange on several hosts (ccxt.md §0): OKX is also okxus and myokx (EEA) */
@@ -96,8 +108,9 @@ export const openExchange: OpenExchange = async (exchangeId, key) => {
   return new lib[exchangeId]!({ apiKey: key.apiKey, secret: key.secret, ...(key.password ? { password: key.password } : {}), ...(key.uid ? { uid: key.uid } : {}), enableRateLimit: true, timeout: 12_000 });
 };
 
-/** every exchange the library covers, by id and by the name it gives itself; the well-known ones first */
-const FIRST = ["binance", "okx", "bybit", "kraken", "coinbase", "kucoin", "gate", "bitget", "mexc", "htx", "cryptocom", "bitfinex", "gemini", "bitstamp", "binanceus", "upbit", "deribit"];
+/** every exchange the library covers, by id and by the name it gives itself; the well-known ones first — the futures venues that list
+ * pre-IPO perpetuals (live/preipo.ts) beside their spot siblings: krakenfutures, kucoinfutures, deribit, phemex */
+const FIRST = ["binance", "okx", "bybit", "kraken", "krakenfutures", "coinbase", "kucoin", "kucoinfutures", "gate", "bitget", "mexc", "deribit", "phemex", "htx", "cryptocom", "bitfinex", "gemini", "bitstamp", "binanceus", "upbit"];
 let listed: Promise<Array<{ id: string; name: string; needs: string[] }>> | undefined;
 export function exchangeList(): Promise<Array<{ id: string; name: string; needs: string[] }>> {
   return (listed ??= ccxt().then((lib) => {
@@ -128,8 +141,12 @@ const BINANCE_2015 = /-2015|Invalid API-key, IP, or permissions/;
 export function exchangeSaidNo(venue: string, name: string, err: unknown, key: KeyFile): Refusal {
   const e = err as { name?: string; message?: string };
   const kind = String(e?.name ?? "");
-  // redacted before the whitespace is folded and the text is cut: a secret over several lines (a PEM key), or one the cut would split, is still found
-  const said = redact(String(e?.message ?? err), Object.values(key)).replace(/\s+/g, " ").slice(0, 240);
+  // redacted before the whitespace is folded and the text is cut: a secret over several lines (a PEM key), or one the cut would split, is still found.
+  // The cut never splits the exchange's own sentence (the "msg" in the JSON it answered with): it runs to the end of that sentence when the
+  // sentence runs past it, so Binance's "…Please contact customer service if you believe you received this message in error." stays whole
+  const folded = redact(String(e?.message ?? err), Object.values(key)).replace(/\s+/g, " ");
+  const sentence = /"(?:msg|message|retMsg|error_description)"\s*:\s*"(?:[^"\\]|\\.)*"/.exec(folded);
+  const said = folded.slice(0, Math.min(600, Math.max(240, sentence ? sentence.index + sentence[0].length : 0)));
   const native = { error: kind, said };
   // judged by what the exchange said, not by the class the library picked: Bybit's country block arrives as a "rate limit", OKX's as HTTP 200
   const region = kind === "RestrictedLocation" || REGION.test(said) || OKX_REGION.test(said);
@@ -280,7 +297,15 @@ export async function exchangeSource(req: ExchangeRequest): Promise<{ source: Li
   const missing = Object.entries(client.requiredCredentials ?? {}).filter(([field, on]) => on && ["apiKey", "secret", "password", "uid"].includes(field) && !req.key[field]).map(([field]) => field);
   if (missing.length) return no("E_ACCOUNT_CREDENTIAL", { venue: req.venue, message: `${client.name ?? req.exchangeId} also needs ${missing.map((m) => `"${m}"`).join(", ")} in ${req.reference}${missing.includes("password") ? ' ("password" is the passphrase set when the API key was made)' : ""}`, detail: { missing } });
   try {
-    await client.fetchTime?.();
+    // the exchange's public clock, where the library has the call: its base class answers NotSupported where it has none (Kraken Futures,
+    // Phemex), and that is the library's word, not the exchange's refusal of the key or the place
+    if (client.has?.fetchTime !== false) {
+      try {
+        await client.fetchTime?.();
+      } catch (err) {
+        if (String((err as { name?: string } | undefined)?.name) !== "NotSupported") throw err;
+      }
+    }
     const said = await probe(client, req.venue, name, req.key);
     const first = await balances(client);
     const ledgers = (LEDGERS[client.id] ?? []).map((l) => l.where);
