@@ -131,3 +131,16 @@ describe("a perpetual read as a pre-IPO contract", () => {
     expect(isPreIpoMarket({ kind: "spot", category: PRE_IPO_CATEGORY })).toBe(false);
   });
 });
+
+describe("a company whose venues price one share per contract", () => {
+  it("Oura: the implied valuation is the price times the share count the venues size on, and the row's price is in shares again", async () => {
+    const { unitOf, PER_SHARE, preIpoOf } = await import("../../src/portfolio/live/preipo.ts");
+    expect(unitOf("okx", "OURA-USDT-SWAP", "oura")).toEqual({ perPoint: 320_945_459, unit: PER_SHARE.oura!.unit });
+    expect(PER_SHARE.oura!.unit).toContain("one contract is one share of Oura Inc. common stock");
+    // the others keep $1 per $1B (and OKX's two rebased swaps their ×10)
+    expect(unitOf("okx", "ANTHROPIC-USDT-SWAP", "anthropic").perPoint).toBe(10_000_000_000);
+    expect(unitOf("gate", "ANTHROPIC_USDT", "anthropic").perPoint).toBe(1_000_000_000);
+    // a venue's own OURA contract is marked with it
+    expect(preIpoOf("okx", { ruleType: "pre_market" }, "OURA", "OURA-USDT-SWAP")?.implied).toMatchObject({ perPoint: 320_945_459 });
+  });
+});

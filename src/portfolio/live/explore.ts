@@ -80,7 +80,7 @@
 import { isRefusal, type Refusal } from "../../core/errors.ts";
 import { isExcludedCategory, isIpoCategory, isRwaMarket, TABS, type TabId } from "./categories.ts";
 import { normalBase, type CompareMissing } from "./compare.ts";
-import { impliedUsd, PRE_IPO_CATEGORY, PRE_IPO_GROUP, PRE_IPO_PER_POINT } from "./preipo.ts";
+import { impliedUsd, PER_SHARE, PRE_IPO_CATEGORY, PRE_IPO_GROUP, PRE_IPO_PER_POINT } from "./preipo.ts";
 import type { EventsQuery, Listing, PublicSource } from "./public-markets.ts";
 import { inDollars, type LiveTrader, type Market, type MarketSession, type MarketStats } from "./trade.ts";
 import { isStable } from "./types.ts";
@@ -670,7 +670,8 @@ function preIpoRow(key: string, every: Got[], aside: ExploreMissing[]): ExploreI
     kind: "perp",
     name: title,
     base: key.slice(PRE_IPO_GROUP.length).toUpperCase(),
-    ...(median !== undefined ? { price: Number((median / PRE_IPO_PER_POINT).toFixed(2)), implied: { usd: median, unit } } : {}),
+    // the row's price is the median written in the company's unit: $1 per $1B, or one share for a company its venues price per share
+    ...(median !== undefined ? { price: Number((median / (PER_SHARE[key.slice(PRE_IPO_GROUP.length)]?.shares ?? PRE_IPO_PER_POINT)).toFixed(2)), implied: { usd: median, unit } } : {}),
     ...(moved ? { changePct24h: moved.m.changePct24h, changeFrom: { venue: moved.r.id, venueName: lineName(moved.r, moved.m) } } : {}),
     ...(vols.length ? { volumeUsd24h: vols.reduce((s, v) => s + v, 0) } : {}),
     category: PRE_IPO_CATEGORY,

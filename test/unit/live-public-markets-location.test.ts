@@ -186,7 +186,10 @@ describe("Hyperliquid's HIP-3 pre-IPO perpetuals, keyless", () => {
     ]);
     expect(got[0]).toEqual({ symbol: "io:ANTH-PERP", name: "Anthropic pre-IPO perpetual on Hyperliquid · io", kind: "perp", base: "ANTH", quote: "USDC", price: 2044.55, bid: undefined, ask: undefined, open: true, types: [], changePct24h: -3.6726, change24h: -77.95, volumeUsd24h: Number("11791556.5899999943"), fundingRate: 0.0000185782, nextFundingAt: "2026-10-08T19:00:00.000Z", maxLeverage: 6, category: "Pre-IPO", group: { id: "preipo:anthropic", title: "Anthropic" }, implied: { perPoint: 1_000_000_000, unit: UNIT, usd: 2_044_550_000_000 }, issuer: "Anthropic", eligibility: PRE_IPO_ISSUERS.anthropic!.eligibility, venueName: "Hyperliquid · io" });
     expect(got[1]).toMatchObject({ base: "OAI", price: 1644.65, change24h: -86.45, changePct24h: -4.9939, maxLeverage: 6, group: { id: "preipo:openai", title: "OpenAI" }, implied: { usd: 1_644_650_000_000 }, issuer: "OpenAI" });
-    expect(got[2]).toMatchObject({ name: "Oura pre-IPO perpetual on Hyperliquid · xyz", base: "OURA", price: 48.551, change24h: -0.38, changePct24h: -0.7766, volumeUsd24h: 17688.0185, fundingRate: 0.0000011593, maxLeverage: 5, group: { id: "preipo:oura" }, implied: { usd: 48_551_000_000 } });
+    expect(got[2]).toMatchObject({ name: "Oura pre-IPO perpetual on Hyperliquid · xyz", base: "OURA", price: 48.551, change24h: -0.38, changePct24h: -0.7766, volumeUsd24h: 17688.0185, fundingRate: 0.0000011593, maxLeverage: 5, group: { id: "preipo:oura" }, implied: { usd: Math.round(48.551 * 320_945_459), perPoint: 320_945_459 } });
+    // Oura is priced one share per contract (trade.xyz's words): the price times the share count the venues size on, about $15.6B — not $48.6B
+    expect((got[2]! as { implied: { usd: number } }).implied.usd).toBeGreaterThan(15.5e9);
+    expect((got[2]! as { implied: { usd: number } }).implied.usd).toBeLessThan(15.7e9);
     expect(hl.notes!({})).toEqual(["Hyperliquid · io, xyz: pre-IPO perpetuals on Hyperliquid's HIP-3 markets, which anyone may deploy; shown while someone holds or trades one."]);
     expect(hl.notes!({})[0]!.length).toBeLessThan(160);
     // a search: the company's name or the coin

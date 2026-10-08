@@ -27,8 +27,9 @@
  * NOT RIGHT FOR OURA. trade.xyz writes of its xyz:OURA (POST /info perpAnnotation, 2026-10-08): "OURA references 1 share of Oura Inc. common
  * stock"; Bitget (320 million) and BloFin (320,945,459) size theirs on an estimated share count; every venue's OURA traded at 48.55–50.91 that
  * day, the per-share level of Oura's $40–44 IPO range. The $1,000,000,000 unit this table gives OURA therefore overstates its implied
- * valuation about threefold, at every venue alike, so the venues still agree with each other. Not changed yet: it needs a unit per company,
- * and the row's price convention in live/explore.ts with it.
+ * valuation about threefold, at every venue alike, so the venues still agree with each other. So a company whose venues price one share per
+ * contract has its own unit (PER_SHARE): the implied valuation is the price times the share count the venues size on, and the row's price in
+ * live/explore.ts is that valuation divided by the same count.
  *
  * A venue's flag, read 2026-10-06 from its own public record (the same record the unified exchange library keeps as a market's `info`, so a
  * connected key's market is read by the same flag):
@@ -67,6 +68,14 @@ export const PRE_IPO_PER_POINT = 1_000_000_000;
 export const OKX_REBASED_PER_POINT = 10_000_000_000;
 const OKX_REBASED: ReadonlySet<string> = new Set(["ANTHROPIC-USDT-SWAP", "OPENAI-USDT-SWAP"]);
 
+/** companies whose venues price ONE SHARE per contract (they sized on a filing's share count), with that count: the implied valuation is the
+ * price times it. Oura: trade.xyz, "OURA references 1 share of Oura Inc. common stock" (POST /info perpAnnotation, 2026-10-08); BloFin sizes
+ * its contract on 320,945,459 shares and Bitget on about 320 million; every venue's OURA traded at 48.55–50.91 that day, the per-share
+ * level of its $40–44 IPO range */
+export const PER_SHARE: Readonly<Record<string, { shares: number; unit: string }>> = {
+  oura: { shares: 320_945_459, unit: "one contract is one share of Oura Inc. common stock: the implied valuation is the price times the 320,945,459 shares the venues size on (BloFin's count; Bitget's about 320 million)" },
+};
+
 /** the venue's unit for a pre-IPO contract's price, in dollars of implied valuation per dollar of price, and the rule in words */
 export interface PreIpoUnit {
   perPoint: number;
@@ -76,7 +85,9 @@ export interface PreIpoUnit {
 const isOkxId = (exchangeId: string): boolean => exchangeId.toLowerCase().startsWith("okx") || exchangeId.toLowerCase() === "myokx";
 
 /** the unit a venue prices one of its pre-IPO contracts in: `instrumentId` is the venue's own id for the contract (ANTHROPIC-USDT-SWAP) */
-export function unitOf(exchangeId: string, instrumentId: string): PreIpoUnit {
+export function unitOf(exchangeId: string, instrumentId: string, company = ""): PreIpoUnit {
+  const share = PER_SHARE[company];
+  if (share) return { perPoint: share.shares, unit: share.unit };
   if (isOkxId(exchangeId) && OKX_REBASED.has(instrumentId.trim().toUpperCase())) return { perPoint: OKX_REBASED_PER_POINT, unit: "OKX: a price of $1 stands for $10,000,000,000 of implied company valuation since its 10:1 rebase of 30 June 2026" };
   return { perPoint: PRE_IPO_PER_POINT, unit: "a price of $1 stands for $1,000,000,000 of implied company valuation (one contract ≈ one-billionth of the company)" };
 }
@@ -184,7 +195,7 @@ export function preIpoOf(exchangeId: string, info: Rec | undefined, base: string
   if (!company) return undefined;
   if ((flag === undefined || NAMED_ONLY.has(exchangeId.toLowerCase())) && !company.known) return undefined;
   const said = PRE_IPO_ISSUERS[company.slug];
-  return { slug: company.slug, name: company.name, category: PRE_IPO_CATEGORY, group: { id: `${PRE_IPO_GROUP}${company.slug}`, title: company.name }, implied: unitOf(exchangeId, instrumentId), ...(said ? { issuer: said.issuer, eligibility: said.eligibility } : {}) };
+  return { slug: company.slug, name: company.name, category: PRE_IPO_CATEGORY, group: { id: `${PRE_IPO_GROUP}${company.slug}`, title: company.name }, implied: unitOf(exchangeId, instrumentId, company.slug), ...(said ? { issuer: said.issuer, eligibility: said.eligibility } : {}) };
 }
 
 /** a market that is a pre-IPO perpetual, by the category every one carries */
