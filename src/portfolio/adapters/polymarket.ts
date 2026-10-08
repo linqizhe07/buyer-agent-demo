@@ -42,9 +42,10 @@ export interface PolymarketSeed {
 }
 
 const V = PREDICTION_VENUES.polymarket!;
-const place = (g: Geoblock) => `${g.country ?? "this region"}${g.region ? `-${g.region}` : ""}`;
+/* the place is never named: a refusal is logged and lands in the ledger, and where the user is stays out of both */
+const place = (_g: Geoblock) => "this location";
 /** the simulated seed names no place: which regions a venue restricts is the venue's list, and it changes */
-const check = (g: Geoblock) => (g.country ? `region ${place(g)}` : "region check");
+const check = (_g: Geoblock) => "region check";
 const regionLimit = (g: Geoblock) => (g.blocked ? `${check(g)}: restricted, Polymarket takes no orders from here (PREDICT_GEOBLOCKED)` : `${check(g)}: not restricted`);
 const RULES = [`orders: ${V.minOrder} shares minimum, matched on the CLOB; trades are signed by the deposit wallet, not the owner address`, "funds are pUSD on Polygon in the deposit wallet; deposits and withdrawals go through the relayer", "outcomes are decided by UMA's oracle; a winning share is redeemed at $1"];
 
@@ -150,7 +151,8 @@ interface PredictMarket {
 /** what `mm predict geoblock` says, without the caller's IP: the portfolio has no use for it */
 export function geoblockOf(data: unknown): Geoblock {
   const r = ((data ?? {}) as { result?: { blocked?: unknown; country?: unknown; region?: unknown } }).result ?? {};
-  return { blocked: r.blocked === true, country: typeof r.country === "string" ? r.country : undefined, region: typeof r.region === "string" ? r.region : undefined };
+  // blocked or not, and nothing else: the place and the IP it names are not kept
+  return { blocked: r.blocked === true };
 }
 
 /** what the credential can do right now: nothing but reads until `mm predict setup` has run, and no orders from a restricted region */

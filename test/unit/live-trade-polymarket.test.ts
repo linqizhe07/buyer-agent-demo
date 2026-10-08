@@ -221,7 +221,9 @@ describe("Polymarket's trading connection", () => {
     const seen: Req[] = [];
     const geo = refusal(await polymarketTradeSource({ venue: "polymarket-trade", label: "", reference: "", key: { privateKey: HARDHAT_0 }, http: stand({ geo: json({ blocked: true, ip: "203.0.113.7", country: "US", region: "PA" }) }, seen), chain: chain(0), clock: () => TS_MS }));
     expect([geo.code, geo.message]).toEqual(["E_VENUE_GEOBLOCKED", GEO_WORDS]);
-    expect(geo.native).toEqual({ blocked: true, country: "US", region: "PA" });
+    // blocked, and nothing else: the refusal is logged and lands in the ledger, so the place and the IP it names are left out
+    expect(geo.native).toEqual({ blocked: true });
+    expect(JSON.stringify(geo)).not.toMatch(/203\.0\.113\.7|"US"|"PA"/);
     expect(JSON.stringify(geo)).not.toContain("203.0.113.7");
     expect(calls(seen)).toEqual([`GET ${GEO}`]);
     // a check that does not answer is not a yes

@@ -819,9 +819,8 @@ export function mmTrader(d: MmTraderDeps): LiveTrader & { kinds: MarketKind[] } 
       return isRefusal(e) ? e : asRefusal(venue, "MetaMask", e);
     }
     const g = obj(obj(data)?.result) ?? obj(data);
-    // the IP mm reports is left out of everything kept
-    const where = { country: str(g?.country), region: str(g?.region) };
-    if (g?.blocked === true) return no("E_VENUE_GEOBLOCKED", { venue, message: `${PM} does not take orders from this location (${[where.country, where.region].filter(Boolean).join("-") || "as mm predict geoblock says"}): that is its own rule, and the account does not look for a way around it. Nothing was placed`, native: { command: cmd(args), blocked: true, ...where } });
+    // the IP and the place mm reports are left out of everything kept: a refusal is logged and lands in the ledger
+    if (g?.blocked === true) return no("E_VENUE_GEOBLOCKED", { venue, message: `${PM} does not take orders from this location (as mm predict geoblock says): that is its own rule, and the account does not look for a way around it. Nothing was placed`, native: { command: cmd(args), blocked: true } });
     if (g?.blocked !== false) return no("E_VENUE_REJECTED", { venue, message: `mm did not say whether ${PM} serves this location, so nothing was placed`, native: { command: cmd(args) } });
     return undefined;
   }
@@ -1110,7 +1109,7 @@ export function mmTrader(d: MmTraderDeps): LiveTrader & { kinds: MarketKind[] } 
     }
     if (!/^[A-Z]{2}$/.test(country)) return no("E_VENUE_REJECTED", { venue, message: `mm did not say where this machine is, so ${HL}'s own line (its Terms of Use §1.6) could not be checked: nothing was sent`, native: { command: cmd(args) } });
     const at = region ? `${country}-${region}` : country;
-    if (HL_CLOSED.countries.has(country) || HL_CLOSED.regions.has(at)) return no("E_VENUE_GEOBLOCKED", { venue, message: `${HL} does not serve this location (${at}, where mm places this machine): its Terms of Use (§1.6) close it to anyone located in the United States, Ontario or a sanctioned territory. That is its own rule, and the account does not look for a way around it. Nothing was sent to ${doing}`, native: { command: cmd(args), country, ...(region ? { region } : {}), terms: HL_TERMS } });
+    if (HL_CLOSED.countries.has(country) || HL_CLOSED.regions.has(at)) return no("E_VENUE_GEOBLOCKED", { venue, message: `${HL} does not serve this location (where mm places this machine): its Terms of Use (§1.6) close it to anyone located in the United States, Ontario or a sanctioned territory. That is its own rule, and the account does not look for a way around it. Nothing was sent to ${doing}`, native: { command: cmd(args), terms: HL_TERMS } });
     return undefined;
   }
 

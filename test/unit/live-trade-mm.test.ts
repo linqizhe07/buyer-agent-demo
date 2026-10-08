@@ -573,7 +573,8 @@ describe("a Polymarket order through mm", () => {
     ok(await x.t.market(`${SLUG}:Yes`));
     x.calls.splice(0);
     const r = refusal(await x.t.place({ symbol: `${SLUG}:Yes`, side: "sell", type: "limit", qty: 10, limitPrice: 0.2, clientId: CLIENT }));
-    expect([r.code, r.message]).toEqual(["E_VENUE_GEOBLOCKED", "Polymarket does not take orders from this location (US-PA): that is its own rule, and the account does not look for a way around it. Nothing was placed"]);
+    expect([r.code, r.message]).toEqual(["E_VENUE_GEOBLOCKED", "Polymarket does not take orders from this location (as mm predict geoblock says): that is its own rule, and the account does not look for a way around it. Nothing was placed"]);
+    expect(JSON.stringify(r)).not.toMatch(/US-PA|"country"|"region"/);
     expect(argvs(x.calls)).toEqual([["predict", "geoblock", "--json"]]);
     expect(JSON.stringify(r)).not.toContain("198.51.100.23");
     // mm's own refusal of the check, and an answer that says neither, place nothing either
@@ -1001,9 +1002,10 @@ describe("perpetuals at Hyperliquid, through mm perps", () => {
     const x = await boot({ ...PERPS, "predict geoblock": IN_US, "perps open": opened({}) });
     const r = refusal(await x.t.place(buy()));
     expect(r.code).toBe("E_VENUE_GEOBLOCKED");
-    expect(r.message).toBe("Hyperliquid does not serve this location (US-PA, where mm places this machine): its Terms of Use (§1.6) close it to anyone located in the United States, Ontario or a sanctioned territory. That is its own rule, and the account does not look for a way around it. Nothing was sent to buy 0.001 BTC");
-    // the place is kept, never the address mm reported
-    expect(r.native).toEqual({ command: "mm predict geoblock --json", country: "US", region: "PA", terms: expect.stringContaining("Terms of Use §1.6") });
+    expect(r.message).toBe("Hyperliquid does not serve this location (where mm places this machine): its Terms of Use (§1.6) close it to anyone located in the United States, Ontario or a sanctioned territory. That is its own rule, and the account does not look for a way around it. Nothing was sent to buy 0.001 BTC");
+    // neither the place nor the address mm reported is kept: a refusal is logged and lands in the ledger
+    expect(r.native).toEqual({ command: "mm predict geoblock --json", terms: expect.stringContaining("Terms of Use §1.6") });
+    expect(JSON.stringify(r)).not.toMatch(/"US"|"PA"|US-PA/);
     expect(JSON.stringify(r)).not.toContain("198.51.100.23");
     expect(argvs(x.calls).some((a) => a[1] === "open")).toBe(false);
     // Ontario too; and a sanctioned territory
@@ -1013,7 +1015,10 @@ describe("perpetuals at Hyperliquid, through mm perps", () => {
     expect(refusal(await x.t.place(buy({ clientId: "2".repeat(32) }))).code).toBe("E_VENUE_GEOBLOCKED");
     // mm's own region guard says the place in its words: that place is held to Hyperliquid's line the same way
     x.answers["predict geoblock"] = fail("PREDICT_GEOBLOCKED", "Polymarket is not available in your region (PA, US). Predict features cannot be used from this location.");
-    expect(refusal(await x.t.place(buy({ clientId: "3".repeat(32) })))).toMatchObject({ code: "E_VENUE_GEOBLOCKED", native: { country: "US", region: "PA" } });
+    const said = refusal(await x.t.place(buy({ clientId: "3".repeat(32) })));
+    expect(said.code).toBe("E_VENUE_GEOBLOCKED");
+    // the place mm named decided it, and is carried nowhere
+    expect(JSON.stringify(said)).not.toMatch(/"US"|"PA"|\(PA, US\)/);
     // a place mm cannot say is no place: nothing is sent
     x.answers["predict geoblock"] = fail("NETWORK_UNREACHABLE", "fetch failed");
     expect(refusal(await x.t.place(buy({ clientId: "4".repeat(32) })))).toMatchObject({ code: "E_VENUE_REJECTED", message: expect.stringContaining("mm could not say where this machine is") });

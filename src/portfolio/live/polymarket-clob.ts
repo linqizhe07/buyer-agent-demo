@@ -402,7 +402,8 @@ export const POLYMARKET_GEOBLOCK = GEOBLOCK;
 export function polymarketLocationSaid(r: HttpReply, venue: string, name: string): Refusal | undefined {
   if (r.status === 451 || (r.status !== 200 && (REGION.test(r.text) || PM_REGION.test(r.text)))) return no("E_VENUE_GEOBLOCKED", { venue, message: GEO_WORDS, native: { status: r.status } });
   if (r.status !== 200 || !isObj(r.body) || typeof r.body.blocked !== "boolean") return no("E_VENUE_UNREACHABLE", { venue, message: `${name}'s location check did not answer: nothing goes to Polymarket without it`, native: { status: r.status } });
-  if (r.body.blocked) return no("E_VENUE_GEOBLOCKED", { venue, message: GEO_WORDS, native: { blocked: true, ...(typeof r.body.country === "string" ? { country: r.body.country } : {}), ...(typeof r.body.region === "string" ? { region: r.body.region } : {}) } });
+  // blocked, and nothing else: the place and the IP it names are never carried — a refusal is logged and lands in the ledger
+  if (r.body.blocked) return no("E_VENUE_GEOBLOCKED", { venue, message: GEO_WORDS, native: { blocked: true } });
   return undefined;
 }
 const INSUFFICIENT = /not enough balance|allowance/i;
