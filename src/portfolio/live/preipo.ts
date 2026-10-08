@@ -13,7 +13,22 @@
  * $10,000,000,000), and ONLY those two. Read live on 2026-10-06: OKX's ANTHROPIC was 214.51 against Gate's 2,139.8, Kraken Futures' 2,078.3,
  * Deribit's 2,078.8, KuCoin's 2,083.0 and MEXC's 2,074.9, and its OPENAI 171.36 against 1,630–1,680 elsewhere; its MOONSHOT-USDT-SWAP
  * (68.18) and OURA-USDT-SWAP (49.03), listed in August and September 2026, equal Kraken's PF_MOONSHOTXUSD 68.18 and PF_OURAXUSD 49.12 and
- * MEXC's 68.01 and 48.96 — so they are in the $1,000,000,000 unit like everyone else's.
+ * MEXC's 68.01 and 48.96 — so OKX prices them in the same unit as everyone else (for OURA that unit is one share: see below).
+ *
+ * Binance and Bybit say the $1,000,000,000 unit in their own words. Bybit, listing ANTHROPICUSDT and OPENAIUSDT on 13 July 2026: "Pre-Rebase:
+ * 1 ANTHROPIC ≈ 1/1,000,000,000 of estimated market cap" (announcements.bybit.com, read 2026-10-08). Binance, listing ANTHROPICUSDT on 2 June
+ * 2026: an "Estimated share count" of 1,000,000,000, the contract opening near "the assumed IPO price per share" (its announcement, read
+ * 2026-10-08 through treeofalpha.com's copy: binance.com answers this machine with an empty 202). Neither can be read from here (Binance
+ * answers 451, Bybit 403), and each may resize a contract once a filing gives the real share count, so their lines are judged against the
+ * other venues' implied valuations like any venue's (live/explore.ts): one more than 10% from the median is set aside and said. Hyperliquid's
+ * HIP-3 io:ANTH (EntropyIO's dex) priced 2,044.55 on 2026-10-08 against the six venues' median of 1,983.79 (OKX 204.38 in its ×10 unit,
+ * Gate 2,036.51, Kraken 1,977.62, Deribit 1,979.86, KuCoin 1,987.72, MEXC 1,977.51), and io:OAI 1,644.65 against 1,606.78: the same unit.
+ *
+ * NOT RIGHT FOR OURA. trade.xyz writes of its xyz:OURA (POST /info perpAnnotation, 2026-10-08): "OURA references 1 share of Oura Inc. common
+ * stock"; Bitget (320 million) and BloFin (320,945,459) size theirs on an estimated share count; every venue's OURA traded at 48.55–50.91 that
+ * day, the per-share level of Oura's $40–44 IPO range. The $1,000,000,000 unit this table gives OURA therefore overstates its implied
+ * valuation about threefold, at every venue alike, so the venues still agree with each other. Not changed yet: it needs a unit per company,
+ * and the row's price convention in live/explore.ts with it.
  *
  * A venue's flag, read 2026-10-06 from its own public record (the same record the unified exchange library keeps as a market's `info`, so a
  * connected key's market is read by the same flag):
@@ -24,7 +39,16 @@
  *   Deribit         GET /api/v2/public/get_instruments?currency=any   underlying_type "preipo" (its SPCX, public since 12 June 2026, is "equity")
  *   KuCoin Futures  GET /api/v1/contracts/active                      marketStage "PRE_MARKET" AND assetClass "STOCK" (its BPUSDTM is PRE_MARKET CRYPTO)
  *   MEXC            GET /api/v1/contract/detail                       conceptPlate contains "mc-trade-zone-preipo"
- * An exchange with no flag read here (Bitget, Phemex, Binance, Bybit) is read by the companies' names alone, matched whole.
+ *   Hyperliquid     POST /info {"type":"perpCategories"}              category "preipo" (documented in its info endpoint; read 2026-10-08:
+ *                                                                    io:ANTH, io:OAI, xyz:OURA and the delisted para:ANTH, vntl:ANTHROPIC,
+ *                                                                    vntl:OPENAI, vntl:SPACEX). Anyone may deploy a HIP-3 market, so there
+ *                                                                    the flag never stands alone: a market it files elsewhere ("stocks") is
+ *                                                                    not one, and one it files as "preipo" is one only under a known name
+ * An exchange with no flag read here is read by the companies' names alone, matched whole: Bitget and Phemex, and Binance and Bybit, whose
+ * documented records carry none (read 2026-10-08: Binance's USDⓈ-M exchangeInfo documents contractType PERPETUAL, CURRENT_MONTH,
+ * NEXT_MONTH, CURRENT_QUARTER, NEXT_QUARTER, PERPETUAL_DELIVERING and TRADIFI_PERPETUAL and gives underlyingType no list; Bybit's v5
+ * instruments-info documents symbolType innovation, adventure, xstocks, commodity, stock, forex, ETF, mstocks, and isPreListing, its
+ * pre-market for coins not yet launched).
  *
  * A company is one row across venues under the names they give it (ANTHROPIC; Deribit's ANTH; Kraken's ANTHROPICx; MEXC's KIMISTOCK for
  * Moonshot AI, whose displayNameEn MEXC writes as "MOONSHOT_USDT PERPETUAL"). A name no entry knows is still a pre-IPO contract when the
@@ -68,7 +92,7 @@ export interface PreIpoCompany {
 }
 
 /** the companies, under the names the venues used on 2026-10-06 (OKX, Gate, Kraken Futures, Deribit, KuCoin Futures, MEXC, and Bitget's,
- * Phemex's, Binance's and Bybit's symbols as the exchanges list them) */
+ * Phemex's, Binance's and Bybit's symbols as the exchanges list them) and on 2026-10-08 (Hyperliquid's HIP-3 io:ANTH, io:OAI, xyz:OURA) */
 export const PRE_IPO_COMPANIES: readonly PreIpoCompany[] = [
   { slug: "anthropic", name: "Anthropic", aliases: ["ANTHROPIC", "ANTH"] },
   { slug: "openai", name: "OpenAI", aliases: ["OPENAI", "OAI"] },
@@ -129,8 +153,14 @@ export function preIpoFlag(exchangeId: string, info: Rec): boolean | undefined {
   if (id === "deribit") return str(info.underlying_type) === undefined ? undefined : info.underlying_type === "preipo";
   if (id === "kucoinfutures") return str(info.marketStage) === undefined ? undefined : info.marketStage === "PRE_MARKET" && str(info.assetClass) === "STOCK";
   if (id === "mexc") return Array.isArray(info.conceptPlate) ? info.conceptPlate.some((c) => typeof c === "string" && c.toLowerCase().includes("preipo")) : undefined;
+  // Hyperliquid's own category for a market (perpCategories), carried on the record as `category`
+  if (id === "hyperliquid") return str(info.category) === undefined ? undefined : info.category === "preipo";
   return undefined;
 }
+
+/** venues anyone may list a market on (Hyperliquid's HIP-3 deployers): their flag can rule a market out, never in on its own — a company's
+ * name the table knows decides */
+const NAMED_ONLY: ReadonlySet<string> = new Set(["hyperliquid"]);
 
 /** what a pre-IPO perpetual's market carries beyond a plain perpetual's fields */
 export interface PreIpoMark {
@@ -143,15 +173,16 @@ export interface PreIpoMark {
   eligibility?: string | undefined;
 }
 
-/** a perpetual read as a pre-IPO contract, or not: by the venue's flag where it has one (the flag alone decides there), else by the
- * company's name matched whole. `info` is the venue's own record (a library market's `info`, or the REST record), `base` the venue's base,
- * `instrumentId` the venue's id for the contract (for OKX's per-instrument unit) */
+/** a perpetual read as a pre-IPO contract, or not: by the venue's flag where it has one (the flag alone decides there — except at a venue
+ * anyone may list on, where it only rules out), else by the company's name matched whole. `info` is the venue's own record (a library
+ * market's `info`, or the REST record), `base` the venue's base, `instrumentId` the venue's id for the contract (for OKX's per-instrument
+ * unit) */
 export function preIpoOf(exchangeId: string, info: Rec | undefined, base: string, instrumentId: string): PreIpoMark | undefined {
   const flag = preIpoFlag(exchangeId, info ?? {});
   if (flag === false) return undefined;
   const company = companyOf(base);
   if (!company) return undefined;
-  if (flag === undefined && !company.known) return undefined;
+  if ((flag === undefined || NAMED_ONLY.has(exchangeId.toLowerCase())) && !company.known) return undefined;
   const said = PRE_IPO_ISSUERS[company.slug];
   return { slug: company.slug, name: company.name, category: PRE_IPO_CATEGORY, group: { id: `${PRE_IPO_GROUP}${company.slug}`, title: company.name }, implied: unitOf(exchangeId, instrumentId), ...(said ? { issuer: said.issuer, eligibility: said.eligibility } : {}) };
 }

@@ -27,7 +27,8 @@
  *     and the valuation it implies in the venue's own unit (OKX's ANTHROPIC at 214 in its $10B unit and Gate's at 2,140 in the $1B unit are
  *     one Anthropic). The median guard below runs on the implied valuation, never on the contract price; the row's `implied.usd` is the
  *     median of its venues' and its `price` that median in the $1-per-$1,000,000,000 convention most venues quote in. No `change24h` on the
- *     row (the units differ); the percent change stands;
+ *     row (the units differ); the percent change stands. A public listing that names its own place (`venueName`: one source for several
+ *     places — Hyperliquid's HIP-3 deployers, "Hyperliquid · io") names its venue line with it; the line's `venue` stays the source's id;
  *   · a stock, by its ticker; a token that stands for a share or a fund (an RWA), by its symbol: an AAPL Stock Token is not an AAPL share.
  *     A token is an RWA when its source lists such tokens (Robinhood's public Stock Token list) or its market carries the RWA category (a
  *     wallet's tokens an issuer stands behind, dex.ts): a Stock Token from a wallet and from Robinhood's public list is one row (`rwa:NVDA`),
@@ -512,6 +513,12 @@ function keyOf(m: Market, kind: ExploreKind, r: Reader): string | undefined {
 }
 
 const priceOf = (m: Market): number | undefined => pos(m.price) ?? (pos(m.bid) !== undefined && pos(m.ask) !== undefined ? (m.bid! + m.ask!) / 2 : undefined);
+/** the name on a market's venue line: a public listing's own place where it names one (Hyperliquid's HIP-3: "Hyperliquid · io"), else the
+ * source's or the venue's name */
+const lineName = (r: Reader, m: Market): string => {
+  const own = (m as Listing).venueName;
+  return !r.connected && typeof own === "string" && own.trim() ? own.trim().slice(0, 80) : r.name;
+};
 /** a market's session as the venue said it (Market.session), with nothing else carried; none where it said none, or not in that shape */
 function sessionOf(m: Market): MarketSession | undefined {
   const s = m.session;
@@ -542,7 +549,7 @@ function atOf(r: Reader, m: Market, symbol = m.symbol, price = priceOf(m), open 
   const note = (r.connected && r.canTrade === false ? r.whyNot : undefined) ?? r.readOnly ?? issuerWords ?? ((open === false || session?.open === false) && typeof m.note === "string" && m.note ? m.note : undefined);
   return {
     venue: r.id,
-    venueName: r.name,
+    venueName: lineName(r, m),
     symbol,
     connected: r.connected,
     canTrade: r.connected ? (ordersTaken ? r.canTrade : false) : false,
@@ -578,7 +585,7 @@ function rowOf(key: string, kind: ExploreKind, venues: Map<string, Got[]>, aside
     const prices = priced.map((e) => priceOf(e.m)!).sort((x, y) => x - y);
     const middle = prices[Math.floor(prices.length / 2)]!;
     const far = new Set(priced.filter((e) => Math.abs(priceOf(e.m)! - middle) / middle > 0.1));
-    for (const e of far) aside.push({ venue: e.r.id, venueName: e.r.name, connected: e.r.connected, symbol: e.m.symbol, why: `lists ${e.m.symbol} at ${priceOf(e.m)}, more than 10% from the other venues' ${middle} for ${key.slice(key.indexOf(":") + 1)}: it may be another token under the same name, so it is left out of that row` });
+    for (const e of far) aside.push({ venue: e.r.id, venueName: lineName(e.r, e.m), connected: e.r.connected, symbol: e.m.symbol, why: `lists ${e.m.symbol} at ${priceOf(e.m)}, more than 10% from the other venues' ${middle} for ${key.slice(key.indexOf(":") + 1)}: it may be another token under the same name, so it is left out of that row` });
     entries = entries.filter((e) => !far.has(e));
   }
   if (!entries.length) return undefined;
@@ -609,7 +616,7 @@ function rowOf(key: string, kind: ExploreKind, venues: Map<string, Got[]>, aside
     name,
     base,
     ...(priceAt ? { price: priceOf(priceAt.m) } : {}),
-    ...(moved ? { changePct24h: moved.m.changePct24h, ...(fin(moved.m.change24h) !== undefined ? { change24h: moved.m.change24h } : {}), changeFrom: { venue: moved.r.id, venueName: moved.r.name } } : {}),
+    ...(moved ? { changePct24h: moved.m.changePct24h, ...(fin(moved.m.change24h) !== undefined ? { change24h: moved.m.change24h } : {}), changeFrom: { venue: moved.r.id, venueName: lineName(moved.r, moved.m) } } : {}),
     ...(vols.length ? { volumeUsd24h: vols.reduce((s, v) => s + v, 0) } : {}),
     ...(category ? { category } : {}),
     ...(funded ? { fundingRate: funded.m.fundingRate, ...(funded.m.nextFundingAt ? { nextFundingAt: funded.m.nextFundingAt } : {}) } : {}),
@@ -640,7 +647,7 @@ function preIpoRow(key: string, every: Got[], aside: ExploreMissing[]): ExploreI
     const usds = valued.map((e) => impliedOf(e.m)!.usd).sort((x, y) => x - y);
     const middle = usds[Math.floor(usds.length / 2)]!;
     const far = new Set(valued.filter((e) => Math.abs(impliedOf(e.m)!.usd - middle) / middle > 0.1));
-    for (const e of far) aside.push({ venue: e.r.id, venueName: e.r.name, connected: e.r.connected, symbol: e.m.symbol, why: `lists ${e.m.symbol} at ${priceOf(e.m)}, an implied ${impliedOf(e.m)!.usd} in its unit, more than 10% from the other venues' ${middle} for ${title}: it may be another thing under the same name, so it is left out of that row` });
+    for (const e of far) aside.push({ venue: e.r.id, venueName: lineName(e.r, e.m), connected: e.r.connected, symbol: e.m.symbol, why: `lists ${e.m.symbol} at ${priceOf(e.m)}, an implied ${impliedOf(e.m)!.usd} in its unit, more than 10% from the other venues' ${middle} for ${title}: it may be another thing under the same name, so it is left out of that row` });
     entries = entries.filter((e) => !far.has(e));
   }
   if (!entries.length) return undefined;
@@ -664,7 +671,7 @@ function preIpoRow(key: string, every: Got[], aside: ExploreMissing[]): ExploreI
     name: title,
     base: key.slice(PRE_IPO_GROUP.length).toUpperCase(),
     ...(median !== undefined ? { price: Number((median / PRE_IPO_PER_POINT).toFixed(2)), implied: { usd: median, unit } } : {}),
-    ...(moved ? { changePct24h: moved.m.changePct24h, changeFrom: { venue: moved.r.id, venueName: moved.r.name } } : {}),
+    ...(moved ? { changePct24h: moved.m.changePct24h, changeFrom: { venue: moved.r.id, venueName: lineName(moved.r, moved.m) } } : {}),
     ...(vols.length ? { volumeUsd24h: vols.reduce((s, v) => s + v, 0) } : {}),
     category: PRE_IPO_CATEGORY,
     group: { id: key, title },
