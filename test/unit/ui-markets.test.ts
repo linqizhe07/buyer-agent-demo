@@ -942,8 +942,13 @@ describe("the one drawer", () => {
     // two venues list it, one would take the user: that one is offered
     const two = { ...item, at: [item.at[0], at("kraken", "Kraken", "live:exchange:kraken")] };
     expect(p.run<Record<string, unknown>>(`mkRoute(${JSON.stringify(two)})`)).toMatchObject({ act: "connect", venueName: "Kraken" });
-    // both would refuse: none of them is offered, and the row says how many list it
+    // Kraken's own terms exclude where the user is: still offered (shown, never enforced), its words on the button
     p.run(`VENUES.set("live:exchange:kraken", { connector: "live:exchange:kraken", name: "Kraken", verdict: "terms-exclude", said: "its terms exclude where you are" })`);
+    const told = p.run<Record<string, string>>(`mkRoute(${JSON.stringify(two)})`);
+    expect(told).toMatchObject({ act: "connect", venueName: "Kraken", terms: "Kraken: its terms exclude where you are — its terms exclude where you are." });
+    expect(p.run<string>(`mkActs(${JSON.stringify(two)}, 0)`)).toContain('title="Kraken: its terms exclude where you are');
+    // both refuse this network: none of them is offered, and the row says how many list it
+    p.run(`VENUES.set("live:exchange:kraken", { connector: "live:exchange:kraken", name: "Kraken", verdict: "not-served", said: "Kraken does not serve this location" })`);
     expect(p.run<Record<string, string>>(`mkRoute(${JSON.stringify(two)})`).text).toMatch(/^None of the 2 venues that list it would take you from where you are\. Hyperliquid: not served here/);
     // setup and no answer are not a no: a venue that did not answer just now is still offered
     p.run(`VENUES.set("live:exchange:kraken", { connector: "live:exchange:kraken", name: "Kraken", verdict: "no-answer" })`);

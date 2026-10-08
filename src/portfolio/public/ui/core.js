@@ -964,11 +964,18 @@ async function readVenues(force = false) {
   }
   return VENUES;
 }
-/* a venue that would refuse the user if connected: its verdict and its words; null when it is connectable or not judged */
-const VENUE_NO = { "not-served": "Not served here", "terms-exclude": "Its terms exclude where you are", closed: "No way in here", setup: "Set up first" };
+/* a venue that would refuse the user if connected — it does not serve this network, needs something on this machine first, or offers no
+   way in: its word and its own words; null when it would take the user or was not judged */
+const VENUE_NO = { "not-served": "Not served here", closed: "No way in here", setup: "Set up first" };
 function venueRefuses(connector) {
   const v = connector && VENUES.get(connector);
   return v && VENUE_NO[v.verdict] ? { word: VENUE_NO[v.verdict], name: v.name, said: v.said || "", verdict: v.verdict } : null;
+}
+/* a venue whose own published terms exclude where the user is: said, never enforced — connecting is still offered, because the venue's
+   own sign-up checks residency; null otherwise */
+function venueTermsSay(connector) {
+  const v = connector && VENUES.get(connector);
+  return v && v.verdict === "terms-exclude" ? { word: "Its terms exclude where you are", name: v.name, said: v.said || "" } : null;
 }
 /* a venue's own words for why nothing is placed there from here: what it or its key said, else what its way in gives */
 const readOnlyWords = (v) => (v.readOnlyBecause || v.noTradeBecause || (v.watchOnly ? "a watched address: nothing is traded or sent from it" : "") || `${v.via || "its connection"} gives no interface for orders here`);

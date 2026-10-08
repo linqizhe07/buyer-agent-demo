@@ -149,7 +149,7 @@ export interface Host {
   /** the earn of the venues connected live (live/earn.ts): each venue's earner, where it has one (absent: none earns) */
   liveEarn?(): EarnDesk | undefined;
   /** where the user can connect, as the host last judged it from the network it runs on (live/availability.ts): a venue that refuses this
-   * network, or whose own terms exclude where the user is, is never asked of the owner by an agent. Undefined: not judged yet */
+   * network, or offers no way in, is never asked of the owner by an agent. Undefined: not judged yet */
   venueVerdict?(venue: string): { name: string; verdict: string; said?: string | undefined } | undefined;
 }
 
@@ -719,12 +719,14 @@ export class AccountEngine {
     const now = this.nowMs();
     const wrong = askProblem(a);
     if (wrong) return no("E_ACCOUNT_BAD_ACTION", { message: wrong });
-    // a venue the owner could not connect from here is not asked of the owner: the agent is told why, in the venue's own words
+    // a venue the owner could not connect from here at all (it refuses this network, or offers no way in) is not asked of the owner: the
+    // agent is told why, in the venue's own words. One whose own terms exclude where the user is is asked: the owner sees its terms in the
+    // form and decides — shown, never enforced, as the venue's own sign-up checks residency
     if (a.kind === "venue" && a.venue) {
       const v = this.host.venueVerdict?.(a.venue);
-      if (v && (v.verdict === "not-served" || v.verdict === "terms-exclude" || v.verdict === "closed")) {
+      if (v && (v.verdict === "not-served" || v.verdict === "closed")) {
         const why = v.verdict === "closed" ? "E_ACCOUNT_BAD_ACTION" : "E_VENUE_GEOBLOCKED";
-        return no(why, { venue: a.venue, message: `the owner is not asked: ${v.name} ${v.verdict === "not-served" ? "does not serve the network this account runs on" : v.verdict === "terms-exclude" ? "excludes where the user is in its own terms" : "offers no way in for this account"}${v.said ? ` — ${v.said}` : ""}. portfolio_venues lists where the user can connect` });
+        return no(why, { venue: a.venue, message: `the owner is not asked: ${v.name} ${v.verdict === "not-served" ? "does not serve the network this account runs on" : "offers no way in for this account"}${v.said ? ` — ${v.said}` : ""}. portfolio_venues lists where the user can connect` });
       }
     }
     const waiting = this.waitingAsks(now);

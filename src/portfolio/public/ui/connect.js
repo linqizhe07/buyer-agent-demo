@@ -107,7 +107,7 @@ function tileSays(connector) {
   const r = REACH.get(connector);
   const v = typeof VENUES !== "undefined" ? VENUES.get(connector) : undefined;
   if (r && REACH_WORD[r.state]) return { word: REACH_WORD[r.state], state: r.state, said: r.said || "", at: r.at, shut: true };
-  if (!r && v && (v.verdict === "not-served" || v.verdict === "setup" || v.verdict === "closed")) return { word: VENUE_NO[v.verdict], state: v.verdict === "not-served" ? "location" : v.verdict, said: v.said || "", at: v.asked, shut: true };
+  if (!r && v && VENUE_NO[v.verdict]) return { word: VENUE_NO[v.verdict], state: v.verdict === "not-served" ? "location" : v.verdict, said: v.said || "", at: v.asked, shut: true };
   if (v && v.verdict === "terms-exclude") return { word: "Its terms exclude where you are", state: "terms", said: v.said || "", at: v.asked, shut: false };
   return null;
 }

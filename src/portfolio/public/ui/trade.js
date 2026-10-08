@@ -788,7 +788,7 @@ function tkTicket(panel, kind0, preset) {
     const unitOf = (r) => (r.implied && r.implied.unit && r.implied.unit !== commonUnit ? `<span class="why">${esc(r.implied.unit)}</span>` : "");
     const nobody = rows.length > 0 && rows.every((r) => r.state === "public" && r.refuses);
     box2.innerHTML = `${none && rows.length ? `<p class="dim small">${rows.some((r) => r.state === "public" && r.connector) ? "None of your accounts trades it yet: connect one where it is listed." : nobody ? "None of the venues that list it would take you from where you are." : "None of your accounts can trade it now."}</p>` : ""}${rows.map((r, i) => {
-      if (r.state === "public") return `<div class="tk-at pub"><span><b>${esc(r.venueName)}</b> <span class="tag">Public</span>${r.refuses ? `<span class="why"><b>${esc(r.refuses.word)}</b>${r.refuses.said ? ` — ${esc(r.refuses.said)}` : ""}</span>` : !r.connector && r.note ? `<span class="why">${esc(r.note)}</span>` : ""}${unitOf(r)}</span><span class="tk-at-r">${priceOf(r) ? `<span class="tab-nums">${priceOf(r)}</span>${r.connector ? '<span class="tk-sep"> · </span>' : ""}` : ""}${r.connector ? `<button type="button" class="link" data-connect="${i}">Connect to trade</button>` : ""}</span></div>`;
+      if (r.state === "public") return `<div class="tk-at pub"><span><b>${esc(r.venueName)}</b> <span class="tag">Public</span>${r.refuses ? `<span class="why"><b>${esc(r.refuses.word)}</b>${r.refuses.said ? ` — ${esc(r.refuses.said)}` : ""}</span>` : r.terms ? `<span class="why"><b>${esc(r.terms.word)}</b>${r.terms.said ? ` — ${esc(r.terms.said)}` : ""}</span>` : !r.connector && r.note ? `<span class="why">${esc(r.note)}</span>` : ""}${unitOf(r)}</span><span class="tk-at-r">${priceOf(r) ? `<span class="tab-nums">${priceOf(r)}</span>${r.connector ? '<span class="tk-sep"> · </span>' : ""}` : ""}${r.connector ? `<button type="button" class="link" data-connect="${i}">Connect to trade</button>` : ""}</span></div>`;
       if (r.state === "off") return `<div class="tk-at off"><span><b>${esc(r.venueName)}</b><span class="why">${esc(r.why)}${r.how ? ` ${esc(r.how)}` : ""}</span></span></div>`;
       return `<button type="button" class="tk-at" data-at="${i}" aria-pressed="${String(!!picked && picked.venue === r.venue)}"><span><b>${esc(r.venueName)}</b>${r.best ? ' <span class="tag up">Best</span>' : ""}${r.closed ? ' <span class="tag">Closed</span>' : ""}${r.note ? `<span class="why">${esc(r.note)}</span>` : ""}${unitOf(r)}</span><span class="tab-nums tk-at-r">${priceOf(r)}${r.worse ? `<span class="why">${esc(Math.abs(r.worse).toFixed(2))}% ${r.worse > 0 ? "worse" : "better, check"}</span>` : ""}</span></button>`;
     }).join("")}`;
@@ -1338,7 +1338,9 @@ function tkWhereRows(item, ranked, kind = "") {
       if (a.connectTo && A.venues.some((v) => v.id === a.connectTo && v.live)) continue;
       // a venue that would refuse the user from where they are (core VENUES) offers no connection: its own words instead
       const no = typeof venueRefuses === "function" ? venueRefuses(a.connector) : null;
-      rows.push({ state: "public", venue: a.venue, venueName: a.venueName, symbol: a.symbol, price: a.price, ...(a.implied ? { implied: a.implied } : {}), connector: tradedHere || !writesOn() || no ? "" : a.connector, connectTo: a.connectTo, note: a.note || "", ...(no ? { refuses: no } : {}) });
+      // its own terms exclude where the user is: said beside the connection, which stays (the venue's sign-up decides)
+      const terms = !no && typeof venueTermsSay === "function" ? venueTermsSay(a.connector) : null;
+      rows.push({ state: "public", venue: a.venue, venueName: a.venueName, symbol: a.symbol, price: a.price, ...(a.implied ? { implied: a.implied } : {}), connector: tradedHere || !writesOn() || no ? "" : a.connector, connectTo: a.connectTo, note: a.note || "", ...(no ? { refuses: no } : {}), ...(terms ? { terms } : {}) });
       continue;
     }
     if (seen.has(a.venue)) continue;

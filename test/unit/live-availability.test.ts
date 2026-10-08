@@ -116,6 +116,14 @@ describe("where this user can connect, from the service", () => {
       expect(isRefusal(no) && no.message).toContain("the owner is not asked: Binance does not serve the network this account runs on");
       const yes = await ag({ type: "agentAsk", kind: "venue", venue: "okx", usd: "0", text: "connect OKX so I can trade there" });
       expect(isRefusal(yes)).toBe(false);
+      // a venue whose own terms exclude where the user is: judged so, and still asked of the owner (shown, never enforced)
+      svc.venueTerms = (c, place) => (c === "live:exchange:kraken" ? { url: "https://www.kraken.com/legal", read: "2026-10-08", says: "…not available in…", excludesHere: place?.country === "ZZ" } : undefined);
+      svc.venuePlace = async () => ({ country: "ZZ" });
+      const judged = (await (await fetch(`${server.url}/api/account/venues?force=1`)).json()) as { venues: Array<{ connector: string; verdict: string; terms?: { excludesHere?: boolean } }> };
+      expect(judged.venues.find((x) => x.connector === "live:exchange:kraken")).toMatchObject({ verdict: "terms-exclude", terms: { excludesHere: true } });
+      expect(JSON.stringify(judged)).not.toContain("ZZ");
+      const asked = await ag({ type: "agentAsk", kind: "venue", venue: "kraken", usd: "0", text: "connect Kraken" });
+      expect(isRefusal(asked)).toBe(false);
     } finally {
       await server.close();
     }
