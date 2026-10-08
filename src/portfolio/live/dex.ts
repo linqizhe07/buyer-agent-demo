@@ -52,7 +52,7 @@ import { RWA_CATEGORY } from "./categories.ts";
 import { CHAIN_BY_ID, CHAINS, STABLECOINS, type ChainName, type ChainReader, type TokenRef } from "./chain.ts";
 import { STOCK_TOKEN_ISSUER, STOCK_TOKEN_TERMS, stockTokens, type StockToken } from "./robinhood.ts";
 import { DONE, badOrder, floorTo, inDollars, pick, plain, type LiveTrader, type Market, type OrderRequest, type OrderState } from "./trade.ts";
-import { REGION, isStable, num, redact, unreachable, venueSaidNo, type Http, type HttpReply, type LiveBalance } from "./types.ts";
+import { edgeRefused, edgeWords, REGION, isStable, num, redact, unreachable, venueSaidNo, type Http, type HttpReply, type LiveBalance } from "./types.ts";
 
 const LIFI = "https://li.quest/v1";
 const NAME = "LI.FI";
@@ -334,9 +334,10 @@ function lifiNo(venue: string, r: HttpReply): Refusal {
   const said = redact(r.text.replace(/\s+/g, " ").trim().slice(0, 220), []);
   const native = { status: r.status, said };
   if (r.status === 451 || REGION.test(r.text)) return venueSaidNo(venue, NAME, r.status, r.text);
-  // LI.FI asks no key, so a 403 is not about one (docs.li.fi/api-reference/api-key-security). It is the likely shape of LI.FI refusing where
-  // the request comes from — not observed, so read conservatively: as LI.FI's own rule, never as something to get around
-  if (r.status === 403) return no("E_VENUE_GEOBLOCKED", { venue, message: `${NAME} refused this machine (HTTP 403): that is its own rule — its terms exclude US persons and sanctioned places — and the account does not look for a way around it`, native });
+  // a 403 is LI.FI's (or its edge's) no to this request: its own words when it gives some; a page with none refuses this network. It answers
+  // from a US network (checked 2026-10-08: /v1/chains and /v1/quote both 200), so nothing here says whom its terms exclude
+  if (edgeRefused(r.status, r.text)) return no("E_VENUE_GEOBLOCKED", { venue, message: edgeWords(NAME, r.status, r.text), native: { status: r.status, edge: true } });
+  if (r.status === 403) return no("E_VENUE_PERMISSION", { venue, message: `${NAME} refused this request (HTTP 403)${str(b.message) ? `: “${str(b.message)}”` : ""}. That is its own answer, and the account does not look for a way around it`, native });
   if (r.status === 400) return { ...badOrder(venue, NAME, str(b.message) || "it did not take the request as written"), native };
   if (r.status === 404 && num(b.code) === 1002) {
     // no route: `errors` is { filteredOut: [{ reason }], failed: [{ subpaths: { path: [{ tool, code, message }] } }] }, or a flat list of the same

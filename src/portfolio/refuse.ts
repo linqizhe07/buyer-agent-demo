@@ -71,5 +71,24 @@ const EN: Partial<Record<Code, string>> = {
 
 export function no(code: Code, extra: { venue?: string; tool?: string; detail?: Record<string, unknown>; native?: unknown; message?: string } = {}): Refusal {
   const message = extra.message ?? EN[code];
-  return refuse(code, message === undefined ? extra : { ...extra, message });
+  // a venue that repeats the address this machine reached it from (OKX's and MEXC's IP-list answers do, an edge's error page may) has it
+  // taken out here, where every refusal is made: a refusal is logged and lands in the ledger, and an address says where the user is
+  const clean = { ...extra, ...(extra.native !== undefined ? { native: unaddressedDeep(extra.native) } : {}) };
+  return refuse(code, message === undefined ? clean : { ...clean, message: unaddressed(message) });
 }
+
+/** a public network address (IPv4, or IPv6) in a venue's words, as "this machine's address"; a loopback or private one says nothing about
+ * where the user is and stays */
+const IPV4 = /\b(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}\b/g;
+const IPV6 = /(?<![0-9a-f:])(?:(?:[0-9a-f]{1,4}:){7}[0-9a-f]{1,4}|(?:[0-9a-f]{1,4}:){1,6}:(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,5})?|::(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){1,6}))(?![0-9a-f:])/gi;
+const PRIVATE_V4 = /^(?:127\.|10\.|0\.|192\.168\.|169\.254\.|172\.(?:1[6-9]|2\d|3[01])\.)/;
+export function unaddressed(text: string): string {
+  if (typeof text !== "string" || !/[.:]/.test(text)) return text;
+  return text.replace(IPV4, (ip) => (PRIVATE_V4.test(ip) ? ip : "(this machine's address)")).replace(IPV6, (ip) => (/^(?:::1|fe80:|f[cd][0-9a-f]{2}:)/i.test(ip) || ip.split(":").filter(Boolean).length < 3 ? ip : "(this machine's address)"));
+}
+const unaddressedDeep = (v: unknown, depth = 0): unknown => {
+  if (typeof v === "string") return unaddressed(v);
+  if (depth > 6 || v === null || typeof v !== "object") return v;
+  if (Array.isArray(v)) return v.map((x) => unaddressedDeep(x, depth + 1));
+  return Object.fromEntries(Object.entries(v as Record<string, unknown>).map(([k, x]) => [k, unaddressedDeep(x, depth + 1)]));
+};

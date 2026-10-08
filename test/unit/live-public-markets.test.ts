@@ -512,7 +512,7 @@ function hyperliquidNet(candles: Rec[] = []) {
 }
 
 describe("Hyperliquid, keyless", () => {
-  it("asks one POST of one fixed body and lists every perpetual busiest first as <COIN>-PERP, with Hyperliquid's own mid, day, funding and leverage, to be placed through a MetaMask Agent Wallet", async () => {
+  it("asks one POST of one fixed body and lists every perpetual busiest first as <COIN>-PERP, with Hyperliquid's own mid, day, funding and leverage, to be placed through Hyperliquid's connection to trade", async () => {
     const net = hyperliquidNet();
     const hl = hyperliquidPublic({ http: net.http, clock: () => NOW });
     const got = (await hl.listings({ limit: 10 })) as Listing[];
@@ -521,7 +521,8 @@ describe("Hyperliquid, keyless", () => {
     expect(got.map((m) => m.symbol)).toEqual(["BTC-PERP", "ETH-PERP"]);
     expect(got[0]).toEqual({ symbol: "BTC-PERP", name: "BTC perpetual on Hyperliquid", kind: "perp", base: "BTC", quote: "USDC", price: 85738.5, open: true, types: [], change24h: 304.5, changePct24h: 0.3564, volumeUsd24h: 1820069402.6143524647, fundingRate: 0.0000125, nextFundingAt: "2026-10-05T15:00:00.000Z", maxLeverage: 40 });
     expect(got[1]).toMatchObject({ price: 2698.24, maxLeverage: 25 });
-    expect(hl).toMatchObject({ id: "hyperliquid", name: "Hyperliquid", kind: "exchange", connectTo: "metamask", connector: "live:metamask" });
+    // traded through the account's Hyperliquid connection: an API wallet that places orders and cannot withdraw
+    expect(hl).toMatchObject({ id: "hyperliquid", name: "Hyperliquid", kind: "exchange", connectTo: "hyperliquid-trade", connector: "live:hyperliquid-trade" });
     // the answer is kept: a search and a second listing ask nothing more
     expect(((await hl.listings({ q: "eth", limit: 5 })) as Listing[]).map((m) => m.symbol)).toEqual(["ETH-PERP"]);
     expect(((await hl.listings({ q: "BTC/USD", limit: 5 })) as Listing[]).map((m) => m.symbol)).toEqual(["BTC-PERP"]);
@@ -529,7 +530,7 @@ describe("Hyperliquid, keyless", () => {
     // the sentence under the list says how much of the venue is shown, when something is left out
     expect(hl.notes!({})).toEqual([]);
     await hl.listings({ limit: 1 });
-    expect(hl.notes!({})).toEqual(["Hyperliquid: 1 of 2 perpetuals shown · search for the rest · placed through a connected MetaMask Agent Wallet"]);
+    expect(hl.notes!({})).toEqual(["Hyperliquid: 1 of 2 perpetuals shown · search for the rest · traded once Hyperliquid is connected to trade"]);
     expect(hl.notes!({})[0]!.length).toBeLessThan(160);
     expect(hl.notes!({ q: "eth" })).toEqual([]);
   });
@@ -765,10 +766,10 @@ describe("Pre-IPO perpetuals, keyless, at six venues", () => {
 });
 
 describe("every public source", () => {
-  it("is the four exchanges, Kalshi, Polymarket, Hyperliquid, the Stock Tokens and the six pre-IPO venues, unless other exchanges are named", () => {
-    const preipo = ["okx-preipo", "gate-preipo", "krakenfutures-preipo", "deribit-preipo", "kucoinfutures-preipo", "mexc-preipo"];
-    expect(publicSources().map((s) => s.id)).toEqual(["kraken", "coinbase", "okx", "binance", "kalshi", "polymarket", "hyperliquid", "robinhood-stock-tokens", ...preipo]);
-    expect(publicSources({ exchanges: ["bybit"] }).map((s) => s.id)).toEqual(["bybit", "kalshi", "polymarket", "hyperliquid", "robinhood-stock-tokens", ...preipo]);
-    expect(PRE_IPO_VENUES.map((v) => v.id)).toEqual(["okx", "gate", "krakenfutures", "deribit", "kucoinfutures", "mexc"]);
+  it("is the five exchanges (Bybit by default, after Binance), Kalshi, Polymarket, Polymarket US, Hyperliquid, the Stock Tokens, the eight exchanges' pre-IPO perpetuals and Hyperliquid's HIP-3 ones, unless other exchanges are named", () => {
+    const preipo = ["okx-preipo", "gate-preipo", "krakenfutures-preipo", "deribit-preipo", "kucoinfutures-preipo", "mexc-preipo", "binance-preipo", "bybit-preipo", "hyperliquid-preipo"];
+    expect(publicSources().map((s) => s.id)).toEqual(["kraken", "coinbase", "okx", "binance", "bybit", "kalshi", "polymarket", "polymarket-us", "hyperliquid", "robinhood-stock-tokens", ...preipo]);
+    expect(publicSources({ exchanges: ["kraken"] }).map((s) => s.id)).toEqual(["kraken", "kalshi", "polymarket", "polymarket-us", "hyperliquid", "robinhood-stock-tokens", ...preipo]);
+    expect(PRE_IPO_VENUES.map((v) => v.id)).toEqual(["okx", "gate", "krakenfutures", "deribit", "kucoinfutures", "mexc", "binance", "bybit"]);
   });
 });

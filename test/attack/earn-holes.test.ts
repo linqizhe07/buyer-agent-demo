@@ -291,7 +291,9 @@ describe("ATTACK: a perpetual from a place Hyperliquid's terms close", () => {
     const { nonce: _n, ...rest } = p.action as Extract<OwnerAction, { type: "liveOrder" }>;
     const r = refusal(await x.own(rest as NoNonce<OwnerAction>));
     expect(r.code).toBe("E_VENUE_GEOBLOCKED");
-    expect(r.message).toContain("Hyperliquid does not serve this location (US-PA");
+    expect(r.message).toContain("Hyperliquid does not serve this location (where mm places this machine)");
+    // the place itself is never named: a refusal is logged and lands in the ledger
+    expect(JSON.stringify(r)).not.toMatch(/US-PA|"country"|"region"/);
     expect(r.message).toContain("does not look for a way around it");
     expect(refusal(await x.own({ type: "liveClose", venue: "mmw", symbol: "BTC-PERP", qty: "" })).code).toBe("E_VENUE_GEOBLOCKED");
     expect(refusal(await x.own({ type: "liveLeverage", venue: "mmw", symbol: "BTC-PERP", leverage: "2", marginMode: "" })).code).toBe("E_VENUE_GEOBLOCKED");

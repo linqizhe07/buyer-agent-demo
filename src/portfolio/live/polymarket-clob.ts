@@ -7,7 +7,11 @@
  * file speaks those two and nothing older.
  *
  *   GET  polymarket.com/api/geoblock   whether Polymarket serves the place this machine is in: asked before connecting and before every
- *                                     order. Blocked is Polymarket's own rule; the answer is that, and nothing here looks for a way around it
+ *                                     order. Blocked is Polymarket's own rule, read with its own lists of how far it goes there: blocked
+ *                                     completely (the sanctioned places: nothing is connected or sent), close-only (positions already open
+ *                                     may be closed and none opened: the United States among them, so a sell is sent and a buy is not), or
+ *                                     close-only on its website alone ("the API itself is not restricted"). Nothing here looks for a way
+ *                                     around it
  *   GET  /auth/derive-api-key          the CLOB credentials of the signer, on an EIP-712 ClobAuth signature (L1); POST /auth/api-key makes
  *                                     them the first time. They are kept in this process's memory and written nowhere
  *   GET  gamma /markets/slug/{slug}    a market by its name: its outcomes and their ids, neg-risk, whether it takes orders
@@ -392,19 +396,53 @@ function positionOf(p: Json): Position | undefined {
 // ---- refusals --------------------------------------------------------------------------------------
 
 /** the CLOB's region refusal is not in Polymarket's docs; a third-party report has 403 "Trading restricted in your region", which the
- * shared REGION pattern does not catch */
-const PM_REGION = /restricted in your (region|country|jurisdiction)|trading (is )?restricted|geo-?blocked|not available in your (region|country)/i;
+ * shared REGION pattern does not catch. "Trading restricted" alone is a market's state, not a place, and is not read as one */
+const PM_REGION = /restricted in your (region|country|jurisdiction)|geo-?blocked|not available in your (region|country)/i;
 const GEO_WORDS = "Polymarket does not serve this location: that is its own rule, and the account does not look for a way around it";
+/** close-only, as Polymarket's docs put it: users there "can close existing positions but cannot open new ones" */
+export const CLOSE_ONLY_WORDS = "Polymarket lets this location close positions, not open new ones (its own rule: docs.polymarket.com/api-reference/geoblock), and the account does not look for a way around it";
 /** Polymarket's location check, the first thing a connection to trade asks (and live/reach.ts asks before any key exists) */
 export const POLYMARKET_GEOBLOCK = GEOBLOCK;
-/** what Polymarket's location check answered, as the account reads it: blocked — completely, or close-only as the US is — is its rule; no
- * answer is not taken for a yes. The IP it reports is left out of everything */
-export function polymarketLocationSaid(r: HttpReply, venue: string, name: string): Refusal | undefined {
-  if (r.status === 451 || (r.status !== 200 && (REGION.test(r.text) || PM_REGION.test(r.text)))) return no("E_VENUE_GEOBLOCKED", { venue, message: GEO_WORDS, native: { status: r.status } });
-  if (r.status !== 200 || !isObj(r.body) || typeof r.body.blocked !== "boolean") return no("E_VENUE_UNREACHABLE", { venue, message: `${name}'s location check did not answer: nothing goes to Polymarket without it`, native: { status: r.status } });
-  if (r.body.blocked) return no("E_VENUE_GEOBLOCKED", { venue, message: GEO_WORDS, native: { blocked: true, ...(typeof r.body.country === "string" ? { country: r.body.country } : {}), ...(typeof r.body.region === "string" ? { region: r.body.region } : {}) } });
-  return undefined;
+
+/** How far Polymarket's `blocked` goes where the user is, by its own lists (docs.polymarket.com/api-reference/geoblock, read 2026-10-08;
+ * its check answers `blocked` alone, the same for all three). Blocked completely, on the website and the API, no closing either: */
+export const PM_BLOCKED = new Set(["IR", "SY", "CU", "KP", "UA-43", "UA-14", "UA-09"]);
+/** close-only on its website alone: "the API itself is not restricted", so as open as anywhere for this account, which trades through the
+ * API (Malta's is for sports markets only). Polymarket's help center (14 August 2026) calls some of these blocked outright: there the CLOB's
+ * own answer to each order is the last word, in its words */
+export const PM_SITE_ONLY = new Set(["IE", "JP", "MT", "NL", "KR"]);
+/** open · close-only (everywhere else Polymarket answers blocked: the United States among them — positions already open may be closed and
+ * orders cancelled, none opened) · blocked completely */
+export type PolymarketScope = "open" | "close-only" | "blocked";
+
+/** Polymarket's answer (or the one `mm predict geoblock` relays) read with its lists: undefined when it says neither yes nor no. The place
+ * it names is matched here, in memory, and goes nowhere. Blocked without a place this can read is blocked completely — not knowing how far
+ * is not a yes — and so is a country whose only blocked parts are named (Ukraine's) when the part is not given */
+export function polymarketScope(answer: unknown): PolymarketScope | undefined {
+  if (!isObj(answer) || typeof answer.blocked !== "boolean") return undefined;
+  if (!answer.blocked) return "open";
+  const country = typeof answer.country === "string" ? answer.country.trim().toUpperCase() : "";
+  const region = typeof answer.region === "string" ? answer.region.trim().toUpperCase() : "";
+  if (!/^[A-Z]{2}$/.test(country) || PM_BLOCKED.has(country)) return "blocked";
+  const parts = [...PM_BLOCKED].filter((r) => r.startsWith(`${country}-`));
+  if (parts.length && (!region || parts.includes(region.startsWith(`${country}-`) ? region : `${country}-${region}`))) return "blocked";
+  return PM_SITE_ONLY.has(country) ? "open" : "close-only";
 }
+
+/** what Polymarket's location check answered, as the account reads it: blocked completely is its rule, and so is close-only (said to the
+ * caller, which sends a sell and refuses a buy); no answer is not taken for a yes. The IP it reports is left out of everything, and so is
+ * the place */
+export function polymarketLocation(r: HttpReply, venue: string, name: string): "open" | "close-only" | Refusal {
+  if (r.status === 451 || (r.status !== 200 && (REGION.test(r.text) || PM_REGION.test(r.text)))) return no("E_VENUE_GEOBLOCKED", { venue, message: GEO_WORDS, native: { status: r.status } });
+  const scope = r.status === 200 ? polymarketScope(r.body) : undefined;
+  if (scope === undefined) return no("E_VENUE_UNREACHABLE", { venue, message: `${name}'s location check did not answer: nothing goes to Polymarket without it`, native: { status: r.status } });
+  // blocked, and nothing else: the place and the IP it names are never carried — a refusal is logged and lands in the ledger
+  if (scope === "blocked") return no("E_VENUE_GEOBLOCKED", { venue, message: GEO_WORDS, native: { blocked: true } });
+  return scope;
+}
+/** a buy from a place Polymarket lets only close: refused before anything is sent, in its words. A sell is of shares the wallet holds (the
+ * CLOB sells nothing else), so it closes a position, and goes */
+export const closeOnlyBuy = (venue: string, doing: string): Refusal => no("E_VENUE_GEOBLOCKED", { venue, message: `${CLOSE_ONLY_WORDS}. A buy opens a position, so nothing was placed (${doing}); a sell of shares the account holds closes one`, native: { blocked: true, closeOnly: true } });
 const INSUFFICIENT = /not enough balance|allowance/i;
 const NO_TRADE = /address banned|closed only mode/i;
 const KEY_OWNER = /has to be the (owner|address) of the api key/i;
@@ -430,14 +468,15 @@ export interface PolymarketTradeRequest {
 }
 
 /** Polymarket, connected to trade: Polymarket's location check first, then the positions and cash of the wallet that holds the money,
- * then the CLOB credentials of the key. Any of the three saying no is the answer, in Polymarket's words */
+ * then the CLOB credentials of the key. Any of the three saying no is the answer, in Polymarket's words. Where Polymarket lets the place
+ * only close positions, the connection is made — what is held is read, and can be sold — and says so */
 export async function polymarketTradeSource(req: PolymarketTradeRequest): Promise<{ source: LiveSource; first: LiveBalance[] } | Refusal> {
   const w = walletOf(req.venue, req.key);
   if (isRefusal(w)) return w;
   const name = req.label || "Polymarket";
   const t = polymarketTrader({ venue: req.venue, name, wallet: w, http: req.http, clock: req.clock, salt: req.salt });
   const geo = await t.geoblock();
-  if (geo) return geo;
+  if (isRefusal(geo)) return geo;
   const read = await polymarketSource({ venue: req.venue, label: name, address: w.maker, http: req.http, chain: req.chain });
   if (isRefusal(read)) return read;
   const creds = await t.creds();
@@ -452,7 +491,7 @@ export async function polymarketTradeSource(req: PolymarketTradeRequest): Promis
     via: `Polymarket CLOB · orders signed by the account wallet's key (${SIG_NAME[w.type]})`,
     probe: {
       can: ["trade"],
-      note: `orders are made by ${w.maker}${w.maker === w.eoa ? "" : ` and signed by its owner key ${w.eoa}`}; Polymarket issued CLOB credentials for ${w.eoa}, kept in this process's memory only${w.type === 0 ? " · Polymarket says a plain address trades only once it has allowlisted it" : ""} · money comes in to that wallet as pUSD on Polygon, or through Polymarket's bridge from the other chains; it leaves Polymarket at Polymarket`,
+      note: `${geo === "close-only" ? `${CLOSE_ONLY_WORDS}: here it sells what the wallet holds and cancels orders, and opens nothing · ` : ""}orders are made by ${w.maker}${w.maker === w.eoa ? "" : ` and signed by its owner key ${w.eoa}`}; Polymarket issued CLOB credentials for ${w.eoa}, kept in this process's memory only${w.type === 0 ? " · Polymarket says a plain address trades only once it has allowlisted it" : ""} · money comes in to that wallet as pUSD on Polygon, or through Polymarket's bridge from the other chains; it leaves Polymarket at Polymarket`,
       native: { calls: ["GET polymarket.com/api/geoblock", "GET data-api /v2/positions?user=", "balanceOf pUSD on Polygon", "GET /auth/derive-api-key"], maker: w.maker, signer: w.eoa, signatureType: w.type },
     },
     read: read.source.read,
@@ -607,9 +646,9 @@ function polymarketTrader(c: { venue: string; name: string; wallet: Wallet; http
     return no("E_VENUE_REJECTED", { venue: c.venue, message: words, native });
   };
 
-  /** Polymarket's own location check, for the IP this machine sends from. Blocked — completely, or close-only as the US is — is its rule;
-   * the check not answering is not taken for a yes. The IP it reports is left out of everything */
-  const geoblock = async (): Promise<Refusal | undefined> => {
+  /** Polymarket's own location check, for the IP this machine sends from: open, close-only (a sell goes, a buy does not), or its refusal —
+   * blocked completely, or the check not answering, which is not taken for a yes. The IP and the place it reports are left out of everything */
+  const geoblock = async (): Promise<"open" | "close-only" | Refusal> => {
     let r: HttpReply;
     try {
       r = await call(GEOBLOCK);
@@ -617,7 +656,7 @@ function polymarketTrader(c: { venue: string; name: string; wallet: Wallet; http
       const x = asRefusal(c.venue, c.name, err, secrets());
       return { ...x, message: `${c.name}'s location check could not be reached: nothing goes to Polymarket without it` };
     }
-    return polymarketLocationSaid(r, c.venue, c.name);
+    return polymarketLocation(r, c.venue, c.name);
   };
 
   /** L1: the key signs ClobAuth (no verifyingContract; the timestamp is seconds, signed as a string; nonce 0) and Polymarket answers the
@@ -992,7 +1031,9 @@ function polymarketTrader(c: { venue: string; name: string; wallet: Wallet; http
         // a market order is bounded by the worst price the account allows, or it is not sent
         if (o.type === "market" && !(o.worstPrice !== undefined && Number.isFinite(o.worstPrice) && o.worstPrice > 0)) return badOrder(c.venue, c.name, "a market order here carries the worst price it may fill at");
         const geo = await geoblock();
-        if (geo) return geo;
+        if (isRefusal(geo)) return geo;
+        // close-only where the user is: a sell closes (the wallet's own shares), a buy would open
+        if (geo === "close-only" && o.side === "buy") return closeOnlyBuy(c.venue, `buy ${plain(o.qty)} shares of ${o.symbol}`);
         const k = await resolve(o.symbol);
         if (!k.open) return no("E_VENUE_MARKET_CLOSED", { venue: c.venue, message: `${c.name}: ${k.name} takes no orders now${k.why ? ` (${k.why})` : ""}` });
         const built = await build(o, k, orderType);

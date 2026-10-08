@@ -208,6 +208,7 @@ const TRADE_KINDS: Record<string, MarketKind[]> = {
   robinhood: ["stock"],
   "robinhood-crypto": ["crypto"],
   kalshi: ["event"],
+  "polymarket-us": ["event"],
   "polymarket-trade": ["event"],
   metamask: ["token", "event", "perp"],
   wallet: ["token"],

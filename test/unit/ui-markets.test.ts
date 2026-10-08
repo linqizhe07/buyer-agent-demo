@@ -510,6 +510,48 @@ describe("the Markets pane", () => {
     expect(p.run(`reachNoteHtml({ state: "ok" }, "kalshi")`)).toBe("");
   });
 
+  it("offers Hyperliquid as Polymarket is offered: its tile is the API-wallet connection (a key file that never withdraws), and the account read by its address is Hyperliquid · by address", () => {
+    const p = page(() => ({}));
+    const options = [...account().connectLive.options, { kind: "hyperliquid-trade", connector: "live:hyperliquid-trade", needs: "key-file", label: "Hyperliquid · trading, with an API wallet that cannot withdraw", venues: ["hyperliquid"] }, { kind: "hyperliquid", connector: "live:hyperliquid", needs: "address", label: "Hyperliquid · by the account's address", venues: ["hyperliquid"] }];
+    p.set("A", account({ connectLive: { ...account().connectLive, options } }));
+    const cat = p.run<string>("catalog(true)");
+    expect(cat).toContain('<button type="button" class="tile" data-kind="hyperliquid-trade" data-extra=""><b>Hyperliquid</b><span>API key</span></button>');
+    expect(cat).toContain('<button type="button" class="tile" data-kind="hyperliquid" data-extra=""><b>Hyperliquid · by address</b><span>Address</span></button>');
+    // neither is offered again under More
+    expect([cat.match(/data-kind="hyperliquid-trade"/g), cat.match(/data-kind="hyperliquid"/g)].map((m) => m?.length)).toEqual([1, 1]);
+    // the API-wallet connection asks its venue's rule first (live/reach.ts); the one by address asks nothing
+    expect(p.run("[tileConnector('hyperliquid-trade', ''), tileConnector('hyperliquid', '')]")).toEqual(["live:hyperliquid-trade", ""]);
+    p.run(`REACH.set("live:hyperliquid-trade", { connector: "live:hyperliquid-trade", state: "location", said: "Hyperliquid does not serve this location: its Terms of Use (§1.6) …", at: "2026-10-06T05:00:00.000Z" })`);
+    expect(p.run<string>("catalog(true)")).toContain('data-kind="hyperliquid-trade" data-extra="" title="Hyperliquid does not serve this location: its Terms of Use (§1.6) …"><b>Hyperliquid</b><span><em class="off">Not served here</em></span>');
+    // its form's note offers to watch the account by its address instead
+    expect(p.run<string>(`reachNoteHtml(REACH.get("live:hyperliquid-trade"), "hyperliquid-trade")`)).toContain('data-reach="watch">Watch a Hyperliquid account by its address instead</button>');
+    // the key file: where an API wallet is made, what to do there in Hyperliquid's words, and its two fields
+    expect(p.run("API_PAGES['hyperliquid-trade']")).toBe("https://app.hyperliquid.xyz/API");
+    const how = p.run<string>("keyHow('hyperliquid-trade')");
+    for (const w of ["More → API", "Generate", "Authorize API Wallet", "180 days", "can never withdraw", '"walletAddress"', '"privateKey"', "§1.6"]) expect(how).toContain(w);
+    expect(p.run("FIELDS['hyperliquid-trade']")).toEqual(["walletAddress", "privateKey"]);
+    expect(p.run("keyHowFor({ id: 'hyperliquid-trade', connector: 'live:hyperliquid-trade' })")).toBe(how);
+  });
+
+  it("offers Polymarket US as an account of its own under Markets and tokens — a key file of its Key ID and Secret Key, made at polymarket.us/developer — asked its own first question, and never under More", () => {
+    const p = page(() => ({}));
+    const options = [...account().connectLive.options, { kind: "polymarket-us", connector: "live:polymarket-us", needs: "key-file", label: "Polymarket US · prediction-market account, API key", venues: [] }];
+    p.set("A", account({ connectLive: { ...account().connectLive, options } }));
+    const cat = p.run<string>("catalog(true)");
+    expect(cat).toContain('<button type="button" class="tile" data-kind="polymarket-us" data-extra=""><b>Polymarket US</b><span>API key</span></button>');
+    expect(cat.match(/data-kind="polymarket-us"/g)?.length).toBe(1);
+    // its group: the tile sits between Kalshi's and Polymarket's
+    expect(cat.indexOf('data-kind="kalshi"') < cat.indexOf('data-kind="polymarket-us"') && cat.indexOf('data-kind="polymarket-us"') < cat.indexOf('data-kind="polymarket-trade"')).toBe(true);
+    expect(p.run("tileConnector('polymarket-us', '')")).toBe("live:polymarket-us");
+    p.run(`REACH.set("live:polymarket-us", { connector: "live:polymarket-us", state: "location", said: "Polymarket US does not serve this location: that is its own rule, and the account does not look for a way around it", at: "2026-10-06T05:00:00.000Z" })`);
+    expect(p.run<string>("catalog(true)")).toContain('data-kind="polymarket-us" data-extra="" title="Polymarket US does not serve this location: that is its own rule, and the account does not look for a way around it"><b>Polymarket US</b><span><em class="off">Not served here</em></span>');
+    expect(p.run("API_PAGES['polymarket-us']")).toBe("https://polymarket.us/developer");
+    const how = p.run<string>("keyHow('polymarket-us')");
+    for (const w of ["Verify your identity", "same method", "Apple, Google or email", '"keyId"', '"secretKey"', "shown only once", "moves no money"]) expect(how).toContain(w);
+    expect(p.run("FIELDS['polymarket-us']")).toEqual(["keyId", "secretKey"]);
+    expect(p.run("keyHowFor({ id: 'polymarket-us', connector: 'live:polymarket-us' })")).toBe(how);
+  });
+
   it("shows in the drawer what the agents are doing in a market: their cards (Review → Portfolio), open orders and the owner's intents", () => {
     const p = page(() => ({}));
     p.set(
@@ -901,6 +943,93 @@ describe("the one drawer", () => {
     expect(html).toContain('<span class="mk-v pub" title="Public prices, read without a key">Kraken</span>');
     expect(html).toContain('<span class="dim mk-more" title="OKX, Coinbase">+2</span>');
     expect(p.run<string>(`mkWhere(${JSON.stringify({ key: "coin:ETH", kind: "coin", name: "Ether", at: [at("Exchange X", true)] })})`)).not.toContain("mk-more");
+  });
+
+  it("offers Connect to trade only at a venue that would take the user from where they are; one that would not says so in its own words, on the row and in the drawer", () => {
+    const p = page(() => ({}));
+    p.set("A", account());
+    const at = (venue: string, venueName: string, connector: string) => ({ venue, venueName, symbol: "BTC-PERP", connected: false, canTrade: false, public: true, connectTo: venue, connector, price: 62_000 });
+    const item = { key: "perp:BTC", kind: "perp", name: "BTC perpetual", base: "BTC", price: 62_000, tabs: ["perps"], at: [at("hyperliquid-trade", "Hyperliquid", "live:exchange:okx")] };
+    // not judged yet: offered as before
+    expect(p.run<Record<string, unknown>>(`mkRoute(${JSON.stringify(item)})`)).toMatchObject({ act: "connect", venueName: "Hyperliquid" });
+    // the venue refuses this network: no connection offered, its words instead — the row's button says it
+    p.run(`VENUES.set("live:exchange:okx", { connector: "live:exchange:okx", name: "Hyperliquid", verdict: "not-served", said: "Hyperliquid's Terms of Use §1.6 do not serve this location." })`);
+    const r = p.run<Record<string, string>>(`mkRoute(${JSON.stringify(item)})`);
+    expect(r).toMatchObject({ act: "why", word: "Not served here" });
+    expect(r.text).toBe("Hyperliquid: not served here — Hyperliquid's Terms of Use §1.6 do not serve this location.");
+    expect(p.run<string>(`mkActs(${JSON.stringify(item)}, 0)`)).toContain(">Not served here · why</button>");
+    // two venues list it, one would take the user: that one is offered
+    const two = { ...item, at: [item.at[0], at("kraken", "Kraken", "live:exchange:kraken")] };
+    expect(p.run<Record<string, unknown>>(`mkRoute(${JSON.stringify(two)})`)).toMatchObject({ act: "connect", venueName: "Kraken" });
+    // Kraken's own terms exclude where the user is: still offered (shown, never enforced), its words on the button
+    p.run(`VENUES.set("live:exchange:kraken", { connector: "live:exchange:kraken", name: "Kraken", verdict: "terms-exclude", said: "its terms exclude where you are" })`);
+    const told = p.run<Record<string, string>>(`mkRoute(${JSON.stringify(two)})`);
+    expect(told).toMatchObject({ act: "connect", venueName: "Kraken", terms: "Kraken: its terms exclude where you are — its terms exclude where you are." });
+    expect(p.run<string>(`mkActs(${JSON.stringify(two)}, 0)`)).toContain('title="Kraken: its terms exclude where you are');
+    // both refuse this network: none of them is offered, and the row says how many list it
+    p.run(`VENUES.set("live:exchange:kraken", { connector: "live:exchange:kraken", name: "Kraken", verdict: "not-served", said: "Kraken does not serve this location" })`);
+    expect(p.run<Record<string, string>>(`mkRoute(${JSON.stringify(two)})`).text).toMatch(/^None of the 2 venues that list it would take you from where you are\. Hyperliquid: not served here/);
+    // setup and no answer are not a no: a venue that did not answer just now is still offered
+    p.run(`VENUES.set("live:exchange:kraken", { connector: "live:exchange:kraken", name: "Kraken", verdict: "no-answer" })`);
+    expect(p.run<Record<string, unknown>>(`mkRoute(${JSON.stringify(two)})`)).toMatchObject({ act: "connect", venueName: "Kraken" });
+    p.run(`VENUES.clear()`);
+  });
+
+  it("the list of accounts reads the account's detection too: a venue whose own terms exclude where the user is is marked and said, never closed; one that refuses this network is closed", () => {
+    const p = page(() => ({}));
+    p.set("A", account());
+    const terms = "its terms exclude where you are (https://www.okx.com/help/terms-of-service, read 2026-10-08): “…Restricted Persons…” — the venue checks residency when an account is opened; the account does not";
+    p.run(`VENUES.set("live:exchange:okx", { connector: "live:exchange:okx", name: "OKX", verdict: "terms-exclude", said: ${JSON.stringify(terms)}, asked: "2026-10-06T05:00:00.000Z" })`);
+    p.run(`VENUES.set("live:exchange:bybit", { connector: "live:exchange:bybit", name: "Bybit", verdict: "not-served", said: "Bybit does not serve this location", asked: "2026-10-06T05:00:00.000Z" })`);
+    expect(p.run("tileSays('live:exchange:okx')")).toMatchObject({ word: "Its terms exclude where you are", shut: false, state: "terms" });
+    expect(p.run("tileSays('live:exchange:bybit')")).toMatchObject({ word: "Not served here", shut: true });
+    const cat = p.run<string>("catalog(true)");
+    expect(cat).toContain('data-extra="okx"');
+    expect(cat).toMatch(/data-extra="okx" title="its terms exclude where you are[^"]*"><b>OKX<\/b><span><em class="off">Its terms exclude where you are<\/em>/);
+    expect(cat).toMatch(/data-extra="bybit" title="Bybit does not serve this location"><b>Bybit<\/b><span><em class="off">Not served here<\/em>/);
+    // the form's note for the terms: the venue's words and when they were judged — no Check again, no watch-instead, and the form stays open
+    const note = p.run<string>("reachNoteHtml(tileSays('live:exchange:okx'), 'exchange')");
+    expect(note).toContain("the venue checks residency when an account is opened; the account does not");
+    expect(note).not.toContain("data-reach=");
+    // this form's own fresh check wins over the detection for a no; a venue the form found answering keeps its terms note
+    p.run(`REACH.set("live:exchange:bybit", { connector: "live:exchange:bybit", state: "ok", at: "2026-10-06T05:00:00.000Z" })`);
+    expect(p.run("tileSays('live:exchange:bybit')")).toBeNull();
+    p.run(`REACH.set("live:exchange:okx", { connector: "live:exchange:okx", state: "ok", at: "2026-10-06T05:00:00.000Z" })`);
+    expect(p.run("tileSays('live:exchange:okx')")).toMatchObject({ shut: false, state: "terms" });
+    p.run("VENUES.clear(); REACH.clear()");
+  });
+
+  it("close-only (Polymarket's rule for the United States among other places): the tile is said and stays open; Markets offers no connection to buy there, and says why", () => {
+    const p = page(() => ({}));
+    p.set("A", account());
+    const said = "Polymarket lets this location close positions, not open new ones (its own rule: docs.polymarket.com/api-reference/geoblock), and the account does not look for a way around it. Connected, the account sells what the wallet holds there and cancels its orders; it opens nothing";
+    p.run(`VENUES.set("live:polymarket-trade", { connector: "live:polymarket-trade", name: "Polymarket", verdict: "close-only", said: ${JSON.stringify(said)}, asked: "2026-10-08T15:00:00.000Z" })`);
+    expect(p.run("tileSays('live:polymarket-trade')")).toMatchObject({ word: "Close only here", state: "close-only", shut: false });
+    expect(p.run<string>("catalog(true)")).toMatch(/data-kind="polymarket-trade" data-extra="" title="Polymarket lets this location close positions[^"]*"><b>Polymarket<\/b><span><em class="off">Close only here<\/em>/);
+    const note = p.run<string>("reachNoteHtml(tileSays('live:polymarket-trade'), 'polymarket-trade')");
+    expect(note).toContain("Connected, the account sells what the wallet holds there");
+    expect(note).toContain('data-reach="again"');
+    expect(note).not.toContain('data-reach="watch"');
+    // a buy is opening: Markets offers no connection there, and says so in Polymarket's words
+    const item = { key: "event:x", kind: "event", name: "Will it rain?", price: 0.4, tabs: ["events"], at: [{ venue: "polymarket", venueName: "Polymarket", symbol: "rain:Yes", connected: false, canTrade: false, public: true, connectTo: "polymarket-trade", connector: "live:polymarket-trade", price: 0.4 }] };
+    expect(p.run<Record<string, string>>(`mkRoute(${JSON.stringify(item)})`)).toMatchObject({ act: "why", word: "Close only here" });
+    p.run("VENUES.clear()");
+  });
+
+  it("a venue that cannot be used from here names its edition for where the user is: a tile of its own beside it, and the form's way to it", () => {
+    const p = page(() => ({}));
+    p.set("A", account());
+    const edition = { connector: "live:exchange:binanceus", name: "Binance.US", said: "Binance.US serves where you are under its own terms (https://www.binance.us/terms-of-use, read 2026-10-08): a separate company, with its own account and API keys" };
+    p.run(`VENUES.set("live:exchange:binance", { connector: "live:exchange:binance", name: "Binance", verdict: "not-served", said: "Binance does not serve this location", asked: "2026-10-08T15:00:00.000Z", edition: ${JSON.stringify(edition)} })`);
+    expect(p.run("tileSays('live:exchange:binance')")).toMatchObject({ word: "Not served here", shut: true, edition: { name: "Binance.US" } });
+    const cat = p.run<string>("catalog(true)");
+    expect(cat).toMatch(/<b>Binance<\/b><span><em class="off">Not served here<\/em><\/span><\/button><button type="button" class="tile" data-kind="exchange" data-extra="binanceus"><b>Binance.US<\/b><span>API key · serves where you are<\/span><\/button>/);
+    // only beside the venue that cannot be used: no other tile says it
+    expect(cat.match(/serves where you are/g)).toHaveLength(1);
+    const note = p.run<string>("reachNoteHtml(tileSays('live:exchange:binance'), 'exchange')");
+    expect(note).toContain('data-reach="edition"');
+    expect(note).toContain(">Connect Binance.US instead</button>");
+    p.run("VENUES.clear()");
   });
 
   it("lists the watchlist without a lead sentence or a date column: the date is the star's title", () => {

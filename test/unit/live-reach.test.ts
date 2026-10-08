@@ -88,14 +88,45 @@ describe("reach: each venue's first, keyless question, before a key is made", ()
     expect((await reachOf("live:robinhood-crypto", blocked)).state).toBe("unreachable");
   });
 
-  it("Polymarket's location check: blocked is its rule; what it says about the place and the IP never leaves the account", async () => {
-    const { d } = deps({ answers: { "https://polymarket.com/api/geoblock": reply(200, { blocked: true, ip: "203.0.113.7", country: "XX", region: "YY" }) } });
-    const r = await reachOf("live:polymarket-trade", d);
+  it("Polymarket's location check, read with its own lists: close-only (the United States among them) connects and opens nothing, blocked completely is not served, close-only on its website alone is open to the API; the place and the IP never leave the account", async () => {
+    const at = (body: unknown) => reachOf("live:polymarket-trade", deps({ answers: { "https://polymarket.com/api/geoblock": reply(200, body) } }).d);
+    const us = await at({ blocked: true, ip: "203.0.113.7", country: "US", region: "PA" });
+    expect(us.state).toBe("close-only");
+    expect(us.said).toBe("Polymarket lets this location close positions, not open new ones (its own rule: docs.polymarket.com/api-reference/geoblock), and the account does not look for a way around it. Connected, the account sells what the wallet holds there and cancels its orders; it opens nothing");
+    const r = await at({ blocked: true, ip: "203.0.113.7", country: "IR", region: "07" });
     expect(r.state).toBe("location");
     expect(r.said).toBe("Polymarket does not serve this location: that is its own rule, and the account does not look for a way around it. Its location check answered blocked");
-    expect(JSON.stringify(r)).not.toMatch(/203\.0\.113\.7|"XX"|"YY"|\bXX\b|\bYY\b/);
+    for (const x of [us, r]) expect(JSON.stringify(x)).not.toMatch(/203\.0\.113\.7|"US"|"PA"|"IR"|"07"/);
+    // Crimea is blocked completely; Ukraine with its part not given is taken so (its only blocked places are parts); no place at all too
+    expect((await at({ blocked: true, country: "UA", region: "43" })).state).toBe("location");
+    expect((await at({ blocked: true, country: "UA", region: "" })).state).toBe("location");
+    expect((await at({ blocked: true })).state).toBe("location");
+    // close-only on its website alone: "the API itself is not restricted"
+    expect((await at({ blocked: true, country: "JP", region: "13" })).state).toBe("ok");
+    // a place Polymarket blocks that its lists do not name: close-only, as its docs say of everywhere it blocks but the sanctioned places
+    expect((await at({ blocked: true, country: "ZZ", region: "" })).state).toBe("close-only");
     expect((await reachOf("live:polymarket-trade", deps({ answers: { "https://polymarket.com/api/geoblock": reply(200, { blocked: false }) } }).d)).state).toBe("ok");
     expect((await reachOf("live:polymarket-trade", deps({ answers: { "https://polymarket.com/api/geoblock": new Error("ETIMEDOUT") } }).d)).state).toBe("unreachable");
+  });
+
+  it("Hyperliquid's trading connection: its own terms (§1.6) held to where this user is now — the place from Polymarket's location check, said never; Polymarket's own verdict is not Hyperliquid's", async () => {
+    const at = (country: string, region: string, blocked = false) => deps({ answers: { "https://polymarket.com/api/geoblock": reply(200, { blocked, ip: "203.0.113.7", country, region }) } });
+    const us = await reachOf("live:hyperliquid-trade", at("US", "NY", true).d);
+    expect(us.state).toBe("location");
+    expect(us.said).toBe("Hyperliquid does not serve this location: its Terms of Use (§1.6) make its Interface unavailable to persons located in the United States of America or Ontario, Canada, or in a territory under economic sanctions. That is its own rule, and the account does not look for a way around it");
+    expect(JSON.stringify(us)).not.toMatch(/203\.0\.113\.7|"US"|"NY"/);
+    expect((await reachOf("live:hyperliquid-trade", at("CA", "ON").d)).state).toBe("location");
+    expect((await reachOf("live:hyperliquid-trade", at("IR", "").d)).state).toBe("location");
+    // blocked by Polymarket in Ireland: that is Polymarket's rule, and Hyperliquid serves there
+    const ie = at("IE", "L", true);
+    expect(await reachOf("live:hyperliquid-trade", ie.d)).toEqual({ connector: "live:hyperliquid-trade", state: "ok", at: "2026-10-07T19:00:00.000Z" });
+    expect(ie.asked.map((a) => a.url)).toEqual(["https://polymarket.com/api/geoblock"]);
+    for (const a of ie.asked) expect(Object.keys(a.headers).map((h) => h.toLowerCase()).filter((h) => /auth|key|sign|token|cookie/.test(h))).toEqual([]);
+    // a place not learned is not a yes
+    const quiet = await reachOf("live:hyperliquid-trade", deps({ answers: { "https://polymarket.com/api/geoblock": new Error("ETIMEDOUT") } }).d);
+    expect([quiet.state, quiet.said]).toEqual(["unreachable", "where this machine is could not be learned just now, so Hyperliquid's own line (its Terms of Use §1.6) could not be held to it; connecting asks again"]);
+    expect((await reachOf("live:hyperliquid-trade", deps({ answers: { "https://polymarket.com/api/geoblock": reply(200, { blocked: false }) } }).d)).state).toBe("unreachable");
+    expect(reachKeepMs(us)).toBe(600_000);
   });
 
   it("Robinhood: the sign-in's discovery only — ok when a client may register itself, no way in when it may not; nothing is registered", async () => {

@@ -18,7 +18,8 @@
     "portfolio:demo": "tsx src/portfolio/demo.ts",
     "portfolio:mcp": "tsx src/portfolio/mcp.ts",
     "account:demo": "tsx src/portfolio/account-demo.ts",
-    "account:service": "tsx src/portfolio/account-service.ts"
+    "account:service": "tsx src/portfolio/account-service.ts",
+    "account:check": "tsx src/portfolio/account-check.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

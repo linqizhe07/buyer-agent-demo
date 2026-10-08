@@ -654,11 +654,12 @@ describe("prediction markets: event contracts", () => {
     expect(await pm.execute({ kind: "move", asset: "pUSD", amount: 100, to: "wallet-main" })).toMatchObject({ ok: true, status: "sent" });
     expect((await pm.read()).map((h) => [h.asset, h.amount])).toEqual([["pUSD", 579.6], ["FED-DEC-HIKE25:YES", 400]]);
     const blocked = polymarketSimAccount({ ...seeds.polymarket, geoblock: { blocked: true, country: "US", region: "NY" } }, clock);
-    expect(blocked.account).toMatchObject({ scope: { can: ["read", "move", "redeem"] }, closed: { trade: "takes no orders from US-NY" } });
+    expect(blocked.account).toMatchObject({ scope: { can: ["read", "move", "redeem"] }, closed: { trade: "takes no orders from this location" } });
     expect(blocked.account.scope.limits[0]).toContain("PREDICT_GEOBLOCKED");
-    expect(await blocked.execute({ kind: "trade", symbol: FED, side: "buy", qty: 10 })).toMatchObject({ code: "E_VENUE_GEOBLOCKED", message: "Polymarket takes no orders from US-NY", native: { error: "PREDICT_GEOBLOCKED", country: "US", region: "NY" } });
+    expect(await blocked.execute({ kind: "trade", symbol: FED, side: "buy", qty: 10 })).toMatchObject({ code: "E_VENUE_GEOBLOCKED", message: "Polymarket takes no orders from this location", native: { error: "PREDICT_GEOBLOCKED", country: "US", region: "NY" } });
     // the live read: what `mm predict geoblock` and `mm predict status` say becomes the credential's scope; the caller's IP is dropped
-    expect(geoblockOf({ result: { blocked: true, ip: "203.0.113.9", country: "US", region: "NY" } })).toEqual({ blocked: true, country: "US", region: "NY" });
+    // blocked or not, and nothing else: the IP and the place it names are not kept
+    expect(geoblockOf({ result: { blocked: true, ip: "203.0.113.9", country: "US", region: "NY" } })).toEqual({ blocked: true });
     expect([liveScope(false, { blocked: true }), liveScope(true, { blocked: true }), liveScope(true, { blocked: false })]).toEqual([["read"], ["read", "move", "redeem"], ["read", "trade", "move", "redeem"]]);
   });
 

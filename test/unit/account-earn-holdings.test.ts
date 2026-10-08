@@ -1,6 +1,6 @@
 /** Money in an earn product beside a venue's balances (account/holdings.ts withEarn, byAsset, change24h): a row of its own, class earn, in
  * the venue's total — and never counted twice where the venue's balance read already carries the same money: Kraken's `<ASSET>.B` lines,
- * a vault's shares in a wallet. OKX's Simple Earn leaves the funding account when it goes in, so nothing is left out there. And an RWA
+ * Binance's `LD<ASSET>` lines, a vault's shares in a wallet. OKX's Simple Earn leaves the funding account when it goes in, so nothing is left out there. And an RWA
  * market's orders join the wallet's RWA row (marketKey). Pure functions: nothing is asked of anyone. */
 import { describe, expect, it } from "vitest";
 import { byAsset, change24h, earnKey, marketClass, marketKey, withEarn, type EarnHeld } from "../../src/portfolio/account/holdings.ts";
@@ -32,6 +32,33 @@ describe("withEarn: an earn product's money added to a venue, the same money in 
     ]);
     // 100 ready + 500 + 625 in earn: not 1,225 + the 500 again
     expect(sum(out.holdings)).toBe(1_225);
+  });
+
+  it("Binance: Simple Earn Flexible is also in the spot balance as LD<ASSET> (unpriced there) — that line goes, the position counts once; Lido's LDO, and an LD line for an asset not in Earn, stay", () => {
+    const binance = venue("binance", "Binance", [
+      { asset: "USDT", amount: 500, usd: 500, class: "stable", note: "spot" },
+      { asset: "USDT", amount: 50, usd: 50, class: "stable", note: "funding" },
+      { asset: "LDUSDT", amount: 40, usd: 0, note: "spot · no price" },
+      { asset: "LDBTC", amount: 0.015, usd: 0, note: "spot · no price" },
+      { asset: "LDO", amount: 30, usd: 27, note: "spot" },
+      // nothing of ETH is in Simple Earn here: the venue's line stands as it gave it
+      { asset: "LDETH", amount: 0.2, usd: 0, note: "spot · no price" },
+    ]);
+    const held: EarnHeld[] = [
+      { product: "USDT001", asset: "USDT", amount: 40, usd: 40, apy: 0.0412, name: "USDT · Simple Earn Flexible" },
+      { product: "BTC001", asset: "BTC", amount: 0.015, usd: 900, name: "BTC · Simple Earn Flexible" },
+    ];
+    const out = withEarn(binance, held);
+    expect(out.dropped.map((h) => h.asset)).toEqual(["LDUSDT", "LDBTC"]);
+    expect(out.holdings.map((h) => [h.asset, h.class])).toEqual([["USDT", "stable"], ["USDT", "stable"], ["LDO", "crypto"], ["LDETH", "crypto"], ["USDT", "earn"], ["BTC", "earn"]]);
+    // 550 ready + 27 LDO + 940 in Simple Earn, and no row for the LD lines: by asset, USDT ready and USDT earning are two rows, LDUSDT none
+    expect(sum(out.holdings)).toBe(1_517);
+    const { rows } = byAsset([{ id: "binance", name: "Binance", holdings: out.holdings }]);
+    expect(rows.map((r) => [r.key, r.amount])).toEqual([["earn:binance:BTC001", 0.015], ["stable:USDT", 550], ["earn:binance:USDT001", 40], ["crypto:LDO", 30], ["crypto:LDETH", 0.2]]);
+    // a vault on a chain is a wallet's, never Binance's: an LD look-alike of its asset in the wallet (not worth what the vault holds, so not
+    // its shares either) stays
+    const wallet = venue("metamask", "MetaMask Agent Wallet", [{ asset: "LDUSDC", amount: 99, usd: 99, note: "Base" }]);
+    expect(withEarn(wallet, [{ product: "8453:0x4e65fe4dba92790696d040ac24aa414708f5c0ab", asset: "USDC", amount: 5, usd: 5, chain: "Base" }]).dropped).toEqual([]);
   });
 
   it("OKX: Simple Earn is not in the funding or trading balance, so both stand: the USDT that is ready and the USDT lent out", () => {

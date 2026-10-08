@@ -948,6 +948,37 @@ const watched = (v) => !!v.address && !v.proven;
 /* an order can be placed here: trading is on, the venue trades, the key may (or has not said), and a wallet is proven yours */
 const canTrade = (v) => writesOn() && !!v.trade && v.trade.can !== false && !watched(v);
 const canMove = (v) => writesOn() && !!v.liveCan && !v.readOnlyBecause && !watched(v) && (v.liveCan.withdraw !== false || ((v.liveCan.ledgers || []).length > 1 && v.liveCan.transfer !== false) || v.liveCan.swap !== false || !!v.liveCan.send);
+/* WHERE THIS USER CAN CONNECT, as the account judged it from the network it runs on (GET /api/account/venues, live/availability.ts): each
+   venue's own answer to that network, and its own terms matched to where the user is (never named). Read when the page is idle and again
+   when older than ten minutes; Markets, Trade and the list of accounts read it before offering "Connect to trade", so a venue that would
+   refuse is never offered — its words are said instead. connector → { name, verdict, said, terms, needs, group, connected } */
+const VENUES = new Map();
+let venuesRead = 0;
+async function readVenues(force = false) {
+  if (!force && venuesRead && Date.now() - venuesRead < 600_000) return VENUES;
+  const got = await api(`/api/account/venues${force ? "?force=1" : ""}`);
+  if (got && Array.isArray(got.venues)) {
+    VENUES.clear();
+    for (const v of got.venues) VENUES.set(v.connector, v);
+    venuesRead = Date.now();
+  }
+  return VENUES;
+}
+/* a venue that would refuse the user's order to open something if connected — it does not serve this network, lets it only close what is
+   held (close-only: Polymarket's rule for the United States among other places), needs something on this machine first, or offers no way
+   in: its word and its own words; null when it would take the user or was not judged. A close-only venue still connects (the list of
+   accounts keeps its form open): what is held there is read, and can be sold */
+const VENUE_NO = { "not-served": "Not served here", "close-only": "Close only here", closed: "No way in here", setup: "Set up first" };
+function venueRefuses(connector) {
+  const v = connector && VENUES.get(connector);
+  return v && VENUE_NO[v.verdict] ? { word: VENUE_NO[v.verdict], name: v.name, said: v.said || "", verdict: v.verdict } : null;
+}
+/* a venue whose own published terms exclude where the user is: said, never enforced — connecting is still offered, because the venue's
+   own sign-up checks residency; null otherwise */
+function venueTermsSay(connector) {
+  const v = connector && VENUES.get(connector);
+  return v && v.verdict === "terms-exclude" ? { word: "Its terms exclude where you are", name: v.name, said: v.said || "" } : null;
+}
 /* a venue's own words for why nothing is placed there from here: what it or its key said, else what its way in gives */
 const readOnlyWords = (v) => (v.readOnlyBecause || v.noTradeBecause || (v.watchOnly ? "a watched address: nothing is traded or sent from it" : "") || `${v.via || "its connection"} gives no interface for orders here`);
 

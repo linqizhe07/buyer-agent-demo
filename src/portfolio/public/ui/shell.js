@@ -381,6 +381,8 @@ function drawReach() {
 async function refresh() {
   try {
     await load();
+    // where the user can connect: asked again when older than ten minutes (core readVenues keeps it otherwise)
+    readVenues().catch(() => {});
     if (unreachable) toast("The account answers again.", "ok");
     unreachable = false;
   } catch {
@@ -405,6 +407,8 @@ routed();
   const ahead = () => {
     if (typeof mkPrefetch === "function") mkPrefetch();
     if (typeof tkReadKinds === "function") tkReadKinds();
+    // where the user can connect (core VENUES): read before anything offers "Connect to trade"; the pane on screen draws again with it
+    readVenues().then(() => drawPane(connected(), owns()));
   };
   if (typeof requestIdleCallback === "function") requestIdleCallback(ahead, { timeout: 2000 });
   else setTimeout(ahead, 500);

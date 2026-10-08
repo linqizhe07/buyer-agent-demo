@@ -3,19 +3,23 @@
  * It is the last trade on a public market, asked without a key through the unified exchange library: the exchanges are tried in order and
  * the first one that answers wins (one that does not serve this location simply does not answer, and the next is asked). A price is kept
  * for a minute; a miss is remembered for five, so an asset nobody lists is not asked about on every refresh.
+ *
+ * The list does not depend on where this machine is. From the developer's machine (2026-10-08) Binance answers HTTP 451 and Bybit 403;
+ * wherever they serve, they price what the first three do not list. A refusal costs one round of requests: the library keeps its failed load
+ * of the markets and answers it again at once, so an exchange that said no is not asked again while the process runs.
  */
 import { openExchange, type ExchangeClient, type OpenExchange } from "./exchange.ts";
 import { isStable, num } from "./types.ts";
 
 export type Price = (asset: string) => Promise<number | undefined>;
 
-const ORDER = ["kraken", "coinbase", "okx", "binance"];
+const ORDER = ["kraken", "coinbase", "okx", "binance", "bybit"];
 const QUOTES = ["USD", "USDT", "USDC"];
 /** a wrapped or staked form is priced as what it wraps only where that is one for one by construction */
 const ALIAS: Record<string, string> = { WETH: "ETH", WBNB: "BNB", WPOL: "POL", MATIC: "POL" };
 
-/** the exchanges a public price is asked of, in the order they are asked; the Markets screen reads their keyless tickers too
- * (public-markets.ts) */
+/** the exchanges a public price is asked of, in the order they are asked; the Markets screen reads their keyless tickers too, the same five
+ * in the same order (public-markets.ts): one list, so a price and the Markets screen never disagree about which exchanges count */
 export const PUBLIC_EXCHANGES: readonly string[] = ORDER;
 
 /** one keyless client per exchange and per opener, opened on first use and kept: every read made through it shares the client, so its

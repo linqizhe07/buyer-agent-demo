@@ -107,6 +107,8 @@ export function compilePolicy(policy: WalletPolicy, catalog: Connector[] = CATAL
         return row(["programs allowlist = swap / transfer 程序", `recipients allowlist = ${home}`, "per-tx cap · daily cap", `session 到期 = ${until}`], "signer");
       case "api-key-rsa":
         return row(["RSA key：trade / read，不含出入金", "出入金 ACH 经 web：钱包不碰", `key 到期 ≤ ${until}`], "venue");
+      case "api-key-ed25519":
+        return row(["Ed25519 key：trade / read，API 没有出入金的调用", "出入金在场所自己的 app 里（借记卡、ACH 等）：钱包不碰", "key 在场所的开发者页面随时可撤销"], "venue");
       case "broker-key":
         return row(["paper key 钉在 paper host（席位启动时核对）", "法币 ACH 不经钱包", "加密单 tif 由插件合同吸收为 gtc / ioc"], "seat");
     }

@@ -8,11 +8,20 @@
 
 // ---- Earn ---------------------------------------------------------------------------------------
 
-/** the products Earn lists: to put money in, those the venue says take it now first (the others with their reason); to take it out, those
- * something is in */
+/** what is ready at a product's venue in its asset, to put in: not what is on its way, nor what is already in an earn product there */
+function enReady(p) {
+  const v = ((typeof A !== "undefined" && A && A.venues) || []).find((x) => x.id === p.venue);
+  return ((v && v.holdings) || []).filter((h) => String(h.asset || "").toUpperCase() === String(p.asset || "").toUpperCase() && !h.inTransit && h.class !== "earn").reduce((s, h) => s + h.amount, 0);
+}
+/** the products Earn lists: to put money in, those the venue says take it now first — among them, those in an asset ready at their venue
+ * (a venue may list hundreds, most in coins not held there: Binance) — and the others with their reason; to take it out, those something
+ * is in */
 function enList(view, kind) {
   const held = (p) => view.positions.some((h) => h.venue === p.venue && h.product === p.id && h.amount > 0);
-  return kind === "withdraw" ? view.products.filter(held) : [...view.products.filter((p) => p.canSupply), ...view.products.filter((p) => !p.canSupply)];
+  if (kind === "withdraw") return view.products.filter(held);
+  const open = view.products.filter((p) => p.canSupply);
+  const ready = new Set(open.filter((p) => enReady(p) > 0));
+  return [...open.filter((p) => ready.has(p)), ...open.filter((p) => !ready.has(p)), ...view.products.filter((p) => !p.canSupply)];
 }
 /* money into or out of one product, as the account prepares it: the product's own asset, the amount typed — or "all" of it out */
 const enDraft = (p, kind, amount) => ({ type: "liveEarn", venue: p.venue, kind: kind === "withdraw" ? "withdraw" : "supply", product: p.id, asset: p.asset, amount: String(amount ?? "").trim() });
@@ -73,8 +82,7 @@ function openEarn(preset = {}) {
       const p = product();
       if (!p) return 0;
       if (kind === "withdraw") return held(p) ? held(p).amount : 0;
-      const v = A.venues.find((x) => x.id === p.venue);
-      return ((v && v.holdings) || []).filter((h) => h.asset.toUpperCase() === p.asset.toUpperCase() && !h.inTransit).reduce((s, h) => s + h.amount, 0);
+      return enReady(p);
     };
     const q = (s) => form.querySelector(s);
     const box = q("[data-q]");

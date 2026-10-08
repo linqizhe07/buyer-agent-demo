@@ -6,8 +6,15 @@
  *   live:alpaca            GET /v2/clock with no key: the 401 it answers is an answer
  *   live:robinhood-crypto  GET /api/v1/crypto/trading/accounts/ with no key: the 400 it answers is an answer
  *   live:kalshi            GET /trade-api/v2/exchange/status, public
- *   live:polymarket-trade  Polymarket's location check, as the connection asks it first (it answers blocked or not; the IP and the place it
- *                          names are never kept)
+ *   live:polymarket-us     GET gateway.polymarket.us/v1/markets?limit=1, its public market data ("No API key needed"): what Polymarket
+ *                          US's own servers answer the network the Account runs on, asked there each time. Its terms set who may open an
+ *                          account (live/eligibility.ts shows them); this asks only whether it answers here
+ *   live:polymarket-trade  Polymarket's location check, as the connection asks it first (it answers blocked or not), read with Polymarket's
+ *                          own lists of how far blocked goes: completely, or close-only (the United States among those), or on its website
+ *                          alone. The IP and the place it names are never kept
+ *   live:hyperliquid-trade Hyperliquid's own line (its Terms of Use §1.6), held to where this user is now (location.ts: the place from
+ *                          Polymarket's location check, used for this one answer and never shown): Hyperliquid's API answers from anywhere,
+ *                          and its terms are what close it to the United States, Ontario and the sanctioned territories
  *   live:robinhood         the sign-in's discovery: its two public metadata documents, and that a client may register itself (OAuthSignIn)
  *   live:metamask          `mm auth status` on this machine: installed, and signed in
  *
@@ -15,16 +22,22 @@
  * connection without a question of its own (a test's stand-ins) has nothing to ask: both answer "ok" without asking anything.
  *
  * States: ok · location (the venue does not serve this location: its rule, said in its words; the account looks for no way around it) ·
- * setup (something on this machine first: mm installed, mm signed in) · closed (the venue offers no way in for this account) · unreachable
- * (no answer just now; the connection asks again when it is made). */
+ * close-only (the venue lets this location close positions and open none: connected, what is held can be sold) · setup (something on this
+ * machine first: mm installed, mm signed in) · closed (the venue offers no way in for this account) · unreachable (no answer just now; the
+ * connection asks again when it is made).
+ *
+ * Every answer is the one the venue gives the network this account runs on — the user's own, on the user's machine — asked when it is
+ * needed. Nothing a builder's machine was answered is written into the account. */
 import type { Refusal } from "../../core/errors.ts";
 import { exchangeClock, type OpenExchange } from "./exchange.ts";
+import { HYPERLIQUID_RULE, locator } from "./location.ts";
 import type { RunMm } from "./metamask.ts";
-import { POLYMARKET_GEOBLOCK, polymarketLocationSaid } from "./polymarket-clob.ts";
+import { CLOSE_ONLY_WORDS, POLYMARKET_GEOBLOCK, polymarketLocation } from "./polymarket-clob.ts";
 import type { OAuthSignIn } from "./signin.ts";
-import { REGION, type Http, type HttpReply } from "./types.ts";
+import { unaddressed } from "../refuse.ts";
+import { edgeRefused, edgeWords, REGION, type Http, type HttpReply } from "./types.ts";
 
-export type ReachState = "ok" | "location" | "setup" | "closed" | "unreachable";
+export type ReachState = "ok" | "location" | "close-only" | "setup" | "closed" | "unreachable";
 export interface Reach {
   connector: string;
   state: ReachState;
@@ -42,12 +55,13 @@ export interface ReachDeps {
 }
 
 /** the venues' names, for the sentences */
-const NAMES: Record<string, string> = { alpaca: "Alpaca", "robinhood-crypto": "Robinhood Crypto", kalshi: "Kalshi", "polymarket-trade": "Polymarket", robinhood: "Robinhood", metamask: "MetaMask Agent Wallet" };
+const NAMES: Record<string, string> = { alpaca: "Alpaca", "robinhood-crypto": "Robinhood Crypto", kalshi: "Kalshi", "polymarket-us": "Polymarket US", "polymarket-trade": "Polymarket", robinhood: "Robinhood", metamask: "MetaMask Agent Wallet" };
 /** the keyless address each HTTP connection asks first */
 const FIRST: Record<string, string> = {
   alpaca: "https://api.alpaca.markets/v2/clock",
   "robinhood-crypto": "https://trading.robinhood.com/api/v1/crypto/trading/accounts/",
   kalshi: "https://external-api.kalshi.com/trade-api/v2/exchange/status",
+  "polymarket-us": "https://gateway.polymarket.us/v1/markets?limit=1",
 };
 /** a probe answers in this long, or it counts as no answer just now */
 const PROBE_MS = 6000;
@@ -57,13 +71,14 @@ const PROBE_MS = 6000;
 export function venueWords(text: string): string {
   const folded = String(text ?? "").replace(/\s+/g, " ");
   const json = /"(?:msg|message|retMsg|error_description|error)"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(folded);
-  if (json && json[1]) return json[1].replace(/\\"/g, '"').replace(/\\\//g, "/").slice(0, 300);
+  // the address this machine reached the venue from, if the venue repeats it, is never kept
+  if (json && json[1]) return unaddressed(json[1].replace(/\\"/g, '"').replace(/\\\//g, "/").slice(0, 300));
   // an answer from a server in front of the venue, its sentence unquoted in braces (Bybit's CloudFront: "{ error:The Amazon CloudFront … }")
   const loose = /\{\s*(?:error|message)\s*:\s*([^{}"]+?)\s*\}/i.exec(folded);
-  if (loose && loose[1]) return loose[1].trim().slice(0, 300);
+  if (loose && loose[1]) return unaddressed(loose[1].trim().slice(0, 300));
   const plain = folded.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ");
   const sentence = plain.split(/(?<=[.!?])\s+(?=[A-Z])/).find((s) => REGION.test(s));
-  return (sentence ?? "").trim().slice(0, 300);
+  return unaddressed((sentence ?? "").trim().slice(0, 300));
 }
 
 /** a refusal as a state: the venue's location rule, no answer, or no way in */
@@ -84,6 +99,8 @@ async function answersHere(connector: string, name: string, url: string, deps: R
     const words = venueWords(r.text);
     return { connector, state: "location", said: `${name} does not serve this location: that is its own rule, and the account does not look for a way around it${words ? `. It answered: “${words}”` : ""}`, at };
   }
+  // a page from the server in front of the venue refusing this network is not the API asking for a key: it refuses, and says no more
+  if (edgeRefused(r.status, r.text)) return { connector, state: "location", said: edgeWords(name, r.status, r.text), at };
   if (r.status >= 500 || r.status === 0) return { connector, state: "unreachable", said: `${name} did not answer just now (HTTP ${r.status}); connecting asks again`, at };
   return { connector, state: "ok", at };
 }
@@ -115,9 +132,18 @@ export async function reachOf(connector: string, deps: ReachDeps): Promise<Reach
     } catch {
       return { connector, state: "unreachable", said: "Polymarket's location check did not answer just now; connecting asks it again", at };
     }
-    const no = polymarketLocationSaid(r, "polymarket", "Polymarket");
+    const here = polymarketLocation(r, "polymarket", "Polymarket");
+    if (here === "open") return { connector, state: "ok", at };
     // its own sentence only: the place and the IP it names stay out
-    return no ? { connector, state: no.code === "E_VENUE_GEOBLOCKED" ? "location" : "unreachable", said: no.code === "E_VENUE_GEOBLOCKED" ? `${no.message}. Its location check answered blocked` : no.message, at } : { connector, state: "ok", at };
+    if (here === "close-only") return { connector, state: "close-only", said: `${CLOSE_ONLY_WORDS}. Connected, the account sells what the wallet holds there and cancels its orders; it opens nothing`, at };
+    return { connector, state: here.code === "E_VENUE_GEOBLOCKED" ? "location" : "unreachable", said: here.code === "E_VENUE_GEOBLOCKED" ? `${here.message}. Its location check answered blocked` : here.message, at };
+  }
+  if (kind === "hyperliquid-trade") {
+    // Hyperliquid's terms, held to where this user is now: the verdict only, never the place
+    const v = await inTime(locator({ http: deps.http, clock: deps.clock, timeoutMs: PROBE_MS }).verdict(HYPERLIQUID_RULE), "late" as const);
+    if (v === "closed") return { connector, state: "location", said: HYPERLIQUID_RULE.closedWords, at };
+    if (v === "served") return { connector, state: "ok", at };
+    return { connector, state: "unreachable", said: `where this machine is could not be learned just now, so Hyperliquid's own line (${HYPERLIQUID_RULE.cite}) could not be held to it; connecting asks again`, at };
   }
   if (kind === "robinhood") {
     const s = deps.signIn?.("robinhood");
@@ -143,5 +169,5 @@ export async function reachOf(connector: string, deps: ReachDeps): Promise<Reach
 
 /** how long an answer is kept: a location rule ten minutes (as public-markets keeps one), a missing setup and no answer a few seconds, an
  * answer two minutes */
-export const reachKeepMs = (r: Reach): number => (r.state === "location" || r.state === "closed" ? 600_000 : r.state === "ok" ? 120_000 : r.state === "setup" ? 5_000 : 20_000);
+export const reachKeepMs = (r: Reach): number => (r.state === "location" || r.state === "close-only" || r.state === "closed" ? 600_000 : r.state === "ok" ? 120_000 : r.state === "setup" ? 5_000 : 20_000);
 

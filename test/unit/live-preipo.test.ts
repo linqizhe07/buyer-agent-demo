@@ -97,11 +97,50 @@ describe("a perpetual read as a pre-IPO contract", () => {
     expect(preIpoOf("kucoinfutures", { marketStage: "PRE_MARKET", assetClass: "STOCK" }, "OURA", "OURAUSDTM")!.issuer).toBeUndefined();
   });
 
+  it("at Hyperliquid, its own category (perpCategories, read 2026-10-08) rules a HIP-3 market out but never in alone: anyone may deploy one, so a company's name decides", () => {
+    expect(preIpoFlag("hyperliquid", { category: "preipo" })).toBe(true);
+    expect(preIpoFlag("hyperliquid", { category: "stocks" })).toBe(false);
+    expect(preIpoFlag("hyperliquid", {})).toBeUndefined();
+    // io:ANTH and io:OAI, filed preipo, in the $1,000,000,000 unit; and by their names alone when the category is not known
+    expect(preIpoOf("hyperliquid", { category: "preipo" }, "ANTH", "io:ANTH")).toMatchObject({ slug: "anthropic", group: { id: "preipo:anthropic" }, implied: { perPoint: 1_000_000_000 }, issuer: "Anthropic" });
+    expect(preIpoOf("hyperliquid", {}, "OAI", "io:OAI")).toMatchObject({ slug: "openai", implied: { perPoint: 1_000_000_000 } });
+    // filed elsewhere: not one, whatever the name
+    expect(preIpoOf("hyperliquid", { category: "stocks" }, "OURA", "xyz:OURA")).toBeUndefined();
+    // filed preipo under a name the table does not know: not one at a venue anyone may list on
+    expect(preIpoOf("hyperliquid", { category: "preipo" }, "STRIPE", "xyz:STRIPE")).toBeUndefined();
+    // SpaceX, public: never, wherever it is filed (vntl:SPACEX was filed preipo, delisted)
+    expect(preIpoOf("hyperliquid", { category: "preipo" }, "SPACEX", "vntl:SPACEX")).toBeUndefined();
+  });
+
+  it("at Binance and Bybit, whose documented records carry no flag, by the company's name alone, in the unit their listings name", () => {
+    // whatever contractType Binance writes (PERPETUAL, TRADIFI_PERPETUAL) or symbolType Bybit does, no flag is read from it
+    expect(preIpoFlag("binance", { contractType: "TRADIFI_PERPETUAL", underlyingType: "COIN" })).toBeUndefined();
+    expect(preIpoFlag("bybit", { contractType: "LinearPerpetual", symbolType: "stock", isPreListing: false })).toBeUndefined();
+    expect(preIpoOf("binance", { contractType: "TRADIFI_PERPETUAL" }, "OPENAI", "OPENAIUSDT")).toMatchObject({ slug: "openai", implied: { perPoint: 1_000_000_000 } });
+    expect(preIpoOf("bybit", { contractType: "LinearPerpetual" }, "ANTHROPIC", "ANTHROPICUSDT")).toMatchObject({ slug: "anthropic", implied: { perPoint: 1_000_000_000 } });
+    expect(preIpoOf("binance", {}, "BTC", "BTCUSDT")).toBeUndefined();
+    expect(preIpoOf("binance", {}, "SPCX", "SPCXUSDT")).toBeUndefined();
+    for (const [venue, inst] of [["binance", "ANTHROPICUSDT"], ["bybit", "OPENAIUSDT"], ["hyperliquid", "io:ANTH"], ["hyperliquid", "xyz:OURA"]]) expect(unitOf(venue!, inst!)).toEqual({ perPoint: 1_000_000_000, unit: "a price of $1 stands for $1,000,000,000 of implied company valuation (one contract ≈ one-billionth of the company)" });
+  });
+
   it("the issuers' words are the issuers' own, dated, and a pre-IPO market is told by its category", () => {
     expect(PRE_IPO_ISSUERS.anthropic).toEqual({ issuer: "Anthropic", eligibility: 'Anthropic, 29 June 2026: "Any sale or transfer of Anthropic stock, or any interest in Anthropic stock, that has not been approved by our Board of Directors is void and will not be recognized on our books and records."' });
     expect(PRE_IPO_ISSUERS.openai!.eligibility).toContain('"cannot be directly or indirectly transferred unless the seller first obtains OpenAI\'s written consent"');
     expect(isPreIpoMarket({ kind: "perp", category: PRE_IPO_CATEGORY })).toBe(true);
     expect(isPreIpoMarket({ kind: "perp", category: "Crypto" })).toBe(false);
     expect(isPreIpoMarket({ kind: "spot", category: PRE_IPO_CATEGORY })).toBe(false);
+  });
+});
+
+describe("a company whose venues price one share per contract", () => {
+  it("Oura: the implied valuation is the price times the share count the venues size on, and the row's price is in shares again", async () => {
+    const { unitOf, PER_SHARE, preIpoOf } = await import("../../src/portfolio/live/preipo.ts");
+    expect(unitOf("okx", "OURA-USDT-SWAP", "oura")).toEqual({ perPoint: 320_945_459, unit: PER_SHARE.oura!.unit });
+    expect(PER_SHARE.oura!.unit).toContain("one contract is one share of Oura Inc. common stock");
+    // the others keep $1 per $1B (and OKX's two rebased swaps their ×10)
+    expect(unitOf("okx", "ANTHROPIC-USDT-SWAP", "anthropic").perPoint).toBe(10_000_000_000);
+    expect(unitOf("gate", "ANTHROPIC_USDT", "anthropic").perPoint).toBe(1_000_000_000);
+    // a venue's own OURA contract is marked with it
+    expect(preIpoOf("okx", { ruleType: "pre_market" }, "OURA", "OURA-USDT-SWAP")?.implied).toMatchObject({ perPoint: 320_945_459 });
   });
 });

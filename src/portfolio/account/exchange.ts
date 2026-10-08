@@ -148,6 +148,9 @@ export interface Host {
   agentWalletUp?(sub: SubAccount): Promise<void>;
   /** the earn of the venues connected live (live/earn.ts): each venue's earner, where it has one (absent: none earns) */
   liveEarn?(): EarnDesk | undefined;
+  /** where the user can connect, as the host last judged it from the network it runs on (live/availability.ts): a venue that refuses this
+   * network, or offers no way in, is never asked of the owner by an agent. Undefined: not judged yet */
+  venueVerdict?(venue: string): { name: string; verdict: string; said?: string | undefined; edition?: { venue: string; name: string } | undefined } | undefined;
 }
 
 /** one way of connecting a real venue, as the page offers it */
@@ -716,6 +719,18 @@ export class AccountEngine {
     const now = this.nowMs();
     const wrong = askProblem(a);
     if (wrong) return no("E_ACCOUNT_BAD_ACTION", { message: wrong });
+    // a venue the owner could not connect from here at all (it refuses this network, or offers no way in) is not asked of the owner: the
+    // agent is told why, in the venue's own words. One whose own terms exclude where the user is is asked: the owner sees its terms in the
+    // form and decides — shown, never enforced, as the venue's own sign-up checks residency
+    if (a.kind === "venue" && a.venue) {
+      const v = this.host.venueVerdict?.(a.venue);
+      if (v && (v.verdict === "not-served" || v.verdict === "closed")) {
+        const why = v.verdict === "closed" ? "E_ACCOUNT_BAD_ACTION" : "E_VENUE_GEOBLOCKED";
+        // its edition for where the user is, when one serves the place under its own terms (Binance.US for Binance): named, for the agent to ask for
+        const instead = v.edition ? ` ${v.edition.name} serves where the user is under its own terms: ask for venue "${v.edition.venue}".` : "";
+        return no(why, { venue: a.venue, message: `the owner is not asked: ${v.name} ${v.verdict === "not-served" ? "does not serve the network this account runs on" : "offers no way in for this account"}${v.said ? ` — ${v.said}` : ""}.${instead} portfolio_venues lists where the user can connect`, ...(v.edition ? { detail: { edition: v.edition.venue } } : {}) });
+      }
+    }
     const waiting = this.waitingAsks(now);
     const times = (this.askTimes.get(agent.address) ?? []).filter((t) => now - t < 3_600_000);
     if (times.length >= ASKS_PER_HOUR) return no("E_ACCOUNT_LIMIT", { message: `at most ${ASKS_PER_HOUR} asks an hour from one agent key: the owner sees the ones already waiting`, detail: { perHour: ASKS_PER_HOUR, waiting: waiting.filter((x) => x.agent === agent.address).map((x) => x.id) } });

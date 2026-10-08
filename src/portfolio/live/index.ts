@@ -6,7 +6,11 @@
  *   live:robinhood       Robinhood's investing accounts, through Robinhood's MCP server               Robinhood's own sign-in
  *   live:robinhood-crypto  a Robinhood crypto account                                                 a key file
  *   live:kalshi          a prediction-market account                                                  a key file
+ *   live:polymarket-us   Polymarket US (QCX LLC, a CFTC-designated contract market): its own          a key file
+ *                        exchange and accounts, not polymarket.com's — its key signs with Ed25519
  *   live:hyperliquid     a perp DEX account                                                           an address
+ *   live:hyperliquid-trade  the same account, traded through an API wallet that cannot withdraw;     a key file
+ *                        Hyperliquid's own line (its Terms of Use §1.6) is held to where the user is first
  *   live:polymarket      a prediction-market wallet                                                   an address
  *   live:polymarket-trade  the same wallet, traded on Polymarket's CLOB                              a key file
  *   live:wallet          any EVM wallet: an exchange's own wallet, a browser wallet, a hardware one,  an address
@@ -23,9 +27,12 @@ import { ALPACA_KEY, alpacaSource } from "./alpaca.ts";
 import type { ChainReader, ChainSender } from "./chain.ts";
 import { defaultKeyRef, loadKeyFile, type KeyShape } from "./credentials.ts";
 import { EXCHANGE_KEY, exchangeSource, type OpenExchange } from "./exchange.ts";
+import { HYPERLIQUID_TRADE_KEY, hyperliquidTradeSource, type OpenHyperliquid } from "./hyperliquid-trade.ts";
 import { KALSHI_KEY, kalshiSource } from "./kalshi.ts";
+import { locator } from "./location.ts";
 import { metamaskSource, type RunMm } from "./metamask.ts";
 import { POLYMARKET_TRADE_KEY, polymarketTradeSource } from "./polymarket-clob.ts";
+import { POLYMARKET_US_KEY, polymarketUsSource } from "./polymarket-us.ts";
 import { ROBINHOOD_CRYPTO_KEY, realMcp, robinhoodCryptoSource, robinhoodStocksSource, type OpenMcp } from "./robinhood.ts";
 import type { OAuthSignIn } from "./signin.ts";
 import type { Price } from "./prices.ts";
@@ -47,6 +54,8 @@ export interface LiveDeps {
   mm: RunMm;
   /** a stand-in for the exchange library (tests) */
   openExchange?: OpenExchange | undefined;
+  /** the exchange library's Hyperliquid client with a stand-in network (tests) */
+  openHyperliquid?: OpenHyperliquid | undefined;
   /** the sign-in at a venue that speaks OAuth to MCP clients, by connector kind (Robinhood) */
   signIn?: ((kind: string) => OAuthSignIn | undefined) | undefined;
   /** an MCP client to a venue's own server; a stand-in in tests */
@@ -160,6 +169,22 @@ const kalshi: Connector = {
   },
 };
 
+/** Polymarket US: the Key ID and the Secret Key polymarket.us/developer gives an identity-verified account, in a key file. A separate
+ * exchange from polymarket.com (live:polymarket-trade): no simulated venue is its counterpart */
+const polymarketUs: Connector = {
+  kind: "polymarket-us",
+  label: "Polymarket US · prediction-market account, API key",
+  needs: "key-file",
+  example: POLYMARKET_US_KEY.example,
+  venues: [],
+  async open(req, deps) {
+    const key = loadKeyFile(deps.home, req.reference, POLYMARKET_US_KEY, req.venue);
+    if (isRefusal(key)) return key;
+    const opened = await polymarketUsSource({ venue: req.venue, label: req.label, reference: req.reference || defaultKeyRef(req.venue), key, http: deps.http, clock: deps.clock });
+    return isRefusal(opened) ? opened : { ...opened, summary: said(opened.source) };
+  },
+};
+
 /** the four that are read by address: the same opening, a different source */
 const byAddress = (kind: string, label: string, example: string, venues: string[], source: (r: AddressRequest) => Promise<{ source: LiveSource; first: LiveBalance[] } | Refusal>, priced: boolean): Connector => ({
   kind,
@@ -175,6 +200,22 @@ const byAddress = (kind: string, label: string, example: string, venues: string[
 
 const wallet = byAddress("wallet", "Wallet · any EVM wallet, by its address", "Connect a browser wallet (OKX Wallet, Binance Wallet, MetaMask …) and it signs one sentence to show the address is yours; or paste an address to watch it — a Robinhood Wallet's too: its Stock Tokens on Robinhood Chain are read with the rest.", ["metamask", "okx-wallet"], walletSource, true);
 const hyperliquid = byAddress("hyperliquid", "Hyperliquid · by the account's address", "The address of the Hyperliquid account itself (the master account, not an API wallet).", ["hyperliquid"], hyperliquidSource, true);
+/** Hyperliquid to trade: an API wallet's key, which signs orders for the account and cannot withdraw, in a key file. Hyperliquid's own line
+ * (its Terms of Use §1.6), held to where this user is now, comes before anything else — and before every order and leverage change */
+const hyperliquidTrade: Connector = {
+  kind: "hyperliquid-trade",
+  label: "Hyperliquid · trading, with an API wallet that cannot withdraw",
+  needs: "key-file",
+  example: HYPERLIQUID_TRADE_KEY.example,
+  venues: ["hyperliquid"],
+  async open(req, deps) {
+    const key = loadKeyFile(deps.home, req.reference, HYPERLIQUID_TRADE_KEY, req.venue);
+    if (isRefusal(key)) return key;
+    const opened = await hyperliquidTradeSource({ venue: req.venue, label: req.label, reference: req.reference || defaultKeyRef(req.venue), key, where: locator({ http: deps.http, clock: deps.clock }), clock: deps.clock, open: deps.openHyperliquid });
+    // a spot token Hyperliquid has no dollar market for is priced like any other
+    return isRefusal(opened) ? opened : { ...opened, summary: said(opened.source), price: deps.price };
+  },
+};
 const polymarket = byAddress("polymarket", "Polymarket · by the account wallet's address", "The account wallet Polymarket shows in the profile menu (the deposit or proxy wallet), not the key that signs for it.", ["polymarket"], polymarketSource, false);
 /** Polymarket to trade: the key that signs for the account wallet, in a key file. Polymarket's location check comes before anything else */
 const polymarketTrade: Connector = {
@@ -200,12 +241,13 @@ const metamask: Connector = {
   venues: ["metamask"],
   async open(req, deps) {
     // the price values an earn vault whose asset is not a dollar stablecoin (without one, only stablecoin vaults are valued)
-    const opened = await metamaskSource({ venue: req.venue, label: req.label, run: deps.mm, price: deps.price });
+    // where this machine is, from the account's own sources, for Hyperliquid's line when mm cannot say (location.ts)
+    const opened = await metamaskSource({ venue: req.venue, label: req.label, run: deps.mm, price: deps.price, where: locator({ http: deps.http, clock: deps.clock }) });
     return isRefusal(opened) ? opened : { ...opened, summary: opened.source.probe.note };
   },
 };
 
-export const CONNECTORS: Connector[] = [exchange, alpaca, robinhood, robinhoodCrypto, kalshi, metamask, wallet, hyperliquid, polymarket, polymarketTrade, ondo];
+export const CONNECTORS: Connector[] = [exchange, alpaca, robinhood, robinhoodCrypto, kalshi, polymarketUs, metamask, wallet, hyperliquid, hyperliquidTrade, polymarket, polymarketTrade, ondo];
 
 /** register a connector kind (the other sources add themselves here) */
 export function register(c: Connector): void {
@@ -226,7 +268,7 @@ export function liveOptions(home: string): LiveOptions {
 }
 
 /** the key file each kind of connection reads */
-export const KEY_SHAPES: Record<string, KeyShape> = { exchange: EXCHANGE_KEY, alpaca: ALPACA_KEY, kalshi: KALSHI_KEY, "robinhood-crypto": ROBINHOOD_CRYPTO_KEY, "polymarket-trade": POLYMARKET_TRADE_KEY };
+export const KEY_SHAPES: Record<string, KeyShape> = { exchange: EXCHANGE_KEY, alpaca: ALPACA_KEY, kalshi: KALSHI_KEY, "polymarket-us": POLYMARKET_US_KEY, "robinhood-crypto": ROBINHOOD_CRYPTO_KEY, "polymarket-trade": POLYMARKET_TRADE_KEY, "hyperliquid-trade": HYPERLIQUID_TRADE_KEY };
 
 /** Is a key file ready for a connection? Where it is, whether only its owner can read it, which fields it is missing — the same checks a
  * connection makes, said before connecting so the page can say what to do next. Field NAMES are said; no value ever leaves this process.

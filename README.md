@@ -10,6 +10,7 @@ npm run account                                    # http://127.0.0.1:4820，配
 npm run account:service -- install --live-cap 20   # macOS 后台常驻；之后 status · restart · logs · code · uninstall
 npx tsx test/standin/ui-standin.ts --port 4821     # 替身账户：同一个页面和门，场所是假的，不联网、不动钱
 npm run account:demo                               # 无头跑十四个 beat
+npm run account:check                              # 从这台机器能接哪些场所，每家用自己的话答；不含 IP、地方、钥匙，可以直接贴给别人
 npm test
 ```
 
@@ -42,20 +43,21 @@ Node ≥ 22。常用开关：`--live-cap 50`（单笔上限，默认 $100）、`
 
 | 类 | 场所 | 能做 |
 |---|---|---|
-| 交易所 | OKX、Kraken、Coinbase、Binance、Bybit、KuCoin 等统一接口库（ccxt）覆盖的一百来家；钥匙文件 | 读；现货和 U 本位永续；提到自己的地方、划转、稳定币互换；OKX、Kraken、KuCoin 的 earn |
+| 交易所 | OKX、Kraken、Coinbase、Binance、Bybit、KuCoin 等统一接口库（ccxt）覆盖的一百来家；钥匙文件 | 读；现货和 U 本位永续；提到自己的地方、划转、稳定币互换；OKX、Kraken、KuCoin、Binance 的 earn |
 | 券商 | Alpaca（钥匙文件）、Robinhood（它的 Trading MCP，OAuth 登录）、Robinhood Crypto | 读、下单；现金只在券商自己那边进出 |
-| 预测市场 | Kalshi（钥匙文件）、Polymarket（钥匙文件，或只填地址看） | 读、事件合约下单 |
+| 预测市场 | Kalshi（钥匙文件）、Polymarket US（钥匙文件：Key ID 和 Secret Key）、Polymarket（钥匙文件，或只填地址看） | 读、事件合约下单 |
 | 钱包 | 浏览器钱包（OKX Wallet、MetaMask 等，签一句话证明地址）、MetaMask Agent Wallet（本机 `mm`） | 换币、跨链、代币化股票（RWA）；`mm` 还有永续、预测、earn，写操作要 `PORTFOLIO_MM_WRITES=1` |
+| 永续 DEX | Hyperliquid：API 钱包（钥匙文件；只能交易，不能提币） | 永续、现货、HIP-3（含 pre-IPO）；每单之前按它条款 §1.6 查你此刻所在的地方 |
 | 只看 | Hyperliquid、Ondo、Robinhood Wallet（按地址） | 读 |
 
-打开 Connect an account 时，账户先替每个要钥匙的连接问一遍它的场所（不带钥匙）：不服务你这个地区的，卡片上直接写 "Not served here" 和它的原话，不用先建 key 再被拒。
+**地区：按每个用户自己所在的地方，不按开发者。** 账户启动后、之后每 30 分钟，自动替每个场所问一遍它对**这台机器的网络**怎么答（不带钥匙），再把它公布的居住地规矩对上这台机器此刻所在的地方：能接、不服务这里、只能平仓（Polymarket 对美国就是这样：照样接得上，能卖、能撤单，不能开新仓；美国人开新仓的地方是另一家交易所 Polymarket US，自己的账户、自己的钥匙，单独一张卡）、它的条款排除你所在的地方（只提示，不拦）、本机先要准备。连不了的，如果它有给你那里的另一个版本（Binance → Binance.US、OKX → OKX US、Polymarket → Polymarket US），而且那个版本从你的网络能接、它自己的话说它是为你那里做的，就标在旁边。同一个答案用在 Connect an account 的卡片、Markets 和下单票（只对会收你的场所给 "Connect to trade"），以及 agent（`portfolio_venues`；agent 请主人接一个不服务你这个网络的场所会直接被拒）。地方只在内存里用于这个判断，不保存、不返回、不写进拒绝；开发者那里被拒的场所（Binance、Bybit、Polymarket 开新仓、Hyperliquid 下单）照样接好了，在服务它们的地方就全有；每个用户都按他自己的网络算，开发者机器上的答案不进代码。账户从不提供绕过地区规矩的办法。
 
-**Pre-IPO**：交易所上按一家未上市公司的估值定价的永续合约，不是股份。六家不带钥匙读得到（OKX、Gate、Kraken Futures、Deribit、KuCoin Futures、MEXC），一家公司一行，写各家隐含估值的中位数；接上其中一家的钥匙，就在同一行下单。Anthropic、OpenAI 都说未经同意的股权转让无效，原话跟着它们那一行走。
+**Pre-IPO**：交易所上按一家未上市公司的估值定价的永续合约，不是股份。九个公开源不带钥匙读（OKX、Gate、Kraken Futures、Deribit、KuCoin Futures、MEXC、Binance、Bybit、Hyperliquid HIP-3；在不服务你的地方，那几家用它们的原话写在列表底下），一家公司一行，写各家隐含估值的中位数（Oura 的合约各家都按一股定价，按股数算）；接上其中一家的钥匙，就在同一行下单。Anthropic、OpenAI 都说未经同意的股权转让无效，原话跟着它们那一行走。
 
 ## 给 agent 的接口
 
 - **MCP**：`npm run portfolio:mcp`（stdio；席位持自己的钥匙，每次写都签名）。接 Claude Code：页面 Agents 弹层的 "Copy agent setup command"。真实账户上的工具：
-  - 读：`portfolio_account` · `portfolio_overview` · `portfolio_holdings` · `portfolio_history` · `portfolio_asset` · `portfolio_candles` · `portfolio_explore` · `portfolio_receive` · `portfolio_earn` · `portfolio_watchlist` · `portfolio_statement`
+  - 读：`portfolio_account` · `portfolio_venues`（从用户所在的网络自动判断哪些场所能接，各用场所自己的话）· `portfolio_overview` · `portfolio_holdings` · `portfolio_history` · `portfolio_asset` · `portfolio_candles` · `portfolio_explore` · `portfolio_receive` · `portfolio_earn` · `portfolio_watchlist` · `portfolio_statement`
   - 下单和动钱：`portfolio_live_markets` · `portfolio_live_compare` · `portfolio_live_positions` · `portfolio_live_preview` · `portfolio_live_order` · `portfolio_live_batch` · `portfolio_live_amend` · `portfolio_live_cancel` · `portfolio_live_close` · `portfolio_live_leverage` · `portfolio_live_move` · `portfolio_live_earn` · `portfolio_pay`
   - 和 owner 说话、等结果：`portfolio_report` · `portfolio_ask` · `portfolio_approval` · `portfolio_wait`
   - 只在模拟对账单（`--classic`）和测试里：`portfolio_read` · `portfolio_markets` · `portfolio_quote` · `portfolio_openness` · `portfolio_execute` · `portfolio_order` · `portfolio_transfer`
@@ -65,7 +67,7 @@ Node ≥ 22。常用开关：`--live-cap 50`（单笔上限，默认 $100）、`
 ## 诚实边界
 
 - Account 的真实连接和真钱写入只对着替身测过：这里没有用过一把真钥匙、一个真钱包。接你自己的账户之前先用只读钥匙；要写，先用小上限、小金额。
-- 真的读过的，是不带钥匙的公开数据：交易所行情、Kalshi、Polymarket、pre-IPO 价格、LI.FI 报价。
+- 真的读过的，是不带钥匙的公开数据：交易所行情、Kalshi、Polymarket、Polymarket US 的公开 gateway、pre-IPO 价格、LI.FI 报价。
 - Pre-IPO 是估值合约，不是股份；各家谁能交易由它们自己定，账户只转述。
 - 本机文件系统是信任边界：能写 home 的人能改账本和钥匙文件；同一系统用户下的 agent 席位之间不隔离。
 - 场所的地区规则是场所的，这里只表现为一扇关着的门，不提供绕过的办法。

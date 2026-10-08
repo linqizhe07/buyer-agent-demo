@@ -39,7 +39,7 @@ import { isRefusal, type Refusal } from "../../core/errors.ts";
 import { no } from "../refuse.ts";
 import { CHAIN_BY_ID, CHAINS, STABLECOINS, type ChainName, type ChainReader } from "./chain.ts";
 import { diamondOn, USDG_ROBINHOOD } from "./dex.ts";
-import { REGION, isStable, num, redact, unreachable, venueSaidNo, type Http, type HttpReply } from "./types.ts";
+import { edgeRefused, edgeWords, REGION, isStable, num, redact, unreachable, venueSaidNo, type Http, type HttpReply } from "./types.ts";
 import { tokenOn, type WalletTx } from "./writes.ts";
 
 const LIFI = "https://li.quest/v1";
@@ -211,7 +211,10 @@ function lifiNo(venue: string, r: HttpReply): Refusal {
   const said = redact(r.text.replace(/\s+/g, " ").trim().slice(0, 220), []);
   const native = { status: r.status, said };
   if (r.status === 451 || REGION.test(r.text)) return venueSaidNo(venue, NAME, r.status, r.text);
-  if (r.status === 403) return no("E_VENUE_GEOBLOCKED", { venue, message: `${NAME} refused this machine (HTTP 403): that is its own rule — its terms exclude US persons and sanctioned places — and the account does not look for a way around it`, native });
+  // a 403 is LI.FI's (or its edge's) no to this request: its own words when it gives some; a page with none refuses this network. It answers
+  // from a US network (checked 2026-10-08: /v1/chains and /v1/quote both 200), so nothing here says whom its terms exclude
+  if (edgeRefused(r.status, r.text)) return no("E_VENUE_GEOBLOCKED", { venue, message: edgeWords(NAME, r.status, r.text), native: { status: r.status, edge: true } });
+  if (r.status === 403) return no("E_VENUE_PERMISSION", { venue, message: `${NAME} refused this request (HTTP 403)${str(b.message) ? `: “${str(b.message)}”` : ""}. That is its own answer, and the account does not look for a way around it`, native });
   if (r.status === 400) return no("E_VENUE_ORDER_INVALID", { venue, message: `${NAME}: ${str(b.message) || "it did not take the transfer as written"}`, native });
   if (r.status === 404 && num(b.code) === 1002) {
     // no route: `errors` is { filteredOut: [{ reason }], failed: [{ subpaths: { path: [{ tool, code, message }] } }] }, or a flat list of the same

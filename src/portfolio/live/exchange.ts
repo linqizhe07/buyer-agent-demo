@@ -19,7 +19,7 @@ import type { Refusal } from "../../core/errors.ts";
 import { no } from "../refuse.ts";
 import type { KeyFile, KeyShape } from "./credentials.ts";
 import { exchangeTrader } from "./exchange-trade.ts";
-import { isStable, num, redact, REGION, type LiveBalance, type LiveProbe, type LiveSource } from "./types.ts";
+import { bannedUntil, edgeRefused, edgeWords, IP_LIST, ipListWords, isStable, num, redact, REGION, type LiveBalance, type LiveProbe, type LiveSource } from "./types.ts";
 import { exchangeWriter } from "./writes.ts";
 
 /** the part of a ccxt exchange this file uses; the tests hand in a stand-in with the same shape */
@@ -148,10 +148,24 @@ export function exchangeSaidNo(venue: string, name: string, err: unknown, key: K
   const sentence = /"(?:msg|message|retMsg|error_description)"\s*:\s*"(?:[^"\\]|\\.)*"/.exec(folded);
   const said = folded.slice(0, Math.min(600, Math.max(240, sentence ? sentence.index + sentence[0].length : 0)));
   const native = { error: kind, said };
-  // judged by what the exchange said, not by the class the library picked: Bybit's country block arrives as a "rate limit", OKX's as HTTP 200
+  // judged by what the exchange said, not by the class the library picked: Bybit's country block arrives as a "rate limit", OKX's as HTTP 200.
+  // Read whole: an edge's HTML page says it further in than the sentence kept, and then the sentence around it is what is kept
   const region = kind === "RestrictedLocation" || REGION.test(said) || OKX_REGION.test(said);
   if (region) return no("E_VENUE_GEOBLOCKED", { venue, message: `${name} does not serve this location: that is its own rule, and the account does not look for a way around it`, native });
+  if (REGION.test(folded)) {
+    const plain = folded.replace(/^\S+ (?:GET|POST|PUT|DELETE) https?:\/\/\S+ \d{3}\b[^{[<]*/, "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+    const at = Math.max(0, plain.search(REGION));
+    return no("E_VENUE_GEOBLOCKED", { venue, message: `${name} does not serve this location: that is its own rule, and the account does not look for a way around it`, native: { error: kind, said: plain.slice(Math.max(0, at - 120), at + 120).trim() } });
+  }
+  // the server in front of the exchange refusing this network with a page of its own (the library calls it "not available"): not a wait
+  const http = thrownHttp(String(e?.message ?? err));
+  if (http && edgeRefused(http.status, http.body)) return no("E_VENUE_GEOBLOCKED", { venue, message: edgeWords(name, http.status, http.body), native: { error: kind, status: http.status, edge: true } });
   if (BINANCE_2015.test(said)) return no("E_VENUE_UNAUTHORIZED", { venue, message: `${name} refused the key: it is wrong, it lacks the permission, or this machine's IP is not on its list (the exchange gives one answer for all three)`, native });
+  // the key is bound to IP addresses and this machine's is not one: the key and the place are fine, the owner adds the address
+  if (IP_LIST.test(said)) return no("E_VENUE_PERMISSION", { venue, message: ipListWords(name), native, detail: { ipList: true } });
+  // banned for too many requests (Binance's 418, "IP banned until <ms>"): until then, not "in a minute"
+  const until = bannedUntil(said);
+  if (until !== undefined || (kind === "DDoSProtection" && /\b418\b/.test(said))) return no("E_VENUE_UNREACHABLE", { venue, message: `${name} has banned this machine's address for too many requests${until ? ` until ${new Date(until).toISOString()}` : " for a while"}: nothing is asked of it before then`, native: { ...native, ...(until ? { until } : {}) } });
   if (kind === "PermissionDenied" || kind === "AccountNotEnabled" || OKX_PERMISSION.test(said)) return no("E_VENUE_PERMISSION", { venue, message: `${name} refused: the key lacks the permission for this, or this machine's IP is not on the key's list`, native });
   if (kind === "AuthenticationError" || kind === "AccountSuspended" || OKX_KEY.test(said)) return no("E_VENUE_UNAUTHORIZED", { venue, message: `${name} does not accept this key`, native });
   if (kind === "RateLimitExceeded" || kind === "DDoSProtection") return no("E_VENUE_UNREACHABLE", { venue, message: `${name} is rate-limiting this machine: try again in a minute`, native });
@@ -288,18 +302,50 @@ export interface ExchangeRequest {
   open?: OpenExchange | undefined;
 }
 
-/** the first question exchangeSource asks — the exchange's public clock — asked alone, with no key (live/reach.ts: before the owner makes
- * one). Undefined: the exchange answers here, or the library has no clock call for it (that is the library's word, not the exchange's) */
+/** the status and the body in what the library threw ("gate GET https://… 403 Forbidden <html>…"), when it says */
+function thrownHttp(text: string): { status: number; body: string } | undefined {
+  const m = /^\S+ (?:GET|POST|PUT|DELETE) https?:\/\/\S+ (\d{3})\b[^{[<]*([\s\S]*)$/.exec(text.trim());
+  return m ? { status: Number(m[1]), body: m[2] ?? "" } : undefined;
+}
+
+/** An exchange's cheapest keyless public answer, for one whose library has no clock call (checked live 2026-10-08: each answered). Without
+ * it, detection took the library's missing call for the exchange's yes, and never heard the exchange at all */
+const FIRST_PUBLIC: Record<string, string> = { gemini: "publicGetV1Symbols", bitstamp: "publicGetTradingPairsInfo", cryptocom: "v1PublicGetPublicGetInstruments", coinbaseinternational: "v1PublicGetInstruments", krakenfutures: "publicGetInstruments" };
+
+/** the first keyless question an exchange is asked: its clock; else its cheapest public list (FIRST_PUBLIC); else its markets, which
+ * connecting reads first anyway. Resolves when the exchange answered; throws what it answered otherwise */
+async function firstQuestion(client: ExchangeClient): Promise<void> {
+  if (client.has?.fetchTime !== false && typeof client.fetchTime === "function") {
+    try {
+      await client.fetchTime();
+      return;
+    } catch (err) {
+      if (String((err as { name?: string } | undefined)?.name) !== "NotSupported") throw err;
+    }
+  }
+  const named = Object.hasOwn(FIRST_PUBLIC, client.id) ? FIRST_PUBLIC[client.id]! : "";
+  const call = named ? (client as unknown as Record<string, unknown>)[named] : undefined;
+  if (typeof call === "function") {
+    await (call as () => Promise<unknown>).call(client);
+    return;
+  }
+  await client.loadMarkets?.();
+}
+
+/** the first question exchangeSource asks — the exchange's public clock, or for one without, its cheapest public list — asked alone, with
+ * no key (live/reach.ts: before the owner makes one). Undefined: the exchange answered here */
 export async function exchangeClock(venue: string, exchangeId: string, open: OpenExchange = openExchange): Promise<Refusal | undefined> {
   const client = await open(exchangeId, {}).catch(() => undefined);
   if (!client) return no("E_WALLET_UNKNOWN_VENUE", { venue, message: `the exchange library knows no exchange called "${exchangeId}"`, detail: { exchange: exchangeId } });
-  if (client.has?.fetchTime === false) return undefined;
   try {
-    await client.fetchTime?.();
+    await firstQuestion(client);
     return undefined;
   } catch (err) {
     if (String((err as { name?: string } | undefined)?.name) === "NotSupported") return undefined;
-    return exchangeSaidNo(venue, client.name ?? exchangeId, err, {});
+    // asked with no key, an answer that is not about the place or the network is still the exchange answering this network (Gate EU's clock
+    // asks for a signed header): a "no way in" would be the library's call, not the exchange's word about where the user is
+    const r = exchangeSaidNo(venue, client.name ?? exchangeId, err, {});
+    return r.code === "E_VENUE_GEOBLOCKED" || r.code === "E_VENUE_UNREACHABLE" ? r : undefined;
   }
 }
 
