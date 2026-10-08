@@ -45,11 +45,11 @@ const TILES = [
   ["Exchanges", [["exchange", "okx", "OKX"], ["exchange", "kraken", "Kraken"], ["exchange", "coinbase", "Coinbase"], ["exchange", "bybit", "Bybit"], ["exchange", "binance", "Binance"], ["exchange", "", "Another exchange"]]],
   ["Brokers", [["robinhood", "", "Robinhood"], ["alpaca", "", "Alpaca"], ["robinhood-crypto", "", "Robinhood Crypto"]]],
   ["Wallets", [["wallet", "", "Browser wallet"], ["metamask", "", "MetaMask Agent Wallet"], ["wallet", "watch", "Watch an address"]]],
-  ["Markets and tokens", [["kalshi", "", "Kalshi"], ["polymarket-trade", "", "Polymarket"], ["polymarket", "", "Polymarket · by address"], ["hyperliquid-trade", "", "Hyperliquid"], ["hyperliquid", "", "Hyperliquid · by address"], ["ondo", "", "Ondo · OUSG"]]],
+  ["Markets and tokens", [["kalshi", "", "Kalshi"], ["polymarket-us", "", "Polymarket US"], ["polymarket-trade", "", "Polymarket"], ["polymarket", "", "Polymarket · by address"], ["hyperliquid-trade", "", "Hyperliquid"], ["hyperliquid", "", "Hyperliquid · by address"], ["ondo", "", "Ondo · OUSG"]]],
 ];
 const HOW = { "key-file": "API key", "sign-in": "Sign in", address: "Address", cli: "mm on this machine" };
 /* the page at each venue where an API key is made (the venues' own account pages) */
-const API_PAGES = { okx: "https://www.okx.com/account/my-api", binance: "https://www.binance.com/en/my/settings/api-management", binanceus: "https://www.binance.us/settings/api-management", coinbase: "https://portal.cdp.coinbase.com/api-keys/secret", bybit: "https://www.bybit.com/app/user/api-management", kraken: "https://pro.kraken.com/app/settings/api", kucoin: "https://www.kucoin.com/account/api", bitget: "https://www.bitget.com/account/newapi", alpaca: "https://app.alpaca.markets/dashboard/overview", kalshi: "https://kalshi.com/account/profile", "robinhood-crypto": "https://robinhood.com/account/crypto", "hyperliquid-trade": "https://app.hyperliquid.xyz/API" };
+const API_PAGES = { okx: "https://www.okx.com/account/my-api", binance: "https://www.binance.com/en/my/settings/api-management", binanceus: "https://www.binance.us/settings/api-management", coinbase: "https://portal.cdp.coinbase.com/api-keys/secret", bybit: "https://www.bybit.com/app/user/api-management", kraken: "https://pro.kraken.com/app/settings/api", kucoin: "https://www.kucoin.com/account/api", bitget: "https://www.bitget.com/account/newapi", alpaca: "https://app.alpaca.markets/dashboard/overview", kalshi: "https://kalshi.com/account/profile", "polymarket-us": "https://polymarket.us/developer", "robinhood-crypto": "https://robinhood.com/account/crypto", "hyperliquid-trade": "https://app.hyperliquid.xyz/API" };
 /* what to tick when making the key, in each venue's own words (read 2026-10-05): trading on, withdrawals off */
 const KEY_HOW = {
   okx: "Tick Read and Trade (and Transfer, to move between Funding and Trading). Leave Withdraw off. Add this machine's IP: a trading key with no IP expires after 14 days unused. The passphrase you set goes in \"password\".",
@@ -63,6 +63,7 @@ const KEY_HOW = {
   bitget: "Read/write with the Trade permission; leave Withdraw and Transfer off. Bind this machine's IP. The passphrase goes in \"password\".",
   alpaca: "Generate a key in your Live account (or Paper, to try it first). Alpaca keys have no permissions to choose: any key can trade, and none can move cash.",
   kalshi: "Create New API Key (Ed25519). If scopes are offered, take read and write::trade and leave write::transfer off.",
+  "polymarket-us": "Verify your identity in the Polymarket US app first. On its developer page, sign in with the same method you use in the app (Apple, Google or email) — Polymarket US says switching methods may break API key access — and create a key: its Key ID goes in \"keyId\", its Secret Key in \"secretKey\" (the secret is shown only once). Its API moves no money in or out.",
   "robinhood-crypto": "Add key with your Ed25519 public key, and enable reading accounts, holdings, orders, products and quotes, and placing crypto orders.",
   "polymarket-trade": "Put in the private key of the wallet that signs for your Polymarket account. If the money sits in a Polymarket wallet, add \"funderAddress\" (the address in your profile menu) and \"signatureType\": 1 (Proxy), 2 (Safe) or 3 (Deposit Wallet); leave both empty for a plain wallet. Polymarket checks your location before anything else.",
   "hyperliquid-trade": "More → API: name an API wallet, Generate, copy its private key, then Authorize API Wallet with your account's own wallet (valid up to 180 days). An API wallet signs trades for your account and can never withdraw. \"walletAddress\" is your account's own address; \"privateKey\" is the API wallet's, never your account's own key. Hyperliquid's terms (§1.6) are checked for where you are before anything else.",
@@ -181,7 +182,7 @@ function keyHowFor(v) {
 }
 
 /* what each key file holds, until the server says exactly (an exchange's own list comes from the exchange library) */
-const FIELDS = { exchange: ["apiKey", "secret"], alpaca: ["keyId", "secret"], kalshi: ["keyId", "privateKeyFile"], "robinhood-crypto": ["apiKey", "privateKey"], "polymarket-trade": ["privateKey", "funderAddress", "signatureType"], "hyperliquid-trade": ["walletAddress", "privateKey"] };
+const FIELDS = { exchange: ["apiKey", "secret"], alpaca: ["keyId", "secret"], kalshi: ["keyId", "privateKeyFile"], "polymarket-us": ["keyId", "secretKey"], "robinhood-crypto": ["apiKey", "privateKey"], "polymarket-trade": ["privateKey", "funderAddress", "signatureType"], "hyperliquid-trade": ["walletAddress", "privateKey"] };
 /* a shell word, quoted */
 const shq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 /* the one command that makes a key file: the folder, an empty template if there is no file yet (an existing one is never overwritten),

@@ -533,6 +533,25 @@ describe("the Markets pane", () => {
     expect(p.run("keyHowFor({ id: 'hyperliquid-trade', connector: 'live:hyperliquid-trade' })")).toBe(how);
   });
 
+  it("offers Polymarket US as an account of its own under Markets and tokens — a key file of its Key ID and Secret Key, made at polymarket.us/developer — asked its own first question, and never under More", () => {
+    const p = page(() => ({}));
+    const options = [...account().connectLive.options, { kind: "polymarket-us", connector: "live:polymarket-us", needs: "key-file", label: "Polymarket US · prediction-market account, API key", venues: [] }];
+    p.set("A", account({ connectLive: { ...account().connectLive, options } }));
+    const cat = p.run<string>("catalog(true)");
+    expect(cat).toContain('<button type="button" class="tile" data-kind="polymarket-us" data-extra=""><b>Polymarket US</b><span>API key</span></button>');
+    expect(cat.match(/data-kind="polymarket-us"/g)?.length).toBe(1);
+    // its group: the tile sits between Kalshi's and Polymarket's
+    expect(cat.indexOf('data-kind="kalshi"') < cat.indexOf('data-kind="polymarket-us"') && cat.indexOf('data-kind="polymarket-us"') < cat.indexOf('data-kind="polymarket-trade"')).toBe(true);
+    expect(p.run("tileConnector('polymarket-us', '')")).toBe("live:polymarket-us");
+    p.run(`REACH.set("live:polymarket-us", { connector: "live:polymarket-us", state: "location", said: "Polymarket US does not serve this location: that is its own rule, and the account does not look for a way around it", at: "2026-10-06T05:00:00.000Z" })`);
+    expect(p.run<string>("catalog(true)")).toContain('data-kind="polymarket-us" data-extra="" title="Polymarket US does not serve this location: that is its own rule, and the account does not look for a way around it"><b>Polymarket US</b><span><em class="off">Not served here</em></span>');
+    expect(p.run("API_PAGES['polymarket-us']")).toBe("https://polymarket.us/developer");
+    const how = p.run<string>("keyHow('polymarket-us')");
+    for (const w of ["Verify your identity", "same method", "Apple, Google or email", '"keyId"', '"secretKey"', "shown only once", "moves no money"]) expect(how).toContain(w);
+    expect(p.run("FIELDS['polymarket-us']")).toEqual(["keyId", "secretKey"]);
+    expect(p.run("keyHowFor({ id: 'polymarket-us', connector: 'live:polymarket-us' })")).toBe(how);
+  });
+
   it("shows in the drawer what the agents are doing in a market: their cards (Review → Portfolio), open orders and the owner's intents", () => {
     const p = page(() => ({}));
     p.set(

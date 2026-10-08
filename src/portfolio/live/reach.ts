@@ -6,6 +6,9 @@
  *   live:alpaca            GET /v2/clock with no key: the 401 it answers is an answer
  *   live:robinhood-crypto  GET /api/v1/crypto/trading/accounts/ with no key: the 400 it answers is an answer
  *   live:kalshi            GET /trade-api/v2/exchange/status, public
+ *   live:polymarket-us     GET gateway.polymarket.us/v1/markets?limit=1, its public market data ("No API key needed"): what Polymarket
+ *                          US's own servers answer the network the Account runs on, asked there each time. Its terms set who may open an
+ *                          account (live/eligibility.ts shows them); this asks only whether it answers here
  *   live:polymarket-trade  Polymarket's location check, as the connection asks it first (it answers blocked or not; the IP and the place it
  *                          names are never kept)
  *   live:hyperliquid-trade Hyperliquid's own line (its Terms of Use §1.6), held to where this user is now (location.ts: the place from
@@ -46,12 +49,13 @@ export interface ReachDeps {
 }
 
 /** the venues' names, for the sentences */
-const NAMES: Record<string, string> = { alpaca: "Alpaca", "robinhood-crypto": "Robinhood Crypto", kalshi: "Kalshi", "polymarket-trade": "Polymarket", robinhood: "Robinhood", metamask: "MetaMask Agent Wallet" };
+const NAMES: Record<string, string> = { alpaca: "Alpaca", "robinhood-crypto": "Robinhood Crypto", kalshi: "Kalshi", "polymarket-us": "Polymarket US", "polymarket-trade": "Polymarket", robinhood: "Robinhood", metamask: "MetaMask Agent Wallet" };
 /** the keyless address each HTTP connection asks first */
 const FIRST: Record<string, string> = {
   alpaca: "https://api.alpaca.markets/v2/clock",
   "robinhood-crypto": "https://trading.robinhood.com/api/v1/crypto/trading/accounts/",
   kalshi: "https://external-api.kalshi.com/trade-api/v2/exchange/status",
+  "polymarket-us": "https://gateway.polymarket.us/v1/markets?limit=1",
 };
 /** a probe answers in this long, or it counts as no answer just now */
 const PROBE_MS = 6000;

@@ -2363,6 +2363,7 @@ const KIND_HERE: Record<string, { name: string; group: VenueHere["group"] }> = {
   metamask: { name: "MetaMask Agent Wallet", group: "Wallets" },
   wallet: { name: "A wallet (a browser wallet, or an address watched)", group: "Wallets" },
   kalshi: { name: "Kalshi", group: "Markets and tokens" },
+  "polymarket-us": { name: "Polymarket US", group: "Markets and tokens" },
   "polymarket-trade": { name: "Polymarket", group: "Markets and tokens" },
   polymarket: { name: "Polymarket · by address", group: "Markets and tokens" },
   "hyperliquid-trade": { name: "Hyperliquid", group: "Markets and tokens" },

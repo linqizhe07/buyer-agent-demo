@@ -16,7 +16,7 @@
  */
 export type ConnectorKind = "cex" | "dex-perp" | "dex-spot" | "prediction" | "rwa" | "broker";
 export type Rail = "cex-deposit" | "dex-bridge" | "onchain" | "fiat";
-export type KeyModel = "delegation" | "clob-key+delegation" | "api-key-permissions" | "agent-key" | "policy-signer" | "api-key-rsa" | "broker-key";
+export type KeyModel = "delegation" | "clob-key+delegation" | "api-key-permissions" | "agent-key" | "policy-signer" | "api-key-rsa" | "api-key-ed25519" | "broker-key";
 export type SeatShape = "ccxt-mcp" | "native-mcp" | "signer-mcp" | "clob-mcp" | "issuer-mcp" | "broker-mcp";
 
 export interface Connector {
@@ -56,6 +56,7 @@ export const KEY_LABEL: Record<KeyModel, string> = {
   "agent-key": "场所签发的 agent key",
   "policy-signer": "策略签名器",
   "api-key-rsa": "RSA 签名 API key",
+  "api-key-ed25519": "Ed25519 签名 API key",
   "broker-key": "券商 paper key",
 };
 
@@ -108,6 +109,8 @@ export const CATALOG: Connector[] = [
     native: "CLOB API key 由钱包签名派生，只下单 / 撤单；钱只经链上委托移动，caveats 只放行 CTF Exchange 与 USDC approve" },
   { id: "kalshi", name: "Kalshi", kind: "prediction", instrument: "YES / NO 合约（CFTC 监管）", seat: "native-mcp", keyModel: "api-key-rsa", rail: "fiat", asset: "USD", seatMounted: false,
     native: "RSA 私钥签每个请求，trade / read；出入金 ACH 经 web，不经钱包" },
+  { id: "polymarket-us", name: "Polymarket US", kind: "prediction", instrument: "YES / NO 合约（CFTC 指定合约市场 QCX LLC，非 polymarket.com）", seat: "native-mcp", keyModel: "api-key-ed25519", rail: "fiat", asset: "USD", seatMounted: false,
+    native: "Ed25519 私钥签每个请求（Key ID + Secret Key，身份验证后在 polymarket.us/developer 生成）；API 只下单 / 撤单 / 读，出入金在它的 app 里，不经钱包" },
   // ---- RWA: compliance-gated by design — allowlists, identity-to-address binding, issuer freeze
   { id: "ondo", name: "Ondo · Global Markets / OUSG", kind: "rwa", instrument: "代币化美股 / ETF · 代币化美债", seat: "issuer-mcp", keyModel: "delegation", rail: "onchain", asset: "USDC", chain: "Ethereum（BNB · Solana 跟进）", targets: ["Ondo subscribe / redeem", "DEX router"], seatMounted: false,
     native: "代币转让限制（allowlist）：agent 的智能账户先过 KYC 白名单；issuer 可冻结；赎回 T+1" },

@@ -13,7 +13,7 @@ describe("connector catalog", () => {
   it("covers CEX, DEX perps, DEX spot, prediction markets, RWA and a broker in one shape", () => {
     const kinds = new Set(CATALOG.map((c) => c.kind));
     expect([...kinds].sort()).toEqual(["broker", "cex", "dex-perp", "dex-spot", "prediction", "rwa"]);
-    expect(CATALOG.filter((c) => c.kind === "prediction").map((c) => c.id)).toEqual(["polymarket", "kalshi"]);
+    expect(CATALOG.filter((c) => c.kind === "prediction").map((c) => c.id)).toEqual(["polymarket", "kalshi", "polymarket-us"]);
     expect(CATALOG.filter((c) => c.kind === "rwa").map((c) => c.id)).toEqual(["ondo", "xstocks", "buidl", "robinhood-stocks", "centrifuge"]);
     expect(new Set(CATALOG.map((c) => c.id)).size).toBe(CATALOG.length);
   });

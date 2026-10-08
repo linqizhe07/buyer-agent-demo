@@ -34,7 +34,8 @@
  *     wallet's tokens an issuer stands behind, dex.ts): a Stock Token from a wallet and from Robinhood's public list is one row (`rwa:NVDA`),
  *     traded at the wallet and priced at both; an Ondo Stock (`rwa:NVDAON`) and an xStock (`rwa:NVDAX`) are rows of their own. Such a
  *     row, and each venue line of it, carries the issuer and the issuer's own eligibility words where the venue's market says them;
- *   · an event contract, by its question: `kalshi:<market ticker>` or `pm:<condition id>`, its legs (YES and NO, or a market's named
+ *   · an event contract, by its question: `kalshi:<market ticker>`, `pm:<condition id>` or, at Polymarket US (its own exchange, not
+ *     polymarket.com's), `pmus:<market slug>` — whichever account or public listing names it — its legs (YES and NO, or a market's named
  *     outcomes) folded into the one row as `outcomes`;
  *   · each venue appears once in a row, by its most traded market for it (its symbol is the one the account's order there names), and a
  *     price more than 10% from the middle of the others' (three venues or more) may be another token under the same name: it is left out of
@@ -176,7 +177,7 @@ export interface ExploreOutcome {
 }
 
 export interface ExploreItem {
-  /** `coin:BTC`, `stock:AAPL`, `perp:ETH`, `rwa:NVDA`, `kalshi:<market ticker>`, `pm:<condition id>` */
+  /** `coin:BTC`, `stock:AAPL`, `perp:ETH`, `rwa:NVDA`, `kalshi:<market ticker>`, `pm:<condition id>`, `pmus:<market slug>` */
   key: string;
   kind: ExploreKind;
   name: string;
@@ -267,6 +268,8 @@ interface Reader {
   family: string;
   /** its event contracts are Kalshi's, named by market ticker */
   kalshi: boolean;
+  /** its event contracts are Polymarket US's, named by market slug */
+  pmus: boolean;
   /** its tokens stand for shares or funds */
   rwa: boolean;
   markets(q: string): Promise<Market[] | Refusal>;
@@ -327,6 +330,7 @@ function fromVenue(v: ExploreVenue): Reader {
     connector: v.connector,
     family: v.connector ?? v.id,
     kalshi: /kalshi/i.test(v.id) || /^live:kalshi/.test(v.connector ?? ""),
+    pmus: v.connector === "live:polymarket-us" || (v.connector === undefined && v.id === "polymarket-us"),
     rwa: false,
     markets: (q) => t.markets(q),
     stats: t.stats ? (s) => t.stats!(s) : undefined,
@@ -346,6 +350,7 @@ function fromPublic(s: PublicSource, perSource: number): Reader {
     connector: s.connector,
     family: s.readOnly !== undefined ? s.id : s.connector,
     kalshi: s.connectTo === "kalshi",
+    pmus: s.connector === "live:polymarket-us",
     rwa: s.kind === "tokens",
     markets: (q) => s.listings({ q, limit: perSource }),
     stats: s.stats ? (symbols) => s.stats!(symbols) : undefined,
@@ -495,6 +500,7 @@ function keyOf(m: Market, kind: ExploreKind, r: Reader): string | undefined {
     const g = groupOf(m);
     if (!g) return undefined;
     if (HEX_ID.test(g.id)) return `pm:${g.id.toLowerCase()}`;
+    if (r.pmus) return `pmus:${g.id.toLowerCase()}`;
     return r.kalshi ? `kalshi:${g.id.toUpperCase()}` : `event:${r.id}:${g.id}`;
   }
   if (kind === "stock") {
@@ -687,8 +693,8 @@ function preIpoRow(key: string, every: Got[], aside: ExploreMissing[]): ExploreI
   };
 }
 
-/** an event's row: its legs at every venue folded into its outcomes, YES and NO first. A `pm:` or `kalshi:` row is one market at one
- * exchange, so a venue the owner connected that lists it trades it already: the public listing of it is left out. Past its close the row
+/** an event's row: its legs at every venue folded into its outcomes, YES and NO first. A `pm:`, `kalshi:` or `pmus:` row is one market at
+ * one exchange, so a venue the owner connected that lists it trades it already: the public listing of it is left out. Past its close the row
  * and its legs say so (`pastEnd`), and a Kalshi leg is closed (see the top of this file) */
 function eventRow(key: string, every: Got[][], now: number): ExploreItem | undefined {
   const order = every.some((l) => l[0]!.r.connected) ? every.filter((l) => l[0]!.r.connected) : every;

@@ -48,6 +48,16 @@
  *                       its five busiest IPO questions (290 KB; "Anthropic IPO by __?" $40,704 a day on 2026-10-06), of which the three
  *                       busiest are shown beside the ten, each reading "IPO". A search reaches every market of every event read. What
  *                       closes within a day is read off the same list: no second request
+ *   Polymarket US       Polymarket US's own exchange (QCX LLC, a CFTC-designated contract market), not polymarket.com's: its public gateway,
+ *                       gateway.polymarket.us ("No API key needed"; polymarket-us.ts, its shapes checked live and keyless 2026-10-08). For
+ *                       each of six of its categories — politics, finance, crypto, macro, geopolitics, technology (its sports and culture
+ *                       are excluded words) — GET /v1/markets?active=true&closed=false&categories=<c>&orderBy=volume&orderDirection=desc&
+ *                       limit=6, 13–32 KB each, the categories in turn, each market as its YES and NO leg (`<market slug>:YES`). Its lists
+ *                       carry no volume figure at all (`orderBy=volume` orders by one it does not return; volume24hr and volumeNum order
+ *                       nothing), so no volume and no 24-hour change are said. The prices are its bestBidQuote and bestAskQuote, the YES
+ *                       contract's (NO's are 1 − them, the other way round); its outcomes and outcomePrices strings do not follow one
+ *                       order (["No","Yes"] beside ["0.6030","0.398"]) and are not read. A search is its own GET /v1/search?query=, events
+ *                       with their markets, which reaches every market it lists. Its rows trade through live:polymarket-us
  *   Pre-IPO perpetuals  contracts on a venue's estimate of a PRIVATE company's valuation (live/preipo.ts: what they are, the unit each
  *                       venue prices them in, the flag each venue's own record carries), at eight exchanges our exchange connector reaches,
  *                       one source each, and at Hyperliquid's HIP-3 deployers (below): the venue's instrument list, kept ten minutes
@@ -122,6 +132,9 @@
  *   Polymarket          GET gamma /markets/slug/{slug} for the outcome's token id (clobTokenIds, in the order of `outcomes`), then the
  *                       CLOB's GET clob.polymarket.com/prices-history?market=&startTs=&fidelity= — Polymarket's price at moments, folded
  *                       into bars, no volume
+ *   Polymarket US       GET gateway.polymarket.us/v1/price-history?symbol=<market slug>&fixedInterval=&fidelity= (its fixed profiles: five-
+ *                       minute points for a day, three-hour points for a week or a month): its "book-derived Yes and No display prices",
+ *                       longPrice from the best ask and shortPrice from one minus the best bid — not trades — folded into bars, no volume
  *   Hyperliquid         POST /info {"type":"candleSnapshot","req":{coin,interval,startTime,endTime}}: its bars of 5m, 1h or 1d, at most 300;
  *                       a HIP-3 market by its dex-prefixed coin ("io:ANTH" answers its bars; the bare "ANTH" HTTP 500, live 2026-10-08)
  *   Stock Tokens        none: Robinhood publishes no history for them
@@ -139,6 +152,7 @@ import { isRefusal, type Refusal } from "../../core/errors.ts";
 import { no } from "../refuse.ts";
 import { categoryOf, isExcludedCategory, isIpoCategory, KALSHI_SERIES, normalWords } from "./categories.ts";
 import { exchangeSaidNo, openExchange, type ExchangeClient, type OpenExchange } from "./exchange.ts";
+import { PMUS_CATEGORIES, PMUS_GATEWAY, PMUS_PER_CATEGORY, pmusBusiest, pmusCandles, pmusLegs, pmusSearch, type PmusGet } from "./polymarket-us.ts";
 import { impliedUsd, PRE_IPO_NAMES, preIpoOf, type PreIpoMark } from "./preipo.ts";
 import { keylessExchange, PUBLIC_EXCHANGES } from "./prices.ts";
 import { STOCK_TOKEN_ISSUER, STOCK_TOKEN_TERMS, stockTokens } from "./robinhood.ts";
@@ -210,8 +224,9 @@ export interface PublicDeps {
 }
 
 /** the only hosts a public source's own GETs go to (Hyperliquid's info endpoint, a POST, has its own guard: hyperliquidInfo); the last eight
- * are the pre-IPO perpetuals' venues (Binance's USDⓈ-M futures host and Bybit's v5 host the last two) */
-export const PUBLIC_HOSTS: readonly string[] = ["external-api.kalshi.com", "gamma-api.polymarket.com", "clob.polymarket.com", "api.robinhood.com", "www.okx.com", "api.gateio.ws", "futures.kraken.com", "www.deribit.com", "api-futures.kucoin.com", "contract.mexc.com", "fapi.binance.com", "api.bybit.com"];
+ * are the pre-IPO perpetuals' venues (Binance's USDⓈ-M futures host and Bybit's v5 host the last two). Polymarket US's public gateway is
+ * its keyless market data only: its signed API (api.polymarket.us) is never asked from here */
+export const PUBLIC_HOSTS: readonly string[] = ["external-api.kalshi.com", "gamma-api.polymarket.com", "clob.polymarket.com", "gateway.polymarket.us", "api.robinhood.com", "www.okx.com", "api.gateio.ws", "futures.kraken.com", "www.deribit.com", "api-futures.kucoin.com", "contract.mexc.com", "fapi.binance.com", "api.bybit.com"];
 const KALSHI = "https://external-api.kalshi.com/trade-api/v2";
 const GAMMA = "https://gamma-api.polymarket.com";
 const CLOB = "https://clob.polymarket.com";
@@ -956,6 +971,56 @@ export function polymarketPublic(deps: PublicDeps = {}): PublicSource {
 /** the minutes between the prices a Polymarket bar is folded from */
 const POLY_FIDELITY: Record<CandleInterval, number> = { "5m": 1, "1h": 5, "1d": 60 };
 
+// ---- Polymarket US --------------------------------------------------------------------------------------------
+
+/** Polymarket US's most traded open markets, keyless (see the top of this file): for each of its categories the account shows
+ * (PMUS_CATEGORIES), its own most traded, the categories in turn — so one busy category does not fill the list — each market as its YES and
+ * its NO leg, named as the account's Polymarket US trader names them (`<market slug>:YES`). Its lists publish no volume, so none is said, and
+ * their order is the one Polymarket US gives. A search is its own GET /v1/search, which reaches every market it lists. What closes within a
+ * window is read off the same list: no second request */
+export function polymarketUsPublic(deps: PublicDeps = {}): PublicSource {
+  const id = "polymarket-us";
+  const name = "Polymarket US";
+  const clock = deps.clock ?? Date.now;
+  const get = getter(fixedHosts(deps.http ?? realHttp, PUBLIC_HOSTS, deps.timeoutMs ?? TIMEOUT_MS), id, name, clock);
+  const history = getter(fixedHosts(deps.http ?? realHttp, PUBLIC_HOSTS, deps.timeoutMs ?? TIMEOUT_MS), id, name, clock, HISTORY_MS);
+  const gw: PmusGet = (path) => get(`${PMUS_GATEWAY}${path}`);
+  /** a market's two legs as a listing: the shared shape with no order types (nothing is ordered through a listing), its category word kept */
+  const legs = (m: Rec): Listing[] => {
+    const word = str(m.category);
+    return pmusLegs(m).map((l) => ({ symbol: l.symbol, name: l.name, kind: l.kind, base: l.base, quote: l.quote, price: l.price, bid: l.bid, ask: l.ask, open: l.open, types: [], ...(l.group ? { group: l.group } : {}), ...(l.outcome ? { outcome: l.outcome } : {}), ...(l.closeTime ? { closeTime: l.closeTime } : {}), ...(l.category ? { category: l.category } : {}), ...(word ? { tags: [word] } : {}) }));
+  };
+  const read = async (o: { q?: string | undefined; category?: string | undefined; closingWithinMs?: number | undefined; limit: number }): Promise<Listing[] | Refusal> => {
+    const q = (o.q ?? "").trim();
+    const found = q ? await pmusSearch(gw, q) : await pmusBusiest(gw, { perCategory: PMUS_PER_CATEGORY });
+    if (isRefusal(found)) return found;
+    const want = o.category?.trim().toLowerCase();
+    const window = pos(o.closingWithinMs);
+    const now = clock();
+    return found
+      .filter((m) => !want || str(m.category)?.toLowerCase() === want)
+      .filter((m) => {
+        if (!window) return true;
+        const end = whenMs(m.endDate);
+        return end > now && end <= now + window;
+      })
+      .slice(0, Math.max(1, o.limit))
+      .flatMap(legs);
+  };
+  return {
+    id,
+    name,
+    kind: "events",
+    connectTo: "polymarket-us",
+    connector: "live:polymarket-us",
+    listings: (o) => read(o),
+    events: (o) => read(o),
+    notes: (o) => [o.q?.trim() ? "Polymarket US: its own search, which reaches every market it lists." : `Polymarket US: the most traded open markets of ${PMUS_CATEGORIES.slice(0, -1).join(", ")} and ${PMUS_CATEGORIES.at(-1)}, in turn (its lists give no volume figure).`],
+    /** a market's price history, keyless (see the top of this file): `<market slug>:YES` or `<market slug>:NO`, as the listing names it */
+    candles: (symbol, interval, sinceMs) => pmusCandles((path) => history(`${PMUS_GATEWAY}${path}`), id, symbol, interval, sinceMs, clock()),
+  };
+}
+
 // ---- Hyperliquid perpetuals -----------------------------------------------------------------------------------
 
 /** Hyperliquid's info endpoint takes a POST with a JSON `type` (hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint,
@@ -1671,8 +1736,8 @@ export function hyperliquidPreIpoPublic(deps: PublicDeps = {}): PublicSource {
 }
 
 /** every public source, in the order the Markets screen asks them: the exchanges (PUBLIC_EXCHANGES unless others are named), Kalshi,
- * Polymarket, Hyperliquid's perpetuals, Robinhood's Stock Tokens, the eight exchanges' pre-IPO perpetuals and Hyperliquid's HIP-3 ones.
- * Made once and kept: what each keeps lives in it */
+ * Polymarket, Polymarket US, Hyperliquid's perpetuals, Robinhood's Stock Tokens, the eight exchanges' pre-IPO perpetuals and Hyperliquid's
+ * HIP-3 ones. Made once and kept: what each keeps lives in it */
 export function publicSources(deps: PublicDeps & { exchanges?: readonly string[] | undefined } = {}): PublicSource[] {
-  return [...(deps.exchanges ?? PUBLIC_EXCHANGES).map((x) => exchangeTickers(x, deps)), kalshiPublic(deps), polymarketPublic(deps), hyperliquidPublic(deps), stockTokensPublic(deps), ...PRE_IPO_VENUES.map((v) => preIpoPublic(v, deps)), hyperliquidPreIpoPublic(deps)];
+  return [...(deps.exchanges ?? PUBLIC_EXCHANGES).map((x) => exchangeTickers(x, deps)), kalshiPublic(deps), polymarketPublic(deps), polymarketUsPublic(deps), hyperliquidPublic(deps), stockTokensPublic(deps), ...PRE_IPO_VENUES.map((v) => preIpoPublic(v, deps)), hyperliquidPreIpoPublic(deps)];
 }

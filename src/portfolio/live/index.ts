@@ -6,6 +6,8 @@
  *   live:robinhood       Robinhood's investing accounts, through Robinhood's MCP server               Robinhood's own sign-in
  *   live:robinhood-crypto  a Robinhood crypto account                                                 a key file
  *   live:kalshi          a prediction-market account                                                  a key file
+ *   live:polymarket-us   Polymarket US (QCX LLC, a CFTC-designated contract market): its own          a key file
+ *                        exchange and accounts, not polymarket.com's — its key signs with Ed25519
  *   live:hyperliquid     a perp DEX account                                                           an address
  *   live:hyperliquid-trade  the same account, traded through an API wallet that cannot withdraw;     a key file
  *                        Hyperliquid's own line (its Terms of Use §1.6) is held to where the user is first
@@ -30,6 +32,7 @@ import { KALSHI_KEY, kalshiSource } from "./kalshi.ts";
 import { locator } from "./location.ts";
 import { metamaskSource, type RunMm } from "./metamask.ts";
 import { POLYMARKET_TRADE_KEY, polymarketTradeSource } from "./polymarket-clob.ts";
+import { POLYMARKET_US_KEY, polymarketUsSource } from "./polymarket-us.ts";
 import { ROBINHOOD_CRYPTO_KEY, realMcp, robinhoodCryptoSource, robinhoodStocksSource, type OpenMcp } from "./robinhood.ts";
 import type { OAuthSignIn } from "./signin.ts";
 import type { Price } from "./prices.ts";
@@ -166,6 +169,22 @@ const kalshi: Connector = {
   },
 };
 
+/** Polymarket US: the Key ID and the Secret Key polymarket.us/developer gives an identity-verified account, in a key file. A separate
+ * exchange from polymarket.com (live:polymarket-trade): no simulated venue is its counterpart */
+const polymarketUs: Connector = {
+  kind: "polymarket-us",
+  label: "Polymarket US · prediction-market account, API key",
+  needs: "key-file",
+  example: POLYMARKET_US_KEY.example,
+  venues: [],
+  async open(req, deps) {
+    const key = loadKeyFile(deps.home, req.reference, POLYMARKET_US_KEY, req.venue);
+    if (isRefusal(key)) return key;
+    const opened = await polymarketUsSource({ venue: req.venue, label: req.label, reference: req.reference || defaultKeyRef(req.venue), key, http: deps.http, clock: deps.clock });
+    return isRefusal(opened) ? opened : { ...opened, summary: said(opened.source) };
+  },
+};
+
 /** the four that are read by address: the same opening, a different source */
 const byAddress = (kind: string, label: string, example: string, venues: string[], source: (r: AddressRequest) => Promise<{ source: LiveSource; first: LiveBalance[] } | Refusal>, priced: boolean): Connector => ({
   kind,
@@ -227,7 +246,7 @@ const metamask: Connector = {
   },
 };
 
-export const CONNECTORS: Connector[] = [exchange, alpaca, robinhood, robinhoodCrypto, kalshi, metamask, wallet, hyperliquid, hyperliquidTrade, polymarket, polymarketTrade, ondo];
+export const CONNECTORS: Connector[] = [exchange, alpaca, robinhood, robinhoodCrypto, kalshi, polymarketUs, metamask, wallet, hyperliquid, hyperliquidTrade, polymarket, polymarketTrade, ondo];
 
 /** register a connector kind (the other sources add themselves here) */
 export function register(c: Connector): void {
@@ -248,7 +267,7 @@ export function liveOptions(home: string): LiveOptions {
 }
 
 /** the key file each kind of connection reads */
-export const KEY_SHAPES: Record<string, KeyShape> = { exchange: EXCHANGE_KEY, alpaca: ALPACA_KEY, kalshi: KALSHI_KEY, "robinhood-crypto": ROBINHOOD_CRYPTO_KEY, "polymarket-trade": POLYMARKET_TRADE_KEY, "hyperliquid-trade": HYPERLIQUID_TRADE_KEY };
+export const KEY_SHAPES: Record<string, KeyShape> = { exchange: EXCHANGE_KEY, alpaca: ALPACA_KEY, kalshi: KALSHI_KEY, "polymarket-us": POLYMARKET_US_KEY, "robinhood-crypto": ROBINHOOD_CRYPTO_KEY, "polymarket-trade": POLYMARKET_TRADE_KEY, "hyperliquid-trade": HYPERLIQUID_TRADE_KEY };
 
 /** Is a key file ready for a connection? Where it is, whether only its owner can read it, which fields it is missing — the same checks a
  * connection makes, said before connecting so the page can say what to do next. Field NAMES are said; no value ever leaves this process.

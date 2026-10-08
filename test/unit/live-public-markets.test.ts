@@ -766,10 +766,10 @@ describe("Pre-IPO perpetuals, keyless, at six venues", () => {
 });
 
 describe("every public source", () => {
-  it("is the five exchanges (Bybit by default, after Binance), Kalshi, Polymarket, Hyperliquid, the Stock Tokens, the eight exchanges' pre-IPO perpetuals and Hyperliquid's HIP-3 ones, unless other exchanges are named", () => {
+  it("is the five exchanges (Bybit by default, after Binance), Kalshi, Polymarket, Polymarket US, Hyperliquid, the Stock Tokens, the eight exchanges' pre-IPO perpetuals and Hyperliquid's HIP-3 ones, unless other exchanges are named", () => {
     const preipo = ["okx-preipo", "gate-preipo", "krakenfutures-preipo", "deribit-preipo", "kucoinfutures-preipo", "mexc-preipo", "binance-preipo", "bybit-preipo", "hyperliquid-preipo"];
-    expect(publicSources().map((s) => s.id)).toEqual(["kraken", "coinbase", "okx", "binance", "bybit", "kalshi", "polymarket", "hyperliquid", "robinhood-stock-tokens", ...preipo]);
-    expect(publicSources({ exchanges: ["kraken"] }).map((s) => s.id)).toEqual(["kraken", "kalshi", "polymarket", "hyperliquid", "robinhood-stock-tokens", ...preipo]);
+    expect(publicSources().map((s) => s.id)).toEqual(["kraken", "coinbase", "okx", "binance", "bybit", "kalshi", "polymarket", "polymarket-us", "hyperliquid", "robinhood-stock-tokens", ...preipo]);
+    expect(publicSources({ exchanges: ["kraken"] }).map((s) => s.id)).toEqual(["kraken", "kalshi", "polymarket", "polymarket-us", "hyperliquid", "robinhood-stock-tokens", ...preipo]);
     expect(PRE_IPO_VENUES.map((v) => v.id)).toEqual(["okx", "gate", "krakenfutures", "deribit", "kucoinfutures", "mexc", "binance", "bybit"]);
   });
 });
