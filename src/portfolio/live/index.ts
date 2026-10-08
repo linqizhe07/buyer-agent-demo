@@ -241,7 +241,8 @@ const metamask: Connector = {
   venues: ["metamask"],
   async open(req, deps) {
     // the price values an earn vault whose asset is not a dollar stablecoin (without one, only stablecoin vaults are valued)
-    const opened = await metamaskSource({ venue: req.venue, label: req.label, run: deps.mm, price: deps.price });
+    // where this machine is, from the account's own sources, for Hyperliquid's line when mm cannot say (location.ts)
+    const opened = await metamaskSource({ venue: req.venue, label: req.label, run: deps.mm, price: deps.price, where: locator({ http: deps.http, clock: deps.clock }) });
     return isRefusal(opened) ? opened : { ...opened, summary: opened.source.probe.note };
   },
 };

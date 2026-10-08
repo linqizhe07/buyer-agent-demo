@@ -150,7 +150,7 @@ export interface Host {
   liveEarn?(): EarnDesk | undefined;
   /** where the user can connect, as the host last judged it from the network it runs on (live/availability.ts): a venue that refuses this
    * network, or offers no way in, is never asked of the owner by an agent. Undefined: not judged yet */
-  venueVerdict?(venue: string): { name: string; verdict: string; said?: string | undefined } | undefined;
+  venueVerdict?(venue: string): { name: string; verdict: string; said?: string | undefined; edition?: { venue: string; name: string } | undefined } | undefined;
 }
 
 /** one way of connecting a real venue, as the page offers it */
@@ -726,7 +726,9 @@ export class AccountEngine {
       const v = this.host.venueVerdict?.(a.venue);
       if (v && (v.verdict === "not-served" || v.verdict === "closed")) {
         const why = v.verdict === "closed" ? "E_ACCOUNT_BAD_ACTION" : "E_VENUE_GEOBLOCKED";
-        return no(why, { venue: a.venue, message: `the owner is not asked: ${v.name} ${v.verdict === "not-served" ? "does not serve the network this account runs on" : "offers no way in for this account"}${v.said ? ` — ${v.said}` : ""}. portfolio_venues lists where the user can connect` });
+        // its edition for where the user is, when one serves the place under its own terms (Binance.US for Binance): named, for the agent to ask for
+        const instead = v.edition ? ` ${v.edition.name} serves where the user is under its own terms: ask for venue "${v.edition.venue}".` : "";
+        return no(why, { venue: a.venue, message: `the owner is not asked: ${v.name} ${v.verdict === "not-served" ? "does not serve the network this account runs on" : "offers no way in for this account"}${v.said ? ` — ${v.said}` : ""}.${instead} portfolio_venues lists where the user can connect`, ...(v.edition ? { detail: { edition: v.edition.venue } } : {}) });
       }
     }
     const waiting = this.waitingAsks(now);

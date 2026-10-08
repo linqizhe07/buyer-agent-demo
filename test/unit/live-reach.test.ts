@@ -88,12 +88,23 @@ describe("reach: each venue's first, keyless question, before a key is made", ()
     expect((await reachOf("live:robinhood-crypto", blocked)).state).toBe("unreachable");
   });
 
-  it("Polymarket's location check: blocked is its rule; what it says about the place and the IP never leaves the account", async () => {
-    const { d } = deps({ answers: { "https://polymarket.com/api/geoblock": reply(200, { blocked: true, ip: "203.0.113.7", country: "XX", region: "YY" }) } });
-    const r = await reachOf("live:polymarket-trade", d);
+  it("Polymarket's location check, read with its own lists: close-only (the United States among them) connects and opens nothing, blocked completely is not served, close-only on its website alone is open to the API; the place and the IP never leave the account", async () => {
+    const at = (body: unknown) => reachOf("live:polymarket-trade", deps({ answers: { "https://polymarket.com/api/geoblock": reply(200, body) } }).d);
+    const us = await at({ blocked: true, ip: "203.0.113.7", country: "US", region: "PA" });
+    expect(us.state).toBe("close-only");
+    expect(us.said).toBe("Polymarket lets this location close positions, not open new ones (its own rule: docs.polymarket.com/api-reference/geoblock), and the account does not look for a way around it. Connected, the account sells what the wallet holds there and cancels its orders; it opens nothing");
+    const r = await at({ blocked: true, ip: "203.0.113.7", country: "IR", region: "07" });
     expect(r.state).toBe("location");
     expect(r.said).toBe("Polymarket does not serve this location: that is its own rule, and the account does not look for a way around it. Its location check answered blocked");
-    expect(JSON.stringify(r)).not.toMatch(/203\.0\.113\.7|"XX"|"YY"|\bXX\b|\bYY\b/);
+    for (const x of [us, r]) expect(JSON.stringify(x)).not.toMatch(/203\.0\.113\.7|"US"|"PA"|"IR"|"07"/);
+    // Crimea is blocked completely; Ukraine with its part not given is taken so (its only blocked places are parts); no place at all too
+    expect((await at({ blocked: true, country: "UA", region: "43" })).state).toBe("location");
+    expect((await at({ blocked: true, country: "UA", region: "" })).state).toBe("location");
+    expect((await at({ blocked: true })).state).toBe("location");
+    // close-only on its website alone: "the API itself is not restricted"
+    expect((await at({ blocked: true, country: "JP", region: "13" })).state).toBe("ok");
+    // a place Polymarket blocks that its lists do not name: close-only, as its docs say of everywhere it blocks but the sanctioned places
+    expect((await at({ blocked: true, country: "ZZ", region: "" })).state).toBe("close-only");
     expect((await reachOf("live:polymarket-trade", deps({ answers: { "https://polymarket.com/api/geoblock": reply(200, { blocked: false }) } }).d)).state).toBe("ok");
     expect((await reachOf("live:polymarket-trade", deps({ answers: { "https://polymarket.com/api/geoblock": new Error("ETIMEDOUT") } }).d)).state).toBe("unreachable");
   });

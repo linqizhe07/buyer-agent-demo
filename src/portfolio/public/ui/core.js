@@ -964,9 +964,11 @@ async function readVenues(force = false) {
   }
   return VENUES;
 }
-/* a venue that would refuse the user if connected — it does not serve this network, needs something on this machine first, or offers no
-   way in: its word and its own words; null when it would take the user or was not judged */
-const VENUE_NO = { "not-served": "Not served here", closed: "No way in here", setup: "Set up first" };
+/* a venue that would refuse the user's order to open something if connected — it does not serve this network, lets it only close what is
+   held (close-only: Polymarket's rule for the United States among other places), needs something on this machine first, or offers no way
+   in: its word and its own words; null when it would take the user or was not judged. A close-only venue still connects (the list of
+   accounts keeps its form open): what is held there is read, and can be sold */
+const VENUE_NO = { "not-served": "Not served here", "close-only": "Close only here", closed: "No way in here", setup: "Set up first" };
 function venueRefuses(connector) {
   const v = connector && VENUES.get(connector);
   return v && VENUE_NO[v.verdict] ? { word: VENUE_NO[v.verdict], name: v.name, said: v.said || "", verdict: v.verdict } : null;

@@ -45,11 +45,13 @@ describe("account:check", () => {
     expect(open.connections.filter((c) => c.state !== "ok")).toEqual([]);
     expect(open.sources.every((s) => s.rows === 1)).toBe(true);
     const shut = await accountCheck({ home: "/nowhere", deps: network(true) });
-    expect(shut.connections.filter((c) => c.state !== "ok").map((c) => [c.connector, c.state])).toEqual([["live:exchange:bybit", "location"], ["live:exchange:binance", "location"], ["live:polymarket-trade", "location"]]);
+    expect(shut.connections.filter((c) => c.state !== "ok").map((c) => [c.connector, c.state])).toEqual([["live:exchange:bybit", "location"], ["live:exchange:binance", "location"], ["live:polymarket-trade", "close-only"]]);
     expect(shut.sources.find((s) => s.id === "binance")).toMatchObject({ code: "E_VENUE_GEOBLOCKED" });
     const md = checkMarkdown(shut);
     expect(md).toContain("| Binance | Not served here | Binance does not serve this location");
     expect(md).toContain("“The Amazon CloudFront distribution is configured to block access from your country”");
+    // Polymarket blocks the place, and its lists do not name it among the sanctioned ones: close-only, said so
+    expect(md).toContain("| Polymarket | Close only here | Polymarket lets this location close positions, not open new ones");
     // nothing about the place: no IP, no country, no region, in the report or its JSON
     for (const text of [md, JSON.stringify(shut)]) expect(text).not.toMatch(/203\.0\.113\.9|\bZZ\b|\bQQ\b/);
   });

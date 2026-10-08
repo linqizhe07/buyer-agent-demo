@@ -92,8 +92,43 @@ export function redact(text: string, secrets: Array<string | undefined>): string
   return out;
 }
 
-/** how venues say "not from where you are": Binance answers 451 with "restricted location", Bybit's edge answers 403 with "block access from your country" */
-export const REGION = /restricted (location|jurisdiction|region|countr)|unavailable from a restricted|(block(ed|s)?|den(y|ied)) access from your (country|region)|not available in your (country|region|jurisdiction)|not (permitted|supported|eligible) in your|eligibility|geo-?block| 451 /i;
+/** how venues say "not from where you are": Binance answers 451 with "restricted location", Bybit's edge answers 403 with "block access from
+ * your country". Only words about a place: a product's or a tier's "eligibility", or "not permitted in your account", is not one, and
+ * reading it as one would tell a user a venue does not serve them when it does */
+export const REGION = /restricted (location|jurisdiction|region|countr)|unavailable from a restricted|(block(ed|s)?|den(y|ied)) access from your (country|region)|not (available|permitted|supported|eligible|offered) (in|for|from) your (country|region|jurisdiction|location|state|area)|geo-?block|\b451 Unavailable|\bHTTP 451\b/i;
+
+/** A venue saying the address this machine reaches it from is not on the key's IP list — each in its own code or words: OKX 50110, Bybit
+ * 10010 ("Unmatched IP"), Bitget 40018 ("Invalid IP"), KuCoin 400006, Crypto.com 40103, MEXC 406 and 700006, Gate IP_FORBIDDEN, Bitstamp
+ * "IP address not allowed" (ccxt's error tables, 2026-10-08). The key is good and the place is served: the address changed, or the key was
+ * bound to another machine's. Binance's -2015 names IP among three causes and is not this */
+export const IP_LIST = /\bunmatched ip\b|\binvalid ip\b|\bip_forbidden\b|\bip non white ?list\b|\bip (?:white ?list|allow ?list)\b|\bip address not (?:allowed|whitelisted|in)\b|\b(?:request|accessing|your) ip\b[^{}"]{0,60}\bnot (?:in|on|included|allowed|whitelisted)\b|"(?:50110|10010|40018|400006|40103|700006)"|\bretCode"?\s*:\s*10010\b|\bcode"?\s*:\s*(?:40103|700006)\b/i;
+/** the account's sentence for it: the venue, the key, and what the owner does — the address itself is never said or kept */
+export const ipListWords = (name: string): string => `${name} refuses this key from this machine's address: the key is bound to a list of IP addresses, and the one this machine reaches ${name} from now is not on it. Add this machine's current address to the key's IP list at ${name} (or make the key again with it), then try again`;
+
+/** An answer from the server in front of a venue rather than from its API: an HTML page refusing the request — a CDN's or a firewall's
+ * ("Access Denied", "Request blocked", "Attention Required", "Just a moment") — with no reason of the venue's. It refuses this network, by
+ * place or by the address's standing; it does not say which, and it is the same for every key. A venue's own JSON "access denied" is not one */
+const EDGE_PAGE = /<(?:!doctype html|html|head|title|body)[\s>]|\baccess denied\b|\brequest (?:could not be satisfied|blocked)\b|\battention required\b|\bjust a moment\b|\bcf-ray\b|\bedgesuite\b|\bincapsula\b/i;
+export function edgeRefused(status: number, text: string): boolean {
+  // 403 only: a 401 page ("401 Authorization Required", Alpaca's own) is the API asking for a key
+  if (status !== 403) return false;
+  const body = String(text ?? "").trim();
+  return !/^[{[]/.test(body) && EDGE_PAGE.test(body);
+}
+/** the page's own title or heading, when it has one: the only words such a page gives */
+export const edgeTitle = (text: string): string => (/<title[^>]*>([^<]{1,80})<\/title>|<h1[^>]*>([^<]{1,80})<\/h1>/i.exec(String(text ?? "")) ?? []).slice(1).find(Boolean)?.trim() ?? "";
+/** the account's sentence for it */
+export const edgeWords = (name: string, status: number, text: string): string => {
+  const t = edgeTitle(text);
+  return `${name} refuses this network: the server in front of it answered HTTP ${status}${t ? ` (“${t}”)` : ""} and gave no reason — by place, or by this address's standing, it does not say. That is its own answer, and the account does not look for a way around it`;
+};
+
+/** a venue that has banned the address this machine reaches it from for too many requests, until when it says (Binance's HTTP 418: "IP
+ * banned until <ms>"): nothing is asked of it before then */
+export function bannedUntil(text: string): number | undefined {
+  const m = /banned until (\d{13})\b/i.exec(String(text ?? ""));
+  return m ? Number(m[1]) : undefined;
+}
 
 /** A venue's answer that is not a yes, as one of the account's refusals. The venue's own words go with it. A venue that does not serve this
  * location is the venue's rule: it is reported as that, and nothing here looks for another way in. */
@@ -102,6 +137,12 @@ export function venueSaidNo(venue: string, name: string, status: number, text: s
   const said = redact(text, secrets).replace(/\s+/g, " ").trim().slice(0, 220);
   const native = { status, said };
   if (status === 451 || REGION.test(text)) return no("E_VENUE_GEOBLOCKED", { venue, message: `${name} does not serve this location: that is its own rule, and the account does not look for a way around it`, native });
+  if (edgeRefused(status, text)) return no("E_VENUE_GEOBLOCKED", { venue, message: edgeWords(name, status, text), native: { status, edge: true } });
+  if (IP_LIST.test(text)) return no("E_VENUE_PERMISSION", { venue, message: ipListWords(name), native, detail: { ipList: true } });
+  if (status === 418 || bannedUntil(text) !== undefined) {
+    const until = bannedUntil(text);
+    return no("E_VENUE_UNREACHABLE", { venue, message: `${name} has banned this machine's address for too many requests${until ? ` until ${new Date(until).toISOString()}` : " for a while"}: nothing is asked of it before then`, native: { ...native, ...(until ? { until } : {}) } });
+  }
   if (status === 401) return no("E_VENUE_UNAUTHORIZED", { venue, message: `${name} does not accept this key`, native });
   if (status === 403) return no("E_VENUE_PERMISSION", { venue, message: `${name} refused: the key lacks the permission to read, or this machine's IP is not on the key's list`, native });
   if (status === 429) return no("E_VENUE_UNREACHABLE", { venue, message: `${name} is rate-limiting this machine: try again in a minute`, native });

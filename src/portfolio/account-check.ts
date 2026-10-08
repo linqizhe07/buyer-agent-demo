@@ -15,6 +15,7 @@
  * Its output is meant to be pasted to someone else (a teammate where the venues serve them, or the developer): it holds no key, balance
  * amount or address.
  */
+import { KNOWN_EXCHANGES } from "./live/availability.ts";
 import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -34,7 +35,8 @@ import { OAuthSignIn } from "./live/signin.ts";
 import { realHttp } from "./live/types.ts";
 
 /** the exchanges asked by default: the tiles of Connect an account, and the ones whose public data Markets reads (pre-IPO venues included) */
-export const CHECK_EXCHANGES = ["okx", "kraken", "coinbase", "bybit", "binance", "kucoin", "gate", "bitget", "mexc", "deribit", "krakenfutures", "kucoinfutures"];
+/** the exchanges asked: every one the account's own detection asks (availability.ts), so the check and the list of accounts agree */
+export const CHECK_EXCHANGES = KNOWN_EXCHANGES;
 const SOURCE_MS = 12_000;
 
 export interface CheckReport {
@@ -99,7 +101,7 @@ export async function accountCheck(o: { home: string; keys?: boolean; deps?: Par
   return { at: new Date(clock()).toISOString(), connections, sources, keys };
 }
 
-const ANSWER: Record<Reach["state"], string> = { ok: "answers", location: "Not served here", setup: "Set up first", closed: "No way in", unreachable: "No answer just now" };
+const ANSWER: Record<Reach["state"], string> = { ok: "answers", location: "Not served here", "close-only": "Close only here", setup: "Set up first", closed: "No way in", unreachable: "No answer just now" };
 const cell = (s: string | undefined) => String(s ?? "").replace(/\|/g, "/").replace(/\s+/g, " ").trim();
 
 /** the report as Markdown, to paste */

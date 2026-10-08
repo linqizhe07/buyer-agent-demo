@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { HYPERLIQUID_RULE, heldTo, locator, TRACE } from "../../src/portfolio/live/location.ts";
+import { HYPERLIQUID_RULE, heldTo, locator, SUBDIVISION, TRACE } from "../../src/portfolio/live/location.ts";
 import type { Http, HttpReply } from "../../src/portfolio/live/types.ts";
 
 /** Where this user is (live/location.ts), from more than one source: in a country whose networks block Polymarket itself, the users a venue
@@ -44,6 +44,34 @@ describe("where this user is, from more than one source", () => {
     // with Polymarket's subdivision, Canada outside Ontario is served and Ontario is closed
     expect(await locator(net({ [PM]: reply(200, { blocked: false, country: "CA", region: "BC" }) })).verdict(HYPERLIQUID_RULE)).toBe("served");
     expect(await locator(net({ [PM]: reply(200, { blocked: true, country: "CA", region: "ON" }) })).verdict(HYPERLIQUID_RULE)).toBe("closed");
+  });
+
+  it("a country the rule closes in part, from the trace alone (Ukraine blocks polymarket.com): the part is asked of one more source, and a user Hyperliquid serves is served", async () => {
+    const at = (region: unknown, country: unknown = "UA") => net({ [PM]: new Error("ECONNRESET"), [TRACE[0]!]: trace("UA"), [SUBDIVISION]: reply(200, { ip: "203.0.113.7", country_code: country, region_code: region, city: "made-up" }) });
+    // Kyiv: served; Crimea: closed
+    const kyiv = at("30");
+    expect(await locator(kyiv).verdict(HYPERLIQUID_RULE)).toBe("served");
+    expect(kyiv.asked).toEqual([PM, TRACE[0], SUBDIVISION]);
+    expect(await locator(at("43")).verdict(HYPERLIQUID_RULE)).toBe("closed");
+    // the other source names another country, or no part, or does not answer: not known, not served
+    expect(await locator(at("30", "PL")).verdict(HYPERLIQUID_RULE)).toBe("unknown");
+    expect(await locator(at("")).verdict(HYPERLIQUID_RULE)).toBe("unknown");
+    expect(await locator(net({ [PM]: new Error("x"), [TRACE[0]!]: trace("UA"), [SUBDIVISION]: new Error("x") })).verdict(HYPERLIQUID_RULE)).toBe("unknown");
+    // asked once: the part is kept with the place
+    const w = locator(kyiv);
+    await w.verdict(HYPERLIQUID_RULE);
+    await w.verdict(HYPERLIQUID_RULE);
+    expect(kyiv.asked.filter((u) => u === SUBDIVISION)).toHaveLength(2);
+    // a country the rule does not split is never asked about its part
+    const sg = net({ [PM]: new Error("x"), [TRACE[0]!]: trace("SG") });
+    await locator(sg).verdict(HYPERLIQUID_RULE);
+    expect(sg.asked).not.toContain(SUBDIVISION);
+  });
+
+  it("the place itself, for the account's own matching of the venues' published terms: from Polymarket's check, else Cloudflare's country alone, else not known", async () => {
+    expect(await locator(net({ [PM]: reply(200, { blocked: true, ip: "203.0.113.7", country: "us", region: "pa" }) })).place()).toEqual({ country: "US", region: "PA" });
+    expect(await locator(net({ [PM]: new Error("x"), [TRACE[0]!]: trace("DE") })).place()).toEqual({ country: "DE", region: "" });
+    expect(await locator(net({})).place()).toBeUndefined();
   });
 
   it("no source gives a place (or Cloudflare says XX / T1): not known, so not served — and nothing about the place is in any refusal", async () => {

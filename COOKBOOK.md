@@ -38,6 +38,7 @@
 | 在一个不联网、不动钱的账户上把页面点一遍 | `npx tsx test/standin/ui-standin.ts --port 4821`（第 11c 条） |
 | 模拟账户里的规则，一个脚本从头走到尾，不起服务 | `npx tsx examples/account/headless.ts` |
 | 十四个 beat 的断言脚本 | `npm run account:demo` |
+| 从这台机器能接哪些场所（每家用自己的话；不含 IP、地方、钥匙，可以贴给别人） | `npm run account:check`；`-- --keys` 再只读地打开 home 里有钥匙文件的连接 |
 
 `npm run account -- --port 4821 --home /tmp/x` 另起一个互不相干的实例。`--classic` 是原来的模拟对账单，不挂这一层。
 
@@ -67,7 +68,7 @@ alias seat='npx tsx examples/account/agent-seat.ts'
 
 "Connect an account" 打开一组卡片，按 Exchanges · Brokers · Wallets · Markets and tokens 分组（服务能接、上面没列的，放在 "More" 里）。它在这几处：Portfolio 的三步清单第一步；Portfolio › Accounts 段头的 "Connect an account"；一个都没接时 Trade 屏的 "Connect an account"。agent 请求你接一个场所时，Waiting for you 里那条请求的 "Connect" 直接是那家的表单。点哪张就是哪个的接法，已经接上的写着 "Connected · add another"。银行和卡不在里面：它们没有给个人的接口。
 
-打开这组卡片时，账户替每个要钥匙、要登录或要 mm 的连接，先问一遍它的场所在建 key 之前的那个问题（不带任何钥匙、令牌或地址：交易所的公开时钟、Alpaca 和 Robinhood Crypto 不带 key 的一次 GET、Kalshi 的公开状态、Polymarket 自己的地区检查、Robinhood 登录的两份公开元数据、本机 `mm auth status`；`GET /api/account/connect/reach`）。场所说不服务这个地区的，卡片上直接写 "Not served here"（悬停是它的原话），点进去是它的原话和问的时间、"Check again"，建 key 的步骤收起来、Connect 按不了；Polymarket 的还给一个 "Watch a Polymarket wallet by its address instead"，那是只看、不交易。mm 没装或没登录的写 "Set up first" 和要跑的命令。一个都没答的不标，Connect 时照样再问。地区的答案留十分钟，别的两分钟；"Another exchange" 里每挑一家就问那一家。从这台机器问（2026-10-07）：Binance、Bybit 和 Polymarket 的交易连接不服务这里，其余的都答。Markets 里没接的场所的行写着 "Connect to trade"，点了直接是那家的连接表单（第 2c 条）。
+卡片上已经写着每家对**你**怎么样：账户启动后几秒、之后每 30 分钟，自动替每个场所问一遍它在建 key 之前的那个问题（不带任何钥匙、令牌或地址：交易所的公开时钟、Alpaca 和 Robinhood Crypto 不带 key 的一次 GET、Kalshi 的公开状态、Polymarket US 公开 gateway 的一次市场列表、Polymarket 自己的地区检查、Robinhood 登录的两份公开元数据、本机 `mm auth status`、Hyperliquid 条款 §1.6 对你此刻所在地方的规定），再把场所公布的居住地规矩对上这台机器此刻所在的地方（`GET /api/account/venues`，开发者文档「地区」一节）。场所说不服务这个网络的，卡片写 "Not served here"（悬停是它的原话），点进去是它的原话和问的时间、"Check again"，建 key 的步骤收起来、Connect 按不了；Polymarket 和 Hyperliquid 的还给一个 "Watch … by its address instead"，那是只看、不交易。场所只让你那里平仓的（Polymarket 对美国），卡片写 "Close only here"，照样能接：读得到持仓，能卖、能撤单，买入会被它的原话拒掉。连不了的场所如果有给你那里的另一个版本（Binance → Binance.US、OKX → OKX US、Polymarket → Polymarket US：另一家公司、自己的账户和钥匙），而且那个版本从你的网络能接、它自己的话说它是为你那里做的，表单里就有 "Connect Polymarket US instead"（没有自己卡片的版本，旁边多一张它的卡）。它的条款排除你所在地方的，卡片写 "Its terms exclude where you are"，点进去是它条款的原话、链接和读的日期——**只提示、不拦**，开户时的居住地审核是场所的事。mm 没装或没登录的写 "Set up first" 和要跑的命令。一个都没答的不标，Connect 时照样再问。所在的地方只在内存里用于这个判断，不保存、不返回。从开发者那台机器（美国，2026-10-08）：Binance、Bybit 和 Hyperliquid 的交易连接不服务那里，Polymarket 的交易连接只能平仓，其余的都答；这只是美国网络看到的，别处照各自的网络算。
 
 **交易所**（OKX、Kraken、Coinbase、Bybit、Binance，或 "Another exchange" 从统一接口库的一百来家里挑）：
 
@@ -84,12 +85,14 @@ OKX connected live · $1,000.00 there now · the venue says this credential can 
 
 **钱包**（OKX Wallet、Binance Wallet、MetaMask 扩展等）：在装了钱包的浏览器里点 "Browser wallet"，再点你的钱包。钱包先给地址，再签一句话（不是交易，什么都不批准），这个地址就是你的，从它可以换币（下面第 5 条）。"Watch an address" 只粘贴地址：能看，既不交易也不收发。
 
+**Hyperliquid**：卡片 "Hyperliquid" 是 API 钱包连接：在 app.hyperliquid.xyz → More → API 里起个名、Generate、Authorize API Wallet（最长 180 天），把它的私钥放进 `privateKey`、你账户自己的地址放进 `walletAddress`（`credentials/hyperliquid-trade/api-key.json`）。API 钱包只能下单、不能提币；账户自己的私钥拒收。接上以后永续、现货、HIP-3（含 io:ANTH 这类 pre-IPO）都在 Trade 里下，每一单、每次改杠杆之前按它条款 §1.6 查你此刻所在的地方。只想看，用 "Hyperliquid · by address"。
+
 **Robinhood**：
 - 投资账户：卡片 "Robinhood" → "Sign in at Robinhood…"，在 Robinhood 自己的页面登录、批准，回来点 "Connect"。读各账户的现金和股票持仓；下单只在 Robinhood 的 Agentic 账户里，整股。令牌只在服务的内存里，重启要重新登录。
 - Crypto：在 Robinhood 网页版的 crypto 账户设置里建 API 凭据（你自己生成 Ed25519 密钥对，把公钥交给 Robinhood，勾上读和下单）。卡片 "Robinhood Crypto" 走和交易所一样的三步，字段是 `apiKey`、`privateKey`（base64 私钥）。
 - Stock Tokens：接任何钱包（包括 "Watch an address" 粘贴 Robinhood Wallet 的地址）都会一起读 Robinhood Chain 上的 Stock Tokens。
 
-**其他**：Alpaca 是钥匙文件（它的 key 没有权限可选，任何 key 都能下单；现金只能在 Alpaca 那边用 ACH 动；接入时问一次 `GET /v2/wallets`，Alpaca 给这个账户开了 Crypto Wallets API 的，Receive 能给出它在 Ethereum、Arbitrum 上的充值地址，提币不从这里走——Alpaca 已把 Trading API 的加密提币下线（2026-10-09 日落），加密在它的 app 里提到那边白名单过的地址；没开的，Details 里是 Alpaca 自己的答复；先用 Paper 账户的 key 试）；Kalshi 是 `keyId` 加它给的私钥 `.pem` 的路径 `privateKeyFile`（有权限可选时选 `read` 和 `write::trade`）；MetaMask Agent Wallet 走本机的 `mm` 命令行（先确认 `mm wallet show` 能用）；Polymarket 要交易用账户钱包的钥匙文件，先问 Polymarket 自己这个地区让不让用（用钥匙接上的，Receive 给出下单钱包的地址收 Polygon 上的 pUSD，别的 EVM 链给 Polymarket 的桥为这个钱包生成的专属充值地址，带它的最低额；只填地址看的给不出地址）；Hyperliquid、Ondo 只填地址、只读（Hyperliquid 只认账户自己钥匙的签名：按地址接的只读，不写）。
+**其他**：Alpaca 是钥匙文件（它的 key 没有权限可选，任何 key 都能下单；现金只能在 Alpaca 那边用 ACH 动；接入时问一次 `GET /v2/wallets`，Alpaca 给这个账户开了 Crypto Wallets API 的，Receive 能给出它在 Ethereum、Arbitrum 上的充值地址，提币不从这里走——Alpaca 已把 Trading API 的加密提币下线（2026-10-09 日落），加密在它的 app 里提到那边白名单过的地址；没开的，Details 里是 Alpaca 自己的答复；先用 Paper 账户的 key 试）；Kalshi 是 `keyId` 加它给的私钥 `.pem` 的路径 `privateKeyFile`（有权限可选时选 `read` 和 `write::trade`）；Polymarket US 是 `keyId` 加 `secretKey`（在它的 app 里做完身份验证，用同一种登录方式去 polymarket.us/developer 生成；Secret Key 只显示一次；它的 API 不动钱）；MetaMask Agent Wallet 走本机的 `mm` 命令行（先确认 `mm wallet show` 能用）；Polymarket 要交易用账户钱包的钥匙文件，先问 Polymarket 自己这个地区让不让用（用钥匙接上的，Receive 给出下单钱包的地址收 Polygon 上的 pUSD，别的 EVM 链给 Polymarket 的桥为这个钱包生成的专属充值地址，带它的最低额；只填地址看的给不出地址）；Hyperliquid、Ondo 只填地址、只读（Hyperliquid 只认账户自己钥匙的签名：按地址接的只读，不写）。
 
 拔掉在那一行的 Details 抽屉里点 "Disconnect…"，先确认一次，再是一次签名。还有没完成的单时拔不掉，先撤单。场所那边的钥匙不动，要删去那边删。agent 钱包没有 "Disconnect"：账户握着它的钥匙和里面的钱，要收走用 Agents 弹层里的 "Take back…"，它随 agent 的子账户留在账户上。Accounts 段头的 "CSV" 下载每个账户的持有。
 
@@ -332,7 +335,7 @@ agent 付 API 调用、按次计费的服务，用的是一个 **agent 钱包**�
 
 ## 7c · Earn：让闲着的钱生息
 
-四家有接口：MetaMask Agent Wallet 的 DeFi 金库（经 `mm earn`）、OKX 的 Simple Earn Flexible、Kraken Earn、KuCoin Earn（Binance 的 Simple Earn 也有接口，不做：它对这台机器回 451）。Portfolio 右边 Cash ready 的 "Earn…" 只在接上的场所里有这四家之一时出现，打开 Earn 弹层。
+五家有接口：MetaMask Agent Wallet 的 DeFi 金库（经 `mm earn`）、OKX 的 Simple Earn Flexible、Kraken Earn、KuCoin Earn、Binance 的 Simple Earn Flexible（从现货账户放进、取回现货；Binance 的自动申购开关账户从不替你打开；开发者那台机器读不到 Binance，这一家照它的文档写、对着替身测过）。Portfolio 右边 Cash ready 的 "Earn…" 只在接上的场所里有这五家之一时出现，打开 Earn 弹层。
 
 1. 点 "Earn…"，弹层顶上选 Put in 或 Take out。列表是场所此刻提供的产品（Take out 只列你在里面有钱的）：币、年化（APY 或 APR，区间的写上限）、取出要等几天（0 是马上）、最小额、取出落在哪（永远是钱来的那个场所）、你在里面有多少。放不进去的排在后面，写场所的理由（例如 mm 的金库锁仓不到 $1,000,000）。
 2. 填数量（"Max" 填你在那里有的；Take out 还有 "All of it"，签进去的是 `"all"`，场所把里面的全部取出）。预览写这一笔值多少、上限多少。
@@ -379,6 +382,8 @@ portfolio_watchlist                                     # 你关注什么、给�
 portfolio_report {intent, status: "taking", note, refs} # taking · done · cannot · note；refs 只能是它自己的 ord-… / pay-… 或交易哈希
 portfolio_ask {kind: "limit", venue, usd, text}         # letIn · limit · venue · topup · session · leverage · mode
 ```
+
+- 请主人接一个场所之前，先读 `portfolio_venues`：每家对这个用户的结论（`connectable` · `not-served` · `close-only` · `terms-exclude` · `setup` · `closed` · `no-answer`）和场所的原话；连不了的还有 `edition`：给用户那里的另一个版本（比如 Binance.US、OKX US、Polymarket US），该请主人接的是它。不服务这个网络、或没有入口的场所（`not-served`、`closed`），`portfolio_ask {kind: "venue"}` 在门口就被拒（`E_VENUE_GEOBLOCKED`，带场所的话），主人不会收到这张卡；条款排除用户所在地方的（`terms-exclude`）照样问到主人，主人在表单里看到它条款的原话再决定。
 
 - 回报出现在 Agents at work 那条意图下面。一个 agent 在一个意图上最多 50 条，不会盖掉别的 agent 的；给所有 agent 的意图上，别的 agent 的回报对它只是别人的话，不是你的指令。
 - 请求出现在 Waiting for you，和它的卡在一组。"Grant…" 打开你自己做这件事的那张表（额度、建钱包或充值、连接那个场所、会话、杠杆上限、模式、放它进来），签了请求自己关掉（给一份额度只关掉它问的场所在这份额度里的那些请求，没点场所的请求任何一份额度都关；收回额度——预算 0——什么都不给，不关请求）；"Decline…" 是一次签名（`answerAsk {ask, decision: "decline"}`），只关掉、什么都不给，agent 在 `portfolio_watchlist` 里一天之内看得见 `declined: true`。agent 要你接一个场所的，那条请求的按钮是 "Connect"，直接是那家的连接表单。
@@ -483,7 +488,7 @@ dsh 启动 stdio 子进程时会去掉名字里带 KEY、SECRET、TOKEN、PASSWO
 
 真实账户上席位只注册真实账户的工具（`mcp.ts` 头上那两张表）：`portfolio_read`、`portfolio_markets`、`portfolio_quote`、`portfolio_openness`、`portfolio_execute`、`portfolio_order` 是 `--classic` 和测试里分层模拟的，`portfolio_transfer` 只在分层模拟上；席位启动时读一次 `/api/account` 判断账户是不是真实的（读不到的当作真实），所以真实账户上的 agent 根本看不到它们。`portfolio_overview` 在真实账户上的流动性是每个场所对自己钥匙或钱包的说法，不带模拟的阶梯和日上限；`portfolio_live_positions` 可以不带 venue；`portfolio_wait` 把 `stranded` 当终态；`portfolio_live_move` 的币是账户认的每一种美元稳定币、桥的目的链含 Robinhood Chain；`portfolio_receive` 给的是场所自己给的地址，agent 改不了；`portfolio_account` 带 owner 的模式（`mode`：`guard` 是 Guard，`open` 是 Beast）和 `modeRules`（Mode 弹层那张表，每扇门两档各怎么做，`cardMinutes` 是一张卡等几分钟）；`portfolio_explore` 的 `tab` 是 all · crypto · stocks · rwas · perps · preipo · predictions，pre-IPO 每家公司一行，行和每个场所的 `at` 带 `implied {usd, unit}`（行的是各家隐含估值的中位数；一个场所的合约在 `portfolio_live_markets` 里还带 `perPoint`），IPO 的问题是普通的 predictions 行；`portfolio_live_compare` 可带 `asset`（`stock` 或 `crypto`），一个名字既是币又是股票时说比哪一个。agent 交易 pre-IPO 永续用的就是普通的永续工具，`symbol` 是 `portfolio_explore` 里那一家的写法。
 
-agent 进来以后常用的一圈：`portfolio_account`（我是谁、能做什么）→ `portfolio_watchlist`（owner 想要什么）→ `portfolio_explore` / `portfolio_holdings`（有什么、我手里有什么）→ `portfolio_live_preview`（这一单会怎样）→ `portfolio_live_order`（Guard 下是一张卡）→ `portfolio_wait` → `portfolio_report`（告诉 owner 做了）。缺额度、缺场所时 `portfolio_ask`，然后接着做手里能做的，不要原地等。
+agent 进来以后常用的一圈：`portfolio_account`（我是谁、能做什么）→ `portfolio_venues`（这个用户从他的网络能接哪些场所）→ `portfolio_watchlist`（owner 想要什么）→ `portfolio_explore` / `portfolio_holdings`（有什么、我手里有什么）→ `portfolio_live_preview`（这一单会怎样）→ `portfolio_live_order`（Guard 下是一张卡）→ `portfolio_wait` → `portfolio_report`（告诉 owner 做了）。缺额度、缺场所时 `portfolio_ask`，然后接着做手里能做的，不要原地等。
 
 ## 11b · Agent 模块接口（给做 Agent 模块的团队）
 
@@ -770,7 +775,10 @@ npx vitest run test/attack
 | Markets 的 Perps 里找不到 ANTHROPIC、OPENAI | 它们是 pre-IPO 永续，只在 Pre-IPO tab，每家公司一行（第 2c 条） |
 | OKX 那条 pre-IPO 的价格只有别家的十分之一 | 它的 ANTHROPIC、OPENAI 两个合约 2026-06-30 做了 10:1 的 rebase：$1 对 $100 亿。隐含估值一样，每家那一条写着它的单位 |
 | Markets 的一行写着 "Connect to trade" | 那是没接的场所的公开行情：点它接上那家，见第 2c 条 |
-| Markets 底下 "Why these, and what's not shown ⓘ" 里说某个场所没答或不服务这里 | 那是场所自己的话（Binance 451、Bybit 403 是按地区拒绝）；没答的那家整个搁 20 秒不再问，说不服务这个地区的搁 10 分钟；连接器抛了异常也算没答（`E_VENUE_UNREACHABLE` · "answered in a way the account could not read"），异常文字只进服务器日志 |
+| 接交易所时说 "refuses this key from this machine's address" | 钥匙绑了 IP，这台机器现在的地址不在名单上（家里的宽带换了地址、换了网络，或者钥匙是在别的机器上建的）。去交易所的 API 管理页，把这台机器现在的地址加进钥匙的 IP 名单，或者重建钥匙；钥匙和地区都没问题 |
+| 说 "has banned this machine's address for too many requests until …" | 场所因为请求太多封了这个地址（Binance 的 418），封到它说的时间；账户到那时之前不再问它 |
+| 说 "refuses this network: the server in front of it answered HTTP 403 … and gave no reason" | 场所前面的服务器拒绝了这个网络，没说为什么（按地方，或者按这个地址的信誉）；那是它的回答，账户不找别的路 |
+| Markets 底下 "Why these, and what's not shown ⓘ" 里说某个场所没答或不服务这里，或一行写 "Not served here · why" | 那是场所自己的话（在开发者那台美国的机器上，Binance 451、Bybit 403 是按地区拒绝；别处照各自的网络算）；`npm run account:check` 把每家对这台机器的回答列出来；没答的那家整个搁 20 秒不再问，说不服务这个地区的搁 10 分钟；连接器抛了异常也算没答（`E_VENUE_UNREACHABLE` · "answered in a way the account could not read"），异常文字只进服务器日志 |
 | 净值曲线不画，或只写 "since …" | 不到两个点，或历史还短：账户每五分钟记一个点，之前的不知道，见第 2b 条 |
 | Assets 写 "Cost known for 1 of 3" | 有的币是账户之前就有的、或从别处转进来的，账户没见过它的成本，见第 2b 条 |
 | 代币化股票的签名按钮按不下去 | 发行方关了或限制了它（OUSG、BUIDL 从不 swap），原话写在按钮上方，见第 5b 条 |

@@ -54,6 +54,7 @@ const API_PAGES = { okx: "https://www.okx.com/account/my-api", binance: "https:/
 const KEY_HOW = {
   okx: "Tick Read and Trade (and Transfer, to move between Funding and Trading). Leave Withdraw off. Add this machine's IP: a trading key with no IP expires after 14 days unused. The passphrase you set goes in \"password\".",
   binance: "Tick Enable Reading and Enable Spot & Margin Trading; leave Enable Withdrawals off. Binance lets a System-generated key trade only when it is restricted to trusted IPs, so add this machine's IP, or make a Self-generated Ed25519 key and put its private key in \"secret\".",
+  okxus: "Make the key at OKX US (us.okx.com): a US account's key works there and nowhere else. Tick Read and Trade; leave Withdraw off. Add this machine's IP. The passphrase you set goes in \"password\".",
   binanceus: "Edit restrictions: keep Enable Read, check Enable Spot Trading, leave withdrawals off. Restrict it to this machine's IP: a key with no IP list that goes unused for 90 days is reset to read-only.",
   coinbase: "Create a Secret API key with the ECDSA signature algorithm (not Ed25519). Permissions: View and Trade; leave Transfer off. \"apiKey\" is the key's name (organizations/…/apiKeys/…), \"secret\" its private key, line breaks included.",
   kraken: "Permissions: Query Funds, Query Open Orders & Trades, Query Closed Orders & Trades, Create & Modify Orders, Cancel/Close Orders. Leave Withdraw Funds off.",
@@ -80,6 +81,11 @@ const isOn = (kind, extra) => (kind === "wallet" ? false : A.venues.some((v) => 
 const REACH = new Map();
 /* the connection a tile asks about: an exchange by its id; the ones read by address ask nothing (a public read is the same everywhere) */
 const tileConnector = (kind, extra) => (kind === "exchange" ? (extra ? `live:exchange:${extra}` : "") : BY_ADDRESS.has(kind) ? "" : `live:${kind}`);
+/* the tile a connection is: [kind, extra] (`live:exchange:binanceus` → exchange, binanceus) */
+const tileOf = (connector) => { const m = /^live:(exchange:)?([a-z0-9-]+)$/.exec(connector || ""); return m ? (m[1] ? ["exchange", m[2]] : [m[2], ""]) : null; };
+/* a venue that cannot be used from here and its edition for where the user is (the account's detection: a separate company that answers
+   this network and whose own terms serve the place — Binance.US for Binance) */
+const editionOf = (connector) => { const v = typeof VENUES !== "undefined" && connector ? VENUES.get(connector) : undefined; return v && v.edition ? v.edition : null; };
 /* a tile's second line once its venue said no */
 const REACH_WORD = { location: "Not served here", setup: "Set up first", closed: "Not available" };
 async function askReach(connectors, force = false) {
@@ -91,9 +97,14 @@ async function askReach(connectors, force = false) {
 /* a trading connection whose venue can also be watched by an address: the address one, its tile's name, and the offer to watch instead */
 const WATCH_INSTEAD = { "polymarket-trade": ["polymarket", "Polymarket · by address", "Watch a Polymarket wallet by its address instead"], "hyperliquid-trade": ["hyperliquid", "Hyperliquid · by address", "Watch a Hyperliquid account by its address instead"] };
 /* the form's note: the venue's no in its words and when it was asked, "Check again"; Polymarket's and Hyperliquid's add the way to see the
-   account there by its address */
+   account there by its address, and a venue with an edition for where the user is (Binance.US for Binance) offers that edition's form */
 function reachNoteHtml(r, kind) {
   if (!r || r.state === "ok") return "";
+  return `${reachSaysHtml(r, kind)}${r.edition && optionOf((tileOf(r.edition.connector) || [])[0]) ? ` <button type="button" class="link" data-reach="edition" title="${esc(r.edition.said)}">Connect ${esc(r.edition.name)} instead</button>` : ""}`;
+}
+function reachSaysHtml(r, kind) {
+  // the venue lets this location only close what is held: its words, and the form stays open — connected, what is held can be sold
+  if (r.state === "close-only") return `${esc(r.said || "")}${r.at ? ` <span class="dim">(asked ${esc(nyTime(r.at))})</span>` : ""} <button type="button" class="link" data-reach="again">Check again</button>`;
   // the venue's own terms exclude where the user is: its words, said once; the venue checks residency when an account is opened
   if (r.state === "terms") return `${esc(r.said || "")}${r.at ? ` <span class="dim">(asked ${esc(nyTime(r.at))})</span>` : ""}`;
   const w = WATCH_INSTEAD[kind];
@@ -101,12 +112,18 @@ function reachNoteHtml(r, kind) {
   return `${esc(r.said || "")}${r.at ? ` <span class="dim">(asked ${esc(nyTime(r.at))})</span>` : ""} <button type="button" class="link" data-reach="again">Check again</button>${instead}`;
 }
 /* what a tile's venue answered, from this form's own check (REACH, the freshest) or the account's detection (core VENUES): a venue that
-   refuses this network, wants something on this machine first, or offers no way in closes the form (`shut`); one whose own terms exclude
-   where the user is says so with its words and link, and does not close it — its sign-up checks residency, the account only shows it */
+   refuses this network, wants something on this machine first, or offers no way in closes the form (`shut`); one that lets this location
+   only close what is held, or whose own terms exclude where the user is, says so in its words and does not close it — connected, what is
+   held can be sold; the venue's sign-up checks residency, the account only shows it */
 function tileSays(connector) {
+  const t = tileSaysOwn(connector);
+  return t ? { ...t, edition: editionOf(connector) } : null;
+}
+function tileSaysOwn(connector) {
   if (!connector) return null;
   const r = REACH.get(connector);
   const v = typeof VENUES !== "undefined" ? VENUES.get(connector) : undefined;
+  if ((r && r.state === "close-only") || (!r && v && v.verdict === "close-only")) return { word: "Close only here", state: "close-only", said: (r || v).said || "", at: r ? r.at : v.asked, shut: false };
   if (r && REACH_WORD[r.state]) return { word: REACH_WORD[r.state], state: r.state, said: r.said || "", at: r.at, shut: true };
   if (!r && v && VENUE_NO[v.verdict]) return { word: VENUE_NO[v.verdict], state: v.verdict === "not-served" ? "location" : v.verdict, said: v.said || "", at: v.asked, shut: true };
   if (v && v.verdict === "terms-exclude") return { word: "Its terms exclude where you are", state: "terms", said: v.said || "", at: v.asked, shut: false };
@@ -126,18 +143,22 @@ function markTiles() {
 /** the tiles, grouped; `wide` lays them out across the page instead of inside the dialog. A way of connecting the server offers that no tile
  * above names is still a tile, under "More", by the server's own name for it: nothing the account can connect is left off */
 function catalog(owner, wide = "") {
-  const tile = ([kind, extra, name]) => {
+  const shown = new Set(TILES.flatMap(([, tiles]) => tiles.map(([kind, extra]) => tileConnector(kind, extra))));
+  const tile = ([kind, extra, name], edition = false) => {
     const o = optionOf(kind);
     if (!o) return "";
     const how = kind === "wallet" ? (extra === "watch" ? "Address" : "Sign one sentence") : o.needs === "cli" && kind !== "metamask" ? "On this machine" : HOW[o.needs] || "";
     const on = isOn(kind, extra);
     const t = on ? null : tileSays(tileConnector(kind, extra));
     const word = t && t.word;
-    return `<button type="button" class="tile${word ? " tile-off" : ""}" data-kind="${esc(kind)}" data-extra="${esc(extra)}"${word ? ` title="${esc(t.said)}"` : ""}${owner ? "" : " disabled"}><b>${esc(name)}</b><span>${on ? '<em class="on">Connected</em> · add another' : word ? `<em class="off">${esc(word)}</em>` : esc(how)}</span></button>`;
+    const own = `<button type="button" class="tile${word ? " tile-off" : ""}" data-kind="${esc(kind)}" data-extra="${esc(extra)}"${word ? ` title="${esc(t.said)}"` : ""}${owner ? "" : " disabled"}><b>${esc(name)}</b><span>${on ? '<em class="on">Connected</em> · add another' : word ? `<em class="off">${esc(word)}</em>` : esc(edition ? `${how} · serves where you are` : how)}</span></button>`;
+    // beside a venue that cannot be used from here: its edition for where the user is, as a tile of its own
+    const ed = !edition && t && t.edition && !shown.has(t.edition.connector) ? tileOf(t.edition.connector) : null;
+    return own + (ed ? tile([ed[0], ed[1], t.edition.name], true) : "");
   };
   const named = new Set(TILES.flatMap(([, tiles]) => tiles.map(([kind]) => kind)));
   const more = ((A.connectLive || {}).options || []).filter((o) => !named.has(o.kind)).map((o) => [o.kind, "", o.label.split(" · ")[0]]);
-  return [...TILES, ["More", more]].map(([title, tiles]) => { const t = tiles.map(tile).join(""); return t ? `<div class="pick-h">${esc(title)}</div><div class="pick ${wide}">${t}</div>` : ""; }).join("");
+  return [...TILES, ["More", more]].map(([title, tiles]) => { const t = tiles.map((x) => tile(x)).join(""); return t ? `<div class="pick-h">${esc(title)}</div><div class="pick ${wide}">${t}</div>` : ""; }).join("");
 }
 
 /** what a connection is (`live:exchange:okx`, `live:kalshi`, `live:polymarket-trade`) as the server offers it: its way of connecting, and the
@@ -271,6 +292,10 @@ async function openConnect(o, { exchange = "", watch = false, name = "", back = 
     if (!b) return;
     const w = WATCH_INSTEAD[o.kind];
     if (b.dataset.reach === "watch" && w) return void openConnect(optionOf(w[0]), { name: w[1], back });
+    // the venue's edition for where the user is: its own form
+    const ed = b.dataset.reach === "edition" ? editionOf(connNow()) : null;
+    const et = ed && tileOf(ed.connector);
+    if (et && optionOf(et[0])) return void openConnect(optionOf(et[0]), { exchange: et[0] === "exchange" ? et[1] : "", name: ed.name, back });
     $("reach-note").className = "reach-note msg wait";
     $("reach-note").textContent = "Asking again…";
     reachAsk(true);

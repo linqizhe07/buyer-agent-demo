@@ -206,7 +206,8 @@ export interface ExchangeEarnDeps {
  * any other exchange. Binance is binance.com's own client alone — Binance.US documents no Simple Earn, and the library's futures clients
  * are not where the money lands — and only where the library has its Simple Earn calls */
 export function exchangeEarner(d: ExchangeEarnDeps): LiveEarner | undefined {
-  if (isOkx(d.client.id)) return okxEarner(d);
+  // OKX US documents no Earn API: its on-chain staking is in its app only
+  if (isOkx(d.client.id) && d.client.id !== "okxus") return okxEarner(d);
   if (d.client.id === "kraken") return krakenEarner(d);
   if (d.client.id === "kucoin") return kucoinEarner(d);
   if (d.client.id === "binance" && BINANCE_CALLS.every((c) => method(d.client, c))) return binanceEarner(d);

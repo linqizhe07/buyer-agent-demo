@@ -46,7 +46,8 @@ import { holdingsOf, type MmBalance, type MmShow } from "../adapters/metamask.ts
 import { no } from "../refuse.ts";
 import { CHAIN_BY_ID, CHAINS, STABLECOINS, type ChainName } from "./chain.ts";
 import { known as knownFigure, once, type EarnPosition, type EarnProduct, type EarnSource, type EarnState, type LiveEarner } from "./earn.ts";
-import { HL_CLOSED, HL_TERMS } from "./location.ts";
+import { HL_TERMS, HYPERLIQUID_RULE, type Locator } from "./location.ts";
+import { CLOSE_ONLY_WORDS, polymarketScope } from "./polymarket-clob.ts";
 import type { Price } from "./prices.ts";
 import { badOrder, ceilTo, DONE, floorTo, inDollars, onStep, pick, plain, type LiveTrader, type Market, type MarketKind, type OrderRequest, type OrderState, type OrderStatus, type Position, type TimeInForce } from "./trade.ts";
 import { asRefusal, isStable, num, redact, REGION, type LiveBalance, type LiveSource } from "./types.ts";
@@ -172,7 +173,7 @@ export const realMm =
 
 /** `price`: a dollar price for an earn vault's asset that is not a dollar stablecoin (live/prices.ts); without one, only stablecoin vaults
  * are valued, and money goes into no other */
-export async function metamaskSource(req: { venue: string; label: string; run: RunMm; env?: Record<string, string | undefined> | undefined; now?: (() => number) | undefined; price?: Price | undefined }): Promise<{ source: LiveSource & EarnSource; first: LiveBalance[] } | Refusal> {
+export async function metamaskSource(req: { venue: string; label: string; run: RunMm; env?: Record<string, string | undefined> | undefined; now?: (() => number) | undefined; price?: Price | undefined; where?: Locator | undefined }): Promise<{ source: LiveSource & EarnSource; first: LiveBalance[] } | Refusal> {
   const name = req.label || "MetaMask Agent Wallet";
   const env = req.env ?? process.env;
   // redacted before it is cut short, so half a secret is never kept
@@ -197,7 +198,7 @@ export async function metamaskSource(req: { venue: string; label: string; run: R
   };
   try {
     const first = await read();
-    const trader = mmTrader({ venue: req.venue, name, address: show.address, run: req.run, env, now: req.now ?? Date.now });
+    const trader = mmTrader({ venue: req.venue, name, address: show.address, run: req.run, env, now: req.now ?? Date.now, where: req.where });
     const earner = mmEarner({ venue: req.venue, name, address: show.address, run: req.run, env, now: req.now ?? Date.now, price: req.price });
     const source: LiveSource & EarnSource = { name, kind: "agent-wallet", reference: "the mm command line's session on this machine", via: "MetaMask · mm command line", address: show.address, probe: { can: ["read", "transfer", "swap"], note: `MetaMask's Guard decides what goes out without asking (${rolling !== undefined ? `$${rolling} a rolling day` : "its policy"}); above that it asks you by email`, native: { address: show.address, tradingMode: show.tradingMode, rolling24h: rolling ?? null } }, read, writer: mmWriter(show.address as `0x${string}`, req.run, req.env), trader, earner };
     return { source, first };
@@ -248,7 +249,8 @@ const HL_MIN_USD = 10;
 const HL_PRICE_DECIMALS = 6;
 const PERP_NOTE = "a Hyperliquid perpetual through mm, margined in USDC in your Hyperliquid account (mm perps deposit comes first). A market order is Hyperliquid's IOC within the worst price; a limit order rests until canceled (GTC). It opens at the leverage set for it here (1x unless set); funding is paid or received every hour. Before every order the account holds this machine's place to Hyperliquid's own line (its Terms of Use §1.6)";
 // Hyperliquid's own line (its Terms of Use §1.6: the United States, Ontario, the sanctioned territories) is one rule for every path to
-// Hyperliquid, kept in location.ts (HL_CLOSED, HL_TERMS); this path holds the place `mm predict geoblock` names to it (hlLine)
+// Hyperliquid, kept in location.ts (HYPERLIQUID_RULE, HL_TERMS); this path holds the place `mm predict geoblock` names to it (hlLine), and
+// the account's own sources' when mm cannot say
 
 const INSUFFICIENT = new Set(["INSUFFICIENT_FUNDS", "INSUFFICIENT_GAS", "INSUFFICIENT_BALANCE", "INSUFFICIENT_LP_BALANCE", "PREDICT_INSUFFICIENT_BALANCE", "PREDICT_INSUFFICIENT_FUNDING_BALANCE", "PREDICT_INSUFFICIENT_GAS"]);
 const INVALID = new Set(["INVALID_AMOUNT", "INVALID_INPUT", "INVALID_SWAP_PARAMS", "AMOUNT_TOO_LOW", "AMOUNT_TOO_HIGH", "SLIPPAGE_TOO_HIGH", "SLIPPAGE_TOO_LOW", "TOKEN_NOT_FOUND", "TOKEN_NOT_SUPPORTED", "NATIVE_ASSET_UNSUPPORTED", "UNSUPPORTED_CHAIN", "REFUEL_UNSUPPORTED_ROUTE", "RWA_NATIVE_TOKEN_UNSUPPORTED", "INVALID_TICK_SIZE", "INVALID_ORDER_TYPE", "INVALID_SIDE", "PREDICT_ORDER_SIZE_TOO_SMALL", "MISSING_FLAG", "MISSING_SWAP_PARAMS", "MISSING_CHAIN", "INVALID_CHAIN", "INVALID_SYMBOL", "INVALID_SIZE", "INVALID_LEVERAGE", "INVALID_PRICE", "INVALID_SLIPPAGE", "AMBIGUOUS_VAULT"]);
@@ -391,6 +393,9 @@ export interface MmTraderDeps {
   name: string;
   address: string;
   run: RunMm;
+  /** where this machine is, from the account's own sources (location.ts), for when mm cannot say: a network that blocks Polymarket blocks
+   * `mm predict geoblock` too, and the users Hyperliquid serves there must not be refused for that */
+  where?: Locator | undefined;
   /** where MetaMask's own switch is read: PORTFOLIO_MM_WRITES */
   env: Record<string, string | undefined>;
   now: () => number;
@@ -810,8 +815,9 @@ export function mmTrader(d: MmTraderDeps): LiveTrader & { kinds: MarketKind[] } 
     return m;
   }
 
-  /** `mm predict geoblock`: Polymarket's own check of where this machine is. Blocked, and nothing else is asked */
-  async function geoblock(args: string[]): Promise<Refusal | undefined> {
+  /** `mm predict geoblock`: Polymarket's own check of where this machine is, read with Polymarket's own lists (polymarketScope). Blocked
+   * completely is no, and nothing else is asked; close-only lets a sell go (shares the wallet holds: it closes a position) and not a buy */
+  async function geoblock(args: string[], side: "buy" | "sell"): Promise<Refusal | undefined> {
     let data: unknown;
     try {
       data = await call(args, PM, "say whether it serves this location", "order");
@@ -820,8 +826,10 @@ export function mmTrader(d: MmTraderDeps): LiveTrader & { kinds: MarketKind[] } 
     }
     const g = obj(obj(data)?.result) ?? obj(data);
     // the IP and the place mm reports are left out of everything kept: a refusal is logged and lands in the ledger
-    if (g?.blocked === true) return no("E_VENUE_GEOBLOCKED", { venue, message: `${PM} does not take orders from this location (as mm predict geoblock says): that is its own rule, and the account does not look for a way around it. Nothing was placed`, native: { command: cmd(args), blocked: true } });
-    if (g?.blocked !== false) return no("E_VENUE_REJECTED", { venue, message: `mm did not say whether ${PM} serves this location, so nothing was placed`, native: { command: cmd(args) } });
+    const scope = polymarketScope(g);
+    if (scope === "blocked") return no("E_VENUE_GEOBLOCKED", { venue, message: `${PM} does not take orders from this location (as mm predict geoblock says): that is its own rule, and the account does not look for a way around it. Nothing was placed`, native: { command: cmd(args), blocked: true } });
+    if (scope === "close-only" && side === "buy") return no("E_VENUE_GEOBLOCKED", { venue, message: `${CLOSE_ONLY_WORDS} (as mm predict geoblock says). A buy opens a position, so nothing was placed; a sell of shares the wallet holds closes one`, native: { command: cmd(args), blocked: true, closeOnly: true } });
+    if (scope === undefined) return no("E_VENUE_REJECTED", { venue, message: `mm did not say whether ${PM} serves this location, so nothing was placed`, native: { command: cmd(args) } });
     return undefined;
   }
 
@@ -867,7 +875,7 @@ export function mmTrader(d: MmTraderDeps): LiveTrader & { kinds: MarketKind[] } 
     const args = ["predict", "place", "--token-id", tokenId, "--side", o.side, "--size", plain(o.qty, 2), "--price", plain(price, 6), "--order-type", ot, ...(o.postOnly ? ["--post-only"] : []), "--json"];
     const geo = ["predict", "geoblock", "--json"];
     if (!writesOn()) return off([geo, args]);
-    const blocked = await geoblock(geo);
+    const blocked = await geoblock(geo, o.side);
     if (blocked) return blocked;
     let data: unknown;
     try {
@@ -1092,6 +1100,14 @@ export function mmTrader(d: MmTraderDeps): LiveTrader & { kinds: MarketKind[] } 
     const args = ["predict", "geoblock", "--json"];
     let country = "";
     let region = "";
+    // mm could not say where this machine is: the account's own sources are asked instead (location.ts) — a network that blocks Polymarket
+    // blocks mm's check too, and the users Hyperliquid serves there must not be refused for that; not known there either, nothing is sent
+    const instead = async (why: string, native: Record<string, unknown>): Promise<Refusal | undefined> => {
+      const v = d.where ? await d.where.verdict(HYPERLIQUID_RULE) : "unknown";
+      if (v === "served") return undefined;
+      if (v === "closed") return no("E_VENUE_GEOBLOCKED", { venue, message: `${HYPERLIQUID_RULE.closedWords}. Nothing was sent to ${doing}`, native: { ...native, terms: HL_TERMS } });
+      return no("E_VENUE_REJECTED", { venue, message: why, native });
+    };
     try {
       const data = await run<unknown>(args);
       const g = obj(obj(data)?.result) ?? obj(data);
@@ -1105,11 +1121,17 @@ export function mmTrader(d: MmTraderDeps): LiveTrader & { kinds: MarketKind[] } 
         country = where.at(-1) ?? "";
         region = where.length > 1 ? where[0]! : "";
       }
-      if (!/^[A-Z]{2}$/.test(country)) return no("E_VENUE_REJECTED", { venue, message: `mm could not say where this machine is, so ${HL}'s own line (its Terms of Use §1.6) could not be checked: nothing was sent`, native: { command: cmd(args), code: f.code, said: said(f.message) } });
+      if (!/^[A-Z]{2}$/.test(country)) return instead(`mm could not say where this machine is, so ${HL}'s own line (its Terms of Use §1.6) could not be checked: nothing was sent`, { command: cmd(args), code: f.code, said: said(f.message) });
     }
-    if (!/^[A-Z]{2}$/.test(country)) return no("E_VENUE_REJECTED", { venue, message: `mm did not say where this machine is, so ${HL}'s own line (its Terms of Use §1.6) could not be checked: nothing was sent`, native: { command: cmd(args) } });
-    const at = region ? `${country}-${region}` : country;
-    if (HL_CLOSED.countries.has(country) || HL_CLOSED.regions.has(at)) return no("E_VENUE_GEOBLOCKED", { venue, message: `${HL} does not serve this location (where mm places this machine): its Terms of Use (§1.6) close it to anyone located in the United States, Ontario or a sanctioned territory. That is its own rule, and the account does not look for a way around it. Nothing was sent to ${doing}`, native: { command: cmd(args), terms: HL_TERMS } });
+    if (!/^[A-Z]{2}$/.test(country)) return instead(`mm did not say where this machine is, so ${HL}'s own line (its Terms of Use §1.6) could not be checked: nothing was sent`, { command: cmd(args) });
+    if (HYPERLIQUID_RULE.closes(country, region)) return no("E_VENUE_GEOBLOCKED", { venue, message: `${HL} does not serve this location (where mm places this machine): its Terms of Use (§1.6) close it to anyone located in the United States, Ontario or a sanctioned territory. That is its own rule, and the account does not look for a way around it. Nothing was sent to ${doing}`, native: { command: cmd(args), terms: HL_TERMS } });
+    // a country the line closes in part (Canada: Ontario; Ukraine: Crimea, Donetsk, Luhansk) without the part: the account's own sources
+    // are asked for it; not known, nothing is sent
+    if (!region && HYPERLIQUID_RULE.splits?.(country)) {
+      const v = d.where ? await d.where.verdict(HYPERLIQUID_RULE) : "unknown";
+      if (v === "closed") return no("E_VENUE_GEOBLOCKED", { venue, message: `${HYPERLIQUID_RULE.closedWords}. Nothing was sent to ${doing}`, native: { command: cmd(args), terms: HL_TERMS } });
+      if (v !== "served") return no("E_VENUE_REJECTED", { venue, message: `mm said the country but not the part of it this machine is in, and ${HL}'s own line (its Terms of Use §1.6) closes part of it: nothing was sent`, native: { command: cmd(args) } });
+    }
     return undefined;
   }
 

@@ -447,19 +447,31 @@ describe("a wallet's swaps through LI.FI: refusals", () => {
     expect(lifiCalls(http)).toEqual([]);
   });
 
-  it("LI.FI refusing where the request comes from is its own rule: reported as that", async () => {
-    for (const [status, body] of [[403, { message: "Forbidden" }], [451, { message: "Unavailable For Legal Reasons" }], [400, { message: "not available in your region" }]] as const) {
+  it("LI.FI refusing where the request comes from is its own rule: reported as that — and a 403 with no word about a place is its no in its own words, not a claim about whom its terms exclude", async () => {
+    for (const [status, body] of [[451, { message: "Unavailable For Legal Reasons" }], [400, { message: "not available in your region" }]] as const) {
       const http = lifi([
         ["https://li.quest/v1/tokens?", { body: TOKENS }],
         ["https://li.quest/v1/quote", { status, body }],
       ]);
       const no = refusal(await trader(http, chainStandIn({ held: { "Base:USDC": 100, Base: 0.01 } })).place(BUY_ORDER));
       expect(no.code).toBe("E_VENUE_GEOBLOCKED");
-      expect(no.message).toMatch(/LI\.FI (does not serve this location|refused this machine \(HTTP 403\)).*the account does not look for a way around it/);
+      expect(no.message).toMatch(/LI\.FI does not serve this location.*the account does not look for a way around it/);
     }
-    // the token list too
+    // a JSON 403: LI.FI's words, as its no to this request (LI.FI answers a US network: nothing is said about whom its terms exclude)
+    const json403 = lifi([
+      ["https://li.quest/v1/tokens?", { body: TOKENS }],
+      ["https://li.quest/v1/quote", { status: 403, body: { message: "Forbidden" } }],
+    ]);
+    const said = refusal(await trader(json403, chainStandIn({ held: { "Base:USDC": 100, Base: 0.01 } })).place(BUY_ORDER));
+    expect([said.code, said.message]).toEqual(["E_VENUE_PERMISSION", "LI.FI refused this request (HTTP 403): “Forbidden”. That is its own answer, and the account does not look for a way around it"]);
+    expect(said.message).not.toMatch(/US persons/);
+    // a page from the server in front of it, refusing this network with no reason: said so
+    const page = lifi([["https://li.quest/v1/tokens?", { status: 403, body: "<html><head><title>Access Denied</title></head><body>Access Denied</body></html>" }]]);
+    const edge = refusal(await trader(page, chainStandIn()).markets(""));
+    expect([edge.code, edge.message]).toEqual(["E_VENUE_GEOBLOCKED", "LI.FI refuses this network: the server in front of it answered HTTP 403 (“Access Denied”) and gave no reason — by place, or by this address's standing, it does not say. That is its own answer, and the account does not look for a way around it"]);
+    // the token list's JSON 403 is LI.FI's no too
     const http = lifi([["https://li.quest/v1/tokens?", { status: 403, body: { message: "Forbidden" } }]]);
-    expect(refusal(await trader(http, chainStandIn()).markets("")).code).toBe("E_VENUE_GEOBLOCKED");
+    expect(refusal(await trader(http, chainStandIn()).markets("")).code).toBe("E_VENUE_PERMISSION");
   });
 
   it("LI.FI rate-limiting, down, or out of reach", async () => {

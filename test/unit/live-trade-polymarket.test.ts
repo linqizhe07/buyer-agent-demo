@@ -52,6 +52,7 @@ const CLOB = "https://clob.polymarket.com";
 const GAMMA = "https://gamma-api.polymarket.com";
 const GEO = "https://polymarket.com/api/geoblock";
 const GEO_WORDS = "Polymarket does not serve this location: that is its own rule, and the account does not look for a way around it";
+const CLOSE_ONLY = "Polymarket lets this location close positions, not open new ones (its own rule: docs.polymarket.com/api-reference/geoblock), and the account does not look for a way around it";
 const ZERO32: Hex = `0x${"00".repeat(32)}`;
 const ORDER_TYPES = {
   Order: [
@@ -217,13 +218,13 @@ describe("Polymarket's trading connection", () => {
     expect([bad.code, bad.message]).toEqual(["E_VENUE_UNAUTHORIZED", "Polymarket does not accept this key's credentials: Invalid L1 Request headers"]);
   });
 
-  it("Polymarket's location check says blocked: that is its rule, said in its words, and nothing else is asked or offered", async () => {
+  it("Polymarket's location check says blocked, and its lists say completely (a sanctioned place): that is its rule, said in its words, and nothing else is asked or offered", async () => {
     const seen: Req[] = [];
-    const geo = refusal(await polymarketTradeSource({ venue: "polymarket-trade", label: "", reference: "", key: { privateKey: HARDHAT_0 }, http: stand({ geo: json({ blocked: true, ip: "203.0.113.7", country: "US", region: "PA" }) }, seen), chain: chain(0), clock: () => TS_MS }));
+    const geo = refusal(await polymarketTradeSource({ venue: "polymarket-trade", label: "", reference: "", key: { privateKey: HARDHAT_0 }, http: stand({ geo: json({ blocked: true, ip: "203.0.113.7", country: "IR", region: "07" }) }, seen), chain: chain(0), clock: () => TS_MS }));
     expect([geo.code, geo.message]).toEqual(["E_VENUE_GEOBLOCKED", GEO_WORDS]);
     // blocked, and nothing else: the refusal is logged and lands in the ledger, so the place and the IP it names are left out
     expect(geo.native).toEqual({ blocked: true });
-    expect(JSON.stringify(geo)).not.toMatch(/203\.0\.113\.7|"US"|"PA"/);
+    expect(JSON.stringify(geo)).not.toMatch(/203\.0\.113\.7|"IR"|"07"/);
     expect(JSON.stringify(geo)).not.toContain("203.0.113.7");
     expect(calls(seen)).toEqual([`GET ${GEO}`]);
     // a check that does not answer is not a yes
@@ -701,14 +702,32 @@ describe("Polymarket's refusals, in its own words", () => {
     expect(refusal((await placeWith(json({ error: `'${EOA}' address banned` }, 400))).r).code).toBe("E_VENUE_PERMISSION");
   });
 
-  it("the region: the location check before the order says blocked, so nothing is sent; the CLOB's own region refusal is the same answer", async () => {
-    const { t, seen } = await pm({ answers: withPost(), geo: [json({ blocked: false }), json({ blocked: true, ip: "203.0.113.7", country: "US", region: "PA" })] });
+  it("the region: the location check before the order says blocked completely, so nothing is sent; the CLOB's own region refusal is the same answer", async () => {
+    const { t, seen } = await pm({ answers: withPost(), geo: [json({ blocked: false }), json({ blocked: true, ip: "203.0.113.7", country: "CU", region: "" })] });
     // the connection asked once; the order asks again, and is told no
     const geo = refusal(await t.place(order()));
     expect([geo.code, geo.message]).toEqual(["E_VENUE_GEOBLOCKED", GEO_WORDS]);
     expect(calls(seen)).toEqual([`GET ${GEO}`]);
     const clob = refusal((await placeWith(json({ error: "Trading restricted in your region" }, 403))).r);
     expect([clob.code, clob.message]).toEqual(["E_VENUE_GEOBLOCKED", GEO_WORDS]);
+  });
+
+  it("close-only, as Polymarket's own lists make the United States: connected, and saying so; a buy is refused in its words before anything is sent, a sell (shares the wallet holds) goes", async () => {
+    const US = json({ blocked: true, ip: "203.0.113.7", country: "US", region: "PA" });
+    const { t, seen, source } = await pm({ answers: withPost(), geo: US });
+    expect(source.probe.note).toContain(`${CLOSE_ONLY}: here it sells what the wallet holds and cancels orders, and opens nothing`);
+    const buy = refusal(await t.place(order()));
+    expect([buy.code, buy.message]).toEqual(["E_VENUE_GEOBLOCKED", `${CLOSE_ONLY}. A buy opens a position, so nothing was placed (buy 10 shares of ${IRAN_SLUG}:Yes); a sell of shares the account holds closes one`]);
+    expect(buy.native).toEqual({ blocked: true, closeOnly: true });
+    expect(JSON.stringify(buy)).not.toMatch(/203\.0\.113\.7|"US"|"PA"/);
+    expect(calls(seen)).toEqual([`GET ${GEO}`]);
+    seen.splice(0);
+    ok(await t.place(order({ side: "sell", clientId: "f".repeat(32) })));
+    expect(calls(seen)[0]).toBe(`GET ${GEO}`);
+    expect(calls(seen)).toContain(`POST ${CLOB}/order`);
+    // close-only on its website alone (Japan: "the API itself is not restricted"): a buy goes as anywhere
+    const jp = await pm({ answers: withPost(), geo: json({ blocked: true, country: "JP", region: "13" }) });
+    ok(await jp.t.place(order()));
   });
 
   it("credentials Polymarket no longer takes (asked for again next time), the rate limit, a restart, cancel-only, a fill-and-kill with nothing to match", async () => {

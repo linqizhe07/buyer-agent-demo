@@ -999,6 +999,39 @@ describe("the one drawer", () => {
     p.run("VENUES.clear(); REACH.clear()");
   });
 
+  it("close-only (Polymarket's rule for the United States among other places): the tile is said and stays open; Markets offers no connection to buy there, and says why", () => {
+    const p = page(() => ({}));
+    p.set("A", account());
+    const said = "Polymarket lets this location close positions, not open new ones (its own rule: docs.polymarket.com/api-reference/geoblock), and the account does not look for a way around it. Connected, the account sells what the wallet holds there and cancels its orders; it opens nothing";
+    p.run(`VENUES.set("live:polymarket-trade", { connector: "live:polymarket-trade", name: "Polymarket", verdict: "close-only", said: ${JSON.stringify(said)}, asked: "2026-10-08T15:00:00.000Z" })`);
+    expect(p.run("tileSays('live:polymarket-trade')")).toMatchObject({ word: "Close only here", state: "close-only", shut: false });
+    expect(p.run<string>("catalog(true)")).toMatch(/data-kind="polymarket-trade" data-extra="" title="Polymarket lets this location close positions[^"]*"><b>Polymarket<\/b><span><em class="off">Close only here<\/em>/);
+    const note = p.run<string>("reachNoteHtml(tileSays('live:polymarket-trade'), 'polymarket-trade')");
+    expect(note).toContain("Connected, the account sells what the wallet holds there");
+    expect(note).toContain('data-reach="again"');
+    expect(note).not.toContain('data-reach="watch"');
+    // a buy is opening: Markets offers no connection there, and says so in Polymarket's words
+    const item = { key: "event:x", kind: "event", name: "Will it rain?", price: 0.4, tabs: ["events"], at: [{ venue: "polymarket", venueName: "Polymarket", symbol: "rain:Yes", connected: false, canTrade: false, public: true, connectTo: "polymarket-trade", connector: "live:polymarket-trade", price: 0.4 }] };
+    expect(p.run<Record<string, string>>(`mkRoute(${JSON.stringify(item)})`)).toMatchObject({ act: "why", word: "Close only here" });
+    p.run("VENUES.clear()");
+  });
+
+  it("a venue that cannot be used from here names its edition for where the user is: a tile of its own beside it, and the form's way to it", () => {
+    const p = page(() => ({}));
+    p.set("A", account());
+    const edition = { connector: "live:exchange:binanceus", name: "Binance.US", said: "Binance.US serves where you are under its own terms (https://www.binance.us/terms-of-use, read 2026-10-08): a separate company, with its own account and API keys" };
+    p.run(`VENUES.set("live:exchange:binance", { connector: "live:exchange:binance", name: "Binance", verdict: "not-served", said: "Binance does not serve this location", asked: "2026-10-08T15:00:00.000Z", edition: ${JSON.stringify(edition)} })`);
+    expect(p.run("tileSays('live:exchange:binance')")).toMatchObject({ word: "Not served here", shut: true, edition: { name: "Binance.US" } });
+    const cat = p.run<string>("catalog(true)");
+    expect(cat).toMatch(/<b>Binance<\/b><span><em class="off">Not served here<\/em><\/span><\/button><button type="button" class="tile" data-kind="exchange" data-extra="binanceus"><b>Binance.US<\/b><span>API key · serves where you are<\/span><\/button>/);
+    // only beside the venue that cannot be used: no other tile says it
+    expect(cat.match(/serves where you are/g)).toHaveLength(1);
+    const note = p.run<string>("reachNoteHtml(tileSays('live:exchange:binance'), 'exchange')");
+    expect(note).toContain('data-reach="edition"');
+    expect(note).toContain(">Connect Binance.US instead</button>");
+    p.run("VENUES.clear()");
+  });
+
   it("lists the watchlist without a lead sentence or a date column: the date is the star's title", () => {
     const p = page((path) => (path.startsWith("/api/account/explore") ? explore : {}));
     p.set("A", account({ watch: [{ venue: "ex", symbol: "BTC/USDT", at: "2026-10-06T04:00:00.000Z" }, { venue: "kraken", symbol: "ETH/USD", at: "2026-10-01T04:00:00.000Z" }] }));

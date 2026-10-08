@@ -12,12 +12,19 @@
  *   GET www.cloudflare.com/cdn-cgi/trace and 1.1.1.1/cdn-cgi/trace   asked only when Polymarket gives no place — in a country whose
  *                                     networks block Polymarket itself, the users a venue DOES serve must not be refused for that: Cloudflare's
  *                                     public trace page, lines of key=value, of which only `loc` (the country, ISO 3166-1 alpha-2) is read; the
- *                                     address on the same page is not. It gives no subdivision, so a rule that closes part of a country (Ontario,
- *                                     Crimea) cannot judge a place it gives, and says "not known" there rather than "served".
+ *                                     address on the same page is not. It gives no subdivision.
+ *
+ *   GET ipapi.co/json/                asked only when a rule closes PART of the country the trace gave and no subdivision is known: Ukraine
+ *                                     ordered its providers to block polymarket.com from 12 January 2026, and a user in Kyiv whom Hyperliquid
+ *                                     serves must not be refused because only Crimea, Donetsk and Luhansk are closed and the trace cannot say
+ *                                     which part of Ukraine this is. Its keyless lookup: only `country_code` and `region_code` (ISO 3166-2) are
+ *                                     read, and its country must be the one already learned. Without it the place is "not known" there rather
+ *                                     than "served".
  *
  * The place is used for the one decision it was asked for, in memory, and kept at most ten minutes so that a burst of orders asks once. It
- * is never logged, written, put in a refusal or returned: what leaves this file is the venue's rule and a verdict — served, closed, or not
- * known. A place that cannot be learned (no answer, an answer without a country) is not taken for a yes: the rule refuses, as the MetaMask
+ * is never logged, written, put in a refusal or returned in an answer: what leaves this file is the venue's rule and a verdict — served,
+ * closed, or not known — and, for the account's own matching of the venues' published terms (availability.ts holding eligibility.ts's
+ * lists to it), the place itself, in memory, for that one answer. A place that cannot be learned (no answer, an answer without a country) is not taken for a yes: the rule refuses, as the MetaMask
  * Agent Wallet's mm perps path does (metamask.ts). Nothing here can be told to skip the rule, and nothing here looks for another way in.
  *
  * Hyperliquid's rule — its Terms of Use, "Last updated on June 15, 2026", read 2026-10-08 at app.hyperliquid.xyz/terms (the page's
@@ -74,10 +81,15 @@ export type Verdict = "served" | "closed" | "unknown";
 /** a user's place, asked of the oracle for each decision, kept at most ten minutes */
 export interface Locator {
   verdict(rule: PlaceRule): Promise<Verdict>;
+  /** the place itself, for the account's matching of the venues' published terms in memory (availability.ts): never logged, written, or
+   * put in an answer; undefined when it cannot be learned now */
+  place(): Promise<{ country: string; region: string } | undefined>;
 }
 
 /** the second and third place to ask, when Polymarket gives no place: Cloudflare's public trace, on two hosts */
 export const TRACE = ["https://www.cloudflare.com/cdn-cgi/trace", "https://1.1.1.1/cdn-cgi/trace"];
+/** the last, for the part of a country a rule closes in part, when nothing above gave it */
+export const SUBDIVISION = "https://ipapi.co/json/";
 /** the longest a place is kept */
 export const PLACE_MS = 10 * 60_000;
 /** the oracle answers in this long, or the place is not known now */
@@ -137,13 +149,37 @@ export function locator(deps: { http: Http; clock: () => number; timeoutMs?: num
     }
     return got;
   };
+  // the part of the country, asked only for a rule that closes part of it: the same country, or nothing; kept with the place
+  const subdivision = async (country: string): Promise<string> => {
+    let r: HttpReply;
+    try {
+      r = await deps.http(SUBDIVISION, { headers: { accept: "application/json" }, timeoutMs: deps.timeoutMs ?? ASK_MS });
+    } catch {
+      return "";
+    }
+    const b = r.body as { country_code?: unknown; region_code?: unknown } | undefined;
+    if (r.status !== 200 || !b || typeof b !== "object") return "";
+    const c = typeof b.country_code === "string" ? b.country_code.trim().toUpperCase() : "";
+    const region = typeof b.region_code === "string" ? b.region_code.trim().toUpperCase() : "";
+    if (c !== country || !/^[A-Z0-9]{1,3}$/.test(region)) return "";
+    if (kept && kept.country === country && !kept.region) kept = { ...kept, region };
+    return region;
+  };
   return {
+    async place() {
+      const p = await place();
+      return p ? { country: p.country, region: p.region } : undefined;
+    },
     async verdict(rule) {
       const p = await place();
       if (!p) return "unknown";
       if (rule.closes(p.country, p.region)) return "closed";
-      // the rule closes part of this country and the subdivision is not known: not judged, so not served
-      if (!p.region && rule.splits?.(p.country)) return "unknown";
+      if (!p.region && rule.splits?.(p.country)) {
+        // the rule closes part of this country and the part is not known: asked once more; still not known, not judged, so not served
+        const region = await subdivision(p.country);
+        if (!region) return "unknown";
+        return rule.closes(p.country, region) ? "closed" : "served";
+      }
       return "served";
     },
   };

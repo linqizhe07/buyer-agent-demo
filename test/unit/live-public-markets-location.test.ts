@@ -62,8 +62,8 @@ describe("Bybit's 403, which the library labels RateLimitExceeded", () => {
     // CloudFront's standard error page, the shape its 403 takes for other sites — made up here: Bybit's own was 96 bytes on 2026-10-08
     const page = `<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd"><HTML><HEAD><META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=iso-8859-1"><TITLE>ERROR: The request could not be satisfied</TITLE></HEAD><BODY><H1>403 ERROR</H1><H2>The request could not be satisfied.</H2><HR noshade size="1px">The Amazon CloudFront distribution is configured to block access from your country.</BODY></HTML>`;
     const err = () => Object.assign(new Error(`bybit GET https://api.bybit.com/v5/market/instruments-info?category=spot 403 Forbidden ${page}`), { name: "RateLimitExceeded" });
-    // exchange.ts alone reads 240 characters, misses the sentence, and the label wins: twenty seconds
-    expect(exchangeSaidNo("bybit", "Bybit", err(), {}).code).toBe("E_VENUE_UNREACHABLE");
+    // exchange.ts reads the whole answer too: the sentence past its first 240 characters decides there as well, not the label
+    expect(exchangeSaidNo("bybit", "Bybit", err(), {})).toMatchObject({ code: "E_VENUE_GEOBLOCKED", native: { said: expect.stringContaining("configured to block access from your country") } });
     const r = exchangeNo("bybit", "Bybit", err());
     expect(r).toMatchObject({ code: "E_VENUE_GEOBLOCKED", message: "Bybit does not serve this location: that is its own rule, and the account does not look for a way around it", native: { error: "RateLimitExceeded", said: expect.stringContaining("The Amazon CloudFront distribution is configured to block access from your country") } });
     expect(String((r.native as { said: string }).said)).not.toMatch(/<|https?:\/\//);

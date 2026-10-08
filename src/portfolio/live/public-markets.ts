@@ -157,7 +157,7 @@ import { impliedUsd, PRE_IPO_NAMES, preIpoOf, type PreIpoMark } from "./preipo.t
 import { keylessExchange, PUBLIC_EXCHANGES } from "./prices.ts";
 import { STOCK_TOKEN_ISSUER, STOCK_TOKEN_TERMS, stockTokens } from "./robinhood.ts";
 import { CANDLE_INTERVALS, inDollars, type Candle, type CandleInterval, type Market, type MarketStats } from "./trade.ts";
-import { isStable, realHttp, REGION, unreachable, type Http, type HttpReply } from "./types.ts";
+import { bannedUntil, edgeRefused, edgeWords, isStable, realHttp, REGION, unreachable, type Http, type HttpReply } from "./types.ts";
 
 /** a market as a public source lists it: the shared shape, and what only a listing carries */
 export type Listing = Market & {
@@ -325,6 +325,10 @@ function saidOf(text: string): string {
 function publicNo(venue: string, name: string, r: HttpReply): Refusal {
   const native = { status: r.status, said: saidOf(r.text) };
   if (r.status === 451 || (r.status !== 200 && REGION.test(r.text))) return no("E_VENUE_GEOBLOCKED", { venue, message: `${name} does not serve this location: that is its own rule, and the account does not look for a way around it`, native });
+  // the server in front of the venue refusing this network with a page of its own: held back as long as a place rule, not asked every 20 s
+  if (edgeRefused(r.status, r.text)) return no("E_VENUE_GEOBLOCKED", { venue, message: edgeWords(name, r.status, r.text), native: { status: r.status, edge: true } });
+  const until = bannedUntil(r.text);
+  if (r.status === 418 || until !== undefined) return no("E_VENUE_UNREACHABLE", { venue, message: `${name} has banned this machine's address for too many requests${until ? ` until ${new Date(until).toISOString()}` : " for a while"}: nothing is asked of it before then`, native: { ...native, ...(until ? { until } : {}) } });
   if (r.status === 429) return no("E_VENUE_UNREACHABLE", { venue, message: `${name} is rate-limiting this machine: try again in a minute`, native });
   if (r.status >= 500 || r.status === 0) return no("E_VENUE_UNREACHABLE", { venue, message: `${name} did not answer`, native });
   if (r.status === 200) return no("E_VENUE_REJECTED", { venue, message: `${name} answered in a way this could not read`, native: { status: 200 } });
@@ -335,8 +339,12 @@ function publicNo(venue: string, name: string, r: HttpReply): Refusal {
  * that does not serve this location (its rule will not change within the hour), twenty seconds for one that is rate-limiting (HTTP 429) or
  * not answering, so a page polling every few seconds does not hammer it. Zero for every other refusal: the next ask asks the venue again.
  * The one rule, for this file's keeper and for the service's read cache */
-export function holdBackMs(r: Refusal): number {
+export function holdBackMs(r: Refusal, now: number = Date.now()): number {
   if (r.code === "E_VENUE_GEOBLOCKED") return 600_000;
+  // a ban for too many requests, until when the venue said: nothing is asked of it before then (an hour at most is kept, then asked again)
+  const until = (r.native as { until?: unknown } | undefined)?.until;
+  if (typeof until === "number" && until > now) return Math.min(until - now, 3_600_000);
+  if ((r.native as { status?: unknown } | undefined)?.status === 418) return 600_000;
   if (r.code === "E_VENUE_UNREACHABLE" || (r.native as { status?: unknown } | undefined)?.status === 429) return 20_000;
   return 0;
 }
