@@ -9,6 +9,12 @@
  *                                     read. Polymarket's own verdict (`blocked`) is Polymarket's rule, not the venue's, and is not read; nor
  *                                     is the address.
  *
+ *   GET www.cloudflare.com/cdn-cgi/trace and 1.1.1.1/cdn-cgi/trace   asked only when Polymarket gives no place — in a country whose
+ *                                     networks block Polymarket itself, the users a venue DOES serve must not be refused for that: Cloudflare's
+ *                                     public trace page, lines of key=value, of which only `loc` (the country, ISO 3166-1 alpha-2) is read; the
+ *                                     address on the same page is not. It gives no subdivision, so a rule that closes part of a country (Ontario,
+ *                                     Crimea) cannot judge a place it gives, and says "not known" there rather than "served".
+ *
  * The place is used for the one decision it was asked for, in memory, and kept at most ten minutes so that a burst of orders asks once. It
  * is never logged, written, put in a refusal or returned: what leaves this file is the venue's rule and a verdict — served, closed, or not
  * known. A place that cannot be learned (no answer, an answer without a country) is not taken for a yes: the rule refuses, as the MetaMask
@@ -46,6 +52,8 @@ export interface PlaceRule {
   closedWords: string;
   /** does the rule close this place: a country (ISO 3166-1 alpha-2) and the subdivision code the oracle gives with it */
   closes(country: string, region: string): boolean;
+  /** the rule closes part of this country: without the subdivision the place cannot be judged (CA: Ontario) */
+  splits?(country: string): boolean;
 }
 
 /** a subdivision as the lists hold it, `CA-ON`: the oracle's region code after the country, unless it already carries the country */
@@ -57,6 +65,7 @@ export const HYPERLIQUID_RULE: PlaceRule = {
   cite: "its Terms of Use §1.6",
   closedWords: "Hyperliquid does not serve this location: its Terms of Use (§1.6) make its Interface unavailable to persons located in the United States of America or Ontario, Canada, or in a territory under economic sanctions. That is its own rule, and the account does not look for a way around it",
   closes: (country, region) => HL_CLOSED.countries.has(country) || (region !== "" && HL_CLOSED.regions.has(subdivision(country, region))),
+  splits: (country) => [...HL_CLOSED.regions].some((r) => r.startsWith(`${country}-`)),
 };
 
 /** served · closed by the rule · not known now (and so not served) */
@@ -67,6 +76,8 @@ export interface Locator {
   verdict(rule: PlaceRule): Promise<Verdict>;
 }
 
+/** the second and third place to ask, when Polymarket gives no place: Cloudflare's public trace, on two hosts */
+export const TRACE = ["https://www.cloudflare.com/cdn-cgi/trace", "https://1.1.1.1/cdn-cgi/trace"];
 /** the longest a place is kept */
 export const PLACE_MS = 10 * 60_000;
 /** the oracle answers in this long, or the place is not known now */
@@ -84,7 +95,7 @@ export function locator(deps: { http: Http; clock: () => number; timeoutMs?: num
     if (drop) clearTimeout(drop);
     drop = undefined;
   };
-  const ask = async (): Promise<{ country: string; region: string } | undefined> => {
+  const polymarket = async (): Promise<{ country: string; region: string } | undefined> => {
     let r: HttpReply;
     try {
       r = await deps.http(POLYMARKET_GEOBLOCK, { headers: { accept: "application/json" }, timeoutMs: deps.timeoutMs ?? ASK_MS });
@@ -98,6 +109,21 @@ export function locator(deps: { http: Http; clock: () => number; timeoutMs?: num
     if (!/^[A-Z]{2}$/.test(country)) return undefined;
     return { country, region: /^[A-Z0-9-]{1,12}$/.test(region) ? region : "" };
   };
+  // Cloudflare's trace: only `loc`, the country; no subdivision (region "")
+  const cloudflare = async (url: string): Promise<{ country: string; region: string } | undefined> => {
+    let r: HttpReply;
+    try {
+      r = await deps.http(url, { headers: { accept: "text/plain" }, timeoutMs: deps.timeoutMs ?? ASK_MS });
+    } catch {
+      return undefined;
+    }
+    if (r.status !== 200) return undefined;
+    const loc = /^loc=([A-Za-z]{2})\s*$/m.exec(String(r.text ?? ""));
+    const country = loc ? loc[1]!.toUpperCase() : "";
+    // XX and T1 are Cloudflare's own words for "not known" and Tor: no place
+    return /^[A-Z]{2}$/.test(country) && country !== "XX" && country !== "T1" ? { country, region: "" } : undefined;
+  };
+  const ask = async (): Promise<{ country: string; region: string } | undefined> => (await polymarket()) ?? (await cloudflare(TRACE[0]!)) ?? (await cloudflare(TRACE[1]!));
   const place = async (): Promise<{ country: string; region: string } | undefined> => {
     if (kept && deps.clock() < kept.until) return kept;
     forget();
@@ -115,7 +141,10 @@ export function locator(deps: { http: Http; clock: () => number; timeoutMs?: num
     async verdict(rule) {
       const p = await place();
       if (!p) return "unknown";
-      return rule.closes(p.country, p.region) ? "closed" : "served";
+      if (rule.closes(p.country, p.region)) return "closed";
+      // the rule closes part of this country and the subdivision is not known: not judged, so not served
+      if (!p.region && rule.splits?.(p.country)) return "unknown";
+      return "served";
     },
   };
 }
@@ -128,5 +157,5 @@ export async function heldTo(rule: PlaceRule, where: Locator, venue: string, doi
   const v = await where.verdict(rule);
   if (v === "served") return undefined;
   if (v === "closed") return no("E_VENUE_GEOBLOCKED", { venue, message: `${rule.closedWords}. ${doing ? `Nothing was sent to ${rule.name} (${doing})` : "Nothing was connected"}`, native: { rule: rule.terms } });
-  return no("E_VENUE_UNREACHABLE", { venue, message: `where this machine is could not be learned just now (Polymarket's location check gave no place), so ${rule.name}'s own line (${rule.cite}) could not be held to it: ${doing ? `nothing was sent (${doing})` : "nothing was connected"}. Try again in a moment`, native: { rule: rule.terms } });
+  return no("E_VENUE_UNREACHABLE", { venue, message: `where this machine is could not be learned just now (neither Polymarket's location check nor Cloudflare's trace gave one that the rule can judge), so ${rule.name}'s own line (${rule.cite}) could not be held to it: ${doing ? `nothing was sent (${doing})` : "nothing was connected"}. Try again in a moment`, native: { rule: rule.terms } });
 }
