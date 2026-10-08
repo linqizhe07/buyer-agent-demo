@@ -5,7 +5,8 @@
  *                   priced by Robinhood's own bid (robinhood.ts), and the best-known Ondo Stocks and xStocks, priced by LI.FI (dex.ts).
  *                   The tokenised shares are held as RWAs, and a proven wallet sells each through the market its row finds by symbol
  *                   and chain (`NVDA/USDG@Robinhood Chain`, `NVDAon/USDC@Ethereum`)
- *   Hyperliquid     POST /info `clearinghouseState` (perps: account value, withdrawable) and `spotClearinghouseState` (spot balances)
+ *   Hyperliquid     POST /info `clearinghouseState` (perps: account value, withdrawable) and `spotClearinghouseState` (spot balances);
+ *                   `userAbstraction`: under a unified account or portfolio margin only the spot balances are counted (the perps value is the same money)
  *   Polymarket      GET data-api /v2/positions?user= (title, outcome, current_size, current_value) + pUSD at that address on Polygon
  *   Ondo            OUSG, rOUSG and USDY at an address on Ethereum, priced by Ondo's own on-chain oracle
  *
@@ -89,21 +90,33 @@ export async function hyperliquidSource(req: AddressRequest): Promise<Opened> {
     if (r.status !== 200 || !r.body || typeof r.body !== "object") throw venueSaidNo(req.venue, name, r.status, r.text);
     return r.body as Record<string, unknown>;
   };
+  // the account's kind (a bare string): under a unified account or portfolio margin the perps ledger draws on the spot balances, so its
+  // account value is the same money again (Hyperliquid's docs; live/hyperliquid-trade.ts reads it the same way). Not read: an ordinary one
+  const abstraction = async (): Promise<string> => {
+    try {
+      const r = await req.http(HL_INFO, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ type: "userAbstraction", user: address }) });
+      return r.status === 200 ? String(typeof r.body === "string" ? r.body : r.text ?? "default").replace(/"/g, "").trim() : "default";
+    } catch {
+      return "default";
+    }
+  };
   const read = async (): Promise<LiveBalance[]> => {
     const perps = await info("clearinghouseState");
     const spot = await info("spotClearinghouseState");
+    const mode = await abstraction();
+    const unified = mode === "unifiedAccount" || mode === "portfolioMargin";
     const margin = (perps.marginSummary ?? {}) as Record<string, unknown>;
     const out: LiveBalance[] = [];
-    // the perps ledger is one dollar figure: what the account is worth there, open positions marked
-    if (num(margin.accountValue) > 0) out.push({ asset: "USDC", amount: num(margin.accountValue), usd: num(margin.accountValue), where: `perps · ${num(perps.withdrawable).toFixed(2)} withdrawable`, class: "stable" });
-    for (const b of (Array.isArray(spot.balances) ? spot.balances : []) as Array<Record<string, unknown>>) if (num(b.total) > 0) out.push({ asset: String(b.coin ?? "?"), amount: num(b.total), where: "spot" });
+    // the perps ledger is one dollar figure: what the account is worth there, open positions marked — counted only where it is its own money
+    if (!unified && num(margin.accountValue) > 0) out.push({ asset: "USDC", amount: num(margin.accountValue), usd: num(margin.accountValue), where: `perps · ${num(perps.withdrawable).toFixed(2)} withdrawable`, class: "stable" });
+    for (const b of (Array.isArray(spot.balances) ? spot.balances : []) as Array<Record<string, unknown>>) if (num(b.total) > 0) out.push({ asset: String(b.coin ?? "?"), amount: num(b.total), where: unified ? "spot · one account with the perps (unified)" : "spot" });
     return out;
   };
   try {
     const first = await read();
-    // what is asked here is two balances, nothing about where this machine is: Hyperliquid's own rule about that (its Terms of Use §1.6) is
-    // checked where orders are placed, by the MetaMask Agent Wallet's mm perps (metamask.ts), not asserted here
-    const source: LiveSource = { name, kind: "perp", reference: address, via: "Hyperliquid info API · by address", address, readOnlyBecause: "Hyperliquid moves money only on a signature by the account's own key: connected by its address, it is read, never written", noTradeBecause: "connected by its address, it is only read: perpetuals are placed through the MetaMask Agent Wallet's mm perps, after Hyperliquid's own rule (Terms of Use §1.6) is checked for this machine", probe: probeOf(req, "the perps account value and the spot balances are two ledgers, reported as the venue reports them", { calls: ["POST /info clearinghouseState", "POST /info spotClearinghouseState"], user: address }), read };
+    // what is asked here is the account's balances, nothing about where this machine is: Hyperliquid's own rule about that (its Terms of Use
+    // §1.6) is checked where orders are placed — the API-wallet connection (hyperliquid-trade.ts) and mm perps (metamask.ts) — not here
+    const source: LiveSource = { name, kind: "perp", reference: address, via: "Hyperliquid info API · by address", address, readOnlyBecause: "Hyperliquid moves money only on a signature by the account's own key: connected by its address, it is read, never written", noTradeBecause: "connected by its address, it is only read: to trade this account, connect it with an API wallet (the Hyperliquid tile), or through the MetaMask Agent Wallet's mm perps; either way Hyperliquid's own rule (Terms of Use §1.6) is checked for where you are first", probe: probeOf(req, "the perps account value and the spot balances are two ledgers, reported as the venue reports them", { calls: ["POST /info clearinghouseState", "POST /info spotClearinghouseState", "POST /info userAbstraction"], user: address }), read };
     return { source, first };
   } catch (err) {
     return asRefusal(req.venue, name, err);

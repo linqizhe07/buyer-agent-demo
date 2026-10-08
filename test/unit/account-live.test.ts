@@ -523,8 +523,17 @@ describe("venues read by address", () => {
     const x = await boot({ http });
     const said = summary(await x.connect("hyperliquid", "live:hyperliquid", ADDRESS));
     expect(said).toContain("Hyperliquid connected live · $2,100.50 there now · watched, not proven yours");
-    expect(asked).toEqual(["POST https://api.hyperliquid.xyz/info clearinghouseState 0x00000000000000000000000000000000000000A1", "POST https://api.hyperliquid.xyz/info spotClearinghouseState 0x00000000000000000000000000000000000000A1"]);
+    expect(asked).toEqual(["POST https://api.hyperliquid.xyz/info clearinghouseState 0x00000000000000000000000000000000000000A1", "POST https://api.hyperliquid.xyz/info spotClearinghouseState 0x00000000000000000000000000000000000000A1", "POST https://api.hyperliquid.xyz/info userAbstraction 0x00000000000000000000000000000000000000A1"]);
     expect((await x.venue("hyperliquid"))!.holdings.map((h) => [h.asset, h.amount, h.usd, h.note])).toEqual([["USDC", 1500.5, 1500.5, "perps · 1200.50 withdrawable"], ["USDC", 500, 500, "spot"], ["HYPE", 2.5, 100, "spot"]]);
+    // a unified account: the perps ledger draws on the spot balances, so its value is the same money again and is not added to them
+    const unified: Http = async (url, init = {}) => {
+      const body = JSON.parse(init.body ?? "{}") as { type: string };
+      if (body.type === "userAbstraction") return json("unifiedAccount");
+      return http(url, init);
+    };
+    const u = await boot({ http: unified });
+    expect(summary(await u.connect("hyperliquid", "live:hyperliquid", ADDRESS))).toContain("Hyperliquid connected live · $600.00 there now");
+    expect((await u.venue("hyperliquid"))!.holdings.map((h) => [h.asset, h.amount, h.note])).toEqual([["USDC", 500, "spot · one account with the perps (unified)"], ["HYPE", 2.5, "spot · one account with the perps (unified)"]]);
     // what the venue answers when it will not serve the caller is the venue's own rule
     const blocked = await boot({ http: async () => json({ error: "restricted jurisdiction" }, 403) });
     const no = refusal(await blocked.connect("hyperliquid", "live:hyperliquid", ADDRESS));
