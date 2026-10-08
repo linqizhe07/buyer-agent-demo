@@ -83,6 +83,7 @@ import { publicPrices } from "./live/prices.ts";
 import { ROBINHOOD_MCP } from "./live/robinhood.ts";
 import { OAuthSignIn } from "./live/signin.ts";
 import { reachKeepMs, reachOf, type Reach } from "./live/reach.ts";
+import { KNOWN_EXCHANGES, venuesHere, type AvailabilityDeps, type VenueHere } from "./live/availability.ts";
 import { isStable, realHttp } from "./live/types.ts";
 import { isPlain } from "./account/state.ts";
 import type { AgentAction, Envelope, Hex } from "./account/sign.ts";
@@ -475,6 +476,13 @@ export class PortfolioService {
       live: () => ({ ...liveOptions(this.opts.home), writes: this.liveWritesView() }),
       liveMoney: () => ({ writes: () => this.liveWritesView(), venue: (id) => (this.adapters.get(id)?.account.watchOnly ? this.liveVenues.get(id) : undefined), realNow: () => this.liveDeps().clock() }),
       liveEarn: () => ({ earner: (id) => (this.adapters.get(id)?.account.watchOnly ? this.earners.get(id) : undefined) }),
+      venueVerdict: (venue) => {
+        // the venue an agent names, as the connection the owner would make for it: an exchange by its own id, or a kind (a venue traded
+        // through its -trade connection when there is one: Hyperliquid, Polymarket)
+        const kept = this.venuesKept?.v;
+        const v = kept?.find((x) => x.connector === `live:exchange:${venue}`) ?? kept?.find((x) => x.connector === `live:${venue}-trade`) ?? kept?.find((x) => x.connector === `live:${venue}`);
+        return v ? { name: v.name, verdict: v.verdict, ...(v.said ? { said: v.said } : {}) } : undefined;
+      },
       pairingCode: () => this.opts.liveWrites?.pairingCode ?? this.opts.pairingCode,
       ...(real && this.opts.liveWrites
         ? {
@@ -1109,6 +1117,49 @@ export class PortfolioService {
         return pending;
       }),
     );
+  }
+  /** WHERE THIS USER CAN CONNECT (live/availability.ts): every venue the account knows, judged from the network it runs on — the venue's
+   * own answer to it (connectReach) and its own terms matched to where it is (in memory only). Asked automatically (watchVenues: at
+   * start and every 30 minutes on the real server) and on request; one answer kept, and asked once while on its way */
+  private venuesKept: { at: number; v: VenueHere[] } | undefined;
+  private venuesPending: Promise<VenueHere[]> | undefined;
+  /** the residency hooks (live/eligibility.ts, live/location.ts): set where they are known; without them only the venues' answers judge */
+  venueTerms: AvailabilityDeps["terms"];
+  venuePlace: AvailabilityDeps["place"];
+  async venuesHere(force = false): Promise<VenueHere[]> {
+    const deps = this.liveDeps();
+    if (!force && this.venuesKept && deps.clock() - this.venuesKept.at < 30 * 60_000) return this.venuesKept.v;
+    if (this.venuesPending) return this.venuesPending;
+    const page = await this.accountView();
+    const on = new Set((page?.venues ?? []).map((v) => v.connector).filter((c): c is string => !!c));
+    this.venuesPending = venuesHere({
+      connections: venueCatalog(liveOptions(this.opts.home).options),
+      reach: (cs) => this.connectReach(cs, force),
+      terms: this.venueTerms,
+      place: this.venuePlace,
+      connected: (c) => on.has(c),
+      clock: deps.clock,
+    })
+      .then((v) => {
+        this.venuesKept = { at: deps.clock(), v };
+        return v;
+      })
+      .finally(() => {
+        this.venuesPending = undefined;
+      });
+    return this.venuesPending;
+  }
+  /** the real server keeps the answer fresh without anyone asking: soon after it starts, then every 30 minutes (never in tests) */
+  watchVenues(everyMs = 30 * 60_000): () => void {
+    const run = () => void this.venuesHere(true).catch(() => undefined);
+    const first = setTimeout(run, 3_000);
+    const every = setInterval(run, everyMs);
+    first.unref?.();
+    every.unref?.();
+    return () => {
+      clearTimeout(first);
+      clearInterval(every);
+    };
   }
   /** which sign-in a state that came back belongs to */
   signInHolding(state: string): OAuthSignIn | undefined {
@@ -2301,6 +2352,28 @@ export interface VenueHealth {
 const KEEP_HELD_MS = 120_000;
 /** how old a venue's last balance-and-earn pair may be and still be shown whole when its earn is late: past it, the newer balance stands */
 const PAIR_MS = 120_000;
+
+/** the venues the account knows, as connections to judge (live/availability.ts): each well-known exchange by its own id, and every other
+ * way of connecting the server offers, under the names and groups the page gives them */
+const EXCHANGE_NAMES: Record<string, string> = { okx: "OKX", kraken: "Kraken", coinbase: "Coinbase", bybit: "Bybit", binance: "Binance", binanceus: "Binance.US", kucoin: "KuCoin", gate: "Gate", bitget: "Bitget", mexc: "MEXC", deribit: "Deribit", krakenfutures: "Kraken Futures", kucoinfutures: "KuCoin Futures", cryptocom: "Crypto.com", gemini: "Gemini", bitstamp: "Bitstamp", bitfinex: "Bitfinex", htx: "HTX" };
+const KIND_HERE: Record<string, { name: string; group: VenueHere["group"] }> = {
+  alpaca: { name: "Alpaca", group: "Brokers" },
+  robinhood: { name: "Robinhood", group: "Brokers" },
+  "robinhood-crypto": { name: "Robinhood Crypto", group: "Brokers" },
+  metamask: { name: "MetaMask Agent Wallet", group: "Wallets" },
+  wallet: { name: "A wallet (a browser wallet, or an address watched)", group: "Wallets" },
+  kalshi: { name: "Kalshi", group: "Markets and tokens" },
+  "polymarket-trade": { name: "Polymarket", group: "Markets and tokens" },
+  polymarket: { name: "Polymarket · by address", group: "Markets and tokens" },
+  "hyperliquid-trade": { name: "Hyperliquid", group: "Markets and tokens" },
+  hyperliquid: { name: "Hyperliquid · by address", group: "Markets and tokens" },
+  ondo: { name: "Ondo · OUSG", group: "Markets and tokens" },
+};
+export function venueCatalog(options: Array<{ kind?: string; needs: VenueHere["needs"]; label: string }>): AvailabilityDeps["connections"] {
+  const exchanges = options.some((o) => o.kind === "exchange") ? KNOWN_EXCHANGES.map((id) => ({ connector: `live:exchange:${id}`, name: EXCHANGE_NAMES[id] ?? id, group: "Exchanges" as const, needs: "key-file" as const })) : [];
+  const others = options.filter((o) => o.kind && o.kind !== "exchange").map((o) => ({ connector: `live:${o.kind}`, name: KIND_HERE[o.kind!]?.name ?? o.label.split(" · ")[0]!, group: KIND_HERE[o.kind!]?.group ?? ("Markets and tokens" as const), needs: o.needs }));
+  return [...exchanges, ...others];
+}
 
 /** how long a venue that cannot be asked just now is not asked again: it did not answer, it is rate-limiting this machine, or it does not
  * serve this location — and ten minutes when it does not serve this location, a rule that does not change by the minute */

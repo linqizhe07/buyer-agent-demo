@@ -154,6 +154,12 @@ describe("the six kinds, as the page runs them", () => {
     expect(pre[1]!.connector).toBe("");
     p.set("A", pageOf([PRED]));
     expect(p.out<Array<Record<string, any>>>(`tkWhereRows(${JSON.stringify({ ...ANTH, at: [ANTH.at[0]] })}, null, "preipo")`)).toEqual([expect.objectContaining({ state: "public", venue: "okx-preipo", connector: "live:exchange:okx" })]);
+    // where OKX would not take the user (core VENUES: its answer to this network, or its terms matched to where they are), the line offers
+    // no connection — OKX's own words instead, and the ticket says none of the venues that list it would take them
+    p.run(`VENUES.set("live:exchange:okx", { connector: "live:exchange:okx", name: "OKX", verdict: "terms-exclude", said: "its terms exclude where you are (https://www.okx.com/help/terms-of-service, read 2026-10-08)" })`);
+    const shut = p.out<Array<Record<string, any>>>(`tkWhereRows(${JSON.stringify({ ...ANTH, at: [ANTH.at[0]] })}, null, "preipo")`);
+    expect(shut).toEqual([expect.objectContaining({ state: "public", venue: "okx-preipo", connector: "", refuses: expect.objectContaining({ word: "Its terms exclude where you are" }) })]);
+    p.run(`VENUES.clear()`);
     // the public listing of a venue the owner has since connected is not offered again
     p.set("A", pageOf([EX, venue("kraken", "Kraken", { trade: { can: true, kinds: ["spot"] } })]));
     expect(p.out<Array<{ state: string }>>(`tkWhereRows(${JSON.stringify(item)}, [])`).map((r) => r.state)).not.toContain("public");

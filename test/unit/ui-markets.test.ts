@@ -926,6 +926,31 @@ describe("the one drawer", () => {
     expect(p.run<string>(`mkWhere(${JSON.stringify({ key: "coin:ETH", kind: "coin", name: "Ether", at: [at("Exchange X", true)] })})`)).not.toContain("mk-more");
   });
 
+  it("offers Connect to trade only at a venue that would take the user from where they are; one that would not says so in its own words, on the row and in the drawer", () => {
+    const p = page(() => ({}));
+    p.set("A", account());
+    const at = (venue: string, venueName: string, connector: string) => ({ venue, venueName, symbol: "BTC-PERP", connected: false, canTrade: false, public: true, connectTo: venue, connector, price: 62_000 });
+    const item = { key: "perp:BTC", kind: "perp", name: "BTC perpetual", base: "BTC", price: 62_000, tabs: ["perps"], at: [at("hyperliquid-trade", "Hyperliquid", "live:exchange:okx")] };
+    // not judged yet: offered as before
+    expect(p.run<Record<string, unknown>>(`mkRoute(${JSON.stringify(item)})`)).toMatchObject({ act: "connect", venueName: "Hyperliquid" });
+    // the venue refuses this network: no connection offered, its words instead — the row's button says it
+    p.run(`VENUES.set("live:exchange:okx", { connector: "live:exchange:okx", name: "Hyperliquid", verdict: "not-served", said: "Hyperliquid's Terms of Use §1.6 do not serve this location." })`);
+    const r = p.run<Record<string, string>>(`mkRoute(${JSON.stringify(item)})`);
+    expect(r).toMatchObject({ act: "why", word: "Not served here" });
+    expect(r.text).toBe("Hyperliquid: not served here — Hyperliquid's Terms of Use §1.6 do not serve this location.");
+    expect(p.run<string>(`mkActs(${JSON.stringify(item)}, 0)`)).toContain(">Not served here · why</button>");
+    // two venues list it, one would take the user: that one is offered
+    const two = { ...item, at: [item.at[0], at("kraken", "Kraken", "live:exchange:kraken")] };
+    expect(p.run<Record<string, unknown>>(`mkRoute(${JSON.stringify(two)})`)).toMatchObject({ act: "connect", venueName: "Kraken" });
+    // both would refuse: none of them is offered, and the row says how many list it
+    p.run(`VENUES.set("live:exchange:kraken", { connector: "live:exchange:kraken", name: "Kraken", verdict: "terms-exclude", said: "its terms exclude where you are" })`);
+    expect(p.run<Record<string, string>>(`mkRoute(${JSON.stringify(two)})`).text).toMatch(/^None of the 2 venues that list it would take you from where you are\. Hyperliquid: not served here/);
+    // setup and no answer are not a no: a venue that did not answer just now is still offered
+    p.run(`VENUES.set("live:exchange:kraken", { connector: "live:exchange:kraken", name: "Kraken", verdict: "no-answer" })`);
+    expect(p.run<Record<string, unknown>>(`mkRoute(${JSON.stringify(two)})`)).toMatchObject({ act: "connect", venueName: "Kraken" });
+    p.run(`VENUES.clear()`);
+  });
+
   it("lists the watchlist without a lead sentence or a date column: the date is the star's title", () => {
     const p = page((path) => (path.startsWith("/api/account/explore") ? explore : {}));
     p.set("A", account({ watch: [{ venue: "ex", symbol: "BTC/USDT", at: "2026-10-06T04:00:00.000Z" }, { venue: "kraken", symbol: "ETH/USD", at: "2026-10-01T04:00:00.000Z" }] }));

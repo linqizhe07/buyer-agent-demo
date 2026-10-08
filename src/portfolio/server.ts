@@ -30,6 +30,8 @@
  *                                      an order its exact size, price and the most it may be worth)
  *   GET  /api/account/exchanges        the exchanges the unified library covers, for the connect form
  *   GET  /api/account/keyfile?kind=&venue=&ref=    whether a key file is in place for a connection: its place, its mode, the fields it misses
+ *   GET  /api/account/venues[?force=1]  where this user can connect: every venue the account knows, judged from this network (its own
+ *                                      answer, and its terms matched to where the network is — never named) — live/availability.ts
  *   GET  /api/account/connect/reach?connector=[&force=1]   before a key is made: whether each connection's venue answers from here
  *                                      (its first, keyless question; a location rule in the venue's words) — live/reach.ts
  *   POST /api/account/wallet/challenge {address, wallet, chainId}   the sentence a wallet signs to show an address is the owner's (EIP-4361)
@@ -382,6 +384,15 @@ export async function startPortfolioServer(opts: PortfolioServerOptions): Promis
     if (!q) return;
     const needs = q.kind === "exchange" && q.exchange ? ((await exchangeList()).find((x) => x.id === q.exchange)?.needs ?? []) : [];
     res.json({ ok: true, ...svc.keyFile(q.kind, q.venue, q.ref, needs) });
+  }));
+  // Where this user can connect, every venue the account knows, judged from the network it runs on (live/availability.ts): each venue's own
+  // answer to it and its own terms matched to where it is — the place itself is never in the answer. Kept 30 minutes; force=1 asks again
+  app.get("/api/account/venues", wrap(async (req, res) => {
+    if (!svc.account) return void res.status(404).json({ ok: false, error: "the account layer is not mounted" });
+    const q = strings(req, res, { force: 5 });
+    if (!q) return;
+    const venues = await svc.venuesHere(q.force === "1");
+    res.json({ ok: true, venues });
   }));
   // Before a key is made: whether each connection's venue answers from this machine at all (live/reach.ts) — its first, keyless question,
   // so the list of accounts says up front which venue does not serve this location, in its own words. No key, token or address is sent
@@ -791,6 +802,9 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   if (liveWrites) console.log(`TRADING IS ON · real orders and movements at the accounts you connect · at most $${liveWrites.capUsd} an order or a movement (--live-cap; --read-only turns it off) · every one is signed by you, or inside a limit you signed for an agent · money leaves a venue only for a place shown to be yours${owned ? "" : `\n  pairing code: ${liveWrites.pairingCode} — the first browser becomes the owner only with this code, typed on the page`}`);
   else if (!classic) console.log(`read-only: nothing is traded or moved from this server (started with --read-only)${owned ? "" : `\n  pairing code: ${code} — the first browser becomes the owner only with this code, typed on the page`}`);
   console.log(classic ? `simulated statement at ${srv.url} · ${service.accounts().length} accounts · MetaMask ${live ? "LIVE via mm" : "simulated (--mm for live)"} · no account layer · ledger ${service.ledgerPath()} · Ctrl-C to stop` : `your account at ${srv.url} · real accounts only: connect them on the page · ledger ${service.ledgerPath()} · Ctrl-C to stop`);
+  // where the owner can connect, kept fresh without anyone asking: the venues' own answers to this network, and their terms matched to where
+  // it is (live/availability.ts) — so the page and the agents know before anyone makes a key
+  if (!classic && service.account) service.watchVenues();
   const stop = () => srv.close().then(() => process.exit(0));
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);

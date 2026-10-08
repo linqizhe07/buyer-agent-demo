@@ -55,7 +55,7 @@ Node ≥ 22。常用开关：`--live-cap 50`（单笔上限，默认 $100）、`
 ## 给 agent 的接口
 
 - **MCP**：`npm run portfolio:mcp`（stdio；席位持自己的钥匙，每次写都签名）。接 Claude Code：页面 Agents 弹层的 "Copy agent setup command"。真实账户上的工具：
-  - 读：`portfolio_account` · `portfolio_overview` · `portfolio_holdings` · `portfolio_history` · `portfolio_asset` · `portfolio_candles` · `portfolio_explore` · `portfolio_receive` · `portfolio_earn` · `portfolio_watchlist` · `portfolio_statement`
+  - 读：`portfolio_account` · `portfolio_venues`（从用户所在的网络自动判断哪些场所能接，各用场所自己的话）· `portfolio_overview` · `portfolio_holdings` · `portfolio_history` · `portfolio_asset` · `portfolio_candles` · `portfolio_explore` · `portfolio_receive` · `portfolio_earn` · `portfolio_watchlist` · `portfolio_statement`
   - 下单和动钱：`portfolio_live_markets` · `portfolio_live_compare` · `portfolio_live_positions` · `portfolio_live_preview` · `portfolio_live_order` · `portfolio_live_batch` · `portfolio_live_amend` · `portfolio_live_cancel` · `portfolio_live_close` · `portfolio_live_leverage` · `portfolio_live_move` · `portfolio_live_earn` · `portfolio_pay`
   - 和 owner 说话、等结果：`portfolio_report` · `portfolio_ask` · `portfolio_approval` · `portfolio_wait`
   - 只在模拟对账单（`--classic`）和测试里：`portfolio_read` · `portfolio_markets` · `portfolio_quote` · `portfolio_openness` · `portfolio_execute` · `portfolio_order` · `portfolio_transfer`
