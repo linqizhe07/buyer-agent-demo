@@ -28,7 +28,30 @@
  *                             GET  earn/redeem-preview                            what a redemption would do: a penalty on an early one
  *                             DELETE earn/orders                                  out, back to the trading account (Earn); PENDING until
  *                                                                                 KuCoin delivers it, which hold-assets shows
- *                           Binance's Simple Earn has an interface too, and is not offered: Binance answers this machine 451
+ *   Binance                 Simple Earn Flexible, through its own API with the account's own key (developers.binance.com, Simple Earn ›
+ *                           Flexible/Locked and Error Code, read 2026-10-08; where that page did not render the subscribe call and the
+ *                           two answers, Binance's own connectors, read the same day: npm @binance/simple-earn 16.0.5 (github.com/binance/
+ *                           binance-connector-js, clients/simple-earn) for the shapes, binance-connector-ruby lib/binance/spot/
+ *                           simple_earn.rb for the defaults; its FAQ "Get Started with Binance Simple Earn Flexible Products", updated
+ *                           2026-09-29, for when money moves). Every call under /sapi/v1/simple-earn:
+ *                             GET  flexible/list                                  what is offered (any key: Enable Reading): the real-time
+ *                                                                                 APR, the bonus tiers, the least that goes in, whether it
+ *                                                                                 takes money (canPurchase, isSoldOut) and lets it out
+ *                             GET  flexible/position                              what is held, and earned (Enable Reading)
+ *                             POST flexible/subscribe                             in, from the spot account (sourceAccount SPOT) — the
+ *                                                                                 key's "Enable Spot & Margin Trading". Its autoSubscribe
+ *                                                                                 is on unless sent off, and turns on Binance's sweep of
+ *                                                                                 the idle spot balance into the product (02:00 and 16:00
+ *                                                                                 UTC): the account sends what the owner set at Binance,
+ *                                                                                 else off
+ *                             POST flexible/redeem                                out, an amount (redeemAll false, always sent) or all of
+ *                                                                                 it (redeemAll), back to the spot account (destAccount
+ *                                                                                 SPOT; Enable Spot & Margin Trading)
+ *                             GET  flexible/history/redemptionRecord              how a redemption stands: Binance returns it at once
+ *                                                                                 within its daily limits, and PAID says it has
+ *                           Binance.US documents no Simple Earn (docs.binance.us has staking alone), so it has none here. Binance answers
+ *                           the developer's machine 451, which is its rule for that place: the account says so in Binance's words, and
+ *                           it decides nothing for anyone Binance serves
  *
  * A withdrawal lands where the money came from, at the same venue, always: none of these calls takes a destination, and the account
  * sends none. Nothing here decides WHETHER money goes in or out: the account's earn door does (account/live-earn.ts) — the server's
@@ -45,7 +68,8 @@ import { isStable, num } from "./types.ts";
 
 /** one product money can be put into */
 export interface EarnProduct {
-  /** the venue's id for it: `8453:0x…` (a vault on a chain, through mm), `savings:USDT` (OKX Simple Earn Flexible), Kraken's strategy id */
+  /** the venue's id for it: `8453:0x…` (a vault on a chain, through mm), `savings:USDT` (OKX Simple Earn Flexible), Kraken's strategy id,
+   * KuCoin's and Binance's own product ids (`2152`, `USDT001`) */
   id: string;
   /** what goes in, and what comes out */
   asset: string;
@@ -178,11 +202,14 @@ export interface ExchangeEarnDeps {
   now?: (() => number) | undefined;
 }
 
-/** OKX's Simple Earn Flexible, Kraken Earn and KuCoin Earn, where the exchange is one of them; nothing for any other exchange */
+/** OKX's Simple Earn Flexible, Kraken Earn, KuCoin Earn and Binance's Simple Earn Flexible, where the exchange is one of them; nothing for
+ * any other exchange. Binance is binance.com's own client alone — Binance.US documents no Simple Earn, and the library's futures clients
+ * are not where the money lands — and only where the library has its Simple Earn calls */
 export function exchangeEarner(d: ExchangeEarnDeps): LiveEarner | undefined {
   if (isOkx(d.client.id)) return okxEarner(d);
   if (d.client.id === "kraken") return krakenEarner(d);
   if (d.client.id === "kucoin") return kucoinEarner(d);
+  if (d.client.id === "binance" && BINANCE_CALLS.every((c) => method(d.client, c))) return binanceEarner(d);
   return undefined;
 }
 
@@ -654,6 +681,267 @@ export function kucoinEarner(d: ExchangeEarnDeps): LiveEarner {
       const redeeming = held.reduce((s, h) => s + h.redeemingAmount, 0);
       const pending = redeeming > 0 || held.some((h) => h.status === "REDEEMING");
       return { ref, status: pending ? "pending" : "done", native: { redeeming } };
+    },
+  };
+}
+
+// ---- Binance Simple Earn Flexible ------------------------------------------------------------------------------------------------
+
+/** the library's implicit calls for Binance's Simple Earn Flexible (ccxt abstract/binance.d.ts): Binance's earn is offered where it has them */
+const BINANCE_CALLS = ["sapiGetSimpleEarnFlexibleList", "sapiGetSimpleEarnFlexiblePosition", "sapiPostSimpleEarnFlexibleSubscribe", "sapiPostSimpleEarnFlexibleRedeem", "sapiGetSimpleEarnFlexibleHistoryRedemptionRecord"];
+/** a Binance product id (`USDT001`): the only kind sent back to it — the library writes these calls' query without escaping it */
+const BINANCE_ID = /^[A-Za-z0-9._-]{2,40}$/;
+const BINANCE_ASSET = /^[A-Z0-9]{1,20}$/;
+/** Binance's Simple Earn codes ("6XXX - Savings Issues", developers.binance.com Simple Earn › Error Code), by what they leave the owner to do */
+const BINANCE_CLOSED = new Set(["-6004", "-6007", "-6008"]); // Product not in purchase status · Not in redeem time · Product not in redeem status
+const BINANCE_INVALID = new Set(["-6005", "-6006", "-6011", "-6014"]); // Smaller than min purchase limit · Redeem amount error · Exceeding the
+// maximum num allowed to purchase per user · Exceed up-limit allowed to purchased
+const BINANCE_SHORT = new Set(["-6012", "-6018"]); // Balance not enough · Asset not enough
+/** Binance's own code and sentence in what the library threw (`binance {"code":-6012,"msg":"Balance not enough"}`) */
+function binanceSaid(said: string): { code?: string | undefined; msg?: string | undefined } {
+  return { code: /"code"\s*:\s*"?(-?\d+)/.exec(said)?.[1], msg: /"msg"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(said)?.[1] };
+}
+const pctOf = (f: number): string => `${Number((f * 100).toFixed(2))}%`;
+
+/** Binance Simple Earn Flexible: out at any time, at Binance's real-time APR. Money goes in from the account's Binance spot account — the
+ * main balance the account reads there — and comes back to it. Product ids are Binance's own (`USDT001`) */
+export function binanceEarner(d: ExchangeEarnDeps): LiveEarner {
+  const { client, venue, name } = d;
+  const now = d.now ?? Date.now;
+  const LANDS = `your ${name} spot account`;
+  /** Binance's name for the spot account: where money goes in from (sourceAccount) and comes back to (destAccount) */
+  const ACCOUNT = "SPOT";
+  const PAGE = 100;
+  const PAGES = 5;
+  const PERMISSION = `subscribing and redeeming need the key's "Enable Spot & Margin Trading" permission, and reading Simple Earn needs "Enable Reading" (set on the key at Binance)`;
+  const closed = (): Refusal => no("E_VENUE_RAIL_CLOSED", { venue, message: `the exchange library does not reach ${name}'s Simple Earn` });
+  const say = (err: unknown, doing: string, kind: "read" | "supply" | "withdraw" = "read"): Refusal => {
+    const r = exchangeSaidNo(venue, name, err, d.key);
+    // its rule for this place, a limit on how often it is asked, a blip: as the exchange said them
+    if (r.code === "E_VENUE_GEOBLOCKED" || r.code === "E_VENUE_UNREACHABLE") return r;
+    const said = str(rec(r.native).said);
+    const { code, msg } = binanceSaid(said);
+    const words = msg ? `${msg}${code ? ` (${code})` : ""}` : "";
+    const native = r.native;
+    // -2015 is Binance's one answer for a missing permission, a wrong key and an IP not on the key's list, -1002 "not authorized": what the
+    // owner can check on the key is said
+    if (code === "-2015" || code === "-1002" || /Invalid API-key, IP, or permissions/i.test(said)) return no("E_VENUE_PERMISSION", { venue, message: `${name} refused to ${doing}: ${PERMISSION}. ${code === "-1002" ? `It said: ${words}` : "Binance gives this one answer (-2015) for a missing permission, a wrong key and an IP not on the key's list"}`, native });
+    if (code === "-6019") return no("E_VENUE_REJECTED", { venue, message: `${name} refused to ${doing}: ${words}. It asks for a confirmation, and the account does not confirm it for you: do it at Binance if you mean to`, native });
+    if (code && BINANCE_SHORT.has(code)) return no("E_VENUE_INSUFFICIENT", { venue, message: `${name} refused to ${doing}: ${words}${kind === "supply" ? `. Only what is in ${LANDS} goes in` : ""}`, native });
+    if (code && BINANCE_CLOSED.has(code)) return no("E_VENUE_MARKET_CLOSED", { venue, message: `${name} refused to ${doing}: ${words}`, native });
+    if (code && BINANCE_INVALID.has(code)) return no("E_VENUE_ORDER_INVALID", { venue, message: `${name} refused to ${doing}: ${words}`, native });
+    if (r.code === "E_VENUE_UNAUTHORIZED") return words ? no("E_VENUE_UNAUTHORIZED", { venue, message: `${name} does not accept this key: ${words}`, native }) : r;
+    // anything else Binance said in words — the product is not there, or not for this account (-6001, -6003, -6017, -6020): its words
+    return words ? no("E_VENUE_REJECTED", { venue, message: `${name} refused to ${doing}: ${words}`, native }) : r;
+  };
+  /** an answer with success false (the library throws on one; a stand-in or a later library may not): nothing was done */
+  const unsuccessful = (doing: string, answer: unknown, request: unknown): Refusal => no("E_VENUE_REJECTED", { venue, message: `${name} did not ${doing}: it answered that it did not succeed`, native: { request, answer } });
+  const notId = (id: string): Refusal => no("E_ACCOUNT_BAD_ACTION", { venue, message: `a product at ${name} is Binance's own Simple Earn Flexible product id (for example USDT001), not "${id.slice(0, 40)}"` });
+  /** a paged list (a hundred a page, five pages at most) */
+  const rowsOf = async (call: string, params: Record<string, unknown>, doing: string): Promise<Array<Record<string, unknown>> | Refusal> => {
+    const f = method(client, call);
+    if (!f) return closed();
+    const out: Array<Record<string, unknown>> = [];
+    for (let page = 1; page <= PAGES; page++) {
+      let data: Record<string, unknown>;
+      try {
+        data = rec(await f({ ...params, current: page, size: PAGE }));
+      } catch (err) {
+        return say(err, doing);
+      }
+      const rows = list(data.rows).map(rec);
+      out.push(...rows);
+      if (rows.length < PAGE || page * PAGE >= num(data.total)) break;
+    }
+    return out;
+  };
+  /** what is held in Simple Earn Flexible (GET flexible/position), in one product when asked */
+  const heldRows = (productId?: string) => rowsOf("sapiGetSimpleEarnFlexiblePosition", productId ? { productId } : {}, "list what is in Simple Earn");
+  /** the asset of each product seen, so one is read again in its own asset's list */
+  const assetOf = new Map<string, string>();
+  const noteOf = (tiers: string): string => `Binance Simple Earn Flexible: out at any time — Binance returns what is redeemed to ${LANDS} at once, within its daily redemption limits. The rate is its real-time APR${tiers ? `, and it pays a bonus tiered APR besides (${tiers})` : ""}. Only what is in ${LANDS} goes in, and the account never turns on Binance's Auto-Subscribe`;
+  const tiersOf = (v: unknown): string =>
+    Object.entries(rec(v))
+      .flatMap(([band, f]) => {
+        const x = known(f);
+        return band && x !== undefined ? [`${band} ${pctOf(x)}`] : [];
+      })
+      .join(", ");
+  /** one of Binance's products as the account offers it (a row of GET flexible/list), at the dollar price it was given */
+  const productOf = (row: Record<string, unknown>, price: number | undefined): EarnProduct | undefined => {
+    const id = str(row.productId);
+    const ccy = str(row.asset).toUpperCase();
+    if (!BINANCE_ID.test(id) || !ccy) return undefined;
+    assetOf.set(id, ccy);
+    const rate = known(row.latestAnnualPercentageRate);
+    const min = known(row.minPurchaseAmount);
+    const soldOut = row.isSoldOut === true;
+    const takes = row.canPurchase === true && !soldOut;
+    const status = str(row.status);
+    return {
+      id,
+      asset: ccy,
+      name: `${ccy} · Simple Earn Flexible`,
+      ...(rate !== undefined ? { apy: rate, rateKind: "apr" as const } : {}),
+      protocol: "Binance Simple Earn",
+      ...(min !== undefined && min > 0 ? { minAmount: min } : {}),
+      lockDays: 0,
+      ...(price !== undefined ? { priceUsd: price } : {}),
+      lands: LANDS,
+      canSupply: takes,
+      canWithdraw: row.canRedeem === true,
+      ...(takes ? {} : { why: soldOut ? `${name} says it is sold out` : `${name} takes no money into it now${status ? ` (${status})` : ""}` }),
+      note: noteOf(tiersOf(row.tierAnnualPercentageRate)),
+    };
+  };
+  /** a product Binance no longer lists, from what is held in it: money can only come out */
+  const heldProduct = async (row: Record<string, unknown>): Promise<EarnProduct> => {
+    const ccy = str(row.asset).toUpperCase();
+    const rate = known(row.latestAnnualPercentageRate);
+    const price = await priceOf(d.price, ccy);
+    return { id: str(row.productId), asset: ccy, name: `${ccy} · Simple Earn Flexible`, ...(rate !== undefined ? { apy: rate, rateKind: "apr" as const } : {}), protocol: "Binance Simple Earn", lockDays: 0, ...(price !== undefined ? { priceUsd: price } : {}), lands: LANDS, canSupply: false, canWithdraw: row.canRedeem === true, why: `${name} does not list it now: what is in it can only come out`, note: noteOf("") };
+  };
+  /** the product with its asset's dollar price, where a public price says one */
+  const priced = async (p: EarnProduct): Promise<EarnProduct> => {
+    if (p.priceUsd !== undefined) return p;
+    const x = await priceOf(d.price, p.asset);
+    return x !== undefined ? { ...p, priceUsd: x } : p;
+  };
+  let seen: { at: number; key: string; items: EarnProduct[] } | undefined;
+  /** every product Binance lists (in one asset when asked), kept five minutes. One asset's list is priced; the whole list — hundreds of
+   * products — only where it costs nothing (a dollar stablecoin), so no asset is asked about one by one: a product money moves for is
+   * priced when it is read alone (product) */
+  const listed = async (asset?: string, fresh = false): Promise<EarnProduct[] | Refusal> => {
+    const key = asset ?? "";
+    if (!fresh && seen && seen.key === key && now() - seen.at < KEPT_MS) return seen.items;
+    const rows = await rowsOf("sapiGetSimpleEarnFlexibleList", asset ? { asset } : {}, "list its Simple Earn products");
+    if (isRefusal(rows)) return rows;
+    const price = asset ? await priceOf(d.price, asset) : undefined;
+    const items: EarnProduct[] = [];
+    for (const row of rows) {
+      const p = productOf(row, asset ? price : isStable(str(row.asset)) ? 1 : undefined);
+      if (p && (!asset || p.asset === asset)) items.push(p);
+    }
+    seen = { at: now(), key, items };
+    return items;
+  };
+  /** how one redemption stands, by Binance's redemption record: PAID is done, a failure rejected; anything else, or no row yet, under way */
+  const redemption = async (redeemId: string): Promise<{ status: EarnState["status"]; native: unknown } | Refusal> => {
+    const f = method(client, "sapiGetSimpleEarnFlexibleHistoryRedemptionRecord");
+    if (!f) return closed();
+    let rows: Array<Record<string, unknown>>;
+    try {
+      rows = list(rec(await f({ redeemId })).rows).map(rec);
+    } catch (err) {
+      return say(err, "say how a redemption stands");
+    }
+    const row = rows.find((x) => str(x.redeemId) === redeemId);
+    if (!row) return { status: "pending", native: { redeemId, record: null } };
+    const s = str(row.status).toUpperCase();
+    return { status: s === "PAID" ? "done" : /FAIL/.test(s) ? "rejected" : "pending", native: { redeemId, record: { status: s, amount: str(row.amount), asset: str(row.asset), destAccount: str(row.destAccount), time: known(row.time) ?? null } } };
+  };
+  const can = d.can.length === 0 ? "unknown" : d.can.includes("trade spot and margin");
+  const submit = once<EarnState>();
+  return {
+    can,
+    ...(can === false ? { whyNot: `this ${name} key may not trade: Simple Earn's subscription and redemption need its "Enable Spot & Margin Trading" permission (set on the key at Binance)` } : {}),
+    what: "Simple Earn Flexible: out at any time",
+    async products(asset) {
+      const a = asset?.trim().toUpperCase() ?? "";
+      // an asset Binance could not have is none here: nothing that is not one goes into its query
+      if (a && !BINANCE_ASSET.test(a)) return [];
+      return listed(a || undefined);
+    },
+    async product(id) {
+      const pid = id.trim();
+      if (!BINANCE_ID.test(pid)) return notId(id);
+      // read afresh: in its own asset's list where it was seen before (one call), else in all of them
+      const was = assetOf.get(pid);
+      const own = was && BINANCE_ASSET.test(was) ? was : undefined;
+      let items = await listed(own, true);
+      if (isRefusal(items)) return items;
+      let hit = items.find((p) => p.id === pid);
+      if (!hit && own) {
+        items = await listed(undefined, true);
+        if (isRefusal(items)) return items;
+        hit = items.find((p) => p.id === pid);
+      }
+      if (hit) return priced(hit);
+      const held = await heldRows(pid);
+      if (isRefusal(held)) return held;
+      const row = held.find((r) => str(r.productId) === pid && num(r.totalAmount) > 0);
+      return row ? heldProduct(row) : no("E_VENUE_REJECTED", { venue, message: `${name} lists no Simple Earn Flexible product ${pid} now` });
+    },
+    async positions() {
+      const rows = await heldRows();
+      if (isRefusal(rows)) return rows;
+      const out: EarnPosition[] = [];
+      for (const r of rows) {
+        const id = str(r.productId);
+        const asset = str(r.asset).toUpperCase();
+        const amount = num(r.totalAmount);
+        if (!id || !asset || !(amount > 0)) continue;
+        assetOf.set(id, asset);
+        const price = await priceOf(d.price, asset);
+        const apy = known(r.latestAnnualPercentageRate);
+        // earned so far, in the asset: the real-time rewards Binance adds to the position each minute and the bonus it pays to spot each day
+        const earned = known(r.cumulativeTotalRewards);
+        out.push({ product: id, id, asset, amount, ...(price !== undefined ? { usd: Number((amount * price).toFixed(2)) } : {}), ...(apy !== undefined ? { apy } : {}), ...(earned !== undefined ? { accrued: earned, ...(price !== undefined ? { accruedUsd: Number((earned * price).toFixed(2)) } : {}) } : {}), name: `${asset} · Simple Earn Flexible`, protocol: "Binance Simple Earn" });
+      }
+      return out;
+    },
+    supply: (p, amount, clientId) =>
+      submit(clientId, async () => {
+        const call = method(client, "sapiPostSimpleEarnFlexibleSubscribe");
+        if (!call) return closed();
+        if (!BINANCE_ID.test(p.id)) return notId(p.id);
+        const doing = `put ${plain(amount)} ${p.asset} into ${p.name}`;
+        // Auto-Subscribe is the owner's to set, at Binance: what the position says goes back as it is, and with nothing held it is off —
+        // Binance's own default is on, which would sweep the idle spot balance into the product twice a day
+        const held = await heldRows(p.id);
+        if (isRefusal(held)) return held;
+        const auto = held.some((r) => str(r.productId) === p.id && r.autoSubscribe === true);
+        const body = { productId: p.id, amount: plain(amount), autoSubscribe: auto, sourceAccount: ACCOUNT };
+        let r: Record<string, unknown>;
+        try {
+          r = rec(await call(body));
+        } catch (err) {
+          return say(err, doing, "supply");
+        }
+        if (r.success === false) return unsuccessful(doing, r, body);
+        return { ref: `subscribe:${p.id}:${str(r.purchaseId) || `client-${clientId}`}`, status: "done", native: { request: body, answer: { purchaseId: str(r.purchaseId), success: r.success ?? null } } };
+      }),
+    // out: an amount, or all of it by Binance's own redeemAll, back to the spot account; done when its redemption record says PAID
+    withdraw: (p, amount, clientId, all) =>
+      submit(clientId, async () => {
+        const call = method(client, "sapiPostSimpleEarnFlexibleRedeem");
+        if (!call) return closed();
+        if (!BINANCE_ID.test(p.id)) return notId(p.id);
+        const doing = all ? `take all of it out of ${p.name}` : `take ${plain(amount)} ${p.asset} out of ${p.name}`;
+        // redeemAll is always sent: Binance's docs give its default as false, its own Ruby connector as true — a part must never go as all
+        const body = { productId: p.id, redeemAll: all, ...(all ? {} : { amount: plain(amount) }), destAccount: ACCOUNT };
+        let r: Record<string, unknown>;
+        try {
+          r = rec(await call(body));
+        } catch (err) {
+          return say(err, doing, "withdraw");
+        }
+        if (r.success === false) return unsuccessful(doing, r, body);
+        const redeemId = str(r.redeemId);
+        const answer = { redeemId, success: r.success ?? null };
+        // no id to follow it by: Binance says a flexible redemption is back at once
+        if (!/^\d{1,30}$/.test(redeemId)) return { ref: `redeem:${p.id}:client-${clientId}`, status: "done", native: { request: body, answer } };
+        const st = await redemption(redeemId);
+        // a record that could not be read leaves it under way: it is asked again
+        return { ref: `redeem:${p.id}:${redeemId}`, status: isRefusal(st) ? "pending" : st.status, native: { request: body, answer, ...(isRefusal(st) ? {} : { record: st.native }) } };
+      }),
+    // a subscription is credited at once; a redemption is followed in Binance's redemption record until it says PAID
+    async status(ref, _p, kind) {
+      if (kind === "supply") return { ref, status: "done", native: { said: `${name} credits a subscription at once` } };
+      const id = /^redeem:[^:]+:(\d{1,30})$/.exec(ref)?.[1];
+      if (!id) return { ref, status: "done", native: { said: `no redemption id to follow: ${name} returns a flexible redemption at once` } };
+      const r = await redemption(id);
+      return isRefusal(r) ? r : { ref, status: r.status, native: r.native };
     },
   };
 }

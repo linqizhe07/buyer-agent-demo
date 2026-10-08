@@ -16,9 +16,10 @@
  *     and the bridged USDC.e. Cash is a row per currency;
  *   · an EVENT CONTRACT by its own symbol: one outcome of one question, at the venue that lists it;
  *   · a STOCK, a stock token, an RWA by its ticker. A venue line's note says what it is there ("Arbitrum · Stock Token");
- *   · money in an EARN product (class earn) by its venue and product, `earn:<venue>:<product>`: a vault, OKX's Simple Earn, a Kraken Earn
- *     strategy is the venue's own, so the same USDC in two products is two rows, and none of them is the USDC that is ready. It is owned
- *     (in the total), not ready (not in `money`), and its 24 hours are its asset's: a dollar's change by nothing, a coin's as the coin's.
+ *   · money in an EARN product (class earn) by its venue and product, `earn:<venue>:<product>`: a vault, OKX's or Binance's Simple Earn, a
+ *     Kraken Earn strategy is the venue's own, so the same USDC in two products is two rows, and none of them is the USDC that is ready.
+ *     It is owned (in the total), not ready (not in `money`), and its 24 hours are its asset's: a dollar's change by nothing, a coin's as
+ *     the coin's.
  *
  * A holding the venue could not price counts no dollars (the live adapter's "no price"): its amount is in the row, its dollars are not,
  * and the row's price is from the venue lines that are priced. Money on its way (`inTransit`) is owned, so it is in the rows, and it is not
@@ -332,6 +333,9 @@ type PageHolding = PageVenue["holdings"][number];
 /** Kraken's balance names an Earn allocation by its asset and a suffix (Kraken's Get Account Balance: `.B` yield-bearing products, `.F`
  * Kraken Rewards, `.S` staked, `.M` opt-in rewards, `.P` parachain) — `USDC.B`, `BTC.B` once the exchange library has named the asset */
 const EARN_SUFFIX = /^([A-Za-z0-9]+)\.(B|F|S|M|P)$/i;
+/** Binance's spot balance carries what is in Simple Earn Flexible as the asset with `LD` before it — `LDUSDT` is USDT there (the exchange
+ * library hands Binance's `balances[].asset` on as it is; the prefix is from Binance's old Flexible Savings, "lending daily") */
+const ldOf = (asset: string): string => `LD${asset.trim().toUpperCase()}`;
 const coinOf = (asset: string): string => normalBase(asset, "crypto") || asset.toUpperCase();
 /** a line's chain, as a wallet's balance names it: the first part of its note ("Base", "Base · no price") */
 const chainOfNote = (note: string | undefined): string => (note ?? "").split(" · ")[0]!.trim().toLowerCase();
@@ -347,17 +351,21 @@ const pctText = (apy: number): string => `${Number((apy * 100).toFixed(2))}%`;
  *     that symbol goes — none, when the balance does not list the shares; where the chain gave no symbol, a line on the same chain whose
  *     symbol carries the vault's asset in it (`aBasUSDC`, `steakUSDC`), is not a dollar itself, and is worth what the position is (within
  *     2%, or 50¢) is taken for it;
+ *   · Binance's Simple Earn Flexible is also in its spot balance, as `LD<ASSET>` (`LDUSDT`, unpriced there): that line goes, the position
+ *     stays. Only the exact name of an asset held in an exchange's earn product (one on no chain) is taken for it, so a coin that merely
+ *     starts with LD (Lido's LDO) stays;
  *   · OKX's Simple Earn is not in the funding or the trading balance (it leaves the funding account when it goes in), so nothing goes there.
  * `stale`: the venue's earn did not answer this time, and these are the last good numbers */
 export function withEarn(v: Pick<PageVenue, "name" | "holdings">, held: readonly EarnHeld[], opts: { stale?: boolean | undefined; shares?: ReadonlyMap<string, string> | undefined } = {}): { holdings: PageHolding[]; dropped: PageHolding[] } {
   const live = held.filter((p) => p.amount > 0);
   if (!live.length) return { holdings: [...v.holdings], dropped: [] };
   const assets = new Set(live.map((p) => coinOf(p.asset)));
+  const lent = new Set(live.filter((p) => !(p.chain ?? "").trim()).map((p) => ldOf(p.asset)));
   const dropped = new Set<PageHolding>();
   for (const h of v.holdings) {
     if (h.class === "earn") continue;
     const k = EARN_SUFFIX.exec(h.asset.trim());
-    if (k && assets.has(coinOf(k[1]!))) dropped.add(h);
+    if ((k && assets.has(coinOf(k[1]!))) || lent.has(h.asset.trim().toUpperCase())) dropped.add(h);
   }
   for (const p of live) {
     const chain = (p.chain ?? "").trim().toLowerCase();

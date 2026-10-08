@@ -6,7 +6,8 @@ import { metamaskSource, MmError, type MmNotice, type RunMm } from "../../src/po
 
 /** EARN at the venues that have an interface for it, each in its own language, against stand-ins that answer in the shapes each documents:
  * mm 7.0.0's `mm earn` (its SDK's Vault and VaultPosition, LI.FI's earn API underneath), OKX's Simple Earn Flexible (API v5
- * finance/savings) and Kraken Earn (/0/private/Earn/*), both through the exchange library's implicit calls. Nothing leaves the process;
+ * finance/savings) and Kraken Earn (/0/private/Earn/*), both through the exchange library's implicit calls; Binance's Simple Earn Flexible
+ * has a file of its own (live-earn-binance.test.ts), run through the real library. Nothing leaves the process;
  * MetaMask's own switch lives in an env object made per test, never in the shell. */
 const WALLET = "0x00000000000000000000000000000000000000Aa";
 const VAULT = "0x7BfA7C4f149E7415b73bdeDfe609237e29CBF34A";
@@ -265,9 +266,14 @@ describe("Kraken Earn: /0/private/Earn with the account's own key", () => {
     expect(refusal(await e.supply(p, 1, "3".repeat(32))).code).toBe("E_VENUE_UNREACHABLE");
   });
 
-  it("OKX, Kraken and KuCoin have earn through their keys here: any other exchange has none (Binance's Simple Earn answers this machine 451)", () => {
-    const none = exchangeEarner({ client: client("binance", [], {}), venue: "binance", name: "Binance", key: KEY, can: ["read"] });
-    expect(none).toBeUndefined();
+  it("OKX, Kraken, KuCoin and Binance have earn through their keys: Binance (binance.com) where the library has its Simple Earn calls — a 451 to one machine decides nothing for others — and no other exchange", () => {
+    const simpleEarn = Object.fromEntries(["sapiGetSimpleEarnFlexibleList", "sapiGetSimpleEarnFlexiblePosition", "sapiPostSimpleEarnFlexibleSubscribe", "sapiPostSimpleEarnFlexibleRedeem", "sapiGetSimpleEarnFlexibleHistoryRedemptionRecord"].map((c) => [c, { rows: [], total: 0 }]));
+    expect(exchangeEarner({ client: client("binance", [], simpleEarn), venue: "binance", name: "Binance", key: KEY, can: ["read"] })?.what).toBe("Simple Earn Flexible: out at any time");
+    // a library without the calls offers none; Binance.US documents no Simple Earn; its futures clients are not where the money lands
+    expect(exchangeEarner({ client: client("binance", [], {}), venue: "binance", name: "Binance", key: KEY, can: ["read"] })).toBeUndefined();
+    expect(exchangeEarner({ client: client("binanceus", [], simpleEarn), venue: "binanceus", name: "Binance.US", key: KEY, can: ["read"] })).toBeUndefined();
+    expect(exchangeEarner({ client: client("binanceusdm", [], simpleEarn), venue: "binanceusdm", name: "Binance USDⓈ-M", key: KEY, can: [] })).toBeUndefined();
+    expect(exchangeEarner({ client: client("bybit", [], {}), venue: "bybit", name: "Bybit", key: KEY, can: [] })).toBeUndefined();
     expect(exchangeEarner({ client: client("okx", [], {}), venue: "okx", name: "OKX", key: KEY, can: [] })).toBeDefined();
     expect(exchangeEarner({ client: client("kraken", [], {}), venue: "kraken", name: "Kraken", key: KEY, can: [] })).toBeDefined();
     expect(exchangeEarner({ client: client("kucoin", [], {}), venue: "kucoin", name: "KuCoin", key: KEY, can: [] })?.what).toBe("KuCoin Earn: flexible savings, fixed terms and staking");

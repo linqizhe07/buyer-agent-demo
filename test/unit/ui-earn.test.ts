@@ -113,10 +113,11 @@ function account(over: Record<string, unknown> = {}) {
 }
 
 describe("Earn's lists and drafts", () => {
-  it("lists the products — to put in, the ones taking money first; to take out, the ones something is in — and drafts money in or out in the product's own asset", () => {
+  it("lists the products — to put in, the ones taking money first, those in an asset ready at their venue before the rest; to take out, the ones something is in — and drafts money in or out in the product's own asset", () => {
     const p = account();
     const view = { products: [{ venue: "okx", id: "savings:BTC", asset: "BTC", canSupply: false, why: "closed to new money" }, { venue: "okx", id: "savings:USDT", asset: "USDT", canSupply: true }, { venue: "mm", id: "8453:0xvault", asset: "USDC", canSupply: true }], positions: [{ venue: "mm", product: "8453:0xvault", asset: "mUSDC", amount: 12 }, { venue: "okx", product: "savings:USDT", asset: "USDT", amount: 0 }] };
-    expect(p.out<Array<{ id: string }>>(`enList(${JSON.stringify(view)}, "supply")`).map((x) => x.id)).toEqual(["savings:USDT", "8453:0xvault", "savings:BTC"]);
+    // the wallet holds USDC (A, ACCOUNT): its vault first; nothing is held at OKX on this page
+    expect(p.out<Array<{ id: string }>>(`enList(${JSON.stringify(view)}, "supply")`).map((x) => x.id)).toEqual(["8453:0xvault", "savings:USDT", "savings:BTC"]);
     expect(p.out<Array<{ id: string }>>(`enList(${JSON.stringify(view)}, "withdraw")`).map((x) => x.id)).toEqual(["8453:0xvault"]);
     expect(p.out('enDraft({ venue: "mm", id: "8453:0xvault", asset: "USDC" }, "withdraw", " 5 ")')).toEqual({ type: "liveEarn", venue: "mm", kind: "withdraw", product: "8453:0xvault", asset: "USDC", amount: "5" });
     expect(p.out('enDraft({ venue: "okx", id: "savings:USDT", asset: "USDT" }, "anything", "10").kind')).toBe("supply");
@@ -181,6 +182,26 @@ describe("the Earn sheet", () => {
     expect(order).toEqual(["ex|savings:USDT", "mm|8453:0xvault", "ex|locked:ETH"]);
     expect(put).toContain("Sign and put in");
     expect(put).not.toContain("data-all");
+  });
+
+  it("a venue that lists hundreds of products (Binance's Simple Earn): Put in shows first the ones in an asset ready there, whatever their yield, so what is held is never past the twelve rows", async () => {
+    const promos = Array.from({ length: 30 }, (_, i) => ({ venue: "binance", venueName: "Binance", id: `P${i}001`, name: `P${i} · Simple Earn Flexible`, asset: `P${i}`, apy: 0.2 - i / 1000, rateKind: "apr", canSupply: true, canWithdraw: true, lockDays: 0, lands: "your Binance spot account" }));
+    const usdt = { venue: "binance", venueName: "Binance", id: "USDT001", name: "USDT · Simple Earn Flexible", asset: "USDT", apy: 0.0412, rateKind: "apr", canSupply: true, canWithdraw: true, lockDays: 0, lands: "your Binance spot account" };
+    const p = page((path) => (path.startsWith("/api/account/earn") ? { ok: true, products: [...promos, usdt], positions: [], venues: [{ venue: "binance", venueName: "Binance", can: true, what: "Simple Earn Flexible: out at any time" }], missing: [] } : {}));
+    p.set("A", { ...ACCOUNT, venues: [venue("binance", "Binance", { usd: 590, earn: { can: true, what: "Simple Earn Flexible: out at any time" }, holdings: [{ asset: "USDT", amount: 550, usd: 550, class: "stable" }, { asset: "USDT", amount: 40, usd: 40, class: "earn" }] })] });
+    p.run('openEarn({ venue: "binance" })');
+    await settle(8);
+    const order = [...String(p.sheets[0]!.root.innerHTML).matchAll(/data-prod="([^"]+)"/g)].map((m) => m[1]);
+    expect(order).toHaveLength(12);
+    expect(order[0]).toBe("binance|USDT001");
+    expect(p.sheets[0]!.root.formParts["[data-have]"].textContent).toBe("550 USDT at Binance");
+  });
+
+  it("Put in's amount at hand (and Max) is the product's asset at the venue that is ready: what is already in an earn product there, or on its way, is not counted", async () => {
+    const p = account({ venues: [venue("ex", "Exchange", { usd: 720, earn: { can: true, what: "Simple Earn Flexible" }, holdings: [{ asset: "USDT", amount: 500, usd: 500, class: "stable", note: "spot" }, { asset: "USDT", amount: 50, usd: 50, class: "stable", note: "funding" }, { asset: "USDT", amount: 150, usd: 150, class: "earn", note: "earning 5.2% at Exchange", earn: { product: "savings:USDT", asset: "USDT" } }, { asset: "USDT", amount: 20, usd: 20, class: "stable", inTransit: true }] })] });
+    p.run('openEarn({ venue: "ex" })');
+    await settle(8);
+    expect(p.sheets[0]!.root.formParts["[data-have]"].textContent).toBe("550 USDT at Exchange");
   });
 
   it("says in the venue's words when a venue can't put money to earn, and when Earn could not be read", async () => {
