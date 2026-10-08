@@ -8,6 +8,9 @@
  *   live:kalshi            GET /trade-api/v2/exchange/status, public
  *   live:polymarket-trade  Polymarket's location check, as the connection asks it first (it answers blocked or not; the IP and the place it
  *                          names are never kept)
+ *   live:hyperliquid-trade Hyperliquid's own line (its Terms of Use §1.6), held to where this user is now (location.ts: the place from
+ *                          Polymarket's location check, used for this one answer and never shown): Hyperliquid's API answers from anywhere,
+ *                          and its terms are what close it to the United States, Ontario and the sanctioned territories
  *   live:robinhood         the sign-in's discovery: its two public metadata documents, and that a client may register itself (OAuthSignIn)
  *   live:metamask          `mm auth status` on this machine: installed, and signed in
  *
@@ -19,6 +22,7 @@
  * (no answer just now; the connection asks again when it is made). */
 import type { Refusal } from "../../core/errors.ts";
 import { exchangeClock, type OpenExchange } from "./exchange.ts";
+import { HYPERLIQUID_RULE, locator } from "./location.ts";
 import type { RunMm } from "./metamask.ts";
 import { POLYMARKET_GEOBLOCK, polymarketLocationSaid } from "./polymarket-clob.ts";
 import type { OAuthSignIn } from "./signin.ts";
@@ -118,6 +122,13 @@ export async function reachOf(connector: string, deps: ReachDeps): Promise<Reach
     const no = polymarketLocationSaid(r, "polymarket", "Polymarket");
     // its own sentence only: the place and the IP it names stay out
     return no ? { connector, state: no.code === "E_VENUE_GEOBLOCKED" ? "location" : "unreachable", said: no.code === "E_VENUE_GEOBLOCKED" ? `${no.message}. Its location check answered blocked` : no.message, at } : { connector, state: "ok", at };
+  }
+  if (kind === "hyperliquid-trade") {
+    // Hyperliquid's terms, held to where this user is now: the verdict only, never the place
+    const v = await inTime(locator({ http: deps.http, clock: deps.clock, timeoutMs: PROBE_MS }).verdict(HYPERLIQUID_RULE), "late" as const);
+    if (v === "closed") return { connector, state: "location", said: HYPERLIQUID_RULE.closedWords, at };
+    if (v === "served") return { connector, state: "ok", at };
+    return { connector, state: "unreachable", said: `where this machine is could not be learned just now, so Hyperliquid's own line (${HYPERLIQUID_RULE.cite}) could not be held to it; connecting asks again`, at };
   }
   if (kind === "robinhood") {
     const s = deps.signIn?.("robinhood");

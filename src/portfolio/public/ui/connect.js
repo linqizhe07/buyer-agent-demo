@@ -45,11 +45,11 @@ const TILES = [
   ["Exchanges", [["exchange", "okx", "OKX"], ["exchange", "kraken", "Kraken"], ["exchange", "coinbase", "Coinbase"], ["exchange", "bybit", "Bybit"], ["exchange", "binance", "Binance"], ["exchange", "", "Another exchange"]]],
   ["Brokers", [["robinhood", "", "Robinhood"], ["alpaca", "", "Alpaca"], ["robinhood-crypto", "", "Robinhood Crypto"]]],
   ["Wallets", [["wallet", "", "Browser wallet"], ["metamask", "", "MetaMask Agent Wallet"], ["wallet", "watch", "Watch an address"]]],
-  ["Markets and tokens", [["kalshi", "", "Kalshi"], ["polymarket-trade", "", "Polymarket"], ["polymarket", "", "Polymarket · by address"], ["hyperliquid", "", "Hyperliquid"], ["ondo", "", "Ondo · OUSG"]]],
+  ["Markets and tokens", [["kalshi", "", "Kalshi"], ["polymarket-trade", "", "Polymarket"], ["polymarket", "", "Polymarket · by address"], ["hyperliquid-trade", "", "Hyperliquid"], ["hyperliquid", "", "Hyperliquid · by address"], ["ondo", "", "Ondo · OUSG"]]],
 ];
 const HOW = { "key-file": "API key", "sign-in": "Sign in", address: "Address", cli: "mm on this machine" };
 /* the page at each venue where an API key is made (the venues' own account pages) */
-const API_PAGES = { okx: "https://www.okx.com/account/my-api", binance: "https://www.binance.com/en/my/settings/api-management", binanceus: "https://www.binance.us/settings/api-management", coinbase: "https://portal.cdp.coinbase.com/api-keys/secret", bybit: "https://www.bybit.com/app/user/api-management", kraken: "https://pro.kraken.com/app/settings/api", kucoin: "https://www.kucoin.com/account/api", bitget: "https://www.bitget.com/account/newapi", alpaca: "https://app.alpaca.markets/dashboard/overview", kalshi: "https://kalshi.com/account/profile", "robinhood-crypto": "https://robinhood.com/account/crypto" };
+const API_PAGES = { okx: "https://www.okx.com/account/my-api", binance: "https://www.binance.com/en/my/settings/api-management", binanceus: "https://www.binance.us/settings/api-management", coinbase: "https://portal.cdp.coinbase.com/api-keys/secret", bybit: "https://www.bybit.com/app/user/api-management", kraken: "https://pro.kraken.com/app/settings/api", kucoin: "https://www.kucoin.com/account/api", bitget: "https://www.bitget.com/account/newapi", alpaca: "https://app.alpaca.markets/dashboard/overview", kalshi: "https://kalshi.com/account/profile", "robinhood-crypto": "https://robinhood.com/account/crypto", "hyperliquid-trade": "https://app.hyperliquid.xyz/API" };
 /* what to tick when making the key, in each venue's own words (read 2026-10-05): trading on, withdrawals off */
 const KEY_HOW = {
   okx: "Tick Read and Trade (and Transfer, to move between Funding and Trading). Leave Withdraw off. Add this machine's IP: a trading key with no IP expires after 14 days unused. The passphrase you set goes in \"password\".",
@@ -65,6 +65,7 @@ const KEY_HOW = {
   kalshi: "Create New API Key (Ed25519). If scopes are offered, take read and write::trade and leave write::transfer off.",
   "robinhood-crypto": "Add key with your Ed25519 public key, and enable reading accounts, holdings, orders, products and quotes, and placing crypto orders.",
   "polymarket-trade": "Put in the private key of the wallet that signs for your Polymarket account. If the money sits in a Polymarket wallet, add \"funderAddress\" (the address in your profile menu) and \"signatureType\": 1 (Proxy), 2 (Safe) or 3 (Deposit Wallet); leave both empty for a plain wallet. Polymarket checks your location before anything else.",
+  "hyperliquid-trade": "More → API: name an API wallet, Generate, copy its private key, then Authorize API Wallet with your account's own wallet (valid up to 180 days). An API wallet signs trades for your account and can never withdraw. \"walletAddress\" is your account's own address; \"privateKey\" is the API wallet's, never your account's own key. Hyperliquid's terms (§1.6) are checked for where you are before anything else.",
 };
 const keyHow = (venue) => KEY_HOW[venue] || "Turn on reading and trading; leave withdrawals off. Bind this machine's IP if the exchange offers it.";
 const optionOf = (kind) => ((A.connectLive || {}).options || []).find((o) => o.kind === kind);
@@ -86,10 +87,14 @@ async function askReach(connectors, force = false) {
   const got = await api(`/api/account/connect/reach?${new URLSearchParams({ connector: list.join(","), ...(force ? { force: "1" } : {}) })}`);
   for (const r of got && Array.isArray(got.reach) ? got.reach : []) REACH.set(r.connector, r);
 }
-/* the form's note: the venue's no in its words and when it was asked, "Check again"; Polymarket's adds the way to see a wallet there */
+/* a trading connection whose venue can also be watched by an address: the address one, its tile's name, and the offer to watch instead */
+const WATCH_INSTEAD = { "polymarket-trade": ["polymarket", "Polymarket · by address", "Watch a Polymarket wallet by its address instead"], "hyperliquid-trade": ["hyperliquid", "Hyperliquid · by address", "Watch a Hyperliquid account by its address instead"] };
+/* the form's note: the venue's no in its words and when it was asked, "Check again"; Polymarket's and Hyperliquid's add the way to see the
+   account there by its address */
 function reachNoteHtml(r, kind) {
   if (!r || r.state === "ok") return "";
-  const instead = r.state === "location" && kind === "polymarket-trade" && optionOf("polymarket") ? ' <button type="button" class="link" data-reach="watch">Watch a Polymarket wallet by its address instead</button>' : "";
+  const w = WATCH_INSTEAD[kind];
+  const instead = r.state === "location" && w && optionOf(w[0]) ? ` <button type="button" class="link" data-reach="watch">${esc(w[2])}</button>` : "";
   return `${esc(r.said || "")}${r.at ? ` <span class="dim">(asked ${esc(nyTime(r.at))})</span>` : ""} <button type="button" class="link" data-reach="again">Check again</button>${instead}`;
 }
 /* the tiles of the open picker, marked from what their venues answered */
@@ -163,7 +168,7 @@ function keyHowFor(v) {
 }
 
 /* what each key file holds, until the server says exactly (an exchange's own list comes from the exchange library) */
-const FIELDS = { exchange: ["apiKey", "secret"], alpaca: ["keyId", "secret"], kalshi: ["keyId", "privateKeyFile"], "robinhood-crypto": ["apiKey", "privateKey"], "polymarket-trade": ["privateKey", "funderAddress", "signatureType"] };
+const FIELDS = { exchange: ["apiKey", "secret"], alpaca: ["keyId", "secret"], kalshi: ["keyId", "privateKeyFile"], "robinhood-crypto": ["apiKey", "privateKey"], "polymarket-trade": ["privateKey", "funderAddress", "signatureType"], "hyperliquid-trade": ["walletAddress", "privateKey"] };
 /* a shell word, quoted */
 const shq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 /* the one command that makes a key file: the folder, an empty template if there is no file yet (an existing one is never overwritten),
@@ -248,7 +253,8 @@ async function openConnect(o, { exchange = "", watch = false, name = "", back = 
   $("reach-note").addEventListener("click", (e) => {
     const b = e.target.closest("[data-reach]");
     if (!b) return;
-    if (b.dataset.reach === "watch") return void openConnect(optionOf("polymarket"), { name: "Polymarket · by address", back });
+    const w = WATCH_INSTEAD[o.kind];
+    if (b.dataset.reach === "watch" && w) return void openConnect(optionOf(w[0]), { name: w[1], back });
     $("reach-note").className = "reach-note msg wait";
     $("reach-note").textContent = "Asking again…";
     reachAsk(true);

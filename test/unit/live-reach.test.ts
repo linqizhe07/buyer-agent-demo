@@ -98,6 +98,26 @@ describe("reach: each venue's first, keyless question, before a key is made", ()
     expect((await reachOf("live:polymarket-trade", deps({ answers: { "https://polymarket.com/api/geoblock": new Error("ETIMEDOUT") } }).d)).state).toBe("unreachable");
   });
 
+  it("Hyperliquid's trading connection: its own terms (§1.6) held to where this user is now — the place from Polymarket's location check, said never; Polymarket's own verdict is not Hyperliquid's", async () => {
+    const at = (country: string, region: string, blocked = false) => deps({ answers: { "https://polymarket.com/api/geoblock": reply(200, { blocked, ip: "203.0.113.7", country, region }) } });
+    const us = await reachOf("live:hyperliquid-trade", at("US", "NY", true).d);
+    expect(us.state).toBe("location");
+    expect(us.said).toBe("Hyperliquid does not serve this location: its Terms of Use (§1.6) make its Interface unavailable to persons located in the United States of America or Ontario, Canada, or in a territory under economic sanctions. That is its own rule, and the account does not look for a way around it");
+    expect(JSON.stringify(us)).not.toMatch(/203\.0\.113\.7|"US"|"NY"/);
+    expect((await reachOf("live:hyperliquid-trade", at("CA", "ON").d)).state).toBe("location");
+    expect((await reachOf("live:hyperliquid-trade", at("IR", "").d)).state).toBe("location");
+    // blocked by Polymarket in Ireland: that is Polymarket's rule, and Hyperliquid serves there
+    const ie = at("IE", "L", true);
+    expect(await reachOf("live:hyperliquid-trade", ie.d)).toEqual({ connector: "live:hyperliquid-trade", state: "ok", at: "2026-10-07T19:00:00.000Z" });
+    expect(ie.asked.map((a) => a.url)).toEqual(["https://polymarket.com/api/geoblock"]);
+    for (const a of ie.asked) expect(Object.keys(a.headers).map((h) => h.toLowerCase()).filter((h) => /auth|key|sign|token|cookie/.test(h))).toEqual([]);
+    // a place not learned is not a yes
+    const quiet = await reachOf("live:hyperliquid-trade", deps({ answers: { "https://polymarket.com/api/geoblock": new Error("ETIMEDOUT") } }).d);
+    expect([quiet.state, quiet.said]).toEqual(["unreachable", "where this machine is could not be learned just now, so Hyperliquid's own line (its Terms of Use §1.6) could not be held to it; connecting asks again"]);
+    expect((await reachOf("live:hyperliquid-trade", deps({ answers: { "https://polymarket.com/api/geoblock": reply(200, { blocked: false }) } }).d)).state).toBe("unreachable");
+    expect(reachKeepMs(us)).toBe(600_000);
+  });
+
   it("Robinhood: the sign-in's discovery only — ok when a client may register itself, no way in when it may not; nothing is registered", async () => {
     const meta = (registration: boolean): Record<string, HttpReply> => ({
       "https://agent.robinhood.com/.well-known/oauth-protected-resource/mcp/trading": reply(200, { authorization_servers: ["https://agent.robinhood.com/mcp/trading"] }),

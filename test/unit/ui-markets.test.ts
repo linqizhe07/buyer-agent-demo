@@ -510,6 +510,29 @@ describe("the Markets pane", () => {
     expect(p.run(`reachNoteHtml({ state: "ok" }, "kalshi")`)).toBe("");
   });
 
+  it("offers Hyperliquid as Polymarket is offered: its tile is the API-wallet connection (a key file that never withdraws), and the account read by its address is Hyperliquid · by address", () => {
+    const p = page(() => ({}));
+    const options = [...account().connectLive.options, { kind: "hyperliquid-trade", connector: "live:hyperliquid-trade", needs: "key-file", label: "Hyperliquid · trading, with an API wallet that cannot withdraw", venues: ["hyperliquid"] }, { kind: "hyperliquid", connector: "live:hyperliquid", needs: "address", label: "Hyperliquid · by the account's address", venues: ["hyperliquid"] }];
+    p.set("A", account({ connectLive: { ...account().connectLive, options } }));
+    const cat = p.run<string>("catalog(true)");
+    expect(cat).toContain('<button type="button" class="tile" data-kind="hyperliquid-trade" data-extra=""><b>Hyperliquid</b><span>API key</span></button>');
+    expect(cat).toContain('<button type="button" class="tile" data-kind="hyperliquid" data-extra=""><b>Hyperliquid · by address</b><span>Address</span></button>');
+    // neither is offered again under More
+    expect([cat.match(/data-kind="hyperliquid-trade"/g), cat.match(/data-kind="hyperliquid"/g)].map((m) => m?.length)).toEqual([1, 1]);
+    // the API-wallet connection asks its venue's rule first (live/reach.ts); the one by address asks nothing
+    expect(p.run("[tileConnector('hyperliquid-trade', ''), tileConnector('hyperliquid', '')]")).toEqual(["live:hyperliquid-trade", ""]);
+    p.run(`REACH.set("live:hyperliquid-trade", { connector: "live:hyperliquid-trade", state: "location", said: "Hyperliquid does not serve this location: its Terms of Use (§1.6) …", at: "2026-10-06T05:00:00.000Z" })`);
+    expect(p.run<string>("catalog(true)")).toContain('data-kind="hyperliquid-trade" data-extra="" title="Hyperliquid does not serve this location: its Terms of Use (§1.6) …"><b>Hyperliquid</b><span><em class="off">Not served here</em></span>');
+    // its form's note offers to watch the account by its address instead
+    expect(p.run<string>(`reachNoteHtml(REACH.get("live:hyperliquid-trade"), "hyperliquid-trade")`)).toContain('data-reach="watch">Watch a Hyperliquid account by its address instead</button>');
+    // the key file: where an API wallet is made, what to do there in Hyperliquid's words, and its two fields
+    expect(p.run("API_PAGES['hyperliquid-trade']")).toBe("https://app.hyperliquid.xyz/API");
+    const how = p.run<string>("keyHow('hyperliquid-trade')");
+    for (const w of ["More → API", "Generate", "Authorize API Wallet", "180 days", "can never withdraw", '"walletAddress"', '"privateKey"', "§1.6"]) expect(how).toContain(w);
+    expect(p.run("FIELDS['hyperliquid-trade']")).toEqual(["walletAddress", "privateKey"]);
+    expect(p.run("keyHowFor({ id: 'hyperliquid-trade', connector: 'live:hyperliquid-trade' })")).toBe(how);
+  });
+
   it("shows in the drawer what the agents are doing in a market: their cards (Review → Portfolio), open orders and the owner's intents", () => {
     const p = page(() => ({}));
     p.set(

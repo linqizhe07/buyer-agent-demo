@@ -46,6 +46,7 @@ import { holdingsOf, type MmBalance, type MmShow } from "../adapters/metamask.ts
 import { no } from "../refuse.ts";
 import { CHAIN_BY_ID, CHAINS, STABLECOINS, type ChainName } from "./chain.ts";
 import { known as knownFigure, once, type EarnPosition, type EarnProduct, type EarnSource, type EarnState, type LiveEarner } from "./earn.ts";
+import { HL_CLOSED, HL_TERMS } from "./location.ts";
 import type { Price } from "./prices.ts";
 import { badOrder, ceilTo, DONE, floorTo, inDollars, onStep, pick, plain, type LiveTrader, type Market, type MarketKind, type OrderRequest, type OrderState, type OrderStatus, type Position, type TimeInForce } from "./trade.ts";
 import { asRefusal, isStable, num, redact, REGION, type LiveBalance, type LiveSource } from "./types.ts";
@@ -246,11 +247,8 @@ const HL_MIN_USD = 10;
 /** Hyperliquid's price rule: at most five significant figures (a whole number always passes), and at most 6 − szDecimals decimals */
 const HL_PRICE_DECIMALS = 6;
 const PERP_NOTE = "a Hyperliquid perpetual through mm, margined in USDC in your Hyperliquid account (mm perps deposit comes first). A market order is Hyperliquid's IOC within the worst price; a limit order rests until canceled (GTC). It opens at the leverage set for it here (1x unless set); funding is paid or received every hour. Before every order the account holds this machine's place to Hyperliquid's own line (its Terms of Use §1.6)";
-/** Hyperliquid's own line: its Terms of Use §1.6 closes the venue to persons located in the United States of America or Ontario, Canada, and
- * in territories under economic sanctions. The sanctioned territories are not listed there; these are the ones under comprehensive
- * sanctions (ISO 3166: Cuba, Iran, North Korea, Syria, and Crimea, Sevastopol, Donetsk and Luhansk) */
-const HL_CLOSED = { countries: new Set(["US", "CU", "IR", "KP", "SY"]), regions: new Set(["CA-ON", "UA-43", "UA-40", "UA-14", "UA-09"]) };
-const HL_TERMS = "Hyperliquid's Terms of Use §1.6: the Interface is not available to persons located in the United States, Ontario, or a sanctioned territory";
+// Hyperliquid's own line (its Terms of Use §1.6: the United States, Ontario, the sanctioned territories) is one rule for every path to
+// Hyperliquid, kept in location.ts (HL_CLOSED, HL_TERMS); this path holds the place `mm predict geoblock` names to it (hlLine)
 
 const INSUFFICIENT = new Set(["INSUFFICIENT_FUNDS", "INSUFFICIENT_GAS", "INSUFFICIENT_BALANCE", "INSUFFICIENT_LP_BALANCE", "PREDICT_INSUFFICIENT_BALANCE", "PREDICT_INSUFFICIENT_FUNDING_BALANCE", "PREDICT_INSUFFICIENT_GAS"]);
 const INVALID = new Set(["INVALID_AMOUNT", "INVALID_INPUT", "INVALID_SWAP_PARAMS", "AMOUNT_TOO_LOW", "AMOUNT_TOO_HIGH", "SLIPPAGE_TOO_HIGH", "SLIPPAGE_TOO_LOW", "TOKEN_NOT_FOUND", "TOKEN_NOT_SUPPORTED", "NATIVE_ASSET_UNSUPPORTED", "UNSUPPORTED_CHAIN", "REFUEL_UNSUPPORTED_ROUTE", "RWA_NATIVE_TOKEN_UNSUPPORTED", "INVALID_TICK_SIZE", "INVALID_ORDER_TYPE", "INVALID_SIDE", "PREDICT_ORDER_SIZE_TOO_SMALL", "MISSING_FLAG", "MISSING_SWAP_PARAMS", "MISSING_CHAIN", "INVALID_CHAIN", "INVALID_SYMBOL", "INVALID_SIZE", "INVALID_LEVERAGE", "INVALID_PRICE", "INVALID_SLIPPAGE", "AMBIGUOUS_VAULT"]);
