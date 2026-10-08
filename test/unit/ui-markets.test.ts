@@ -951,6 +951,30 @@ describe("the one drawer", () => {
     p.run(`VENUES.clear()`);
   });
 
+  it("the list of accounts reads the account's detection too: a venue whose own terms exclude where the user is is marked and said, never closed; one that refuses this network is closed", () => {
+    const p = page(() => ({}));
+    p.set("A", account());
+    const terms = "its terms exclude where you are (https://www.okx.com/help/terms-of-service, read 2026-10-08): “…Restricted Persons…” — the venue checks residency when an account is opened; the account does not";
+    p.run(`VENUES.set("live:exchange:okx", { connector: "live:exchange:okx", name: "OKX", verdict: "terms-exclude", said: ${JSON.stringify(terms)}, asked: "2026-10-06T05:00:00.000Z" })`);
+    p.run(`VENUES.set("live:exchange:bybit", { connector: "live:exchange:bybit", name: "Bybit", verdict: "not-served", said: "Bybit does not serve this location", asked: "2026-10-06T05:00:00.000Z" })`);
+    expect(p.run("tileSays('live:exchange:okx')")).toMatchObject({ word: "Its terms exclude where you are", shut: false, state: "terms" });
+    expect(p.run("tileSays('live:exchange:bybit')")).toMatchObject({ word: "Not served here", shut: true });
+    const cat = p.run<string>("catalog(true)");
+    expect(cat).toContain('data-extra="okx"');
+    expect(cat).toMatch(/data-extra="okx" title="its terms exclude where you are[^"]*"><b>OKX<\/b><span><em class="off">Its terms exclude where you are<\/em>/);
+    expect(cat).toMatch(/data-extra="bybit" title="Bybit does not serve this location"><b>Bybit<\/b><span><em class="off">Not served here<\/em>/);
+    // the form's note for the terms: the venue's words and when they were judged — no Check again, no watch-instead, and the form stays open
+    const note = p.run<string>("reachNoteHtml(tileSays('live:exchange:okx'), 'exchange')");
+    expect(note).toContain("the venue checks residency when an account is opened; the account does not");
+    expect(note).not.toContain("data-reach=");
+    // this form's own fresh check wins over the detection for a no; a venue the form found answering keeps its terms note
+    p.run(`REACH.set("live:exchange:bybit", { connector: "live:exchange:bybit", state: "ok", at: "2026-10-06T05:00:00.000Z" })`);
+    expect(p.run("tileSays('live:exchange:bybit')")).toBeNull();
+    p.run(`REACH.set("live:exchange:okx", { connector: "live:exchange:okx", state: "ok", at: "2026-10-06T05:00:00.000Z" })`);
+    expect(p.run("tileSays('live:exchange:okx')")).toMatchObject({ shut: false, state: "terms" });
+    p.run("VENUES.clear(); REACH.clear()");
+  });
+
   it("lists the watchlist without a lead sentence or a date column: the date is the star's title", () => {
     const p = page((path) => (path.startsWith("/api/account/explore") ? explore : {}));
     p.set("A", account({ watch: [{ venue: "ex", symbol: "BTC/USDT", at: "2026-10-06T04:00:00.000Z" }, { venue: "kraken", symbol: "ETH/USD", at: "2026-10-01T04:00:00.000Z" }] }));

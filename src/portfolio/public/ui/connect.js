@@ -93,19 +93,32 @@ const WATCH_INSTEAD = { "polymarket-trade": ["polymarket", "Polymarket · by add
    account there by its address */
 function reachNoteHtml(r, kind) {
   if (!r || r.state === "ok") return "";
+  // the venue's own terms exclude where the user is: its words, said once; the venue checks residency when an account is opened
+  if (r.state === "terms") return `${esc(r.said || "")}${r.at ? ` <span class="dim">(asked ${esc(nyTime(r.at))})</span>` : ""}`;
   const w = WATCH_INSTEAD[kind];
   const instead = r.state === "location" && w && optionOf(w[0]) ? ` <button type="button" class="link" data-reach="watch">${esc(w[2])}</button>` : "";
   return `${esc(r.said || "")}${r.at ? ` <span class="dim">(asked ${esc(nyTime(r.at))})</span>` : ""} <button type="button" class="link" data-reach="again">Check again</button>${instead}`;
 }
+/* what a tile's venue answered, from this form's own check (REACH, the freshest) or the account's detection (core VENUES): a venue that
+   refuses this network, wants something on this machine first, or offers no way in closes the form (`shut`); one whose own terms exclude
+   where the user is says so with its words and link, and does not close it — its sign-up checks residency, the account only shows it */
+function tileSays(connector) {
+  if (!connector) return null;
+  const r = REACH.get(connector);
+  const v = typeof VENUES !== "undefined" ? VENUES.get(connector) : undefined;
+  if (r && REACH_WORD[r.state]) return { word: REACH_WORD[r.state], state: r.state, said: r.said || "", at: r.at, shut: true };
+  if (!r && v && (v.verdict === "not-served" || v.verdict === "setup" || v.verdict === "closed")) return { word: VENUE_NO[v.verdict], state: v.verdict === "not-served" ? "location" : v.verdict, said: v.said || "", at: v.asked, shut: true };
+  if (v && v.verdict === "terms-exclude") return { word: "Its terms exclude where you are", state: "terms", said: v.said || "", at: v.asked, shut: false };
+  return null;
+}
 /* the tiles of the open picker, marked from what their venues answered */
 function markTiles() {
   for (const b of document.querySelectorAll("#modal button.tile")) {
-    const r = REACH.get(tileConnector(b.dataset.kind, b.dataset.extra));
-    const word = r && REACH_WORD[r.state];
-    if (!word || b.querySelector("em.on")) continue;
+    const t = tileSays(tileConnector(b.dataset.kind, b.dataset.extra));
+    if (!t || b.querySelector("em.on")) continue;
     b.classList.add("tile-off");
-    b.title = r.said || "";
-    b.querySelector("span").innerHTML = `<em class="off">${esc(word)}</em>`;
+    b.title = t.said;
+    b.querySelector("span").innerHTML = `<em class="off">${esc(t.word)}</em>`;
   }
 }
 
@@ -117,9 +130,9 @@ function catalog(owner, wide = "") {
     if (!o) return "";
     const how = kind === "wallet" ? (extra === "watch" ? "Address" : "Sign one sentence") : o.needs === "cli" && kind !== "metamask" ? "On this machine" : HOW[o.needs] || "";
     const on = isOn(kind, extra);
-    const r = on ? null : REACH.get(tileConnector(kind, extra));
-    const word = r && REACH_WORD[r.state];
-    return `<button type="button" class="tile${word ? " tile-off" : ""}" data-kind="${esc(kind)}" data-extra="${esc(extra)}"${word ? ` title="${esc(r.said || "")}"` : ""}${owner ? "" : " disabled"}><b>${esc(name)}</b><span>${on ? '<em class="on">Connected</em> · add another' : word ? `<em class="off">${esc(word)}</em>` : esc(how)}</span></button>`;
+    const t = on ? null : tileSays(tileConnector(kind, extra));
+    const word = t && t.word;
+    return `<button type="button" class="tile${word ? " tile-off" : ""}" data-kind="${esc(kind)}" data-extra="${esc(extra)}"${word ? ` title="${esc(t.said)}"` : ""}${owner ? "" : " disabled"}><b>${esc(name)}</b><span>${on ? '<em class="on">Connected</em> · add another' : word ? `<em class="off">${esc(word)}</em>` : esc(how)}</span></button>`;
   };
   const named = new Set(TILES.flatMap(([, tiles]) => tiles.map(([kind]) => kind)));
   const more = ((A.connectLive || {}).options || []).filter((o) => !named.has(o.kind)).map((o) => [o.kind, "", o.label.split(" · ")[0]]);
@@ -192,9 +205,11 @@ function openPicker() {
   for (const b of $("modal-form").querySelectorAll("button.tile")) b.addEventListener("click", () => openConnect(optionOf(b.dataset.kind), { exchange: b.dataset.kind === "exchange" ? b.dataset.extra : "", watch: b.dataset.extra === "watch", name: b.querySelector("b").textContent, back: true }));
   if (!$("modal").open) $("modal").showModal();
   // each venue's first question, asked as the list opens (kept on the server): a tile whose venue says no is marked while the owner reads
-  askReach(TILES.flatMap(([, tiles]) => tiles.map(([kind, extra]) => tileConnector(kind, extra)))).then(() => {
+  const again = () => {
     if ($("modal").open && ($("modal-form-title") || {}).textContent === "Connect an account") markTiles();
-  });
+  };
+  askReach(TILES.flatMap(([, tiles]) => tiles.map(([kind, extra]) => tileConnector(kind, extra)))).then(again);
+  if (typeof readVenues === "function") readVenues().then(again);
 }
 
 /** one way of connecting, as one short form */
@@ -235,12 +250,12 @@ async function openConnect(o, { exchange = "", watch = false, name = "", back = 
   const showReach = () => {
     const note = $("reach-note");
     if (!note || body.isConnected === false) return;
-    const r = REACH.get(connNow());
+    const t = tileSays(connNow());
     const was = reachShut;
-    reachShut = !!(r && REACH_WORD[r.state]);
-    note.hidden = !r || r.state === "ok";
+    reachShut = !!(t && t.shut);
+    note.hidden = !t;
     note.className = `reach-note msg ${reachShut ? "no" : "wait"}`;
-    note.innerHTML = reachNoteHtml(r, o.kind);
+    note.innerHTML = t ? reachNoteHtml(t, o.kind) : "";
     for (const el of form.querySelectorAll("#live-body .steps, #live-body details.opts")) el.hidden = reachShut;
     if (reachShut) $("modal-go").disabled = true;
     else if (was) $("modal-go").disabled = Owner.role !== "owner" || (o.needs === "sign-in" && !form.elements.ref.value);
