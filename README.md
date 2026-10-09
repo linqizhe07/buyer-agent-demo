@@ -16,9 +16,13 @@ npm test
 
 Node ≥ 22。常用开关：`--live-cap 50`（单笔上限，默认 $100）、`--read-only`（不下单、不动钱）、`--fresh`（不接着以前的运行）。钥匙文件和账本在 home（`$BUYER_HOME`，默认 `~/.buyer-agent-demo/`），钥匙文件 `chmod 600`；页面只传文件在哪，值不进页面和账本。
 
-## 页面：三屏
+## 页面
 
-- **Portfolio**：你有什么。净值曲线、跨场所按资产汇总、持仓、账户（健康、对 agent 的开关、Details）；右栏是等你批的卡和 agent 的请求、agent 在做什么、现成的钱、配置条。Move · Receive · Earn · Sell many 都从这里开。
+样子是 Demo v2 画布第七轮的（F1 / F5，用这一层自己的 tokens 和尺寸）：左边一条白 rail，Markets · Trade · Agents；rail 最下面是 **Account** 钱包按钮（净值 · 模式），打开 Account 的三页，头上是模式（Guard | Beast）、"Trading on · $100 a move"、Settings。
+
+- **Portfolio**：你有什么。净值曲线、跨场所按资产汇总、持仓；右栏是等你批的卡和 agent 的请求（第七轮的圆键：蓝的 ✓ 批、✗ 拒）、agent 在做什么、现成的钱、配置条。Move · Receive · Earn · Sell many 都从这里开。
+- **Venues**：接上的账户（健康、对 agent 的开关、Details）和 Connect an account。
+- **Memory**：agent 记得什么：账户替每个 agent 记的对话（照第七轮的气泡画）、它自己的笔记、你的 About you；每个字你都能看、改、删（下面「记忆」）。
 - **Markets**：有什么可以交易。接上的场所，加上没接的场所不带钥匙读来的公开行情（标 "Connect to trade"）。tab：All · Crypto · Stocks · RWAs · Perps · Pre-IPO · Predictions · Watching；一个市场一个抽屉。
 - **Trade**：在一个市场里建仓位。一张下单票，按种类六面（Crypto · Stocks · RWAs · Perps · Pre-IPO · Predictions，和 Markets 同样的词），加 Under way。
 
@@ -54,6 +58,16 @@ Node ≥ 22。常用开关：`--live-cap 50`（单笔上限，默认 $100）、`
 
 **Pre-IPO**：交易所上按一家未上市公司的估值定价的永续合约，不是股份。九个公开源不带钥匙读（OKX、Gate、Kraken Futures、Deribit、KuCoin Futures、MEXC、Binance、Bybit、Hyperliquid HIP-3；在不服务你的地方，那几家用它们的原话写在列表底下），一家公司一行，写各家隐含估值的中位数（Oura 的合约各家都按一股定价，按股数算）；接上其中一家的钥匙，就在同一行下单。Anthropic、OpenAI 都说未经同意的股权转让无效，原话跟着它们那一行走。
 
+## 记忆
+
+agent 的记忆放在账户里，不放在某一个 agent 程序里：换一个会话、重启、换一个程序拿同一个席位来接，它都读得回来；你在 Memory 一页读每一个字，签名改、签名删（`account/memory.ts`）。
+
+- **对话**：账户在事情发生时写下你和每个 agent 之间来往的：你的意图、放它进来、给它的额度、批或拒的卡；它的回报和请求，它签的每一条指令和结果（单、卡、拒绝码）。给所有 agent 的话记一份，每个 agent 从它被放进来那一刻起读得到。
+- **笔记**：agent 自己要记的（你的偏好、规矩、教训、一件事做到哪了），用它自己的钥匙签，只有它和你读得到。
+- **About you**：你签的笔记，每个 agent 都读。
+
+记忆是话，不是权限：额度、门、卡都不读它。钥匙、密钥、密码、助记词、IP 一律不收；忘了就是从文件里删掉，笔记的字从不进账本。agent 用 `portfolio_memory` 读，用 `portfolio_remember` / `portfolio_forget` 记它自己的。
+
 ## 给 agent 的接口
 
 - **MCP**：`npm run portfolio:mcp`（stdio；席位持自己的钥匙，每次写都签名）。接 Claude Code：页面 Agents 弹层的 "Copy agent setup command"。真实账户上的工具：
@@ -70,7 +84,8 @@ Node ≥ 22。常用开关：`--live-cap 50`（单笔上限，默认 $100）、`
 - Account 的真实连接和真钱写入只对着替身测过：这里没有用过一把真钥匙、一个真钱包。接你自己的账户之前先用只读钥匙；要写，先用小上限、小金额。
 - 真的读过的，是不带钥匙的公开数据：交易所行情、Kalshi、Polymarket、Polymarket US 的公开 gateway、pre-IPO 价格、LI.FI 报价。
 - Pre-IPO 是估值合约，不是股份；各家谁能交易由它们自己定，账户只转述。
-- 本机文件系统是信任边界：能写 home 的人能改账本和钥匙文件；同一系统用户下的 agent 席位之间不隔离。
+- 本机文件系统是信任边界：能写 home 的人能改账本和钥匙文件；同一系统用户下的 agent 席位之间不隔离，记忆文件也一样（MCP 席位只读它自己的笔记，是约定，不是墙）。
+- 记忆挡钥匙、密钥、助记词、IP 靠的是一组模式，换个写法的秘密它认不出；agent 自己写的话账户不审，只保证它们不变成权限。
 - 场所的地区规则是场所的，这里只表现为一扇关着的门，不提供绕过的办法。
 - 托管、牌照、出了错谁赔，不是软件，这里没有。
 

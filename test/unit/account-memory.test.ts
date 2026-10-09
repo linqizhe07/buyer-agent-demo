@@ -103,8 +103,8 @@ describe("what is never kept", () => {
     const secrets = [
       `0x${"ab".repeat(32)}`,
       `${"1f".repeat(32)}`,
-      "-----BEGIN OPENSSH PRIVATE KEY----- b3BlbnNzaC1rZXktdjEAAAAA",
-      "token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abc",
+      `${"-----BEGIN"} OPENSSH ${"PRIVATE KEY-----"} b3BlbnNzaC1rZXktdjEAAAAA`,
+      `token ${["eyJhbGciOiJIUzI1NiJ9", "eyJzdWIiOiIxMjM0NTY3ODkwIn0", "abc"].join(".")}`,
       // made here, not written out: a scanner of the public repository would take a written one for a real key
       `the stripe key ${["sk", "live", "51Habcdefghijklmnop"].join("_")}`,
       `aws ${"AKIA"}${"ABCDEFGHIJKLMNOP"}`,
