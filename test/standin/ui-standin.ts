@@ -29,6 +29,8 @@
  *                 in Guard it asks for a market buy of ETH, which waits on a card for the owner
  *   steering      two intents (one to Claude Code, one to every agent), Claude Code's report on the first, two asks (a bigger budget, a
  *                 venue connected), three watched markets — one at a venue that is not connected
+ *   memory        the owner's About you, and two notes Claude Code keeps (account/memory.ts); the conversation the account kept as all of
+ *                 the above passed (Account → Memory)
  *   the curve     net worth points over the last seven days, off the stand-in's own price curves, so the curve draws at once
  *
  * PAIRING. The seed key paired first, with the code, the way a browser does. The page then asks this browser for the code too: typed
@@ -254,6 +256,10 @@ export async function startStandin(o: StandinOptions): Promise<Standin> {
   ok("Claude Code's ask for a bigger budget", await ag({ type: "agentAsk", kind: "limit", venue: "ex", usd: "1000", text: "Raise my trading budget to $1,000 so I can finish the SOL position you asked for" }));
   ok("Claude Code's ask for a venue", await ag({ type: "agentAsk", kind: "venue", venue: "standin-pubex", usd: "", text: "Connect Stand-in Public Exchange: DOGE trades only there" }));
   for (const [venue, symbol] of [["ex", "BTC/USDT"], ["predict", "SI-FEDCUT-DEC:YES"], ["standin-pubex", "DOGE/USD"]] as const) ok(`${symbol} watched`, await own({ type: "setWatch", venue, symbol, on: "true" }));
+  // memory (account/memory.ts): the owner's About you, and two notes Claude Code keeps for itself, signed with its key
+  ok("About you", await own({ type: "setMemory", scope: "about", id: "", topic: "rule", text: "Small positions: no more than $150 an order, and never leverage above 3x without asking me first." }));
+  ok("Claude Code's note on the owner", await ag({ type: "agentRemember", id: "", topic: "preference", text: "The owner builds positions with limit orders on dips, and wants a report after each fill." }));
+  ok("Claude Code's note on its task", await ag({ type: "agentRemember", id: "", topic: "progress", text: "SOL position for the owner's intent: first $100 limit placed 1% under the market; add again under $140." }));
 
   // ---- the net worth curve: points over the last seven days, off the same curves the candles come from ----
   const curvePoints = await drawThePast(svc, world, home, walletVenue, walletAt);

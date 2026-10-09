@@ -260,6 +260,8 @@ export interface Resolved {
 }
 
 export const slug = (name: string) => name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+/** what each kind of ask asks for, in words: an agent's ask as the conversation keeps it */
+const ASKED_FOR: Record<AskKind, string> = { letIn: "to be let in", limit: "a bigger limit", venue: "a venue connected", topup: "money in its wallet", session: "a new session", leverage: "more leverage", mode: "Beast mode" };
 
 /** an instruction about memory as the ledger keeps it: who signed it, its nonce and which note — never the note's words, so that what the
  * owner has forgotten is not kept anywhere else (account/memory.ts) */
@@ -736,10 +738,15 @@ export class AccountEngine {
       const what = a.type === "agentReport" ? `report on ${a.intent}` : a.type === "agentAsk" ? `ask for ${a.kind}${a.venue ? ` at ${a.venue}` : ""}` : this.requestWords(a);
       return { who: "account", kind: "refusal", text: `${what}: refused — ${out.message}`, code: out.code };
     }
-    if (a.type === "agentReport") return { who: "agent", kind: "report", text: `${a.status}${a.note.trim() ? `: ${a.note.trim()}` : ""}`, ref: a.intent };
+    if (a.type === "agentReport") {
+      const said = { taking: "On it", done: "Done", cannot: "Can't do it" }[a.status] ?? "";
+      return { who: "agent", kind: "report", text: [said, a.note.trim()].filter(Boolean).join(": ") || a.status, ref: a.intent };
+    }
     if (a.type === "agentAsk") {
       const ask = out.kind === "result" ? (out.result as { ask?: { id?: string } } | undefined)?.ask : undefined;
-      return { who: "agent", kind: "ask", text: `asks for ${a.kind}${a.venue ? ` at ${a.venue}` : ""}${a.usd ? ` · $${a.usd}` : ""}${a.text.trim() ? ` — ${a.text.trim()}` : ""}`, ref: ask?.id };
+      const what = ASKED_FOR[a.kind as AskKind] ?? a.kind;
+      const about = [a.usd ? `$${Number(a.usd).toLocaleString("en-US")}` : "", a.venue ? `at ${this.name(a.venue)}` : ""].filter(Boolean).join(" ");
+      return { who: "agent", kind: "ask", text: `Asks for ${what}${about ? ` (${about})` : ""}${a.text.trim() ? `: ${a.text.trim()}` : ""}`, ref: ask?.id };
     }
     const words = this.requestWords(a);
     if (out.kind === "card") return { who: "agent", kind: "did", text: `${words}: waits for the owner on ${out.card.id}`, ref: out.card.id };
@@ -794,8 +801,11 @@ export class AccountEngine {
     switch (a.type) {
       case "setIntent": {
         const to = a.agent.trim() === "*" ? "everyone" : a.agent.trim().toLowerCase();
-        const id = a.validUntil === 0 ? a.id : (this.state.intents.find((x) => x.envelope.action === a)?.id ?? a.id);
-        return { to, who: "owner", kind: a.validUntil === 0 ? "withdraw" : "intent", text: said, ref: id || undefined };
+        if (a.validUntil === 0) return { to, who: "owner", kind: "withdraw", text: `${a.id} withdrawn: nothing more is to be done for it`, ref: a.id || undefined };
+        const id = this.state.intents.find((x) => x.envelope.action === a)?.id ?? a.id;
+        // the owner's own words, then what they name: which way, what, where, about how much, until when
+        const named = [a.side.trim(), a.symbol.trim(), a.venue.trim() ? `at ${this.name(a.venue.trim())}` : "", a.usd.trim() ? `about $${Number(a.usd).toLocaleString("en-US")}` : ""].filter(Boolean).join(" ");
+        return { to, who: "owner", kind: "intent", text: `${a.text.trim()}${named ? ` (${named})` : ""} · until ${etDate(a.validUntil)}`, ref: id || undefined };
       }
       case "approveAgent": {
         const zero = /^0x0{40}$/i.test(a.agentAddress);
@@ -823,7 +833,7 @@ export class AccountEngine {
       case "disconnectVenue":
         return { to: "everyone", who: "owner", kind: "venue", text: said };
       case "setWatch":
-        return { to: "everyone", who: "owner", kind: "watch", text: said };
+        return { to: "everyone", who: "owner", kind: "watch", text: `${a.on === "true" ? "Watching" : "No longer watching"} ${a.symbol.trim()} at ${this.name(a.venue.trim())}` };
       default:
         return undefined;
     }

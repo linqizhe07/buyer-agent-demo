@@ -105,7 +105,7 @@ describe("the account page's scripts", () => {
     expect(named.filter((s) => s.startsWith("/ui/")).sort()).toEqual(onDisk.sort());
     // the order the contract names: what moves money and what connects before the panes that use it, the statement and the agents' mount
     // point after them, the shell last
-    expect(named).toEqual(["/owner.js", "/ui/core.js", "/ui/connect.js", "/ui/money.js", "/ui/asset.js", "/ui/intent.js", "/ui/portfolio.js", "/ui/earn.js", "/ui/markets.js", "/ui/trade.js", "/ui/statement.js", "/ui/agents-mount.js", "/ui/shell.js"]);
+    expect(named).toEqual(["/owner.js", "/ui/core.js", "/ui/connect.js", "/ui/money.js", "/ui/asset.js", "/ui/intent.js", "/ui/portfolio.js", "/ui/memory.js", "/ui/earn.js", "/ui/markets.js", "/ui/trade.js", "/ui/statement.js", "/ui/agents-mount.js", "/ui/shell.js"]);
     // each ui script waits for the page to be parsed and runs in the order named
     for (const m of html.matchAll(/<script\b([^>]*)\bsrc="(\/ui\/[^"]+)"/g)) expect(m[1], m[2] ?? "").toMatch(/\bdefer\b/);
     // the tokens first (both backgrounds), then the shell, then what the earlier renderers still draw; the classic page's sheet is not needed
@@ -140,23 +140,24 @@ describe("the account page's scripts", () => {
     }
   });
 
-  it("is the desktop shell: a rail with Portfolio · Markets · Trade, a top bar, three panes, one sheet, a drawer, an asking dialog, toasts that speak, and the background set before the first paint", () => {
+  it("is the desktop shell in round 7's look: a rail with Markets · Trade and the Account at its foot (Portfolio · Venues · Memory under its own header), a top bar, five panes, one sheet, a drawer, an asking dialog, toasts that speak, and the background set before the first paint", () => {
     // the background is read before any stylesheet, in a guarded read: a window with storage off still paints Cream
     const head = html.slice(0, html.indexOf("</head>"));
     expect(head.indexOf('localStorage.getItem("account.theme")')).toBeGreaterThan(0);
     expect(head.indexOf('localStorage.getItem("account.theme")')).toBeLessThan(head.indexOf("/ui/tokens.css"));
     expect(head).toMatch(/try\s*\{[^}]*localStorage/);
-    for (const tab of ["portfolio", "markets", "trade"]) {
-      expect(html, tab).toMatch(new RegExp(`<section class="pane" data-pane="${tab}"[^>]*>[\\s\\S]*?<div id="pane-${tab}">`));
-      expect(html, tab).toMatch(new RegExp(`<a href="#/${tab}" data-tab="${tab}">`));
-    }
+    for (const tab of ["portfolio", "venues", "memory", "markets", "trade"]) expect(html, tab).toMatch(new RegExp(`<section class="pane" data-pane="${tab}"[^>]*>[\\s\\S]*?<div id="pane-${tab}">`));
+    // the rail's own two, and the Account at its foot opening its three, each a link to its route
+    for (const tab of ["markets", "trade"]) expect(html, tab).toMatch(new RegExp(`<a href="#/${tab}" data-tab="${tab}">`));
+    expect(html).toMatch(/<a class="rail-wallet" href="#\/portfolio" id="rail-wallet">/);
+    for (const tab of ["portfolio", "venues", "memory"]) expect(html, tab).toMatch(new RegExp(`<a href="#/${tab}" data-acct="${tab}">`));
     for (const id of ["lens", "lens-menu", "search", "open-statement", "open-agents", "open-settings", "mode", "mode-note", "mode-more", "banner", "restored", "modal", "sheet", "modal-form", "drawer", "ask"]) expect(html, id).toContain(`id="${id}"`);
     // the IA round took the "+ Trade" pill (the nav item and the t key are the way), the ⧉ and the ≡ Menu off the chrome
     for (const gone of ["rail-trade", "copy-setup", "open-menu"]) expect(html, gone).not.toContain(`id="${gone}"`);
     expect(html).toMatch(/<dialog id="modal"><div id="sheet"><\/div><form method="dialog" id="modal-form"><\/form><\/dialog>/);
     expect(html).toMatch(/<div id="toasts" role="status" aria-live="polite"><\/div><div id="alerts" role="alert"/);
     // the search lives in the page, so a refresh neither freezes nor wipes it
-    expect(html).toMatch(/<form class="search" id="search-form" role="search" data-live>/);
+    expect(html).toMatch(/<form class="search" id="search-form" role="search" data-live( data-only="trading")?>/);
     // the mode at the rail's foot (Guard | Beast; the wire values stay guard | open); the background is a Settings matter, drawn there
     expect(html).not.toContain("data-set-theme");
     expect(html).toContain('data-set-mode="guard"');
@@ -191,7 +192,7 @@ describe("the account page's scripts", () => {
     const all = [...contract, ...mine, ...there];
     expect(b.run(`[${all.join(", ")}].map((f) => typeof f)`), all.join(" ")).toEqual(Array(all.length).fill("function"));
     // what the panes are to define: a function when it is there, and nothing else under that name
-    const panes = ["renderPortfolio", "renderMarkets", "renderTrade", "openTicket", "openHandToAgent", "openReceive", "openAsset", "openMarket"];
+    const panes = ["renderPortfolio", "renderVenues", "renderMemory", "renderMarkets", "renderTrade", "openTicket", "openHandToAgent", "openReceive", "openAsset", "openMarket"];
     for (const p of panes) expect(["function", "undefined"], p).toContain(b.run(`typeof ${p}`));
     expect(b.run("[A, busy, flash, said, S.length, ROUTE.tab, view.lens]")).toEqual([null, false, "", "", 0, "portfolio", ""]);
   });

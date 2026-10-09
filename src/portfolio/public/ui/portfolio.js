@@ -13,7 +13,7 @@
    of the intents last mounted under Agents at work, and the card a "Review" elsewhere asked to be shown */
 const PF = { tab: "assets", range: "1w", hold: null, holdErr: "", hist: new Map(), pos: null, agents: null, earn: null, curve: null, intentsKey: "", hiWant: "", soon: false, hover: null };
 const PF_RANGES = [["1d", "1D"], ["1w", "1W"], ["1m", "1M"], ["all", "All"]];
-const PF_TABS = [["assets", "Assets"], ["positions", "Positions"], ["accounts", "Accounts"]];
+const PF_TABS = [["assets", "Assets"], ["positions", "Positions"]];
 const PF_RANGE_WORDS = { "1d": "past day", "1w": "past week", "1m": "past month", all: "since the start" };
 const r2pf = (n) => Number(Number(n || 0).toFixed(2)) || 0;
 const pfDollars = (cls) => cls === "cash" || cls === "stable";
@@ -189,6 +189,8 @@ function pfTrades(v) {
 /** the Portfolio pane (the shell calls it on every read, on the route and on the lens) */
 function renderPortfolio({ el, owner, params = {} }) {
   if (params.view && PF_TABS.some(([v]) => v === params.view)) PF.tab = params.view;
+  // the accounts were a third view here; they are the Account's Venues now (round 7, F5): an old link goes there
+  if (params.view === "accounts") queueMicrotask(() => go("venues", {}, { replace: true }));
   const mode = connected().length ? "full" : "fresh";
   if (!el.firstElementChild || el.firstElementChild.dataset.pf !== mode) {
     el.innerHTML = mode === "fresh"
@@ -374,11 +376,12 @@ function pfWaitingHtml(l, owner) {
   const n = cards.length + asks.length + knocks.length;
   if (!n) return "";
   const off = !owner;
-  const card = (c) => `<div class="pf-item" data-pf-card="${esc(c.id)}"><div class="pf-item-t"><b>${esc(c.reason)}</b><span class="dim small">${fine(c.usd)}${c.expiresAt ? ` · answer by ${esc(pfWhen(c.expiresAt))}` : ""}</span><details class="more"><summary>What it asks</summary><pre>${esc((c.shown || []).filter((f) => f.value !== "" && f.name !== "nonce").map((f) => `${f.name}: ${f.value}`).join("\n"))}</pre></details></div><div class="pf-btns">${pfBtn("reject", "Reject", { cls: "btn btn-sm", data: { card: c.id }, off })}${pfBtn("approve", "Approve", { cls: "btn btn-sm btn-primary", data: { card: c.id }, off })}</div></div>`;
+  const card = (c) => `<div class="pf-item" data-pf-card="${esc(c.id)}"><div class="pf-item-t"><b>${esc(c.reason)}</b><span class="dim small">${fine(c.usd)}${c.expiresAt ? ` · answer by ${esc(pfWhen(c.expiresAt))}` : ""}</span><details class="more"><summary>What it asks</summary><pre>${esc((c.shown || []).filter((f) => f.value !== "" && f.name !== "nonce").map((f) => `${f.name}: ${f.value}`).join("\n"))}</pre></details></div><div class="pf-btns pf-keys">${pfBtn("reject", `${icon("x")}<span class="sr">Reject</span>`, { cls: "rkey", data: { card: c.id }, off, title: "Reject" })}${pfBtn("approve", `${icon("check")}<span class="sr">Approve</span>`, { cls: "rkey yes-k", data: { card: c.id }, off, title: "Approve: one signature" })}</div></div>`;
   // a venue asked for is connected from here, as the board offered it: its own connect form
-  const grant = (a) => (a.kind === "venue" ? pfBtn("grant", `${icon("plug", "sm")}Connect`, { cls: "btn btn-sm btn-primary", data: { ask: a.id }, off }) : pfBtn("grant", "Grant…", { cls: "btn btn-sm btn-primary", data: { ask: a.id }, off }));
-  const ask = (a) => `<div class="pf-item pf-ask"><div class="pf-item-t"><b>${esc(a.text || PF_ASK_WORDS[a.kind] || a.kind)}</b><span class="dim small">${esc([`Asks for ${PF_ASK_WORDS[a.kind] || a.kind}`, a.usd && (a.kind === "limit" || a.kind === "topup") ? money(Number(a.usd)) : "", a.venue ? `at ${pfVenueName(a.venue)}` : "", a.at ? `asked ${pfWhen(a.at)}` : ""].filter(Boolean).join(" · "))}</span>${pfGrantable(a) ? "" : `<span class="dim small">${esc(pfWhyNot(a))}</span>`}</div><div class="pf-btns">${pfBtn("decline", "Decline…", { cls: "btn btn-sm", data: { ask: a.id }, off })}${pfGrantable(a) ? grant(a) : ""}</div></div>`;
-  const knock = (r) => `<div class="pf-item pf-ask"><div class="pf-item-t"><b>${esc(r.name || "An agent")} asks to be let in</b><span class="dim small"><span class="mono">${esc(short(r.address))}</span> · ${esc(nyDay(r.at))} ${esc(nyTime(r.at))}</span></div><div class="pf-btns">${pfBtn("letin", "Let in…", { cls: "btn btn-sm btn-primary", data: { agent: r.address }, off })}</div></div>`;
+  // round 7's keys (F3): a round icon for each answer, its word for the screen reader and on hover; Grant and Connect open the form signed
+  const grant = (a) => (a.kind === "venue" ? pfBtn("grant", `${icon("plug")}<span class="sr">Connect</span>`, { cls: "rkey yes-k", data: { ask: a.id }, off, title: "Connect it: opens the form you sign" }) : pfBtn("grant", `${icon("check")}<span class="sr">Grant</span>`, { cls: "rkey yes-k", data: { ask: a.id }, off, title: "Grant: opens the form you sign" }));
+  const ask = (a) => `<div class="pf-item pf-ask"><div class="pf-item-t"><b>${esc(a.text || PF_ASK_WORDS[a.kind] || a.kind)}</b><span class="dim small">${esc([`Asks for ${PF_ASK_WORDS[a.kind] || a.kind}`, a.usd && (a.kind === "limit" || a.kind === "topup") ? money(Number(a.usd)) : "", a.venue ? `at ${pfVenueName(a.venue)}` : "", a.at ? `asked ${pfWhen(a.at)}` : ""].filter(Boolean).join(" · "))}</span>${pfGrantable(a) ? "" : `<span class="dim small">${esc(pfWhyNot(a))}</span>`}</div><div class="pf-btns pf-keys">${pfBtn("decline", `${icon("x")}<span class="sr">Decline</span>`, { cls: "rkey", data: { ask: a.id }, off, title: "Decline" })}${pfGrantable(a) ? grant(a) : ""}</div></div>`;
+  const knock = (r) => `<div class="pf-item pf-ask"><div class="pf-item-t"><b>${esc(r.name || "An agent")} asks to be let in</b><span class="dim small"><span class="mono">${esc(short(r.address))}</span> · ${esc(nyDay(r.at))} ${esc(nyTime(r.at))}</span></div><div class="pf-btns pf-keys">${pfBtn("letin", `${icon("check")}<span class="sr">Let in</span>`, { cls: "rkey yes-k", data: { agent: r.address }, off, title: "Let it in: opens the form you sign" })}</div></div>`;
   const groups = pfGroups(cards, asks).map((g) => `<div class="pf-grp"><div class="pf-grp-h"><div class="who">${avatar((A.keys.find((k) => k.address === g.agent) || {}).code || g.name, "sm")}<div><b>${esc(g.name)}</b></div></div>${g.cards.length > 1 ? pfBtn("approve-all", `Approve all ${g.cards.length}`, { cls: "btn btn-sm", data: { agent: g.agent }, off }) : ""}</div>${g.cards.map(card).join("")}${g.asks.map(ask).join("")}</div>`).join("");
   return `<section class="callout pf-wait" aria-labelledby="pf-wait-h"><div class="pf-wait-h"><h2 class="label warn-t" id="pf-wait-h">Waiting for you · ${n}</h2></div>${groups}${knocks.map(knock).join("")}</section>`;
 }
@@ -448,12 +451,8 @@ function pfAllocHtml(rows) {
 
 function pfTableHtml(l, venueIn, rows, owner) {
   const L = connected().filter((v) => venueIn(v.id));
-  const tools = PF.tab === "assets"
-    ? (typeof openSellMany === "function" && L.some(canTrade) ? pfBtn("sellmany", `${icon("sellmany", "sm")}Sell many…`, { cls: "btn btn-sm", off: !owner, title: owner ? "" : PF_LOOK_ONLY }) : "")
-    : PF.tab === "accounts"
-      ? `${A.connectLive ? pfBtn("connect", `${icon("plug", "sm")}Connect an account`, { cls: "btn btn-sm", off: !owner }) : ""}${typeof downloadBalances === "function" ? pfBtn("csv", `${icon("download", "sm")}CSV`, { cls: "btn btn-sm btn-ghost" }) : ""}`
-      : "";
-  const body = PF.tab === "positions" ? pfPositionsHtml(l, venueIn, owner) : PF.tab === "accounts" ? pfAccountsHtml(venueIn, owner) : pfAssetsHtml(l, rows);
+  const tools = PF.tab === "assets" && typeof openSellMany === "function" && L.some(canTrade) ? pfBtn("sellmany", `${icon("sellmany", "sm")}Sell many…`, { cls: "btn btn-sm", off: !owner, title: owner ? "" : PF_LOOK_ONLY }) : "";
+  const body = PF.tab === "positions" ? pfPositionsHtml(l, venueIn, owner) : pfAssetsHtml(l, rows);
   return `<div class="sec-head pf-tabs">${pfSeg("tab", PF_TABS, PF.tab, "Show")}<span class="tools">${tools}</span></div>${body}`;
 }
 
@@ -564,6 +563,21 @@ function pfAccountsHtml(venueIn, owner) {
     // the rest of what an account can do from here — Trade…, Move…, Receive, a new key, Disconnect… — is in its drawer
     { cell: (v) => `<div class="acts pf-acts">${pfBtn("acct-details", "Details", { cls: "btn btn-sm btn-ghost", data: { venue: v.id } })}</div>` },
   ], L, { empty: "No account here.", cls: "pf-acct-t" });
+}
+
+// ---- the Account's Venues (round 7, F5) ------------------------------------------------------------------------------------------
+
+/** The Account's Venues: every account connected, with its standing, what it is worth, whether agents may act there and its details — and
+ * Connect an account. The shell calls it on every read, on the route and on the lens; its clicks are the Portfolio's (pfWire) */
+function renderVenues({ el, owner }) {
+  if (!el.firstElementChild || el.firstElementChild.dataset.pf !== "venues") el.innerHTML = '<div class="pf pf-venues" data-pf="venues"><section class="sec pf-table" data-pf-part="venues" aria-labelledby="pf-venues-h"></section></div>';
+  pfWire(el);
+  const venueIn = pfVenueIn(lensNow());
+  const L = connected().filter((v) => venueIn(v.id));
+  const tools = `${typeof downloadBalances === "function" && L.length ? pfBtn("csv", `${icon("download", "sm")}CSV`, { cls: "btn btn-sm btn-ghost" }) : ""}${A.connectLive ? pfBtn("connect", `${icon("plug", "sm")}Connect an account`, { cls: "btn btn-primary btn-sm", off: !owner, title: owner ? "" : PF_LOOK_ONLY }) : ""}`;
+  const agents = A.keys.filter((k) => k.status === "ok").length;
+  const sub = L.length ? `${plural(L.length, "account")} · ${money(L.reduce((t, v) => t + num(v.usd), 0))}${agents ? ` · where ${agents === 1 ? "your agent" : "your agents"} may act is each one's switch` : ""}` : "Connect an exchange, a broker, a wallet or a prediction market: each is read through its own interface, and nothing moves without your signature.";
+  pfPut(el, "venues", `<div class="sec-head"><div class="pf-venues-t"><h2 class="h2" id="pf-venues-h">Venues</h2><span class="dim small">${esc(sub)}</span></div><span class="tools">${tools}</span></div>${pfAccountsHtml(venueIn, owner)}`);
 }
 
 // ---- what the buttons do ---------------------------------------------------------------------------------------------------------

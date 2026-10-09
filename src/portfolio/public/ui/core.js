@@ -2,8 +2,8 @@
    signs what the owner asks for; it decides nothing the account did not. */
 /* THE CONTRACT. The page is plain scripts sharing one global scope, run in this order after owner.js (the device key: Owner.prepare ·
    Owner.submit · Owner.act · Owner.why · Owner.role):
-     core (this file) · connect · money · asset · intent · portfolio · earn · markets · trade · statement · agents-mount · shell (draws and
-     starts it).
+     core (this file) · connect · money · asset · intent · portfolio · memory · earn · markets · trade · statement · agents-mount · shell
+     (draws and starts it).
    Each top-level name is declared once across them all (test/unit/page-scripts.test.ts). Declare what the shell calls as top-level
    `function` declarations.
 
@@ -12,7 +12,8 @@
      busy         an owner action is being signed and sent                            view  { month, account, type, agent } the statement's
      flash, said  a refusal / what was done: set them, then load() or render(), and          filters · lens: the top bar's lens, see lensNow()
                   the shell shows each once as a toast
-     ROUTE        { tab: "portfolio" | "markets" | "trade", params } from the hash (#/markets?tab=crypto&q=btc · #/trade?kind=perps)
+     ROUTE        { tab: "portfolio" | "venues" | "memory" | "markets" | "trade", params } from the hash (#/markets?tab=crypto&q=btc ·
+                  #/trade?kind=perps); the first three are the Account (ACCOUNT_TABS), opened from the rail's foot
    Doing
      load()                       read the account and the statement again, then render() (shell.js): the chrome, the visible pane, and
                                   the redraw of whatever sheet or drawer is open; the latest read wins over a slower earlier one
@@ -72,8 +73,8 @@
      isAgentWallet(v) (never disconnected: emptied with Take back…) · modeOf(m) ("guard" | "open", whichever word a read uses) ·
      dollarsOf() · isDollar(asset) · networksOf() · bridgeChainsOf() (the lists the account publishes, the page's own as the fallback)
    A browser wallet sending what the account built: PROVIDERS (proven address → wallet) · SENT · INFLIGHT · walletFor(address) · mined(w, hash)
-   What the panes define (the shell calls each if it is there): renderPortfolio(ctx) [portfolio.js] · renderMarkets(ctx) [markets.js] ·
-     renderTrade(ctx) [trade.js], ctx = { el (#pane-…), owner, lens, params }; render() redraws only the visible pane, so keep what the owner is
+   What the panes define (the shell calls each if it is there): renderPortfolio(ctx) · renderVenues(ctx) [portfolio.js] · renderMemory(ctx)
+     [memory.js] · renderMarkets(ctx) [markets.js] · renderTrade(ctx) [trade.js], ctx = { el (#pane-…), owner, lens, params }; render() redraws only the visible pane, so keep what the owner is
      typing in an element you do not redraw. And the openers other parts call: openTicket(preset) · openClose(position) [trade.js] ·
      openHandToAgent(preset) [intent.js] · openReceive(venue) [money.js] · openLiveMove(venueId, preset) [money.js] · openAsset(key)
      [asset.js] · declineAsk(ask) [portfolio.js] · openMarket(item) [markets.js] · openPicker() / openConnect(option, opts) / connectVia(connector,
@@ -899,7 +900,9 @@ function quoteDialog({ title, sub = "", fields = "", draft, show, block, done, s
 
 // ---- where the page is ----------------------------------------------------------------------
 
-const TABS = ["portfolio", "markets", "trade"];
+const TABS = ["portfolio", "venues", "memory", "markets", "trade"];
+/* the Account's own three, opened from the rail's foot (round 7): the rest are the rail's */
+const ACCOUNT_TABS = ["portfolio", "venues", "memory"];
 const ROUTE = { tab: "portfolio", params: {} };
 const ROUTED = [];
 const routeOf = (hash) => {

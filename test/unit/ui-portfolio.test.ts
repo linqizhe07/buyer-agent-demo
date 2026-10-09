@@ -205,8 +205,10 @@ describe("the Portfolio pane", () => {
     // each card is named, so a "Review" elsewhere can bring it into view
     for (const id of ["card-0001", "card-0002", "card-0003"]) expect(html).toContain(`data-pf-card="${id}"`);
     // a venue asked for is connected from here: the ask's button says so
-    expect(html).toMatch(/data-pf-act="grant" data-ask="ask-0002"[^>]*>(<svg[^>]*>.*?<\/svg>)?Connect<\/button>/);
-    expect(html).toMatch(/data-pf-act="grant" data-ask="ask-0001"[^>]*>Grant…<\/button>/);
+    // round 7's keys (F3): a round icon for each answer, its word for the screen reader — Connect on a venue ask, Grant on the rest
+    expect(html).toMatch(/data-pf-act="grant" data-ask="ask-0002"[^>]*>(<svg[^>]*>.*?<\/svg>)<span class="sr">Connect<\/span><\/button>/);
+    expect(html).toMatch(/data-pf-act="grant" data-ask="ask-0001"[^>]*>(<svg[^>]*>.*?<\/svg>)<span class="sr">Grant<\/span><\/button>/);
+    expect(html).toMatch(/class="rkey yes-k" data-pf-act="approve"[^>]*title="Approve: one signature"/);
     // a browser that cannot sign sees them, and can press none
     const look = String(p.run(`pfWaitingHtml(${ALL}, false)`));
     expect(look.match(/data-pf-act="(approve|reject|grant|approve-all)"[^>]*disabled/g)).toHaveLength(3 + 3 + 2 + 1);

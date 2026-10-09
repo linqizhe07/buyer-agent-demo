@@ -132,8 +132,10 @@ describe("the Mode sheet", () => {
 });
 
 describe("the chrome around the mode", () => {
-  it("the rail: Guard | Beast with a note and 'What changes ›' to the sheet; the status pill says Trading on or Read-only with no cap words; no '+ Trade', no Background", () => {
-    expect(html).toMatch(/<div class="seg" role="group" aria-labelledby="mode-label" id="mode"><button type="button" data-set-mode="guard" aria-pressed="false">Guard<\/button><button type="button" data-set-mode="open" aria-pressed="false">Beast<\/button><\/div>\s*<div class="note-s" id="mode-note"><\/div>\s*<button type="button" class="link dim" id="mode-more">What changes ›<\/button>/);
+  it("the Account's header (round 7, F5): Guard | Beast with a note and What changes to the sheet; the status pill says Trading on and the most a move may be, or Read-only; no '+ Trade', no Background", () => {
+    expect(html).toMatch(/<div class="seg" role="group" aria-label="Mode" id="mode"><button type="button" data-set-mode="guard" aria-pressed="false">Guard<\/button><button type="button" data-set-mode="open" aria-pressed="false">Beast<\/button><\/div>\s*<button type="button" class="icon-btn" id="mode-more" aria-label="What changes between Guard and Beast"[^>]*>/);
+    // the note under the Account's tabs says what the mode does with what agents ask for
+    expect(html).toMatch(/<span class="note-s dim" id="mode-note"><\/span>/);
     for (const gone of ['id="rail-trade"', 'id="bg-label"', "data-set-theme", 'id="copy-setup"', 'id="open-menu"', 'id="i-menu"', "rail-trade"]) expect(html, gone).not.toContain(gone);
     const shell = source("ui/shell.js");
     expect(shell).toContain('$("mode-more").addEventListener("click", () => A && openMode());');
@@ -142,7 +144,7 @@ describe("the chrome around the mode", () => {
     p.run(OWNER);
     p.set("A", account());
     p.run("renderChrome(connected(), true)");
-    expect(p.el("writes").innerHTML).toBe('<span class="pill warm" title="Orders and moves go through only when you sign them, or inside a limit you gave an agent">Trading on</span>');
+    expect(p.el("writes").innerHTML).toBe('<span class="pill up" title="Orders and moves go through only when you sign them, or inside a limit you gave an agent">Trading on · $250 a move</span>');
     expect(p.el("mode-note").textContent).toBe("What agents ask for waits for you on a card.");
     p.set("A", account({ mode: "open", connectLive: { writes: { on: false }, options: [] } }));
     p.run("renderChrome(connected(), true)");
@@ -153,10 +155,11 @@ describe("the chrome around the mode", () => {
     expect(callers).toEqual(['$("mode-more").addEventListener("click", () => A && openMode());']);
   });
 
-  it("the top bar is the lens, the search and the Statement; the Settings sheet is Trading · the agents' session and leverage · Background · Devices, with no Mode; the Agents sheet has the setup command and no Devices", () => {
+  it("the top bar is the lens and the Statement, with the Account's header on its tabs (the mode, What changes, Settings) and the search on Markets' and Trade's; the Settings sheet is Trading · the agents' session and leverage · Background · Devices, with no Mode; the Agents sheet has the setup command and no Devices", () => {
     const top = html.slice(html.indexOf('<header class="topbar">'), html.indexOf("</header>"));
-    expect([...top.matchAll(/<button\b[^>]*\bid="([^"]+)"/g)].map((m) => m[1])).toEqual(["lens", "open-statement"]);
-    expect(top).toContain('id="search-form"');
+    expect([...top.matchAll(/<button\b[^>]*\bid="([^"]+)"/g)].map((m) => m[1])).toEqual(["lens", "mode-more", "open-settings", "open-statement"]);
+    expect(top).toMatch(/<div class="acct-tools" data-only="account">/);
+    expect(top).toMatch(/id="search-form"[^>]*data-only="trading"/);
     const p = page();
     p.run(OWNER);
     p.set("A", account());

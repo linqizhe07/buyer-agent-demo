@@ -3,7 +3,8 @@
    browser chose Black); with no script the system's own light or dark decides. Below them, the names the page used before (portfolio.css:
    --paper --ink --line --sage --orange …) point at these, so every earlier class still renders in either background.
    Contrast (WCAG AA, 4.5:1 for words): Cream dim on ground 6.3, warn-text on warn-fill 5.9, up on white 5.4, down on white 5.6, up on its
-   fill 4.5, down on its fill 4.6; Black dim on ground 8.1, warn-text on warn-fill 9.0, up on a card 8.0, down on a card 7.2. */
+   fill 4.5, down on its fill 4.6, white on the accent 5.7; Black dim on ground 8.1, warn-text on warn-fill 9.0, up on a card 8.0, down on a
+   card 7.2, white on the accent 5.0. */
 /* the two faces, served from this account (fonts/, SIL Open Font License: fonts/OFL.txt): Manrope, one variable file a script (400–800),
    and IBM Plex Mono 400 and 500. A script's file is fetched only when the page shows a letter of it; Manrope's latin is preloaded by
    account.html, so the first paint is already in it */
@@ -66,6 +67,10 @@
   --alloc-event: #0d7a52;
   --alloc-rwa: #d9741e;
   --alloc-earn: #8a6d3b;
+  /* round 7's accent (the Demo v2 canvas, F1): your own words in a conversation, and the one round key that says yes. Words on it are white,
+     5.7:1 */
+  --accent: #3b5bdb;
+  --on-accent: #ffffff;
 }
 
 :root[data-theme="black"] {
@@ -103,6 +108,9 @@
   --alloc-event: #4cc38a;
   --alloc-rwa: #f0a040;
   --alloc-earn: #d2b07a;
+  /* white words on it 5.0:1; the accent itself 3.5:1 on a card */
+  --accent: #4263eb;
+  --on-accent: #ffffff;
 }
 
 /* no script to read the choice: the system's own dark gets Black */
@@ -142,6 +150,8 @@
     --alloc-event: #4cc38a;
     --alloc-rwa: #f0a040;
     --alloc-earn: #d2b07a;
+    --accent: #4263eb;
+    --on-accent: #ffffff;
   }
 }
 

@@ -100,7 +100,9 @@ button.ink { background: var(--primary); color: var(--on-primary); }
 .skip:focus { top: 12px; }
 .app { display: flex; align-items: stretch; min-height: 100vh; }
 .rail { flex: 0 0 var(--rail); position: sticky; top: 0; height: 100vh; overflow-y: auto; overflow-x: hidden; padding: 24px 16px; background: var(--rail-bg); border-right: 1px solid var(--border); display: flex; flex-direction: column; gap: 22px; }
-.brand { font-family: var(--font-sans); font-size: 22px; font-weight: 800; padding: 0 12px; letter-spacing: -0.02em; }
+/* round 7 (the Demo v2 canvas, F1 and F5): the name with a round mark, the rail's items, and the Account at its foot */
+.brand { font-family: var(--font-sans); font-size: 22px; font-weight: 800; padding: 0 12px; letter-spacing: -0.02em; display: flex; align-items: center; gap: 10px; color: var(--text); text-decoration: none; }
+.brand-mark { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: var(--radius-pill); background: var(--primary); color: var(--on-primary); font-size: 14px; font-weight: 800; letter-spacing: 0; }
 .rail-nav { display: flex; flex-direction: column; gap: 4px; position: relative; }
 .rail-nav a { position: relative; min-height: 44px; padding: 0 12px; border-radius: var(--radius-s); color: var(--dim); display: flex; align-items: center; gap: 12px; font-size: 15px; font-weight: 500; text-decoration: none; }
 .rail-nav a .ico { width: 22px; height: 22px; }
@@ -113,6 +115,15 @@ button.ink { background: var(--primary); color: var(--on-primary); }
 @media (min-width: 901px) { .rail-nav:has(> .rail-pill:not([hidden])) a[aria-current="page"] { background: transparent; } }
 .rail-nav a[aria-current="page"] .ico { stroke-width: 2.1; }
 .rail-foot { margin-top: auto; display: flex; flex-direction: column; gap: 14px; }
+/* the Account: a wallet button at the rail's foot with the net worth and the mode, marked while Portfolio · Venues · Memory is shown */
+.rail-wallet { display: flex; align-items: center; gap: 12px; min-height: 56px; padding: 8px 12px; border: 1px solid var(--border); border-radius: var(--radius-s); background: var(--surface); color: var(--text); text-decoration: none; }
+.rail-wallet .ico { width: 22px; height: 22px; flex: none; }
+.rail-wallet:hover { background: var(--hover); }
+.rail-wallet[aria-current="page"] { border-color: var(--rule); background: var(--surface-2); }
+.rail-wallet[aria-current="page"] .rw-h { font-weight: 700; }
+.rw { display: flex; flex-direction: column; line-height: 1.25; min-width: 0; flex: 1; }
+.rw-h { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 600; }
+.rw-sub { font-size: 12px; color: var(--dim); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .group { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
 /* the rail's toggle (Mode) runs its whole width, the two halves sharing it */
 .group .seg { display: flex; width: 100%; flex-wrap: nowrap; }
@@ -126,8 +137,28 @@ button.ink { background: var(--primary); color: var(--on-primary); }
 /* a status in a word or two (Trading on · Read-only): a small pill on the second surface */
 .pill { display: inline-block; font-size: 12px; font-weight: 600; border-radius: var(--radius-pill); padding: 3px 10px; white-space: nowrap; color: var(--dim); background: var(--surface-2); }
 .pill.warm { background: var(--warn-fill); color: var(--warn-text); }
+.pill.up { background: var(--up-fill); color: var(--up); }
 
 .main { flex: 999 1 560px; min-width: 0; padding: 24px 36px 48px; display: flex; flex-direction: column; gap: 24px; outline: none; }
+/* the top bar is the Account's header on its three tabs (F5: its name, the mode, trading on, Settings) and Markets' and Trade's search on theirs */
+.main[data-at="account"] [data-only="trading"], .main[data-at="trading"] [data-only="account"] { display: none !important; }
+.acct-h { font-size: 20px; font-weight: 700; letter-spacing: -0.01em; margin-right: 4px; }
+.acct-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.acct-tools .icon-btn { width: 36px; height: 36px; color: var(--dim); }
+.acct-tools .icon-btn:hover:not(:disabled) { color: var(--text); }
+.acct-tabs { display: flex; align-items: center; gap: 8px 16px; flex-wrap: wrap; margin-top: -8px; }
+.acct-tabs .note-s { margin-left: auto; }
+/* a seg of links (the Account's tabs): the same pills as a seg of buttons, the one shown pressed */
+.seg a { min-height: 38px; padding: 0 14px; border-radius: var(--radius-pill); color: var(--dim); font-size: 13px; font-weight: 600; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; text-decoration: none; transition: background-color 120ms ease-out, color 120ms ease-out; }
+.seg a:hover:not([aria-current="page"]) { color: var(--text); }
+.seg a[aria-current="page"] { background: var(--surface); color: var(--text); font-weight: 700; box-shadow: var(--shadow-card); }
+/* round 7's round keys: what the owner answers, a 32 round icon (the yes in the accent, the no on the second surface), its word for the
+   screen reader and on hover */
+.rkey { width: 32px; height: 32px; border: 0; padding: 0; border-radius: var(--radius-pill); display: inline-flex; align-items: center; justify-content: center; background: var(--surface-2); color: var(--text); flex: none; transition: background-color 120ms ease-out, opacity 120ms ease-out; }
+.rkey .ico { width: 14px; height: 14px; stroke-width: 2.4; }
+.rkey:hover:not(:disabled) { background: var(--border); }
+.rkey.yes-k { background: var(--accent); color: var(--on-accent); }
+.rkey.yes-k:hover:not(:disabled) { background: var(--accent); opacity: 0.88; }
 .topbar { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; position: relative; }
 .lens { font-size: 16px; font-weight: 700; border: 0; border-radius: var(--radius-s); background: transparent; height: 44px; padding: 0 6px; margin-left: -6px; display: inline-flex; align-items: center; gap: 6px; max-width: 320px; }
 .lens:hover { background: var(--hover); }
@@ -410,11 +441,31 @@ dialog { color: var(--text); }
   .rail-nav a { padding: 0 10px; flex: none; }
   /* the strip scrolls sideways: the ring just inside each link, so it is not cut */
   .rail-nav a:focus-visible { outline-offset: -2px; }
-  .rail-foot { display: none; }
+  /* the strip keeps the Account: its wallet button, without the clock */
+  .rail-links { flex-direction: row; }
+  .rail-links button { width: auto; padding: 0 10px; }
+  .rail-foot { margin: 0 0 0 auto; flex-direction: row; }
+  .rail-status { display: none; }
+  .rail-wallet { min-height: 44px; padding: 4px 12px; gap: 8px; }
+  /* the strip's first row: the mark, and the Account (it says the name); the rail's items under them */
+  .brand { order: 1; }
+  .brand > span:not(.brand-mark) { display: none; }
+  .rail-foot { order: 2; }
+  .rail-nav { order: 3; }
+  .rail-links { order: 4; }
+  /* the header's first row: where the page is (the Account, the lens) and the Statement; then the mode, trading on, Settings — or the search */
+  .topbar { gap: 8px 12px; }
+  .topbar .top-tools { display: contents; }
+  .acct-h { order: 1; }
+  .lens { order: 2; }
+  #open-statement { order: 3; margin-left: auto; }
+  .acct-tools, .search { order: 4; flex-basis: 100%; }
+  .acct-tabs { margin-top: -4px; }
+  .acct-tabs .note-s { margin-left: 0; flex-basis: 100%; }
   .main { padding: 16px 16px 40px; }
   .search { width: 100%; }
   .top-tools { width: 100%; margin-left: 0; }
-  .top-tools .search { flex: 1; }
+  .top-tools .search { flex: 1 1 100%; }
   .col-side { max-width: none; }
   .panel { position: static; }
   dialog .row, .row2 { grid-template-columns: 1fr; }
@@ -432,6 +483,6 @@ dialog { color: var(--text); }
 
 /* ---- under reduced motion: no fade on what is pointed at, no lift, no pill sliding (last, so it outweighs every rule above it) -------- */
 @media (prefers-reduced-motion: reduce) {
-  .btn, .icon-btn, .seg button, .tabs button, .rail-nav a, .rail-links button, .lens, .menu button, .picks button, .link, .t tr.click td, .tk-list button, .quick-card, .choice, .choice::after, .quick-card::after { transition: none; }
+  .btn, .icon-btn, .seg button, .seg a, .rkey, .tabs button, .rail-nav a, .rail-links button, .lens, .menu button, .picks button, .link, .t tr.click td, .tk-list button, .quick-card, .choice, .choice::after, .quick-card::after { transition: none; }
   .rail-nav.moves .rail-pill { transition: none; }
 }
