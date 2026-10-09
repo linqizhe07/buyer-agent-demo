@@ -78,7 +78,9 @@ function memDraw(el, owner) {
     memPut(el, "how", "");
     return;
   }
-  const agents = memAgents();
+  // an agent in the lens is the only one shown
+  const l = lensNow();
+  const agents = memAgents().filter((a) => l.kind !== "agent" || a.address === l.id.toLowerCase());
   const shown = agents.find((a) => a.address === MEM.agent) || agents[0];
   if (shown) MEM.agent = shown.address;
   memPut(el, "who", memWhoHtml(agents, shown));
@@ -206,7 +208,8 @@ function memWire(el) {
       MEM.agent = t.dataset.memAgent;
       MEM.edit = "";
       MEM.adding = false;
-      return void memAgain();
+      // the agent picked is the route's, so a read that comes later draws the same one (#/memory?agent=0x…)
+      return void go("memory", { agent: MEM.agent }, { replace: true });
     }
     memAct(t.dataset.memAct, t.dataset);
   });
