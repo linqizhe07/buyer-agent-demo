@@ -168,6 +168,21 @@ describe("the store", () => {
     expect(readFileSync(join(dir, `agent-${a}.json`), "utf8")).not.toContain("memecoins");
   });
 
+  it("lists only the agents with something kept: an address asked about is not one, and one whose memory was all forgotten goes", () => {
+    const dir = join(fresh(), "memory");
+    const m = new MemoryStore(dir, () => START);
+    const asked = "0x510ee6000000000000000000000000000000c94f";
+    m.notes(asked);
+    m.conversation(asked, { limit: 5 });
+    expect(m.agents()).toEqual([]);
+    m.keep(cc.address, { id: "", topic: "fact", text: "kept" }, "agent");
+    m.record(codex.address, { who: "owner", kind: "letIn", text: "let in" });
+    expect(m.agents()).toEqual([cc.address, codex.address].sort());
+    m.forget(codex.address, "all");
+    expect(m.agents()).toEqual([cc.address]);
+    expect(new MemoryStore(dir, () => START).agents()).toEqual([cc.address]);
+  });
+
   it("holds an agent to its number of notes and of changes an hour; lets the oldest turns go", () => {
     let t = START;
     const m = new MemoryStore(join(fresh(), "memory"), () => t);

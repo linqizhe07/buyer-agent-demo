@@ -232,17 +232,17 @@ export class MemoryStore {
     if (hit) return hit as T;
     let file = empty();
     const p = this.path(scope);
-    if (existsSync(p)) {
+    // nothing kept there: not held either, so asking about any number of addresses keeps nothing
+    if (!existsSync(p)) return file;
+    try {
+      const got = JSON.parse(readFileSync(p, "utf8")) as T;
+      if (got && got.v === 1) file = { ...empty(), ...got };
+    } catch {
+      // a file that does not read as one is started again; the broken one is left beside it, unread
       try {
-        const got = JSON.parse(readFileSync(p, "utf8")) as T;
-        if (got && got.v === 1) file = { ...empty(), ...got };
+        renameSync(p, `${p}.unread-${this.nowMs()}`);
       } catch {
-        // a file that does not read as one is started again; the broken one is left beside it, unread
-        try {
-          renameSync(p, `${p}.unread-${this.nowMs()}`);
-        } catch {
-          /* nothing to keep aside */
-        }
+        /* nothing to keep aside */
       }
     }
     this.cache.set(scope, file);
@@ -267,14 +267,18 @@ export class MemoryStore {
   private everyoneFile = (): TurnsFile => this.read<TurnsFile>("everyone", () => ({ v: 1, seq: 0, turns: [], dropped: 0 }));
   private agentFile = (address: string): AgentFile => this.read<AgentFile>(address, () => ({ v: 1, address, seq: 0, notes: [], turnSeq: 0, turns: [], dropped: 0 }));
 
-  /** the agents with something kept, by address */
+  /** the agents with something kept — a note or a turn — by address. An address only asked about (a read of its memory) is not one: what
+   * is listed is what was written, so a read can never put an agent on the owner's page */
   agents(): string[] {
-    const seen = new Set<string>([...this.cache.keys()].filter(isAddress));
+    const addresses = new Set<string>([...this.cache.keys()].filter(isAddress));
     if (existsSync(this.dir)) for (const name of readdirSync(this.dir)) {
       const m = /^agent-(0x[0-9a-f]{40})\.json$/.exec(name);
-      if (m) seen.add(m[1]!);
+      if (m) addresses.add(m[1]!);
     }
-    return [...seen].sort();
+    return [...addresses].filter((a) => {
+      const f = this.agentFile(a);
+      return f.notes.length > 0 || f.turns.length > 0;
+    }).sort();
   }
 
   /** the owner's notes for every agent */
