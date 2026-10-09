@@ -57,6 +57,10 @@
  *   GET  /api/account/quotes?pairs=okx|BTC/USDT,…        fresh prices for up to twelve markets
  *   GET  /api/account/sellable                           everything held that is not a dollar, and what selling it would sign
  *   GET  /api/account/agents                             the agents one by one: keys, limits, cards, orders, payments, wallets, intents
+ *   GET  /api/account/memory?turns=100                   what the agents remember (account/memory.ts), as the owner reads it: About you,
+ *                                                        the words to every agent, each agent's notes and conversation
+ *   GET  /api/account/memory/agent?address=&before=&limit=&q=   one agent's memory as that agent reads it (portfolio_memory): About you,
+ *                                                        its own notes, its conversation; the latest `limit` before the turn `before`
  *   GET  /api/account/candles?venue=&symbol=&interval=   one market's price history (5m · 1h · 1d): a connected venue's own, or a venue not
  *                                                        connected from its public data, without a key; kept a minute
  *   GET  /api/account/earn?venue=&asset=                 Earn: the products the connected venues offer (the MetaMask Agent Wallet's
@@ -563,6 +567,21 @@ export async function startPortfolioServer(opts: PortfolioServerOptions): Promis
   app.get("/api/account/agents", wrap(async (_req, res) => {
     if (!mounted(res)) return;
     answerOf(res, await svc.agents());
+  }));
+
+  // what the agents remember: the owner's whole view (the page's Memory), and one agent's (its MCP seat reads its own)
+  app.get("/api/account/memory", wrap(async (req, res) => {
+    if (!mounted(res)) return;
+    const q = strings(req, res, { turns: 4 });
+    if (!q) return;
+    const turns = q.turns ? Math.max(1, Math.min(500, Math.trunc(Number(q.turns)) || 100)) : 100;
+    answerOf(res, svc.memoryView(turns));
+  }));
+  app.get("/api/account/memory/agent", wrap(async (req, res) => {
+    if (!mounted(res)) return;
+    const q = strings(req, res, { address: 42, before: 20, limit: 4, q: 120 });
+    if (!q) return;
+    answerOf(res, svc.memoryFor(q.address, { before: q.before || undefined, limit: q.limit ? Number(q.limit) || 50 : undefined, q: q.q || undefined }));
   }));
 
   // one market's price history: a connected venue's own, or a public source's without a key. The venue is an id the account knows and the

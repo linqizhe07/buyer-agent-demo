@@ -97,6 +97,9 @@ export const CODES = {
   E_ACCOUNT_ORDER_UNKNOWN: { layer: "ACCOUNT", zh: "账户上没有这张单，或者它不是这把钥匙下的" },
   E_ACCOUNT_UNPRICED: { layer: "ACCOUNT", zh: "这个资产在这里没有价格，无法判断额度，拒绝" },
   E_ACCOUNT_CREDENTIAL: { layer: "ACCOUNT", zh: "这个连接要用的凭据不在说好的地方，或者不能用" },
+  E_ACCOUNT_MEMORY_SECRET: { layer: "ACCOUNT", zh: "记忆里不收钥匙、密码、密钥和 IP 地址" },
+  E_ACCOUNT_MEMORY_FULL: { layer: "ACCOUNT", zh: "记忆已满：先忘掉一条，或者改一条" },
+  E_ACCOUNT_MEMORY_UNKNOWN: { layer: "ACCOUNT", zh: "记忆里没有这一条" },
   // the payee — the other side of a payment the agent makes
   E_PAYEE_CHANGED: { layer: "PAYEE", zh: "收款地址和这个 host 钉住的不一样" },
   E_PAYEE_OVERCHARGE: { layer: "PAYEE", zh: "收款方要的比授权的多" },

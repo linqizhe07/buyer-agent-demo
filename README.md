@@ -60,6 +60,7 @@ Node ≥ 22。常用开关：`--live-cap 50`（单笔上限，默认 $100）、`
   - 读：`portfolio_account` · `portfolio_venues`（从用户所在的网络自动判断哪些场所能接，各用场所自己的话）· `portfolio_overview` · `portfolio_holdings` · `portfolio_history` · `portfolio_asset` · `portfolio_candles` · `portfolio_explore` · `portfolio_receive` · `portfolio_earn` · `portfolio_watchlist` · `portfolio_statement`
   - 下单和动钱：`portfolio_live_markets` · `portfolio_live_compare` · `portfolio_live_positions` · `portfolio_live_preview` · `portfolio_live_order` · `portfolio_live_batch` · `portfolio_live_amend` · `portfolio_live_cancel` · `portfolio_live_close` · `portfolio_live_leverage` · `portfolio_live_move` · `portfolio_live_earn` · `portfolio_pay`
   - 和 owner 说话、等结果：`portfolio_report` · `portfolio_ask` · `portfolio_approval` · `portfolio_wait`
+  - 记忆（账户替 agent 记着，换会话、重启都在）：`portfolio_memory`（读：你的 About you、它自己的笔记、它和你的对话）· `portfolio_remember` · `portfolio_forget`（它自己的笔记，用它的钥匙签）
   - 只在模拟对账单（`--classic`）和测试里：`portfolio_read` · `portfolio_markets` · `portfolio_quote` · `portfolio_openness` · `portfolio_execute` · `portfolio_order` · `portfolio_transfer`
 - **HTTP**：只读接口 `GET /api/account/...`，只听 127.0.0.1；表在 [docs/account.md](docs/account.md)。
 - **给做 Agent 模块的团队**：[COOKBOOK](COOKBOOK.md) 的「11b · Agent 模块接口」。

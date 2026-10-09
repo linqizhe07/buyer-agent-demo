@@ -44,12 +44,13 @@ import { parseIntent, parseOrder } from "../intents.ts";
 import { achArrival, etDate, whenLabel } from "./calendar.ts";
 import { doorOf, plan, type Door, type Leg, type Rail, type Route, type RouteRequest, type VenueView, whyWatchOnly } from "./doors.ts";
 import { heldUsd, inFlightUsd, launch, newPayment, settleDue, type Advance, type Authority, type Money, type Payment, type PaymentKind } from "./payments.ts";
-import { actionHash, isAgentAction, isDeviceSig, isJwk, isOwnerAction, kidOf, malformed, micro, MONEY_TTL_MS, MONEY_TYPES, NonceBook, ownerTypedData, shownFields, signerOf, type Action, type AgentAction, type AnySig, type Envelope, type Hex, type Jwk, type OwnerAction, type SendAsset } from "./sign.ts";
+import { actionHash, isAgentAction, isDeviceSig, isJwk, isOwnerAction, kidOf, malformed, MEMORY_TYPES, micro, MONEY_TTL_MS, MONEY_TYPES, NonceBook, ownerTypedData, shownFields, signerOf, type Action, type AgentAction, type AnySig, type Envelope, type Hex, type Jwk, type OwnerAction, type SendAsset } from "./sign.ts";
 import { LiveMoves, type LiveMoney } from "./live-moves.ts";
 import { LiveOrders, type CloseQuote, type LiveOrder, type OrderQuote } from "./live-orders.ts";
 import { LiveEarns, type EarnDesk, type EarnQuote, type LiveEarn } from "./live-earn.ts";
 import type { KeptAuthorisation } from "./pay-real.ts";
 import { CARD_TTL_MS, modeRules, type ModeRule } from "./mode-rules.ts";
+import type { MemoryStore, TurnWho } from "./memory.ts";
 import { activeAgents, agentStatus, applyOwner, applyReport, ASK_TTL_MS, askProblem, ASKS_PER_AGENT, ASKS_PER_HOUR, cleanName, covers, deviceKeys, EARN_NAMES, emptyState, isOwner, MAX_ASKS, nameHolder, refsOf, spendFor, type AccountState, type AgentKey, type AgentReport, type AskKind, type OwnerKey, type SpendApproval, type SubAccount } from "./state.ts";
 
 const HUB = "metamask";
@@ -151,6 +152,9 @@ export interface Host {
   /** where the user can connect, as the host last judged it from the network it runs on (live/availability.ts): a venue that refuses this
    * network, or offers no way in, is never asked of the owner by an agent. Undefined: not judged yet */
   venueVerdict?(venue: string): { name: string; verdict: string; said?: string | undefined; edition?: { venue: string; name: string } | undefined } | undefined;
+  /** what the agents remember (account/memory.ts): the conversation the account keeps for them, their notes and the owner's About you
+   * (absent: this account keeps no memory) */
+  memory?(): MemoryStore | undefined;
 }
 
 /** one way of connecting a real venue, as the page offers it */
@@ -256,6 +260,10 @@ export interface Resolved {
 }
 
 export const slug = (name: string) => name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+
+/** an instruction about memory as the ledger keeps it: who signed it, its nonce and which note — never the note's words, so that what the
+ * owner has forgotten is not kept anywhere else (account/memory.ts) */
+export const wordless = (e: Envelope): Envelope => (e?.action && MEMORY_TYPES.has(e.action.type) && "text" in e.action ? { ...e, action: { ...e.action, text: "" } as Action } : e);
 export const agentIdOf = (k: AgentKey): AgentId => ({ id: slug(k.name), name: k.name, code: k.code });
 const dex = (s: string): { venue: string; ledger?: string | undefined } => {
   const [venue, ledger] = s.split(":");
@@ -514,14 +522,16 @@ export class AccountEngine {
     for (const who of signers) this.nonces.use(who, action.nonce);
     // taken, on the record before anything runs: a later run of the account reads this row and does not take the same instruction again,
     // whatever became of it (a money instruction is good for ten minutes, and a restart can come inside them)
-    this.host.log({ kind: "action", venue: "*", tool: action.type, signer, envelope, outcome: "taken", reason: `${action.type} taken: it is not taken again, by this run of the account or a later one`, ...(agent ? { agent: slug(agent.name) } : {}) });
+    this.host.log({ kind: "action", venue: "*", tool: action.type, signer, envelope: wordless(envelope), outcome: "taken", reason: `${action.type} taken: it is not taken again, by this run of the account or a later one`, ...(agent ? { agent: slug(agent.name) } : {}) });
 
     // an order or a cancel is not kept waiting while the account asks other venues how their orders stand
     await this.settle(["liveCancel", "agentLiveCancel", "liveOrder", "agentLiveOrder"].includes(action.type));
     const out = await this.run(action, envelope, signer, agent, hash);
     this.results.set(key, { at: now, out });
     if (!isRefusal(out) && isOwnerAction(action)) this.answered(action, envelope);
-    if (isRefusal(out)) this.host.log({ kind: "account-refusal", venue: out.venue ?? "*", tool: action.type, code: out.code, reason: out.message, detail: out.detail, native: out.native, signer, envelope, ...(agent ? { agent: slug(agent.name) } : {}) });
+    if (isRefusal(out)) this.host.log({ kind: "account-refusal", venue: out.venue ?? "*", tool: action.type, code: out.code, reason: out.message, detail: out.detail, native: out.native, signer, envelope: wordless(envelope), ...(agent ? { agent: slug(agent.name) } : {}) });
+    // the agent's words, or the owner's to it, and what came of them: kept for the agents to read back (account/memory.ts)
+    this.converse(action, out, agent);
     return out;
   }
 
@@ -638,12 +648,184 @@ export class AccountEngine {
         return this.report(action, envelope, signer, agent!);
       case "agentAsk":
         return this.ask(action, agent!);
+      case "agentRemember":
+      case "agentForget":
+        return this.agentMemory(action, signer, agent!);
+      case "setMemory":
+      case "forgetMemory":
+        return this.ownerMemory(action, signer);
       case "agentOrder": {
         const order = parseOrder({ base: action.base, side: action.side, qty: action.qty });
         if (!order) return no("E_ACCOUNT_BAD_ACTION", { message: "not an order: {base: an asset or an event contract, side: buy | sell, qty: more than zero}" });
         this.host.log({ kind: "action", venue: "*", tool: action.type, signer, envelope, outcome: "handed on", reason: `${agent!.name} · ${order.side} ${order.qty} ${order.base}`, agent: slug(agent!.name) });
         return { ok: true, kind: "result", result: await this.host.order(order.base, order.side, order.qty, agentIdOf(agent!), signer) };
       }
+    }
+  }
+
+  // ---- memory: the conversation kept for the agents, their notes, the owner's About you ----------------------------------
+
+  /** An agent's own notes (account/memory.ts): kept or forgotten under its own key. The ledger's row says which note changed, and when —
+   * never its words, so that what is forgotten is gone */
+  private agentMemory(a: Extract<AgentAction, { type: "agentRemember" | "agentForget" }>, signer: string, agent: AgentKey): Outcome {
+    const memory = this.host.memory?.();
+    if (!memory) return no("E_ACCOUNT_BAD_ACTION", { message: "this account keeps no memory" });
+    if (a.type === "agentRemember") {
+      const note = memory.keep(agent.address, a, "agent");
+      if (isRefusal(note)) return note;
+      const summary = `${agent.name} ${a.id.trim() ? "changed" : "kept"} ${note.id} (${note.topic}, ${note.text.length} characters)`;
+      this.host.log({ kind: "action", venue: "*", tool: a.type, signer, outcome: "ok", reason: summary, agent: slug(agent.name) });
+      return { ok: true, kind: "result", result: { note } };
+    }
+    const id = a.id.trim();
+    if (!/^note-\d{1,6}$/.test(id)) return no("E_ACCOUNT_BAD_ACTION", { message: 'an agent forgets one of its own notes, by its id ("note-0003"); the conversation is the owner\'s to forget' });
+    const gone = memory.forget(agent.address, id);
+    if (isRefusal(gone)) return gone;
+    this.host.log({ kind: "action", venue: "*", tool: a.type, signer, outcome: "ok", reason: `${agent.name} forgot ${id}`, agent: slug(agent.name) });
+    return { ok: true, kind: "result", result: { forgot: id } };
+  }
+
+  /** The owner's memory: About you kept or changed, a note written into an agent's notes, and anything forgotten — one note, one turn, a
+   * conversation, all an agent kept. An agent is named by the address of a key the account let in (now or before) */
+  private ownerMemory(a: Extract<OwnerAction, { type: "setMemory" | "forgetMemory" }>, signer: string): Outcome {
+    const memory = this.host.memory?.();
+    if (!memory) return no("E_ACCOUNT_BAD_ACTION", { message: "this account keeps no memory" });
+    const scope = a.scope.trim().toLowerCase();
+    const known = scope === "about" || scope === "everyone" || this.state.agents.some((k) => k.address === scope) || memory.agents().includes(scope);
+    if (!known) return no("E_ACCOUNT_BAD_ACTION", { message: `memory is kept for "about" (About you, read by every agent), "everyone" (the words to every agent) or an agent by the address of its key, not for "${scope.slice(0, 44)}"` });
+    const whose = scope === "about" ? "About you" : scope === "everyone" ? "the words to every agent" : `${this.agentName(scope)}'s memory`;
+    if (a.type === "setMemory") {
+      if (scope === "everyone") return no("E_ACCOUNT_BAD_ACTION", { message: "the words to every agent are the account's record of what passed: a note for every agent is kept in About you (scope \"about\")" });
+      const note = memory.keep(scope, a, "owner");
+      if (isRefusal(note)) return note;
+      const summary = `${a.id.trim() ? "changed" : "kept"} ${note.id} in ${whose} (${note.topic}, ${note.text.length} characters)`;
+      this.host.log({ kind: "action", venue: "*", tool: a.type, signer, outcome: "ok", reason: summary });
+      return { ok: true, kind: "result", result: { note, summary } };
+    }
+    const what = a.what.trim();
+    if (!/^(?:notes|conversation|all|note-\d{1,6}|turn-\d{1,8}|all-\d{1,8})$/.test(what)) return no("E_ACCOUNT_BAD_ACTION", { message: 'what is forgotten is one note ("note-0003"), one turn ("turn-000041", "all-000007"), "notes", "conversation" or "all"' });
+    const gone = memory.forget(scope, what);
+    if (isRefusal(gone)) return gone;
+    const summary = `forgot ${what === "all" ? "everything" : what === "notes" ? "every note" : what === "conversation" ? "the conversation" : what} in ${whose}: ${gone} gone`;
+    this.host.log({ kind: "action", venue: "*", tool: a.type, signer, outcome: "ok", reason: summary });
+    return { ok: true, kind: "account", summary };
+  }
+
+  /** The conversation the agents read back: what the owner said to an agent (or to every agent) and what each agent asked for, with what
+   * came of it — written as it happens. No limit reads it. A file that cannot be written never undoes what was done */
+  private converse(action: Action, out: Outcome, agent: AgentKey | undefined): void {
+    const memory = this.host.memory?.();
+    if (!memory || MEMORY_TYPES.has(action.type)) return;
+    try {
+      if (agent && isAgentAction(action)) {
+        const t = this.agentTurn(action, out);
+        if (t) memory.record(agent.address, t);
+        return;
+      }
+      if (isRefusal(out) || !isOwnerAction(action)) return;
+      const t = this.ownerTurn(action, out);
+      if (t) memory.record(t.to, t);
+    } catch {
+      /* the record of the conversation is for reading back; what was done stands */
+    }
+  }
+
+  /** an agent's instruction as a turn: its words and what came of them, or the account's refusal */
+  private agentTurn(a: AgentAction, out: Outcome): { who: TurnWho; kind: string; text: string; ref?: string | undefined; code?: string | undefined } | undefined {
+    if (isRefusal(out)) {
+      const what = a.type === "agentReport" ? `report on ${a.intent}` : a.type === "agentAsk" ? `ask for ${a.kind}${a.venue ? ` at ${a.venue}` : ""}` : this.requestWords(a);
+      return { who: "account", kind: "refusal", text: `${what}: refused — ${out.message}`, code: out.code };
+    }
+    if (a.type === "agentReport") return { who: "agent", kind: "report", text: `${a.status}${a.note.trim() ? `: ${a.note.trim()}` : ""}`, ref: a.intent };
+    if (a.type === "agentAsk") {
+      const ask = out.kind === "result" ? (out.result as { ask?: { id?: string } } | undefined)?.ask : undefined;
+      return { who: "agent", kind: "ask", text: `asks for ${a.kind}${a.venue ? ` at ${a.venue}` : ""}${a.usd ? ` · $${a.usd}` : ""}${a.text.trim() ? ` — ${a.text.trim()}` : ""}`, ref: ask?.id };
+    }
+    const words = this.requestWords(a);
+    if (out.kind === "card") return { who: "agent", kind: "did", text: `${words}: waits for the owner on ${out.card.id}`, ref: out.card.id };
+    if (out.kind === "order") return { who: "agent", kind: "did", text: `${words}: ${out.order.id} ${out.order.status}${out.order.filledQty > 0 ? `, ${out.order.filledQty} filled` : ""}`, ref: out.order.id };
+    if (out.kind === "payment") return { who: "agent", kind: "did", text: `${words}: ${out.payment.id} ${out.payment.status}`, ref: out.payment.id };
+    if (out.kind === "account") return { who: "agent", kind: "did", text: `${words}: ${out.summary}` };
+    return { who: "agent", kind: "did", text: `${words}: handed on` };
+  }
+
+  /** what an agent asked for, in a line */
+  private requestWords(a: AgentAction): string {
+    switch (a.type) {
+      case "agentLiveOrder":
+        return `${a.side} ${a.qty ? a.qty : `$${a.usd} of`} ${a.symbol} at ${this.name(a.venue)}, ${a.limitPrice ? `limit ${a.limitPrice}` : "market"}${a.reduceOnly === "true" ? ", reduce-only" : ""}`;
+      case "agentLiveCancel":
+        return `cancel ${a.order} at ${this.name(a.venue)}`;
+      case "agentLiveAmend":
+        return `change ${a.order} at ${this.name(a.venue)}`;
+      case "agentLiveClose":
+        return `close ${a.qty ? a.qty : "all of"} ${a.symbol} at ${this.name(a.venue)}`;
+      case "agentLiveLeverage":
+        return `${a.symbol} at ${this.name(a.venue)} to ${a.leverage}x${a.marginMode ? ` ${a.marginMode}` : ""}`;
+      case "agentLiveMove":
+        return `${a.kind} ${a.amount} ${a.asset} from ${this.name(a.from)} to ${this.name(a.to)}`;
+      case "agentLiveEarn":
+        return `${a.kind} ${a.amount} ${a.asset} ${a.kind === "withdraw" ? "out of" : "into"} ${a.product} at ${this.name(a.venue)}`;
+      case "agentPay": {
+        let host = "a payee";
+        try {
+          host = new URL(a.url).host;
+        } catch {
+          /* not a URL: said as a payee */
+        }
+        return `pay ${host} up to $${a.maxAmount}`;
+      }
+      case "agentSendAsset":
+        return `send ${a.amount} ${a.token} to ${a.destination}`;
+      case "agentSwap":
+        return `swap ${a.amount} ${a.sell} for ${a.buy} at ${this.name(a.venue)}`;
+      case "agentExecute":
+        return `${String((a.intent as { kind?: unknown }).kind ?? "an intent")} at ${this.name(a.account)}`;
+      case "agentOrder":
+        return `${a.side} ${a.qty} ${a.base}`;
+      default:
+        return a.type;
+    }
+  }
+
+  /** the owner's signed action as a turn, and whom it was said to: one agent (its address) or every agent */
+  private ownerTurn(a: OwnerAction, out: Exclude<Outcome, Refusal>): { to: string; who: TurnWho; kind: string; text: string; ref?: string | undefined } | undefined {
+    const said = out.kind === "account" ? out.summary : this.summary(a);
+    switch (a.type) {
+      case "setIntent": {
+        const to = a.agent.trim() === "*" ? "everyone" : a.agent.trim().toLowerCase();
+        const id = a.validUntil === 0 ? a.id : (this.state.intents.find((x) => x.envelope.action === a)?.id ?? a.id);
+        return { to, who: "owner", kind: a.validUntil === 0 ? "withdraw" : "intent", text: said, ref: id || undefined };
+      }
+      case "approveAgent": {
+        const zero = /^0x0{40}$/i.test(a.agentAddress);
+        const key = zero ? this.state.agents.filter((k) => k.name === a.agentName && k.revokedAt !== undefined).at(-1) : undefined;
+        const to = zero ? key?.address : a.agentAddress.toLowerCase();
+        return to ? { to, who: "owner", kind: zero ? "revoke" : "letIn", text: said } : undefined;
+      }
+      case "approveSpend":
+        return { to: a.agent.toLowerCase(), who: "owner", kind: "limit", text: said, ref: a.intent?.trim() || undefined };
+      case "createSubAccount":
+        return { to: a.agent.toLowerCase(), who: "owner", kind: "wallet", text: said };
+      case "approveCard": {
+        const card = this.host.card(a.card);
+        if (!card?.signer) return undefined;
+        const came = out.kind === "order" ? ` · ${out.order.id} ${out.order.status}` : out.kind === "payment" ? ` · ${out.payment.id} ${out.payment.status}` : "";
+        return { to: card.signer.toLowerCase(), who: "owner", kind: "card", text: `${a.decision === "approve" ? "approved" : a.decision === "reject" ? "rejected" : a.decision} ${card.id}: ${card.reason}${came}`, ref: card.id };
+      }
+      case "answerAsk": {
+        const ask = this.declined.find((x) => x.id === a.ask.trim());
+        return ask ? { to: ask.agent, who: "owner", kind: "declined", text: said, ref: ask.id } : undefined;
+      }
+      case "setPolicy":
+        return { to: "everyone", who: "owner", kind: "policy", text: said };
+      case "connectVenue":
+      case "disconnectVenue":
+        return { to: "everyone", who: "owner", kind: "venue", text: said };
+      case "setWatch":
+        return { to: "everyone", who: "owner", kind: "watch", text: said };
+      default:
+        return undefined;
     }
   }
 

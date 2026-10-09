@@ -47,6 +47,7 @@ import { eventState, eventSymbol, eventTop, EVENTS, isEventSymbol, PREDICTION_VE
 import { orderPlan, type OrderPlan, type Part } from "./router.ts";
 import type { Side } from "./venues.ts";
 import { cents, detailOf, plainRefusal, routeLine, sayOf, waitWords } from "./words.ts";
+import { MemoryStore, MAX_ABOUT, MAX_NOTES, MAX_TURNS, NOTE_TEXT, TOPICS, type Conversation, type MemoryNote, type MemoryTurn } from "./account/memory.ts";
 import { AccountEngine, CARD_TTL_MS, slug, type AccountPage, type AccountSeed, type AgentAsk, type CardOffer, type DeclinedAsk, type Outcome } from "./account/exchange.ts";
 import { assetKey, byAsset, change24h, withEarn, type AssetRow, type DayChange, type EarnHeld, type MoneySummary } from "./account/holdings.ts";
 import { NetWorthLog, networthPath, type NetWorthHistory, type NetWorthSnapshot } from "./account/networth.ts";
@@ -76,7 +77,7 @@ import { agentWalletKey, agentWalletKeyPath, hasKey } from "./account/keystore.t
 import { agentWalletSource, agentWalletVenue } from "./live/agent-wallet.ts";
 import { guardedHttp, type PayHttp } from "./live/guarded-http.ts";
 import { publicSender } from "./live/chain.ts";
-import type { SubAccount } from "./account/state.ts";
+import { agentStatus, type SubAccount } from "./account/state.ts";
 import { publicChain } from "./live/chain.ts";
 import { realMm } from "./live/metamask.ts";
 import { publicPrices } from "./live/prices.ts";
@@ -297,6 +298,8 @@ export class PortfolioService {
   readonly live: boolean;
   /** the account layer, when it is mounted */
   readonly account: AccountEngine | undefined;
+  /** what the agents remember, kept with the account layer (account/memory.ts): the conversation, their notes, the owner's About you */
+  readonly memory: MemoryStore | undefined;
   /** the simulated payees an agent's payment can reach (x402, MPP, ACP, AP2), mounted with the account layer */
   readonly payees: PayeeWorld | undefined;
   /** the page's scripted agent, when a server has one: the owner talks to it through a signed instruction */
@@ -339,6 +342,7 @@ export class PortfolioService {
     if (opts.real) this.openness = { ...this.openness, mode: "guard" };
     this.ledger = this.openLedger();
     this.mount();
+    this.memory = opts.account !== undefined || opts.venues === "frontline" ? new MemoryStore(join(opts.home, "memory"), () => Date.parse(this.now())) : undefined;
     this.account = opts.account !== undefined || opts.venues === "frontline" ? new AccountEngine(this.host(), opts.account ?? {}) : undefined;
     if (this.account) this.catalog = opts.connectable ?? loadConnectable();
     // the payees are simulated hosts: a real account has none. A real account pays real ones, from agent wallets (account/pay-real.ts)
@@ -490,6 +494,7 @@ export class PortfolioService {
         return v ? { name: v.name, verdict: v.verdict, ...(v.said ? { said: v.said } : {}), ...(edition ? { edition } : {}) } : undefined;
       },
       pairingCode: () => this.opts.liveWrites?.pairingCode ?? this.opts.pairingCode,
+      memory: () => this.memory,
       ...(real && this.opts.liveWrites
         ? {
             agentWalletAddress: (name: string) => {
@@ -1068,10 +1073,59 @@ export class PortfolioService {
       intents: page.intents.filter((i) => i.agent === k.address || i.agent === "*"),
       asks: page.asks.filter((a) => a.agent === k.address),
       declinedAsks: page.declinedAsks.filter((a) => a.agent === k.address),
+      memory: this.memory ? { notes: this.memory.notes(k.address).length, turns: this.memory.conversation(k.address, { sinceMs: this.firstLetIn(k.address), limit: 1 }).total } : { notes: 0, turns: 0 },
       flights: this.flights.filter((f) => f.agent.name === k.name && f.agent.code === k.code).slice(-10).reverse().map((f) => ({ no: f.no, at: f.at, request: f.request, legs: f.legs.map((l) => `${l.mark === "ok" ? "✓" : l.mark === "no" ? "✗" : l.mark === "wait" ? "▣" : "·"} ${l.text}`) })),
     }));
     // the mode as every other read wires it (`guard` is Guard, `open` is Beast): the page puts the words on it
     return { asOf: page.now, mode: this.openness.mode === "open" ? "open" : "guard", agents, requests: page.requests };
+  }
+
+  /** when a key was first let in: the words to every agent are its to read from then on */
+  private firstLetIn(address: string): number | undefined {
+    const times = (this.account?.state.agents ?? []).filter((k) => k.address === address).map((k) => Date.parse(k.approvedAt)).filter(Number.isFinite);
+    return times.length ? Math.min(...times) : undefined;
+  }
+
+  /** MEMORY, as the owner reads it (Account → Memory): About you, the words to every agent, and each agent's notes and conversation as
+   * that agent reads it — every key the account let in (an earlier one included) and any agent whose memory outlived its key. The latest
+   * `turns` of each conversation (100 unless said); older ones by memoryFor's `before` */
+  memoryView(turns = 100): MemoryPage | Refusal {
+    if (!this.account || !this.memory) return no("E_ACCOUNT_BAD_ACTION", { message: "the account layer is not mounted" });
+    const nowMs = Date.parse(this.now());
+    // the key that stands for an address, when there is one; else its latest
+    const keys = new Map<string, { name: string; code: string; status: string }>();
+    for (const k of this.account.state.agents) {
+      const status = agentStatus(this.account.state, k.address, nowMs);
+      if (!keys.has(k.address) || status === "ok") keys.set(k.address, { name: k.name, code: k.code, status });
+    }
+    const addresses = [...new Set([...keys.keys(), ...this.memory.agents()])];
+    const everyone = this.memory.everyone();
+    return {
+      asOf: this.now(),
+      about: this.memory.about(),
+      everyone: { turns: everyone.turns.slice(-turns), total: everyone.turns.length, dropped: everyone.dropped },
+      agents: addresses.map((address) => {
+        const k = keys.get(address);
+        return { address, name: k?.name ?? "", code: k?.code ?? "", status: k?.status ?? "gone", notes: this.memory!.notes(address), conversation: this.memory!.conversation(address, { sinceMs: this.firstLetIn(address), limit: turns }) };
+      }),
+      limits: { noteText: NOTE_TEXT, maxNotes: MAX_NOTES, maxAbout: MAX_ABOUT, maxTurns: MAX_TURNS, topics: [...TOPICS] },
+    };
+  }
+
+  /** MEMORY, as one agent reads it (portfolio_memory): the owner's About you, its own notes, and its conversation — its own turns and the
+   * words to every agent since its key was first let in — latest last, `limit` of them before the turn `before`; `q` narrows all three to
+   * what mentions it. Words, never a permission */
+  memoryFor(address: string, o: { before?: string | undefined; limit?: number | undefined; q?: string | undefined } = {}): AgentMemoryView | Refusal {
+    if (!this.account || !this.memory) return no("E_ACCOUNT_BAD_ACTION", { message: "the account layer is not mounted" });
+    const a = address.trim().toLowerCase();
+    if (!/^0x[0-9a-f]{40}$/.test(a)) return no("E_ACCOUNT_BAD_ACTION", { message: "an agent's memory is read by the address of its key" });
+    return {
+      asOf: this.now(),
+      about: MemoryStore.matching(this.memory.about(), o.q),
+      notes: MemoryStore.matching(this.memory.notes(a), o.q),
+      conversation: this.memory.conversation(a, { sinceMs: this.firstLetIn(a), before: o.before, limit: o.limit, q: o.q }),
+      limits: { noteText: NOTE_TEXT, maxNotes: MAX_NOTES, maxAbout: MAX_ABOUT, maxTurns: MAX_TURNS, topics: [...TOPICS] },
+    };
   }
 
   /** every order the account ever placed, as last logged, with each row at which more of it filled (account/costbasis.ts ordersOf): every run's */
@@ -2255,6 +2309,35 @@ export interface AgentView {
   /** what the owner declined of its asks in the last day */
   declinedAsks: DeclinedAsk[];
   flights: Array<{ no: string; at: string; request: string; legs: string[] }>;
+  /** what the account keeps for it to read back (account/memory.ts): how many notes, and how many turns of its conversation */
+  memory: { notes: number; turns: number };
+}
+
+export interface MemoryLimits {
+  noteText: number;
+  maxNotes: number;
+  maxAbout: number;
+  maxTurns: number;
+  topics: string[];
+}
+
+/** the owner's view of what the agents remember */
+export interface MemoryPage {
+  asOf: string;
+  about: MemoryNote[];
+  everyone: { turns: MemoryTurn[]; total: number; dropped: number };
+  /** `status` ok · expired · revoked, or gone: memory kept for a key the account no longer lists */
+  agents: Array<{ address: string; name: string; code: string; status: string; notes: MemoryNote[]; conversation: Conversation }>;
+  limits: MemoryLimits;
+}
+
+/** one agent's view of its memory */
+export interface AgentMemoryView {
+  asOf: string;
+  about: MemoryNote[];
+  notes: MemoryNote[];
+  conversation: Conversation;
+  limits: MemoryLimits;
 }
 
 export interface AgentsView {
