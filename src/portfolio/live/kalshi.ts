@@ -363,8 +363,13 @@ function kalshiNo(venue: string, name: string, r: HttpReply, secrets: string[], 
   const net = networkNo(venue, name, r, native);
   if (net) return net;
   if (r.status === 401 || r.status === 0 || r.status >= 500) return venueSaidNo(venue, name, r.status, text, secrets, r);
-  // where the account is: Kalshi's own rule — a lapsed location attestation, for one, stops a key in Sports, Elections and Entertainment markets
-  if (r.status === 451 || REGION.test(text) || /attest/i.test(text) || (r.status === 403 && /location/i.test(text))) return no("E_VENUE_GEOBLOCKED", { venue, message: `${name} does not take this order from where this account is: that is its own rule, and the account does not look for a way around it`, native });
+  // where the account is, by status: Kalshi's own rule for the whole exchange, whatever the words
+  if (r.status === 451) return no("E_VENUE_GEOBLOCKED", { venue, message: `${name} does not take this order from where this account is: that is its own rule, and the account does not look for a way around it`, native });
+  // a lapsed location attestation stops a key in some market categories only (Sports, Elections and Entertainment): Kalshi's rule for these
+  // markets, held to them alone — its other markets, and how its other orders stand, still answer
+  if (r.status === 403 && /attest/i.test(text)) return no("E_VENUE_GEOBLOCKED", { venue, message: `${name} takes no API orders in this market's category without a current location attestation: its own rule, for these markets alone`, native, detail: { scope: "product" } });
+  // where the account is: Kalshi's own rule for the whole exchange
+  if (REGION.test(text) || (r.status === 403 && /location/i.test(text))) return no("E_VENUE_GEOBLOCKED", { venue, message: `${name} does not take this order from where this account is: that is its own rule, and the account does not look for a way around it`, native });
   if (r.status === 403) return no("E_VENUE_PERMISSION", { venue, message: `${name} refused: this key may not trade. A Kalshi key keeps the scopes it was made with; one that trades has write (or write::trade)`, native });
   const t = text.toLowerCase();
   // the order as written, in Kalshi's words: native goes into no(), where a refusal's words are made safe to keep

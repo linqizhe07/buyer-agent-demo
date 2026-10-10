@@ -542,7 +542,7 @@ export interface MmSendVoice {
   landed(job: string): Promise<"pending" | "settled" | "failed">;
 }
 
-export function mmTrader(d: MmTraderDeps): LiveTrader & { kinds: MarketKind[] } {
+export function mmTrader(d: MmTraderDeps): LiveTrader & { kinds: MarketKind[]; positionsOf(symbol: string): Promise<Position[] | Refusal>; held(o: { side: "buy" | "sell"; reduceOnly?: boolean | undefined; symbol?: string | undefined }): Promise<Refusal | undefined> } {
   const { venue, run, env, now } = d;
   const { said, cmd, writesOn, off, failureOf, saidNo, call, unread, lost } = mmVoice(venue, run, env);
   /** an order mm sent whose answer was lost (lost above), and that could not be found taken: it may have been. Said as that — never as
@@ -1582,6 +1582,22 @@ export function mmTrader(d: MmTraderDeps): LiveTrader & { kinds: MarketKind[] } 
       if (isRefusal(pm)) return pm;
       if (isRefusal(hl)) return hl;
       return [...pm, ...hl];
+    },
+    /** what is held at the one venue a market is at: a close reads only the part it closes, so that Polymarket refusing this network (a
+     * network that blocks polymarket.com) never hides — nor keeps from being closed — a perpetual at Hyperliquid, nor the other way */
+    async positionsOf(symbol: string) {
+      const p = parseSymbol(venue, symbol);
+      if (isRefusal(p)) return p;
+      return p.kind === "perp" ? perpPositions() : p.kind === "predict" ? pmPositions() : [];
+    },
+    /** the venue's place rule for an order here, asked before the owner is quoted or an agent's card is raised (account/live-orders.ts
+     * placeRule), signing and sending nothing: Polymarket's own check for an outcome (close-only lets a sell through), Hyperliquid's line for
+     * a perpetual; a swap has none */
+    async held(o: { side: "buy" | "sell"; reduceOnly?: boolean | undefined; symbol?: string | undefined }) {
+      const p = parseSymbol(venue, o.symbol ?? "");
+      if (isRefusal(p) || p.kind === "swap") return undefined;
+      if (p.kind === "perp") return hlLine(`${o.side}${o.reduceOnly ? " to close" : ""} ${p.coin}-PERP`);
+      return geoblock(["predict", "geoblock", "--json"], o.reduceOnly ? "sell" : o.side);
     },
     /** a position closed: at Hyperliquid by its own close (mm perps close); at Polymarket by selling the shares, a market order at the
      * account's 2% room under the bid, as the account would send it (no amend: mm has no command that changes an order in place) */

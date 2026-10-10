@@ -144,7 +144,8 @@ describe("the account's own answer, kept, refuses at the door only while it is f
     const cc = simKey("agent:claude-code");
     const openExchange: OpenExchange = async (id) => ({ id, name: id === "binance" ? "Binance" : id, has: {}, fetchTime: async () => { if (id === "binance") throw thrown("ExchangeNotAvailable", 'binance GET https://api.binance.com/api/v3/time 451 Unavailable For Legal Reasons {"code":0,"msg":"Service unavailable from a restricted location"}'); return 1; } }) as unknown as ExchangeClient;
     const http = (async () => ({ status: 404, body: undefined, text: "" })) as Http;
-    const svc = await PortfolioService.create({ home, venues: "frontline", real: true, publicMarkets: [], liveDeps: { http, openExchange, clock: () => now, mm: (async () => ({ authenticated: true })) as unknown as RunMm, price: async () => undefined }, account: { owners: [{ id: owner.address, kind: "eoa", label: "owner", addedAt: new Date(now).toISOString() }] } });
+    // the account's clock follows the test's: the nonces below are signed at that moment, and a nonce is good for two days around the account's clock
+    const svc = await PortfolioService.create({ home, now: () => new Date(now).toISOString(), venues: "frontline", real: true, publicMarkets: [], liveDeps: { http, openExchange, clock: () => now, mm: (async () => ({ authenticated: true })) as unknown as RunMm, price: async () => undefined }, account: { owners: [{ id: owner.address, kind: "eoa", label: "owner", addedAt: new Date(now).toISOString() }] } });
     const own = async (a: NoNonce<OwnerAction>) => svc.exchange(await signOwner(owner, { ...a, nonce: now + ++n } as OwnerAction));
     const ag = async (a: NoNonce<AgentAction>) => svc.exchange(await signAgent(cc, { ...a, nonce: now + ++n } as AgentAction));
     expect(isRefusal(await own({ type: "approveAgent", agentAddress: cc.address, agentName: "Claude Code", validUntil: now + 30 * 86_400_000 }))).toBe(false);

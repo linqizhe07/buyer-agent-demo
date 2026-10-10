@@ -286,7 +286,15 @@ describe("ATTACK: MetaMask's own switch", () => {
 describe("ATTACK: a perpetual from a place Hyperliquid's terms close", () => {
   it("an order, a close and a leverage change at Hyperliquid are refused in Hyperliquid's words before anything is sent, whoever signs", async () => {
     const x = await boot({ mmEnv: { PORTFOLIO_MM_WRITES: "1" } });
-    const p = await x.engine.prepare({ type: "liveOrder", venue: "mmw", symbol: "BTC-PERP", side: "buy", orderType: "market", qty: "0.001" });
+    // quoted from here: refused before the owner is quoted, in Hyperliquid's words (the place rule is asked before a quote or a card)
+    const draft = { type: "liveOrder", venue: "mmw", symbol: "BTC-PERP", side: "buy", orderType: "market", qty: "0.001" } as const;
+    const quoted = await x.engine.prepare(draft);
+    expect(isRefusal(quoted) && [quoted.code, quoted.message.includes("Hyperliquid does not serve this location (where mm places this machine)")]).toEqual(["E_VENUE_GEOBLOCKED", true]);
+    // an order prepared where Hyperliquid serves, and signed after the machine moved here: refused when it is placed, before anything is sent
+    const us = mm.answers["predict geoblock"];
+    mm.answers["predict geoblock"] = { command: "geoblock", result: { blocked: false, ip: "203.0.113.9", country: "IE", region: "L" } };
+    const p = await x.engine.prepare(draft);
+    mm.answers["predict geoblock"] = us;
     if (isRefusal(p)) throw new Error(p.message);
     const { nonce: _n, ...rest } = p.action as Extract<OwnerAction, { type: "liveOrder" }>;
     const r = refusal(await x.own(rest as NoNonce<OwnerAction>));

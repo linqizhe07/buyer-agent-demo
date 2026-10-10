@@ -945,7 +945,7 @@ describe("the one drawer", () => {
     expect(p.run<string>(`mkWhere(${JSON.stringify({ key: "coin:ETH", kind: "coin", name: "Ether", at: [at("Exchange X", true)] })})`)).not.toContain("mk-more");
   });
 
-  it("offers Connect to trade only at a venue that would take the user from where they are; one that would not says so in its own words, on the row and in the drawer", () => {
+  it("offers Connect to trade only at a venue that would take the user from where they are; one that would not is said in a word, not in its sentence, and a row none of whose venues serves this network says so", () => {
     const p = page(() => ({}));
     p.set("A", account());
     const at = (venue: string, venueName: string, connector: string) => ({ venue, venueName, symbol: "BTC-PERP", connected: false, canTrade: false, public: true, connectTo: venue, connector, price: 62_000 });
@@ -956,8 +956,8 @@ describe("the one drawer", () => {
     p.run(`VENUES.set("live:exchange:okx", { connector: "live:exchange:okx", name: "Hyperliquid", verdict: "not-served", said: "Hyperliquid's Terms of Use §1.6 do not serve this location." })`);
     const r = p.run<Record<string, string>>(`mkRoute(${JSON.stringify(item)})`);
     expect(r).toMatchObject({ act: "why", word: "Not served here" });
-    expect(r.text).toBe("Hyperliquid: not served here — Hyperliquid's Terms of Use §1.6 do not serve this location.");
-    expect(p.run<string>(`mkActs(${JSON.stringify(item)}, 0)`)).toContain(">Not served here · why</button>");
+    expect(r.text).toBe("Hyperliquid: not served here.");
+    expect(p.run<string>(`mkActs(${JSON.stringify(item)}, 0)`)).toContain(">Not served here</button>");
     // two venues list it, one would take the user: that one is offered
     const two = { ...item, at: [item.at[0], at("kraken", "Kraken", "live:exchange:kraken")] };
     expect(p.run<Record<string, unknown>>(`mkRoute(${JSON.stringify(two)})`)).toMatchObject({ act: "connect", venueName: "Kraken" });
@@ -968,21 +968,21 @@ describe("the one drawer", () => {
     expect(p.run<string>(`mkActs(${JSON.stringify(two)}, 0)`)).toContain('title="Kraken: its terms exclude where you are');
     // both refuse this network: none of them is offered, and the row says how many list it
     p.run(`VENUES.set("live:exchange:kraken", { connector: "live:exchange:kraken", name: "Kraken", verdict: "not-served", said: "Kraken does not serve this location" })`);
-    expect(p.run<Record<string, string>>(`mkRoute(${JSON.stringify(two)})`).text).toMatch(/^None of the 2 venues that list it would take you from where you are\. Hyperliquid: not served here/);
+    expect(p.run<Record<string, string>>(`mkRoute(${JSON.stringify(two)})`).text).toBe("None of the 2 venues that list it serves this network.");
     // setup and no answer are not a no: a venue that did not answer just now is still offered
     p.run(`VENUES.set("live:exchange:kraken", { connector: "live:exchange:kraken", name: "Kraken", verdict: "no-answer" })`);
     expect(p.run<Record<string, unknown>>(`mkRoute(${JSON.stringify(two)})`)).toMatchObject({ act: "connect", venueName: "Kraken" });
     p.run(`VENUES.clear()`);
   });
 
-  it("the list of accounts reads the account's detection too: a venue whose own terms exclude where the user is is marked and said, never closed; one that refuses this network is closed", () => {
+  it("the list of accounts reads the account's detection too: a venue whose own terms exclude where the user is is marked and said, never closed; one that refuses this network is marked Not served here, in its words, and not closed either (the connection is kept waiting)", () => {
     const p = page(() => ({}));
     p.set("A", account());
     const terms = "its terms exclude where you are (https://www.okx.com/help/terms-of-service, read 2026-10-08): “…Restricted Persons…” — the venue checks residency when an account is opened; the account does not";
     p.run(`VENUES.set("live:exchange:okx", { connector: "live:exchange:okx", name: "OKX", verdict: "terms-exclude", said: ${JSON.stringify(terms)}, asked: "2026-10-06T05:00:00.000Z" })`);
     p.run(`VENUES.set("live:exchange:bybit", { connector: "live:exchange:bybit", name: "Bybit", verdict: "not-served", said: "Bybit does not serve this location", asked: "2026-10-06T05:00:00.000Z" })`);
     expect(p.run("tileSays('live:exchange:okx')")).toMatchObject({ word: "Its terms exclude where you are", shut: false, state: "terms" });
-    expect(p.run("tileSays('live:exchange:bybit')")).toMatchObject({ word: "Not served here", shut: true });
+    expect(p.run("tileSays('live:exchange:bybit')")).toMatchObject({ word: "Not served here", state: "location", shut: false });
     const cat = p.run<string>("catalog(true)");
     expect(cat).toContain('data-extra="okx"');
     expect(cat).toMatch(/data-extra="okx" title="its terms exclude where you are[^"]*"><b>OKX<\/b><span><em class="off">Its terms exclude where you are<\/em>/);
@@ -1021,7 +1021,7 @@ describe("the one drawer", () => {
     p.set("A", account());
     const edition = { connector: "live:exchange:binanceus", name: "Binance.US", said: "Binance.US serves where you are under its own terms (https://www.binance.us/terms-of-use, read 2026-10-08): a separate company, with its own account and API keys" };
     p.run(`VENUES.set("live:exchange:binance", { connector: "live:exchange:binance", name: "Binance", verdict: "not-served", said: "Binance does not serve this location", asked: "2026-10-08T15:00:00.000Z", edition: ${JSON.stringify(edition)} })`);
-    expect(p.run("tileSays('live:exchange:binance')")).toMatchObject({ word: "Not served here", shut: true, edition: { name: "Binance.US" } });
+    expect(p.run("tileSays('live:exchange:binance')")).toMatchObject({ word: "Not served here", shut: false, edition: { name: "Binance.US" } });
     const cat = p.run<string>("catalog(true)");
     expect(cat).toMatch(/<b>Binance<\/b><span><em class="off">Not served here<\/em><\/span><\/button><button type="button" class="tile" data-kind="exchange" data-extra="binanceus"><b>Binance.US<\/b><span>API key · serves where you are<\/span><\/button>/);
     // only beside the venue that cannot be used: no other tile says it
@@ -1030,6 +1030,78 @@ describe("the one drawer", () => {
     expect(note).toContain('data-reach="edition"');
     expect(note).toContain(">Connect Binance.US instead</button>");
     p.run("VENUES.clear()");
+  });
+
+  it("a venue that refuses this network no longer shuts the form: the tile keeps Not served here and the venue's words, the note keeps them with Check again and adds that the connection can still be saved; a venue that wants something on this machine first, or offers no way in, still shuts it", () => {
+    const p = page(() => ({}));
+    p.set("A", account());
+    const said = "Binance does not serve this location: that is its own rule, and the account does not look for a way around it. It answered: “Service unavailable from a restricted location”";
+    p.run(`REACH.set("live:exchange:binance", { connector: "live:exchange:binance", state: "location", said: ${JSON.stringify(said)}, at: "2026-10-06T05:00:00.000Z" })`);
+    p.run(`REACH.set("live:metamask", { connector: "live:metamask", state: "setup", said: "mm is not signed in on this machine: run mm login in a terminal, then check again", at: "2026-10-06T05:00:00.000Z" })`);
+    p.run(`REACH.set("live:kalshi", { connector: "live:kalshi", state: "closed", said: "Kalshi offers no way in for this account", at: "2026-10-06T05:00:00.000Z" })`);
+    expect(p.run("tileSays('live:exchange:binance')")).toMatchObject({ word: "Not served here", state: "location", shut: false });
+    expect(p.run("tileSays('live:metamask')")).toMatchObject({ word: "Set up first", state: "setup", shut: true });
+    expect(p.run("tileSays('live:kalshi')")).toMatchObject({ word: "Not available", state: "closed", shut: true });
+    // the account's detection says the same of a venue the form has not asked yet
+    p.run(`VENUES.set("live:exchange:bybit", { connector: "live:exchange:bybit", name: "Bybit", verdict: "not-served", said: "Bybit does not serve this location", asked: "2026-10-06T05:00:00.000Z" })`);
+    p.run(`VENUES.set("live:exchange:kraken", { connector: "live:exchange:kraken", name: "Kraken", verdict: "closed", said: "no way in", asked: "2026-10-06T05:00:00.000Z" })`);
+    expect(p.run("tileSays('live:exchange:bybit')")).toMatchObject({ word: "Not served here", state: "location", shut: false });
+    expect(p.run("tileSays('live:exchange:kraken')")).toMatchObject({ word: "No way in here", state: "closed", shut: true });
+    // the form's note: the venue's words, when it was asked, Check again, and that the connection can still be saved (the venue named as the form has it)
+    const note = p.run<string>(`reachNoteHtml(tileSays("live:exchange:binance"), "exchange", "Binance")`);
+    expect(note).toContain("It answered: “Service unavailable from a restricted location”");
+    expect(note).toContain('<span class="dim">(asked 01:00)</span>');
+    expect(note).toContain('<button type="button" class="link" data-reach="again">Check again</button>');
+    expect(note).toContain('<div class="dim small reach-still">You can still connect it: the account keeps the connection and asks Binance again when a check of this network finds it answering (Check again, or the half-hourly check). Nothing is sent to it until then.</div>');
+    expect(p.run<string>(`reachNoteHtml(tileSays("live:exchange:binance"), "exchange")`)).toContain("asks the venue again when a check of this network");
+    // nothing here names a way around the venue's rule
+    expect(note).not.toMatch(/proxy|vpn|another host/i);
+    // a no that shuts the form, and a close-only venue, add no such line
+    expect(p.run<string>(`reachNoteHtml(tileSays("live:metamask"), "metamask", "MetaMask Agent Wallet")`)).not.toContain("You can still connect it");
+    expect(p.run<string>(`reachNoteHtml({ state: "close-only", said: "Polymarket lets this location close positions, not open new ones", at: "2026-10-06T05:00:00.000Z" }, "polymarket-trade", "Polymarket")`)).not.toContain("You can still connect it");
+    // the tile keeps the venue's word and its look: that is the venue's answer, and true
+    expect(p.run<string>("catalog(true)")).toContain(`<button type="button" class="tile tile-off" data-kind="exchange" data-extra="binance" title="${said.replace(/'/g, "&#39;")}"><b>Binance</b><span><em class="off">Not served here</em></span></button>`);
+    p.run("VENUES.clear(); REACH.clear()");
+  });
+
+  it("a connection the owner signed while its venue refused this network, or did not answer, waits on the account: its tile says Connected · waiting, the venue's words on hover, not Not served here and not greyed; one read by address counts for its kind", () => {
+    const p = page(() => ({}));
+    const binance = { venue: "binance", name: "Binance", connector: "live:exchange:binance", needs: "key-file", keyFile: "credentials/binance/api-key.json", said: "Binance does not serve this location: that is its own rule, and the account does not look for a way around it. Asked again when a check of this network finds it answering", code: "E_VENUE_GEOBLOCKED", since: "2026-10-06T04:00:00.000Z", how: "connect" };
+    const poly = { venue: "polymarket-a1b2c3", name: "Polymarket · 0xa1b2", connector: "live:polymarket", needs: "address", address: "0xa1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2", said: "Polymarket's data API did not answer: asked again in 60 s", code: "E_VENUE_UNREACHABLE", since: "2026-10-06T04:30:00.000Z", how: "restart" };
+    const options = [...account().connectLive.options, { kind: "polymarket", connector: "live:polymarket", needs: "address", label: "Polymarket · by the account wallet's address" }];
+    p.set("A", account({ connectLive: { ...account().connectLive, options, waiting: [binance, poly] } }));
+    // the venue still refuses this network: the tile says the connection waits, not the venue's no
+    p.run(`REACH.set("live:exchange:binance", { connector: "live:exchange:binance", state: "location", said: "Binance does not serve this location", at: "2026-10-06T05:00:00.000Z" })`);
+    expect(p.run("waitingOf('exchange', 'binance').venue")).toBe("binance");
+    expect(p.run("waitingOf('polymarket', '').venue")).toBe("polymarket-a1b2c3");
+    expect(p.run("[waitingOf('exchange', 'okx'), waitingOf('exchange', ''), waitingOf('kalshi', ''), waitingOf('polymarket-trade', '')]")).toEqual([null, null, null, null]);
+    const cat = p.run<string>("catalog(true)");
+    expect(cat).toContain(`<button type="button" class="tile" data-kind="exchange" data-extra="binance" title="${binance.said}"><b>Binance</b><span><em class="on">Connected</em> · waiting for it to answer this network</span></button>`);
+    expect(cat).toContain(`<button type="button" class="tile" data-kind="polymarket" data-extra="" title="${poly.said.replace(/'/g, "&#39;")}"><b>Polymarket · by address</b><span><em class="on">Connected</em> · waiting for it to answer this network</span></button>`);
+    expect(cat).not.toMatch(/data-extra="binance"[^>]*Not served here/);
+    // a venue connected and read is still Connected · add another; one with nothing waiting and no answer is as before
+    expect(cat).toContain('data-kind="kalshi" data-extra=""><b>Kalshi</b><span><em class="on">Connected</em> · add another</span>');
+    expect(cat).toContain('<button type="button" class="tile" data-kind="exchange" data-extra="okx"><b>OKX</b><span>API key</span></button>');
+    // without the waiting entry the same answer greys the tile again
+    p.run("A.connectLive.waiting = []");
+    expect(p.run<string>("catalog(true)")).toContain('class="tile tile-off" data-kind="exchange" data-extra="binance" title="Binance does not serve this location"><b>Binance</b><span><em class="off">Not served here</em></span>');
+    p.run("REACH.clear()");
+  });
+
+  it("a connection its venue answered and refused (stopped: the key, the account) is not waiting: its tile says Not connected · connect it again, the venue's words on hover; the picker's marking from the venues' answers leaves a tile alone while its connection is on the account", () => {
+    const p = page(() => ({}));
+    const stopped = { venue: "binance", name: "Binance", connector: "live:exchange:binance", needs: "key-file", keyFile: "credentials/binance/api-key.json", said: "Binance refused the key: it has no permission for this action. Not asked again: connect it again, or disconnect it", code: "E_VENUE_UNAUTHORIZED", by: "venue", since: "2026-10-06T04:00:00.000Z", how: "restart", stopped: true };
+    p.set("A", account({ connectLive: { ...account().connectLive, waiting: [stopped] } }));
+    expect(p.run<string>("catalog(true)")).toContain(`<button type="button" class="tile" data-kind="exchange" data-extra="binance" title="${stopped.said}"><b>Binance</b><span><em class="off">Not connected</em> · connect it again</span></button>`);
+    expect(p.run<string>("catalog(true)")).not.toContain("waiting for it to answer");
+    // the venue's answer to this network, read as the list opens, marks no tile whose connection is on the account; the same tile with
+    // nothing on the account is marked
+    p.run(`REACH.set("live:exchange:binance", { connector: "live:exchange:binance", state: "location", said: "Binance does not serve this location", at: "2026-10-06T05:00:00.000Z" })`);
+    p.run('var SPAN = { innerHTML: "" }; var TILE = { dataset: { kind: "exchange", extra: "binance" }, classList: { added: [], add(c) { this.added.push(c); } }, title: "", querySelector: (s) => (s === "span" ? SPAN : null) }; document.querySelectorAll = () => [TILE]; markTiles()');
+    expect(p.run("[TILE.classList.added, TILE.title, SPAN.innerHTML]")).toEqual([[], "", ""]);
+    p.run("A.connectLive.waiting = []; markTiles()");
+    expect(p.run("[TILE.classList.added, TILE.title, SPAN.innerHTML]")).toEqual([["tile-off"], "Binance does not serve this location", '<em class="off">Not served here</em>']);
+    p.run("REACH.clear()");
   });
 
   it("lists the watchlist without a lead sentence or a date column: the date is the star's title", () => {
@@ -1102,5 +1174,100 @@ describe("a stock out of its session", () => {
     const read = { ...explore, items: [aapl(NIGHT)] };
     p.run(`MKT.got.set(${JSON.stringify("/api/account/explore?limit=200")}, { at: ${NOW}, body: ${JSON.stringify(read)}, good: ${JSON.stringify(read)}, goodAt: ${NOW} })`);
     expect(p.run<string>("MKT.reg = []; mkWatchingHtml(lensNow())")).toContain('title="Opens Tue 6 Oct, 09:30 New York">Closed</span>');
+  });
+});
+
+describe("after connect, a venue that refuses this network is a state Markets says, not an error", () => {
+  const CLOSE_SAID = "Polymarket lets this location close positions, not open new ones (its own rule)";
+  /* Polymarket connected and trading, close-only on this network */
+  const withPm = (over: Record<string, unknown> = {}) => account({ venues: [...account().venues, venue("pm", "Polymarket", { trade: { can: true, what: "event contracts", kinds: ["event"], positions: true }, closeOnly: { said: CLOSE_SAID }, ...over })] });
+  const rainLine = { venue: "pm", venueName: "Polymarket", symbol: "rain:Yes", connected: true, canTrade: true, public: false, price: 0.4, open: true, closeOnly: true };
+  const rain = { key: "pm:rain", kind: "event", name: "Will it rain?", price: 0.4, category: "Weather", tabs: ["all", "predictions"], outcomes: [{ label: "YES", price: 0.4, at: [{ venue: "pm", symbol: "rain:Yes" }] }, { label: "NO", price: 0.6, at: [{ venue: "pm", symbol: "rain:No" }] }], at: [rainLine] };
+  const held = { ok: true, row: null, positions: [{ venue: "pm", venueName: "Polymarket", symbol: "rain:Yes", name: "Will it rain? · Yes", kind: "event", side: "long", qty: 10 }], orders: [], cost: [], lines: [] };
+
+  it("a connected venue that lets this network only close takes no buy: the row says Close only here, the drawer says it in a chip with the venue's words folded away, Sell stays, and Buy opens the drawer instead of a red toast", () => {
+    const p = page(() => ({}));
+    p.set("A", withPm());
+    p.set("ITEMS", { rain, held });
+    expect(p.run<Record<string, string>>("mkRoute(ITEMS.rain, 0)")).toEqual({ act: "why", venue: "pm", text: "Polymarket: close only here. What you hold there can be sold.", word: "Close only here", said: CLOSE_SAID });
+    expect(p.run<string>("MKT.reg = []; mkActs(ITEMS.rain, 0)")).toContain('title="Polymarket: close only here. What you hold there can be sold.">Close only here</button>');
+    // the explore line alone says it too (before the account's mark on the venue is read)
+    p.set("A", withPm({ closeOnly: undefined }));
+    expect(p.run<Record<string, string>>("mkRoute(ITEMS.rain)")).toMatchObject({ act: "why", word: "Close only here", said: "" });
+    p.set("A", withPm());
+    // the drawer: no Buy and no warning callout; the state in a chip, the venue's words in a closed details; selling what is held stays
+    const html = p.run<string>('mkDrawerHtml({ item: ITEMS.rain, interval: "1h", asset: ITEMS.held, ipo: [] })');
+    expect(html).toContain(`<div class="mk-state"><span class="chip" title="Polymarket: close only here. What you hold there can be sold.">Close only here</span><details class="inl"><summary>The venue's words</summary>${CLOSE_SAID}.</details></div>`);
+    expect(html).not.toContain("Can't trade it here");
+    expect(html).not.toContain('data-act="yn"');
+    expect(html).toContain('data-act="sell" data-venue="pm" data-symbol="rain:Yes"');
+    // Across venues: no Trade there; the state in a word, the venue's words on hover
+    const across = p.run<string>("mkAcrossHtml({ item: ITEMS.rain, asset: ITEMS.held })");
+    expect(across).toContain(`<span class="why" title="${CLOSE_SAID}"><b>Close only here</b></span>`);
+    expect(across).not.toContain('data-act="trade-at"');
+    // Buy (a row's outcome button) opens the market's drawer, once; nothing is said as an error
+    p.run("var OPENED = []; var TOASTS = []; openMarket = (x) => OPENED.push(x.key); toast = (t, k) => TOASTS.push([t, k])");
+    p.run('MKT.open = null; mkTrade(ITEMS.rain, "buy", 0)');
+    expect(p.run("[OPENED, TOASTS]")).toEqual([["pm:rain"], []]);
+    p.run('MKT.open = { item: ITEMS.rain }; mkTrade(ITEMS.rain, "buy", 0); MKT.open = null');
+    expect(p.run("OPENED.length")).toBe(1);
+    // a refusal that is no state (Kalshi's key can't trade) is still said as one
+    p.set("ITEMS.fedK", { ...fed, at: [fed.at[0]], outcomes: fed.outcomes.map((o) => ({ ...o, at: [o.at[0]] })) });
+    p.run('mkTrade(ITEMS.fedK, "buy", 0)');
+    expect(p.run<Array<[string, string]>>("TOASTS").map(([, k]) => k)).toEqual(["no"]);
+  });
+
+  it("where its connected venue is close-only, a public listing at a venue that serves this network is offered instead; never one whose venue is already connected", () => {
+    const p = page(() => ({}));
+    p.set("A", withPm());
+    const pub = { venue: "standin-pubex-public", venueName: "Stand-in", symbol: "RAIN-YES", connected: false, canTrade: false, public: true, price: 0.41, connectTo: "standin-pubex", connector: "live:standin-pubex" };
+    p.set("ITEMS", { both: { ...rain, at: [rainLine, pub] }, again: { ...rain, at: [rainLine, { ...pub, connectTo: "kalshi", connector: "live:kalshi" }] } });
+    expect(p.run<Record<string, string>>("mkRoute(ITEMS.both, 0)")).toMatchObject({ act: "connect", connector: "live:standin-pubex", venueName: "Stand-in" });
+    // Kalshi is connected already: its public line is a price, not a connection to offer again
+    expect(p.run<Record<string, string>>("mkRoute(ITEMS.again, 0)")).toMatchObject({ act: "why", word: "Close only here" });
+  });
+
+  it("the drawer's comparison names a venue that does not serve this network once, in a quiet line with its words on hover; a read that failed keeps its words", () => {
+    const p = page(() => ({}));
+    p.set("A", account());
+    p.set("ITEMS", { btc });
+    const geo = { venue: "binance", venueName: "Binance", why: "Binance does not serve this location: that is its own rule", code: "E_VENUE_GEOBLOCKED" };
+    const compare = { ok: true, rows: [{ venue: "ex", venueName: "Exchange X", symbol: "BTC/USDT", price: 62140, spreadPct: 0.01, best: true, ready: true }], missing: [geo, geo, { venue: "kraken", venueName: "Kraken", why: "Kraken did not answer just now", code: "E_VENUE_UNREACHABLE" }] };
+    const html = p.run<string>(`mkAcrossHtml({ item: ITEMS.btc, compare: ${JSON.stringify(compare)} })`);
+    expect(html).toContain('<p class="mk-quiet" title="Binance: Binance does not serve this location: that is its own rule.">Not served on this network now: Binance.</p>');
+    expect(html).toContain('<p class="mk-missing">Not compared: <b>Kraken</b>: Kraken did not answer just now.</p>');
+    expect(html).not.toContain("<b>Binance</b>");
+    // what is held, read without that venue: the same quiet line
+    const asset = { ok: true, row: null, positions: [], orders: [], cost: [], lines: [], missing: [geo] };
+    expect(p.run<string>(`mkHeldHtml({ item: ITEMS.btc, asset: ${JSON.stringify(asset)} })`)).toContain('<p class="mk-quiet" title="Binance: Binance does not serve this location: that is its own rule.">Not served on this network now: Binance.</p>');
+  });
+
+  it("an order the account stopped following reads Not followed, its note on hover, under You hold (Cancel stays: it sends the owner's cancel again) and under Agents on it", () => {
+    const p = page(() => ({}));
+    const note = "Exchange X refuses this network, so the account can neither cancel it nor see it fill: it stopped following it. Cancel it at Exchange X";
+    const agent = "0x3a087530887bd175ccc38828ee3776e5b6ea1ac6";
+    const order = { id: "ord-1", venue: "ex", venueName: "Exchange X", side: "buy", qty: 0.01, base: "BTC", symbol: "BTC/USDT", type: "limit", limitPrice: 60000, status: "open", filledQty: 0, unfollowed: true, note, agent };
+    p.set("A", account({ orders: [order], keys: [{ address: agent, name: "Claude Code", status: "ok" }] }));
+    p.set("ITEMS", { btc });
+    const asset = { ok: true, row: null, positions: [], orders: [order], cost: [], lines: [] };
+    expect(p.run<string>(`mkHeldHtml({ item: ITEMS.btc, asset: ${JSON.stringify(asset)} })`)).toContain(`<span class="st dim" title="${note}">Not followed</span><button type="button" class="btn btn-sm btn-ghost" data-act="cancel" data-order="ord-1"`);
+    const agents = p.run<string>("mkAgentsHtml(ITEMS.btc)");
+    expect(agents).toContain(`ord-1 · Exchange X · <span title="${note}">Not followed</span>`);
+    expect(agents).not.toContain("· open");
+  });
+
+  it("the connect form's note is quiet (wait) for a connection already waiting on the account, and red for one that is not", () => {
+    const p = page(() => ({}));
+    const waiting = { venue: "kalshi-2", name: "Kalshi", connector: "live:kalshi", needs: "key-file", keyFile: "credentials/kalshi/api-key.json", said: "Kalshi does not serve this location", code: "E_VENUE_GEOBLOCKED", since: "2026-10-06T04:00:00.000Z", how: "connect" };
+    p.set("A", account({ connectLive: { ...account().connectLive, waiting: [waiting] } }));
+    // the dialog's parts, kept by id
+    p.run('var ELS = {}; var mkEl = (id) => ({ id, innerHTML: "", textContent: "", className: "", hidden: false, open: false, value: "", dataset: {}, addEventListener() {}, querySelectorAll: () => [], querySelector: () => null, showModal() { this.open = true; }, close() {}, elements: { label: { value: "", addEventListener() {} }, ref: { value: "", addEventListener() {} } } }); document.getElementById = (id) => (ELS[id] = ELS[id] || mkEl(id))');
+    p.run('REACH.set("live:kalshi", { connector: "live:kalshi", state: "location", said: "Kalshi does not serve this location", at: "2026-10-06T05:00:00.000Z" })');
+    p.run('openConnect(optionOf("kalshi"), {})');
+    expect(p.run("ELS['reach-note'].className")).toBe("reach-note msg wait");
+    expect(p.run<string>("ELS['reach-note'].innerHTML")).toContain("Kalshi does not serve this location");
+    p.run('A.connectLive.waiting = []; ELS = {}; openConnect(optionOf("kalshi"), {})');
+    expect(p.run("ELS['reach-note'].className")).toBe("reach-note msg no");
+    p.run("REACH.clear()");
   });
 });

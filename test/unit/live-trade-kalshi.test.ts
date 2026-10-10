@@ -451,7 +451,8 @@ describe("Kalshi's refusals, in its own words", () => {
     expect(await said(json({ error: { code: "invalid_order_size", message: "invalid order size" } }, 400))).toEqual(["E_VENUE_ORDER_INVALID", "Kalshi: Kalshi does not take an order of this size (counts are in steps of 0.01 contracts)", { status: 400, said: "invalid_order_size · invalid order size" }]);
     expect(await said(json({ code: "forbidden", message: "Forbidden - insufficient permissions" }, 403))).toEqual(["E_VENUE_PERMISSION", "Kalshi refused: this key may not trade. A Kalshi key keeps the scopes it was made with; one that trades has write (or write::trade)", { status: 403, said: "forbidden · Forbidden - insufficient permissions" }]);
     const region = await said(json({ error: { code: "forbidden", message: "API key location attestation has expired for this market category" } }, 403));
-    expect([region[0], region[1]]).toEqual(["E_VENUE_GEOBLOCKED", "Kalshi does not take this order from where this account is: that is its own rule, and the account does not look for a way around it"]);
+    // a lapsed attestation is Kalshi's rule for some market categories, held to them alone
+    expect([region[0], region[1]]).toEqual(["E_VENUE_GEOBLOCKED", "Kalshi takes no API orders in this market's category without a current location attestation: its own rule, for these markets alone"]);
     expect((await said(json({ error: { code: "forbidden", message: "Not available in your jurisdiction" } }, 403)))[0]).toBe("E_VENUE_GEOBLOCKED");
     expect((await said(json({ error: { code: "market_inactive", message: "market is not active" } }, 400)))[0]).toBe("E_VENUE_MARKET_CLOSED");
     expect((await said(json({ error: { code: "invalid_order", message: "invalid price", details: "INVALID_PRICE" } }, 400)))[0]).toBe("E_VENUE_ORDER_INVALID");

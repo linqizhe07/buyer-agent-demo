@@ -22,6 +22,7 @@ import { no } from "../refuse.ts";
 import type { AccountKind } from "../accounts.ts";
 import { STABLECOINS, type ChainName } from "../live/chain.ts";
 import { isStable } from "../live/types.ts";
+import { holdBackMs } from "../live/public-markets.ts";
 import type { LiveTrader } from "../live/trade.ts";
 import type { Landed, LiveReceipt, LiveWriter, WalletTx } from "../live/writes.ts";
 import type { BridgeRoute } from "../live/bridge.ts";
@@ -66,7 +67,11 @@ export interface LiveMoney {
   held?(venue: string): Refusal | undefined;
   /** a venue's answer that holds it back, given to that shared hold */
   hold?(venue: string, r: Refusal): void;
-  /** a venue that did not come back after a restart and is being connected again (service.ts restore), in the words that say why: what is
+  /** the same for the earn door, whose place in the hold is its own where a connection reaches several venues (mm's earn is LI.FI's) */
+  earnHeld?(venue: string): Refusal | undefined;
+  earnHold?(venue: string, r: Refusal): void;
+  /** a venue on the account whose venue has not answered this network yet — connected by the owner so, or not back after a restart — and is
+   * asked again (service.ts waiting), in the words that say why: what is
    * followed there waits for it rather than being let go */
   waiting?(venue: string): string | undefined;
 }
@@ -149,6 +154,25 @@ export class LiveMoves {
     return this.e.host.liveMoney?.();
   }
 
+  /** the refusal that keeps a venue back now, from the account's one hold (shared with its reads and the other doors): only what the venue
+   * asked for — its place rule or its edge, a ban, a wait it named — not a read that only did not answer. Nothing is asked of it meanwhile */
+  private heldNow(venue: string): Refusal | undefined {
+    const r = this.money()?.held?.(venue);
+    return r && (r.code === "E_VENUE_GEOBLOCKED" || typeof (r.native as { until?: unknown } | undefined)?.until === "number") && holdBackMs(r) > 0 ? r : undefined;
+  }
+  /** a venue asked for what a movement needs (its deposit address, its fee, the movement itself): its answer that asks to be left alone holds
+   * it for every read and door, as the order door's does */
+  private async asked<T>(venue: string, call: () => Promise<T | Refusal>): Promise<T | Refusal> {
+    const r = await call();
+    if (isRefusal(r) && (r.code === "E_VENUE_GEOBLOCKED" || typeof (r.native as { until?: unknown } | undefined)?.until === "number") && holdBackMs(r) > 0) this.money()?.hold?.(venue, r);
+    return r;
+  }
+  /** a venue on the account that is not read yet: connected and waiting for its venue to answer this network (service.ts waiting) */
+  private notYet(id: string, end: "from" | "to"): Refusal | undefined {
+    const w = this.money()?.waiting?.(id);
+    return w ? no(end === "to" ? "E_ACCOUNT_DESTINATION" : "E_VENUE_UNREACHABLE", { venue: id, message: `${w}: no money is moved ${end === "to" ? "to" : "from"} it until it answers` }) : undefined;
+  }
+
   /** Everything that does not depend on who signed: the switch, the cap, the two venues, a destination that is the user's own, the fee */
   private async plan(f: Fields): Promise<Plan | Refusal> {
     const m = this.money();
@@ -162,8 +186,12 @@ export class LiveMoves {
     if (!isStable(f.asset) || !isStable(f.toAsset)) return no("E_ACCOUNT_UNPRICED", { message: "real money moves here in dollar stablecoins only, so that the cap means dollars" });
     if (amount > w.capUsd) return no("E_ACCOUNT_LIMIT", { message: `${usd(amount)} is more than the most one real movement may be on this server (${usd(w.capUsd)}). It is set when the server starts: --live-cap`, detail: { capUsd: w.capUsd } });
     const src = m.venue(f.from);
-    if (!src) return no("E_WALLET_ACCOUNT_UNKNOWN", { venue: f.from, message: `"${f.from}" is not a venue connected live: real money moves only between venues connected live` });
+    if (!src) return this.notYet(f.from, "from") ?? no("E_WALLET_ACCOUNT_UNKNOWN", { venue: f.from, message: `"${f.from}" is not a venue connected live: real money moves only between venues connected live` });
     if (!src.writer) return no("E_VENUE_RAIL_CLOSED", { venue: src.id, message: `${src.name}: ${src.readOnlyBecause ?? "this venue is read, not written"}` });
+    // a venue that does not serve this network now, or asked to be left alone: not asked for anything, in its own words. A wallet the user
+    // sends from themselves (a browser wallet, a bridge from it) is not a venue asked for anything
+    const srcHeld = src.writer.can.send === "wallet" ? undefined : this.heldNow(src.id);
+    if (srcHeld) return srcHeld;
     const from = src as Plan["src"];
     if (kind === "transfer" || kind === "swap") {
       if (f.to !== f.from) return no("E_ACCOUNT_BAD_ACTION", { message: `a ${kind} stays at one venue` });
@@ -189,13 +217,18 @@ export class LiveMoves {
     if (kind === "send" && from.address !== undefined && !from.proven) return no("E_VENUE_RAIL_CLOSED", { venue: src.id, message: `${src.name} is watched, not proven yours: nothing is sent from it here. Connect it again from the wallet itself` });
     if (f.from === f.to) return no("E_ACCOUNT_BAD_ACTION", { message: "the money leaves for another venue" });
     const dst = m.venue(f.to);
-    if (!dst) return no("E_ACCOUNT_DESTINATION", { venue: f.to, message: `"${f.to}" is not a venue connected live: real money goes only to a place of yours the account can see` });
+    if (!dst) return this.notYet(f.to, "to") ?? no("E_ACCOUNT_DESTINATION", { venue: f.to, message: `"${f.to}" is not a venue connected live: real money goes only to a place of yours the account can see` });
     if (!dst.writer?.can.receive) return no("E_ACCOUNT_DESTINATION", { venue: dst.id, message: `${dst.name}: ${dst.readOnlyBecause ?? "nothing is sent there from here"}` });
     // a wallet's address is the user's only if it was shown to be; an exchange's deposit address is the exchange's own answer
     if (dst.address !== undefined && !dst.proven) return no("E_ACCOUNT_DESTINATION", { venue: dst.id, message: `${dst.name} is watched, not proven yours: real money goes only to an address a wallet signed for. Connect it again from the wallet itself` });
-    const where = await dst.writer.depositAddress(f.asset, network);
+    // an exchange is asked for its deposit address: not while it does not serve this network, or asked to be left alone
+    const dstHeld = dst.address === undefined ? this.heldNow(dst.id) : undefined;
+    if (dstHeld) return dstHeld;
+    const where = await this.asked(dst.id, () => dst.writer!.depositAddress(f.asset, network));
     if (isRefusal(where)) return where;
-    const fee = kind === "withdraw" ? ((await from.writer.withdrawFee?.(f.asset, network)) ?? 0) : 0;
+    const feeAsked = kind === "withdraw" && from.writer.withdrawFee ? await this.asked(from.id, async () => (await from.writer.withdrawFee!(f.asset, network)) ?? 0) : 0;
+    if (isRefusal(feeAsked)) return feeAsked;
+    const fee = feeAsked;
     return { f, kind, src: from, dst, amount, network, toAddress: where.address, ...(where.tag ? { tag: where.tag } : {}), fee };
   }
 
@@ -215,10 +248,12 @@ export class LiveMoves {
     let toAddress = from.address as Hex;
     if (f.to !== f.from) {
       const d = m.venue(f.to);
-      if (!d) return no("E_ACCOUNT_DESTINATION", { venue: f.to, message: `"${f.to}" is not a venue connected live: real money goes only to a place of yours the account can see` });
+      if (!d) return this.notYet(f.to, "to") ?? no("E_ACCOUNT_DESTINATION", { venue: f.to, message: `"${f.to}" is not a venue connected live: real money goes only to a place of yours the account can see` });
       if (!d.writer?.can.receive) return no("E_ACCOUNT_DESTINATION", { venue: d.id, message: `${d.name}: ${d.readOnlyBecause ?? "nothing is sent there from here"}` });
       if (d.address !== undefined && !d.proven) return no("E_ACCOUNT_DESTINATION", { venue: d.id, message: `${d.name} is watched, not proven yours: real money goes only to an address a wallet signed for. Connect it again from the wallet itself` });
-      const where = await d.writer.depositAddress(f.toAsset, toNetwork);
+      const dHeld = d.address === undefined ? this.heldNow(d.id) : undefined;
+      if (dHeld) return dHeld;
+      const where = await this.asked(d.id, () => d.writer!.depositAddress(f.toAsset, toNetwork));
       if (isRefusal(where)) return where;
       if (where.tag) return no("E_ACCOUNT_DESTINATION", { venue: d.id, message: `${d.name} takes ${f.toAsset} on ${toNetwork} with a memo, which a bridge does not carry` });
       dst = d;
@@ -362,7 +397,10 @@ export class LiveMoves {
     let r: LiveReceipt | WalletTx | Refusal;
     // a bridge: the approval (when one is needed) and the transfer, for the wallet to send in that order
     const bridgeTxs = p.kind === "bridge" && p.route ? [...(p.route.approval?.txs ?? []), { ...p.route.tx, what: "bridge" } satisfies WalletTx] : undefined;
-    if (bridgeTxs) r = bridgeTxs[bridgeTxs.length - 1]!;
+    // the venue the money leaves, held back since this was planned (its place rule, its edge, a ban): nothing is sent to it, in its words
+    const held = bridgeTxs ? undefined : this.heldNow(p.src.id);
+    if (held) r = held;
+    else if (bridgeTxs) r = bridgeTxs[bridgeTxs.length - 1]!;
     // the exchange's idempotency key: the payment's id AND this run's, since a later run can hand the same payment id out again
     else if (p.kind === "withdraw") r = await p.src.writer.withdraw!({ asset: f.asset, amount: p.amount, address: p.toAddress!, tag: p.tag, network: p.network!, clientId: `${id}-${this.runId}` });
     else if (p.kind === "transfer") r = await p.src.writer.transfer!({ asset: f.asset, amount: p.amount, from: f.fromLedger, to: f.toLedger });
@@ -371,6 +409,8 @@ export class LiveMoves {
     else r = await p.src.writer.walletTx!({ asset: f.asset, amount: p.amount, to: p.toAddress!, network: p.network! });
     if (isRefusal(r)) {
       this.e.host.log({ kind: "account-refusal", venue: p.src.id, tool: `live ${p.kind}`, code: r.code, reason: r.message, native: r.native, signer: who.signer });
+      // the venue's own answer that asks to be left alone (not a hold this door took it from) holds it for every read and door
+      if (r !== held && (r.code === "E_VENUE_GEOBLOCKED" || typeof (r.native as { until?: unknown } | undefined)?.until === "number") && holdBackMs(r) > 0) this.money()?.hold?.(p.src.id, r);
       return r;
     }
     const wallet = "data" in r ? r : undefined;

@@ -67,6 +67,11 @@ import { plain } from "./trade.ts";
 import type { Price } from "./prices.ts";
 import { isStable, num } from "./types.ts";
 
+/** a read just before a money request that the venue answered with its own rule for this network (not one product's), or a ban or a wait it
+ * named: the request is not sent after it — the venue has just said it does not take one from here. A read that only did not answer leaves
+ * no baseline, and the request goes as before */
+const leftAlone = (r: Refusal): boolean => (r.code === "E_VENUE_GEOBLOCKED" && (r.detail as { scope?: unknown } | undefined)?.scope === undefined) || typeof (r.native as { until?: unknown } | undefined)?.until === "number";
+
 /** one product money can be put into */
 export interface EarnProduct {
   /** the venue's id for it: `8453:0x…` (a vault on a chain, through mm), `savings:USDT` (OKX Simple Earn Flexible), Kraken's strategy id,
@@ -303,6 +308,7 @@ export function okxEarner(d: ExchangeEarnDeps): LiveEarner {
       if (!call) return no("E_VENUE_RAIL_CLOSED", { venue, message: `the exchange library does not reach ${name}'s Simple Earn` });
       // what is lent before: what settles the request if its answer is lost (a read that fails leaves nothing to compare, and moves nothing)
       const before = method(client, "privateGetFinanceSavingsBalance") ? await lent(p.asset) : undefined;
+      if (isRefusal(before) && leftAlone(before)) return before;
       // no `rate`: OKX keeps the minimum lending rate set before (its own default otherwise); no destination: it lands in the funding account
       const body = { ccy: p.asset, amt: plain(amount), side };
       try {
@@ -448,10 +454,10 @@ export function krakenEarner(d: ExchangeEarnDeps): LiveEarner {
       return say(err, "list what is allocated to Earn");
     }
   };
-  const before = async (strategy: string): Promise<number | undefined> => {
+  const before = async (strategy: string): Promise<number | undefined | Refusal> => {
     if (!method(client, "privatePostEarnAllocations")) return undefined;
     const x = await allocated(strategy);
-    return isRefusal(x) ? undefined : x;
+    return isRefusal(x) ? (leftAlone(x) ? x : undefined) : x;
   };
   return {
     can,
@@ -504,6 +510,7 @@ export function krakenEarner(d: ExchangeEarnDeps): LiveEarner {
         if (!call) return no("E_VENUE_RAIL_CLOSED", { venue, message: `the exchange library does not reach ${name}'s Earn` });
         const body = { strategy_id: p.id, amount: plain(amount) };
         const was = await before(p.id);
+        if (isRefusal(was)) return was;
         try {
           const r = await call(body);
           return { ref: `allocate:${p.id}:${clientId}`, status: "pending", native: { request: body, answer: rec(r).result ?? null } };
@@ -518,6 +525,7 @@ export function krakenEarner(d: ExchangeEarnDeps): LiveEarner {
         if (!call) return no("E_VENUE_RAIL_CLOSED", { venue, message: `the exchange library does not reach ${name}'s Earn` });
         const body = { strategy_id: p.id, amount: plain(amount) };
         const was = await before(p.id);
+        if (isRefusal(was)) return was;
         try {
           const r = await call(body);
           return { ref: `deallocate:${p.id}:${clientId}`, status: "pending", native: { request: body, answer: rec(r).result ?? null } };
@@ -696,6 +704,7 @@ export function kucoinEarner(d: ExchangeEarnDeps): LiveEarner {
         if (!call) return no("E_VENUE_RAIL_CLOSED", { venue, message: `the exchange library does not reach ${name}'s Earn` });
         const body = { productId: p.id, amount: plain(amount), accountType: ACCOUNT };
         const was = method(client, "earnGetEarnHoldAssets") ? await holding(p.id) : undefined;
+        if (isRefusal(was) && leftAlone(was)) return was;
         try {
           const r = rec(rec(await call(body)).data);
           return { ref: `purchase:${p.id}:${clientId}`, status: "done", native: { request: body, answer: { orderId: str(r.orderId), orderTxId: str(r.orderTxId) } } };

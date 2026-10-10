@@ -220,6 +220,80 @@ describe("the Earn sheet", () => {
   });
 });
 
+describe("Earn, where a venue does not serve this network", () => {
+  const NOT_HERE = "Exchange does not serve this location: that is its own rule, and the account does not look for a way around it";
+  /* the exchange on the account, marked as not serving this network now */
+  const awayEx = venue("ex", "Exchange", { usd: 900, trade: { can: true, what: "spot", positions: true }, earn: { can: true, what: "Simple Earn Flexible" }, notServed: { said: NOT_HERE }, holdings: [{ asset: "USDT", amount: 500, usd: 500, class: "stable" }] });
+  const mm = venue("mm", "MetaMask", { usd: 100, earn: { can: true, what: "vaults" }, holdings: [{ asset: "USDC", amount: 40, usd: 40, class: "stable" }] });
+
+  it("names each venue that does not serve this network once, in one quiet line with their words folded away; a read that failed keeps its words, once a venue", async () => {
+    const said = "Binance does not serve this location: that is its own rule, and the account does not look for a way around it";
+    const geo = (venueId: string, venueName: string, why: string) => ({ venue: venueId, venueName, why, code: "E_VENUE_GEOBLOCKED", part: "earn" });
+    const down = { venue: "mm", venueName: "MetaMask", why: "mm did not answer", code: "E_VENUE_UNREACHABLE", part: "earn" };
+    const p = page((path) => (path.startsWith("/api/account/earn") ? { ...EARN, missing: [geo("binance", "Binance", said), geo("binance", "Binance", said), geo("bybit", "Bybit", "Bybit does not serve this location"), down, down] } : {}));
+    p.set("A", ACCOUNT);
+    p.run("openEarn({})");
+    await settle();
+    const html = String(p.sheets[0]!.root.innerHTML);
+    expect(html).toContain(`<div class="dim small">Not served on this network now: Binance, Bybit.<details class="inl"><summary>Their words</summary><div><b>Binance</b>: ${said}.</div><div><b>Bybit</b>: Bybit does not serve this location.</div></details></div>`);
+    expect(html.match(/Not served on this network now/g)).toHaveLength(1);
+    expect(html.match(/MetaMask could not be read: mm did not answer/g)).toHaveLength(1);
+    expect(html).not.toContain("Binance could not be read");
+    expect(html).not.toContain('class="msg no"');
+  });
+
+  it("offers nothing at a venue the account marks as not serving this network, and names it the same way; the sheet opened for it says where it stands in place of an empty list", async () => {
+    const p = page((path) => (path.startsWith("/api/account/earn") ? EARN : {}));
+    p.set("A", { ...ACCOUNT, venues: [awayEx, mm] });
+    p.run("openEarn({})");
+    await settle();
+    const all = String(p.sheets[0]!.root.innerHTML);
+    expect(all).not.toContain('data-prod="ex|');
+    expect(all).toContain('data-prod="mm|8453:0xvault"');
+    expect(all).toContain(`<div class="dim small">Not served on this network now: Exchange.<details class="inl"><summary>Their words</summary><div><b>Exchange</b>: ${NOT_HERE}.</div></details></div>`);
+    // opened for that venue (Take out, its row's Withdraw…): where it stands, said once; its words still on request
+    p.run('openEarn({ venue: "ex", side: "withdraw", product: "savings:USDT" })');
+    await settle();
+    const one = String(p.sheets[1]!.root.innerHTML);
+    expect(one).toContain('<p class="empty">Exchange doesn&#39;t serve the network you&#39;re on now. What it holds in earn stays there, and shows here again when it answers.</p>');
+    expect(one).not.toContain("Not served on this network now");
+    expect(one).toContain(`<div class="dim small"><details class="inl"><summary>Their words</summary><div><b>Exchange</b>: ${NOT_HERE}.</div></details></div>`);
+    expect(one).not.toContain("data-prod=");
+    // the venue refused the read itself, before the account marked it: the same words, never a red box
+    const q = page(() => ({ ok: false, refusal: { code: "E_VENUE_GEOBLOCKED", message: NOT_HERE } }));
+    q.set("A", ACCOUNT);
+    q.run('openEarn({ venue: "ex" })');
+    await settle();
+    const refused = String(q.sheets[0]!.root.innerHTML);
+    expect(refused).toContain("Exchange doesn&#39;t serve the network you&#39;re on now.");
+    expect(refused).not.toContain('class="msg no"');
+  });
+
+  it("Sell many names a venue that does not serve this network once, quietly, its words on hover; a read that failed keeps its words", async () => {
+    const p = page((path) => (path.startsWith("/api/account/sellable") ? { ...SELLABLE, missing: [{ venue: "binance", venueName: "Binance", why: "Binance does not serve this location", code: "E_VENUE_GEOBLOCKED" }, { venue: "kraken", venueName: "Kraken", why: "Kraken did not answer" }] } : {}));
+    p.set("A", ACCOUNT);
+    p.run("openSellMany({})");
+    await settle();
+    const list = String(p.sheets[0]!.root.smBody.innerHTML);
+    expect(list).toContain('<p class="dim small" title="Binance: Binance does not serve this location.">Not served on this network now: Binance.</p>');
+    expect(list).toContain("Kraken could not be read: Kraken did not answer");
+    expect(list).not.toContain("Binance could not be read");
+  });
+
+  it("Cash ready's Earn… and an earning row's Withdraw… are offered only where a venue that serves this network earns", () => {
+    const p = account();
+    p.set("PF.hold", { money: { venues: [] } });
+    const cash = () => String(p.run('pfCashHtml({ kind: "all", id: "", name: "All accounts" }, () => true, true)'));
+    expect(cash()).toContain('data-pf-act="earn"');
+    expect(p.run('[pfEarnOutAt("ex"), pfEarnOutAt("mm")]')).toEqual([true, true]);
+    p.set("A", { ...ACCOUNT, venues: [awayEx, mm] });
+    expect(cash()).toContain('data-pf-act="earn"');
+    expect(p.run('[pfEarnOutAt("ex"), pfEarnOutAt("mm")]')).toEqual([false, true]);
+    p.set("A", { ...ACCOUNT, venues: [awayEx] });
+    expect(cash()).not.toContain('data-pf-act="earn"');
+  });
+});
+
 describe("Sell many", () => {
   it("drafts the legs: a market sell of what is held (or less), a position's close (all, or part); names each", () => {
     const p = account();

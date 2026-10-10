@@ -301,6 +301,22 @@ describe("fix round · what the panes draw", () => {
     await q.run<Promise<unknown>>('own({ type: "setWatch", venue: "ex", symbol: "BTC/USDT", on: "true" })');
     expect(q.out("[flash, said]")).toEqual(["The account did not answer. Try again.", ""]);
   });
+
+  it("the restore banner counts the venues still waiting for their venue after the restart apart from the ones back and the ones missed, and lists no waiting one under details: each has its row under Venues", () => {
+    const p = page();
+    p.run('var DRAWN = ""; paint = (el, html) => { DRAWN = html; return true; }');
+    const restore = { runs: 1, from: "2026-10-01", owner: true, agents: 1, limits: 0, mode: "Guard", venues: [{ venue: "ex", ok: true }, { venue: "binance", ok: false, why: "connecting again", waiting: true, said: "Binance does not serve this location: asked again when a check of this network finds it answering" }, { venue: "old", ok: false, why: "the key file is gone" }], orders: 2, payments: 0, skipped: [], state: "done" };
+    p.set("A", account([venue("ex", "Exchange")], { restore }));
+    p.run("drawRestoreNotice()");
+    expect(p.run("DRAWN")).toContain("Continued after a restart: 1 of 3 accounts connected again · 1 waiting for its venue (see Venues) · 2 transactions followed again");
+    expect(p.run("DRAWN")).toContain("<div>old: the key file is gone</div>");
+    expect(p.run("DRAWN")).not.toContain("binance");
+    // two waiting; and none once every venue came back
+    p.run('A.restore.venues.push({ venue: "okx", ok: false, why: "connecting again", waiting: true, said: "OKX did not answer: asked again in 60 s" }); drawRestoreNotice()');
+    expect(p.run("DRAWN")).toContain("1 of 4 accounts connected again · 2 waiting for their venues (see Venues)");
+    p.run('A.restore.venues = [{ venue: "ex", ok: true }]; drawRestoreNotice()');
+    expect(p.run("DRAWN")).toBe("Continued after a restart: 1 of 1 account connected again · 2 transactions followed again");
+  });
 });
 
 describe("fix round · the owner's words and the limit for them", () => {
@@ -335,5 +351,20 @@ describe("fix round · the owner's words and the limit for them", () => {
     expect(src).toMatch(/data-revoke.*confirmSheet/);
     expect(src).toContain("for ${esc(s.intent)}");
     expect(source("ui/intent.js")).toContain("for ${esc(lim.intent)}");
+  });
+});
+
+describe("after connect: a venue that does not serve this network is named, never printed as an error", () => {
+  it("awayMiss tells a read's place rule (or a venue the account marks notServed) from a read that failed; awayLine names each venue once, its words escaped, on hover or folded", () => {
+    const p = page();
+    p.set("A", account([venue("ex", "Exchange", { notServed: { said: "Exchange does not serve this location" } }), venue("okx", "OKX")]));
+    expect(p.out('[awayMiss({ venue: "binance", code: "E_VENUE_GEOBLOCKED" }), awayMiss({ venue: "ex", code: "E_VENUE_UNREACHABLE" }), awayMiss({ venue: "okx", code: "E_VENUE_UNREACHABLE" }), awayMiss({ venue: "gone" }), awayMiss(null)]')).toEqual([true, true, false, false, false]);
+    const list = '[{ venue: "binance", venueName: "Binance", why: "Binance <b>does not</b> serve this location." }, { venue: "binance", venueName: "Binance", why: "again" }, { venue: "ex", venueName: "Exchange", said: "Its own rule" }]';
+    expect(p.run(`awayLine(${list})`)).toBe('<p class="dim small" title="Binance: Binance &lt;b&gt;does not&lt;/b&gt; serve this location. Exchange: Its own rule.">Not served on this network now: Binance, Exchange.</p>');
+    expect(p.run(`awayLine(${list}, { fold: true, cls: "x" })`)).toBe('<div class="x">Not served on this network now: Binance, Exchange.<details class="inl"><summary>Their words</summary><div><b>Binance</b>: Binance &lt;b&gt;does not&lt;/b&gt; serve this location.</div><div><b>Exchange</b>: Its own rule.</div></details></div>');
+    // the words alone, where the venue is already named; nothing at all for nothing
+    expect(p.run('awayLine([{ venue: "ex", venueName: "Exchange", why: "x" }], { fold: true, named: false })')).toBe('<div class="dim small"><details class="inl"><summary>Their words</summary><div><b>Exchange</b>: x.</div></details></div>');
+    expect(p.run('awayLine([{ venue: "ex", venueName: "Exchange" }], { named: false })')).toBe("");
+    expect(p.run("awayLine([])")).toBe("");
   });
 });

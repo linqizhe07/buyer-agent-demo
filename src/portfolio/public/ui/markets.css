@@ -158,3 +158,5 @@
 .pick .tile:hover:not(:disabled) { border-color: var(--card-border); background: linear-gradient(var(--hover), var(--hover)) var(--surface); box-shadow: var(--shadow-lift); }
 #modal-form .step > i { font-weight: 800; font-variant-numeric: tabular-nums; }
 #modal-form .kf-cmd .btn-sm, #modal-form .step .btn-sm { font-size: 14px; padding: 0 16px; }
+/* under a venue's refusal of this network: that the connection can still be saved, on a line of its own */
+#modal-form .reach-still { margin-top: 6px; line-height: 1.5; }

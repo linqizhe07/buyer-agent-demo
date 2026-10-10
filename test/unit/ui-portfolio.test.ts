@@ -349,7 +349,9 @@ describe("the Portfolio pane", () => {
     expect(String(p.run(`pfAccountsHtml(pfVenueIn(${ALL}), false)`))).toMatch(/data-venue="wallet" data-on="false"[^>]*disabled/);
     // the health chip: ✓ for a venue that answered, ✗ with the venue's own geoblock words for one that did not; the caption and "as of" are gone
     expect(acc).toMatch(/<span class="chip pf-health" title="Answered at 07:58 · 12 ms"><span aria-hidden="true">✓<\/span>Answers<\/span>/);
-    expect(acc).toMatch(/<span class="chip pf-health bad" title="Predictions does not serve this location\. That is Predictions&#39;s own rule for this location\."><span aria-hidden="true">✗<\/span>Not answering<\/span>/);
+    // a venue that does not serve this network is that state, said in a word (not a failure: no ✗), and offered for nothing from here
+    expect(acc).toContain('<span class="chip pf-health away" title="Predictions does not serve this location. Its numbers are from the last good read; it is asked again when a check of this network finds it answering."><span aria-hidden="true">·</span>Not served here</span></span>');
+    expect(acc).not.toContain("Not answering");
     expect(acc).not.toContain("API key");
     expect(acc).not.toContain("as of");
     // what a venue trades from here, or why not — and when a new key would fix it
@@ -359,6 +361,159 @@ describe("the Portfolio pane", () => {
     expect(t.can).toBe(false);
     expect(t.rekey).toBe(true);
     expect(t.text).toContain("This key can't trade. Create New API Key (Ed25519)");
+  });
+
+  it("lists a connection waiting for its venue under the accounts: no value, a neutral chip with the venue's words, no switch, Check again and Disconnect; the card's subtitle, the net worth's words and Next steps count it", async () => {
+    const entry = { venue: "binance", name: "Binance", connector: "live:exchange:binance", needs: "key-file", keyFile: "credentials/binance/api-key.json", said: "Binance does not serve this location: that is its own rule, and the account does not look for a way around it. Asked again when a check of this network finds it answering", code: "E_VENUE_GEOBLOCKED", since: "2026-10-06T10:30:00.000Z", how: "connect" };
+    const p = account({ connectLive: { ...ACCOUNT.connectLive, waiting: [entry] } });
+    const acc = String(p.run(`pfAccountsHtml(pfVenueIn(${ALL}), true)`));
+    // the four accounts as before, then the waiting row: no Details, no switch, no health chip of its own
+    expect(acc.match(/data-pf-act="acct-details"/g)).toHaveLength(4);
+    expect(acc.match(/role="switch"/g)).toHaveLength(4);
+    expect(acc).toMatch(/<b>Binance<\/b><span class="dim small">waiting for the venue<\/span>/);
+    expect(acc).toContain(`<span class="pf-chips"><span class="chip" title="${entry.said}">Waiting for the venue</span><span class="dim small">since 06:30</span></span>`);
+    expect(acc).not.toContain('class="chip pf-health bad" title="Binance');
+    expect(acc).toContain('data-pf-act="recheck" data-connector="live:exchange:binance"');
+    expect(acc).toContain('data-pf-act="unwait" data-venue="binance"');
+    expect(acc.indexOf('data-venue="agent-claude-code"')).toBeLessThan(acc.indexOf('data-pf-act="unwait"'));
+    // a browser that only looks may ask the venue again, not disconnect
+    const look = String(p.run(`pfAccountsHtml(pfVenueIn(${ALL}), false)`));
+    expect(look).toMatch(/data-pf-act="unwait" data-venue="binance"[^>]*disabled/);
+    expect(look).not.toMatch(/data-pf-act="recheck" data-connector="live:exchange:binance"[^>]*disabled/);
+    // the lens on one venue shows that venue's rows only
+    expect(String(p.run(`pfAccountsHtml(pfVenueIn({ kind: "venue", id: "ex", name: "Exchange" }), true)`))).not.toContain("unwait");
+    // the Venues card's subtitle counts it apart from the accounts
+    p.run('var NODE = { innerHTML: "", hidden: false }; var EL = { innerHTML: "", dataset: {}, addEventListener() {}, querySelector: () => NODE, contains: () => false }');
+    p.run("renderVenues({ el: EL, owner: true })");
+    expect(String(p.run("NODE.innerHTML"))).toContain("4 accounts · $12,000.00 · where your agent may act is each one&#39;s switch · 1 waiting for its venue");
+    // Check again asks the venue's first question again, forced, then reads the account; Disconnect asks first, then signs disconnectVenue
+    p.run("var ASKED = ''; confirmSheet = async (t) => { ASKED = t; return true; }; var DRAFTS = []; own = async (d) => { DRAFTS.push(d); return { status: 200, body: {} }; }; var LOADS = 0; load = async () => { LOADS++; }; var REACHED = []; askReach = async (c, f) => { REACHED.push([c, f]); }");
+    p.run('pfAct("recheck", { connector: "live:exchange:binance" })');
+    await settle();
+    expect(p.run("REACHED")).toEqual([[["live:exchange:binance"], true]]);
+    expect(p.run("LOADS")).toBe(1);
+    p.run('pfAct("unwait", { venue: "binance" })');
+    await settle();
+    expect(p.run("ASKED")).toBe("Disconnect Binance? The connection comes off the account and Binance is not asked again. Nothing was ever read from it, and its key file stays where it is.");
+    expect(JSON.stringify(p.run("DRAFTS"))).toBe(JSON.stringify([{ type: "disconnectVenue", venue: "binance" }]));
+    // a browser that only looks signs nothing
+    p.run('Owner.role = "pending"; DRAFTS = []');
+    p.run('pfAct("unwait", { venue: "binance" })');
+    await settle();
+    expect(p.run("DRAFTS.length")).toBe(0);
+    p.run('Owner.role = "owner"');
+    // with no account connected: step 1 is done all the same, and nothing reads as if nothing had been connected
+    p.run("A.venues = []; A.keys = []");
+    expect(p.run("pfSteps(A).map((s) => s.done)")).toEqual([true, false, false]);
+    expect(String(p.run("pfStepsHtml(true, true)"))).toContain("Get started · 1 of 3");
+    expect(String(p.run(`pfWorthHtml(${ALL}, pfVenueIn(${ALL}), null)`))).toContain("Nothing is read yet: 1 connection waits for its venue to answer this network (see Venues).");
+    p.run("renderVenues({ el: EL, owner: true })");
+    const sub = String(p.run("NODE.innerHTML"));
+    expect(sub).toContain("1 connection waiting for its venue: nothing is read from it until it answers this network.");
+    expect(sub).not.toContain("Connect an exchange, a broker");
+    // the waiting row and Connect an account stay; there is no CSV of nothing
+    expect(sub).toContain('data-pf-act="unwait" data-venue="binance"');
+    expect(sub).toContain('data-pf-act="connect"');
+    expect(sub).not.toContain('data-pf-act="csv"');
+  });
+
+  it("a connection its venue answered and refused (stopped) is a row of its own kind: Not connected in the bad chip with the venue's words, a dim line saying the venue refused it, Connect again (the connection's own form, on its name and file) and Disconnect, no Check again; the subtitle counts it as not connected, and it does not make step 1 done", async () => {
+    const stopped = { venue: "binance", name: "Binance", connector: "live:exchange:binance", needs: "key-file", keyFile: "credentials/binance/api-key.json", said: "Binance refused the key: it has no permission for this action. Not asked again: connect it again, or disconnect it", code: "E_VENUE_UNAUTHORIZED", by: "venue", since: "2026-10-06T10:30:00.000Z", how: "restart", stopped: true };
+    const waiting = { venue: "okx", name: "OKX", connector: "live:exchange:okx", needs: "key-file", keyFile: "credentials/okx/api-key.json", said: "OKX did not answer: asked again in 60 s", code: "E_VENUE_UNREACHABLE", since: "2026-10-06T10:00:00.000Z", how: "connect" };
+    const p = account({ connectLive: { ...ACCOUNT.connectLive, waiting: [waiting, stopped] } });
+    const acc = String(p.run(`pfAccountsHtml(pfVenueIn(${ALL}), true)`));
+    expect(acc).toMatch(/<b>Binance<\/b><span class="dim small">the venue refused the connection<\/span>/);
+    expect(acc).toContain(`<span class="chip pf-health bad" title="${stopped.said}"><span aria-hidden="true">✗</span>Not connected</span><span class="dim small">since 06:30</span>`);
+    expect(acc).toContain('data-pf-act="reconnect" data-venue="binance"');
+    expect(acc).toContain('data-pf-act="unwait" data-venue="binance"');
+    expect(acc).not.toContain('data-connector="live:exchange:binance"');
+    // the waiting row beside it is as before
+    expect(acc).toMatch(/<b>OKX<\/b><span class="dim small">waiting for the venue<\/span>/);
+    expect(acc).toContain('data-pf-act="recheck" data-connector="live:exchange:okx"');
+    expect(acc).not.toContain('data-pf-act="reconnect" data-venue="okx"');
+    // a browser that only looks connects nothing again
+    expect(String(p.run(`pfAccountsHtml(pfVenueIn(${ALL}), false)`))).toMatch(/data-pf-act="reconnect" data-venue="binance"[^>]*disabled/);
+    // Connect again opens the connection's own form on its name and key file, through connectVia
+    p.run("var VIA = []; connectVia = (c, o) => { VIA.push([c, o]); return true; }");
+    p.run('pfAct("reconnect", { venue: "binance" })');
+    await settle();
+    expect(p.run("VIA")).toEqual([["live:exchange:binance", { name: "Binance", label: "Binance", ref: "credentials/binance/api-key.json", fromWait: true }]]);
+    // the subtitle counts the two apart
+    p.run('var NODE = { innerHTML: "", hidden: false }; var EL = { innerHTML: "", dataset: {}, addEventListener() {}, querySelector: () => NODE, contains: () => false }');
+    p.run("renderVenues({ el: EL, owner: true })");
+    expect(String(p.run("NODE.innerHTML"))).toContain("4 accounts · $12,000.00 · where your agent may act is each one&#39;s switch · 1 waiting for its venue · 1 not connected");
+    // a stopped connection alone: no connected account, step 1 not done, the subtitle says what to do
+    p.run("A.venues = []; A.keys = []; A.connectLive.waiting = [A.connectLive.waiting[1]]");
+    expect(p.run("pfSteps(A).map((s) => s.done)")).toEqual([false, false, false]);
+    p.run("renderVenues({ el: EL, owner: true })");
+    expect(String(p.run("NODE.innerHTML"))).toContain("1 not connected: connect it again, or disconnect it.");
+    // this account's own no (the key file gone at a restart) is said as that, never as the venue's
+    p.run('A.connectLive.waiting = [{ ...A.connectLive.waiting[0], by: "account", code: "E_ACCOUNT_CREDENTIAL", said: "there is no key file at credentials/binance/api-key.json. Not asked again: connect it again, or disconnect it" }]');
+    expect(String(p.run(`pfAccountsHtml(pfVenueIn(${ALL}), true)`))).toMatch(/<b>Binance<\/b><span class="dim small">not connected: the key could not be read<\/span>/);
+    expect(String(p.run(`pfWorthHtml(${ALL}, pfVenueIn(${ALL}), null)`))).toContain("Nothing is connected yet.");
+  });
+
+  it("a venue that lets this network only close is said in a word beside its health — Close only here, its words on hover — and Trades reads Sells only, in the chips and in its drawer", () => {
+    const said = "Polymarket lets this location close positions, not open new ones (its own rule)";
+    const pm = venue("pm", "Polymarket", { usd: 40, trade: { can: true, what: "event contracts", positions: true }, closeOnly: { said }, plugged: true });
+    const p = account({ venues: [...ACCOUNT.venues, pm] });
+    const chips = String(p.run("pfChips(A.venues[4])"));
+    expect(chips).toContain(`<span class="chip" title="${said}">Close only here</span> <span class="chip warm">Sells only</span>`);
+    expect(chips).not.toContain(">Trades<");
+    expect(chips).not.toContain("Not served here");
+    expect(p.run("pfTrades(A.venues[4])")).toEqual({ can: true, text: "Sells only on this network: what you hold there can be sold or closed; nothing new is bought." });
+    // a venue that trades as before keeps Trades
+    expect(String(p.run("pfChips(A.venues[0])"))).toContain('<span class="chip warm">Trades</span>');
+  });
+
+  it("a waiting connection a restart could not bring back shows what its venue held at the last good read: dim, when on hover, the time under its name, and in no total", () => {
+    const entry = { venue: "binance", name: "Binance", connector: "live:exchange:binance", needs: "key-file", keyFile: "credentials/binance/api-key.json", said: "Binance did not answer this network after the restart. Asked again when a check of this network finds it answering", code: "E_VENUE_GEOBLOCKED", since: "2026-10-06T10:30:00.000Z", how: "restart", lastUsd: 812.5, lastAt: "2026-10-06T09:15:00.000Z" };
+    const p = account({ connectLive: { ...ACCOUNT.connectLive, waiting: [entry] } });
+    const acc = String(p.run(`pfAccountsHtml(pfVenueIn(${ALL}), true)`));
+    expect(acc).toContain('<span class="dim" title="Last read before the restart, Tue 6 Oct 05:15">$812.50</span>');
+    expect(acc).toMatch(/<b>Binance<\/b><span class="dim small">waiting for the venue · last read 05:15<\/span>/);
+    // the card's total is the connected accounts' alone
+    p.run('var NODE = { innerHTML: "", hidden: false }; var EL = { innerHTML: "", dataset: {}, addEventListener() {}, querySelector: () => NODE, contains: () => false }');
+    p.run("renderVenues({ el: EL, owner: true })");
+    expect(String(p.run("NODE.innerHTML"))).toContain("4 accounts · $12,000.00");
+    // one without a last read keeps its dash
+    p.run("A.connectLive.waiting = [{ ...A.connectLive.waiting[0], lastUsd: undefined, lastAt: undefined, how: 'connect' }]");
+    const plain = String(p.run(`pfAccountsHtml(pfVenueIn(${ALL}), true)`));
+    expect(plain).not.toContain("Last read before the restart");
+    expect(plain).toMatch(/<b>Binance<\/b><span class="dim small">waiting for the venue<\/span>/);
+  });
+
+  it("Check again on a waiting row that still finds no answer says so in a neutral word, never the venue's sentence as an error", async () => {
+    const entry = { venue: "binance", name: "Binance", connector: "live:exchange:binance", needs: "key-file", keyFile: "credentials/binance/api-key.json", said: "Binance does not serve this location", code: "E_VENUE_GEOBLOCKED", since: "2026-10-06T10:30:00.000Z", how: "connect" };
+    const p = account({ connectLive: { ...ACCOUNT.connectLive, waiting: [entry] } });
+    p.run('var TOASTS = []; toast = (t, k) => TOASTS.push([t, k]); var LOADS = 0; load = async () => { LOADS++; }; askReach = async (c) => { REACH.set(c[0], { connector: c[0], state: "location", said: "Binance does not serve this location: that is its own rule", at: "2026-10-06T12:00:00.000Z" }); }');
+    p.run('pfAct("recheck", { connector: "live:exchange:binance" })');
+    await settle();
+    expect(p.run("TOASTS")).toEqual([["Binance still doesn't answer this network. It stays on the account and comes back by itself when it does.", "info"]]);
+    expect(p.run("flash")).toBe("");
+    expect(p.run("LOADS")).toBe(1);
+    // no answer at all reads the same
+    p.run('TOASTS = []; askReach = async (c) => { REACH.set(c[0], { connector: c[0], state: "unreachable", said: "Binance did not answer just now", at: "2026-10-06T12:00:00.000Z" }); }');
+    p.run('pfAct("recheck", { connector: "live:exchange:binance" })');
+    await settle();
+    expect(p.run<Array<[string, string]>>("TOASTS").map(([, k]) => k)).toEqual(["info"]);
+    expect(p.run("flash")).toBe("");
+    p.run("REACH.clear()");
+  });
+
+  it("Assets and Positions name a venue that does not serve this network once, quietly, its words on hover; a read that failed keeps its words", () => {
+    const geo = { venue: "binance", venueName: "Binance", why: "Binance does not serve this location", code: "E_VENUE_GEOBLOCKED" };
+    const p = account();
+    p.set("PF.hold", { ...HOLD, missing: [geo, { venue: "okx", venueName: "OKX", why: "OKX did not answer" }] });
+    const assets = String(p.run(`pfAssetsHtml(${ALL}, pfRowsIn(PF.hold.rows, pfVenueIn(${ALL})))`));
+    expect(assets).toContain('<p class="small dim pf-miss" title="Binance: Binance does not serve this location.">Not served on this network now: Binance.</p>');
+    expect(assets).toContain("Not read this time: OKX (OKX did not answer)");
+    expect(assets).not.toContain("Binance (Binance");
+    p.set("PF.pos", { ok: true, positions: [], missing: [geo, { venue: "okx", venueName: "OKX", why: "OKX did not answer" }] });
+    const pos = String(p.run(`pfPositionsHtml(${ALL}, pfVenueIn(${ALL}), true)`));
+    expect(pos).toContain("Not served on this network now: Binance.");
+    expect(pos).toContain("<li><b>OKX</b> could not be read: OKX did not answer</li>");
+    expect(pos).not.toContain("<b>Binance</b> could not be read");
   });
 
   it("closes an account to agents for free and reopens it signed", async () => {

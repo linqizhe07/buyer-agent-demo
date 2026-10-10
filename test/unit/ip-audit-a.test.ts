@@ -328,7 +328,7 @@ describe("R2-34 · an order at a venue that refuses this network can be let go b
     expect(d.openAt("ex")?.id).toBe("ord-0001");
     const o = placed(await d.cancel({ venue: "ex", order: "ord-0001" }, owner));
     expect([o.unfollowed, spend().spentMicro, d.openAt("ex")]).toEqual([true, 0, undefined]);
-    expect(o.note).toBe("Ex refuses this network, so the account can neither cancel it nor see it fill: it stopped following it, and what it held of a limit beyond what had filled is free. Cancel it at Ex");
+    expect(o.note).toBe("Ex refuses this network, so the account can neither cancel it nor see it fill: it stopped following it, and what it held of a limit beyond what had filled is free. It sends your cancel again when a check of this network finds Ex answering; meanwhile you can cancel it at Ex");
     expect(JSON.stringify(e.orders)).not.toContain("203.0.113.9");
   });
 
@@ -580,8 +580,12 @@ describe("R3-24 · a supply the venue refused for this network does not use up t
     const { d, spend } = earnDoor(ex);
     expect(refusal(await d.agent(supplyAsk(1), who)).code).toBe("E_VENUE_GEOBLOCKED");
     expect([spend().spentMicro, spend().last]).toEqual([0, {}]);
+    // the venue's place rule holds it for every door ten minutes: the next supply goes once that has run out, on a network it serves
     refuse = false;
-    const out = await d.agent(supplyAsk(2), who);
+    expect(refusal(await d.agent(supplyAsk(2), who)).code).toBe("E_VENUE_GEOBLOCKED");
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.now() + 11 * 60_000 });
+    const out = await d.agent(supplyAsk(3), who);
+    vi.useRealTimers();
     expect(isRefusal(out)).toBe(false);
     expect(spend().spentMicro).toBe(10_000_000);
   });

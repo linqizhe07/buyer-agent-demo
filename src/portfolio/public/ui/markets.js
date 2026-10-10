@@ -170,32 +170,42 @@ function mkRoute(item, oi) {
   let refused = null;
   for (const l of mkLegs(item, oi)) {
     const v = mkVenue(l.venue);
-    if (!v || !l.symbol) continue;
+    // a connected venue that does not serve this network now is not offered, nor said: the list is what serves the user
+    if (!v || !l.symbol || !servedHere(v)) continue;
     const a = mkAtOf(item, l.venue);
+    // a venue that lets this network only close what is held takes no buy from here: that state, in a word (the venue's own words kept for
+    // whoever asks); what is held there is still sold, from the drawer's Sell
+    if (mkCloseOnly(item, l.venue)) {
+      refused = refused || { venue: v.id, word: "Close only here", said: (v.closeOnly && v.closeOnly.said) || "", text: `${v.name}: close only here. What you hold there can be sold.` };
+      continue;
+    }
     if (canTrade(v) && a.canTrade !== false && a.open !== false) return { act: "trade", venue: v.id, symbol: l.symbol, venueName: v.name };
     refused = refused || { venue: v.id, text: mkWhyNot(v, a) };
   }
   // connecting another venue is offered only where none of the owner's connected venues trades the thing at all — and only a venue that
   // would take the user from where they are (core VENUES: its answer to this network, its terms); one that would not says so, in its words
-  const pubs = mkTradedHere(item) ? [] : item.at.filter((a) => a.public && a.connector && connectionOf(a.connector));
+  const pubs = mkTradedHere(item) ? [] : item.at.filter((a) => a.public && a.connector && connectionOf(a.connector) && !(a.connectTo && mkVenue(a.connectTo)));
   // a venue that takes the user first; one whose own terms exclude where the user is is still offered, with its words (shown, not enforced)
   const pub = pubs.find((a) => !venueRefuses(a.connector) && !venueTermsSay(a.connector)) || pubs.find((a) => !venueRefuses(a.connector));
   if (pub) {
     const terms = venueTermsSay(pub.connector);
     return { act: "connect", connector: pub.connector, venue: pub.connectTo || "", venueName: pub.venueName, note: pub.note || "", ...(terms ? { terms: `${pub.venueName}: ${terms.word.toLowerCase()}${terms.said ? ` — ${mkSaid(terms.said)}` : ""}.` } : {}) };
   }
-  if (refused) return { act: "why", venue: refused.venue, text: refused.text };
+  if (refused) return { act: "why", venue: refused.venue, text: refused.text, ...(refused.word ? { word: refused.word, said: refused.said } : {}) };
+  // every venue that lists it would not take the user from this network: said in a word (the venue's own sentence is in the list of where
+  // the user can connect, and under Why these), not as an error
   const shut = pubs.map((a) => ({ a, no: venueRefuses(a.connector) })).find((x) => x.no);
-  if (shut) {
-    const one = `${shut.a.venueName}: ${shut.no.word.toLowerCase()}${shut.no.said ? ` — ${mkSaid(shut.no.said)}` : ""}.`;
-    return { act: "why", word: shut.no.word, text: pubs.length > 1 ? `None of the ${pubs.length} venues that list it would take you from where you are. ${one}` : one };
-  }
+  if (shut) return { act: "why", word: shut.no.word, said: pubs.length > 1 ? "" : shut.no.said, text: pubs.length > 1 ? `None of the ${pubs.length} venues that list it serves this network.` : `${shut.a.venueName}: ${shut.no.word.toLowerCase()}.` };
   const p0 = item.at.find((a) => a.public);
   return { act: "why", text: p0 ? (p0.note ? `${p0.venueName}: ${mkSaid(p0.note)}.` : `This server can't connect ${p0.venueName}.`) : "No venue on the account trades it." };
 }
 
-/* a connected venue of the owner's trades the thing (its key may): a public line of the same row is then a price, never a connection to offer */
-const mkTradedHere = (item) => (item.at || []).some((a) => a.connected && a.canTrade !== false);
+/* a connected venue of the owner's trades the thing (its key may, and it is not close-only on this network): a public line of the same row
+   is then a price, never a connection to offer */
+const mkTradedHere = (item) => (item.at || []).some((a) => a.connected && a.canTrade !== false && !mkCloseOnly(item, a.venue));
+/* a connected venue that lets this network only close what is held, for this market (its explore line) or as the account marks the venue:
+   sells and closes go there, buys do not */
+const mkCloseOnly = (item, venue) => !!(mkAtOf(item, venue).closeOnly || (mkVenue(venue) || {}).closeOnly);
 /* a public listing's market is watched under the venue it would be once connected */
 const mkVenueOfLeg = (item, venue) => { const a = mkAtOf(item, venue); return a.public && a.connectTo ? a.connectTo : venue; };
 /* a watchlist entry is one of this row's markets (any venue, any outcome) */
@@ -243,6 +253,14 @@ function mkAgentsOn(item) {
     intents: (A.intents || []).filter((x) => hit(x.symbol)),
   };
 }
+/* a venue line of a market that serves the network the account runs on: a connected venue that does not now, or a public one whose venue does
+   not serve this network or offers no way in, is not listed (the list is what serves the user) */
+const mkServes = (a) => {
+  const v = a.connected ? mkVenue(a.venue) : null;
+  if (v) return servedHere(v);
+  const no = a.connector ? venueRefuses(a.connector) : null;
+  return !(no && (no.verdict === "not-served" || no.verdict === "closed"));
+};
 /* the lens narrows Markets to one venue's markets; under an agent's lens every market stays (agents hold no markets of their own) */
 const mkInLens = (item, lens) => !lens || lens.kind !== "venue" || item.at.some((a) => a.venue === lens.id || a.connectTo === lens.id);
 
@@ -312,7 +330,8 @@ function mkActs(item, i) {
   const k = esc(item.key);
   if (r.act === "trade") return `<div class="acts"><button type="button" class="btn btn-sm" data-act="trade" data-i="${i}" data-fk="trade:${k}"${mkDis()}>Trade</button></div>`;
   if (r.act === "connect") return `<div class="acts"><button type="button" class="btn btn-sm" data-act="connect" data-connector="${esc(r.connector)}" data-name="${esc(r.venueName)}" data-fk="connect:${k}"${r.terms ? ` title="${esc(r.terms)}"` : ""}${mkDis()}>${icon("plug", "sm")}Connect to trade</button></div>`;
-  return `<div class="acts"><button type="button" class="link dim mk-why" data-act="open" data-i="${i}" data-fk="why:${k}" title="${esc(r.text)}">${esc(r.word || "Can't trade here")} · why</button></div>`;
+  // a state in a word (Not served here, Close only here) is said as that; anything else opens the drawer, which says why
+  return `<div class="acts"><button type="button" class="link dim mk-why" data-act="open" data-i="${i}" data-fk="why:${k}" title="${esc(r.text)}">${esc(r.word || "Can't trade here · why")}</button></div>`;
 }
 /* a row's price now: the fresh one from its venue when there is one, else what the explore read said */
 function mkPriceOf(item) {
@@ -375,7 +394,7 @@ function mkYn(item, i, o, oi) {
   const m = leg && mkFresh(`${leg.venue}|${leg.symbol}`);
   const r = mkRoute(item, oi);
   const label = mkLabel(o.label);
-  const after = r.act === "connect" ? `: connect ${r.venueName} to trade` : r.act === "why" ? ": can't be traded here" : "";
+  const after = r.act === "connect" ? `: connect ${r.venueName} to trade` : r.act === "why" ? (r.word ? `: ${r.word.toLowerCase()}` : ": can't be traded here") : "";
   return `<button type="button" class="${oi === 0 ? "yes" : "no-btn"}" data-act="yn" data-i="${i}" data-o="${oi}" data-fk="yn:${esc(item.key)}:${oi}"${r.act !== "why" ? mkDis() : ""}>${esc(label)} · <span${leg ? ` data-q="${esc(`${leg.venue}|${leg.symbol}`)}" data-fmt="c"` : ""}>${mkCents(m ? m.ask ?? m.price : o.ask ?? o.price)}</span>${after ? `<span class="sr">${esc(after)}</span>` : ""}</button>`;
 }
 /** an event as a card: a live countdown, the question, and its first two outcomes to buy — with one line of facts (what it is about · where ·
@@ -622,6 +641,8 @@ function mkTrade(item, side, oi) {
   const r = mkRoute(item, oi);
   if (r.act === "trade") return void mkTicket({ venue: r.venue, symbol: r.symbol, side, ...(oi !== undefined && item.outcomes ? { outcome: item.outcomes[oi].label } : {}) }, item);
   if (r.act === "connect") return void connectVia(r.connector, { name: r.venueName });
+  // a state in a word (Not served here, Close only here) is no error: the market's drawer says where it stands
+  if (r.word) return void (MKT.open && MKT.open.item && MKT.open.item.key === item.key ? undefined : openMarket(item));
   toast(r.text || "No venue on the account trades it.", "no");
 }
 /** Hand to agent: the owner's intent for it, which agents read (signed in the intent sheet; it grants nothing — the limits do), with the
@@ -1065,7 +1086,10 @@ function mkHeldHtml(o) {
     lines.push(`<div><span class="mk" aria-hidden="true">·</span><div><div class="t1">${esc(p.side === "short" ? "Short" : "Long")} ${esc(qtyOf(p.qty))} · ${esc(p.name || p.symbol)} ${p.unrealizedUsd !== undefined ? chg(p.unrealizedUsd, "$") : ""}</div><div class="t2">${esc(p.venueName || nameOf(p.venue))}${p.entryPrice !== undefined ? ` · in at ${esc(ev ? mkCents(p.entryPrice) : px(p.entryPrice))}` : ""}${p.markPrice !== undefined ? ` · now ${esc(ev ? mkCents(p.markPrice) : px(p.markPrice))}` : ""}${p.leverage ? ` · ${esc(String(p.leverage))}x` : ""}${p.liquidationPrice ? ` · liquidation ${esc(px(p.liquidationPrice))}` : ""}</div></div>${close}</div>`);
   }
   for (const x of a.orders || []) {
-    const cancel = x.canceling ? '<span class="st pending">Canceling</span>' : owner ? `<button type="button" class="btn btn-sm btn-ghost" data-act="cancel" data-order="${esc(x.id)}" data-venue="${esc(x.venue)}" data-fk="cancel:${esc(x.id)}">Cancel</button>` : "";
+    // an order the account stopped following (its cancel asked while its venue refused this network): said so, its note on hover; Cancel
+    // sends the owner's cancel again
+    const unfollowed = x.unfollowed && !x.canceling ? `<span class="st dim"${x.note ? ` title="${esc(x.note)}"` : ""}>Not followed</span>` : "";
+    const cancel = x.canceling ? '<span class="st pending">Canceling</span>' : owner ? `${unfollowed}<button type="button" class="btn btn-sm btn-ghost" data-act="cancel" data-order="${esc(x.id)}" data-venue="${esc(x.venue)}" data-fk="cancel:${esc(x.id)}">Cancel</button>` : unfollowed;
     lines.push(`<div><span class="mk" aria-hidden="true">${x.side === "buy" ? "+" : "−"}</span><div><div class="t1">${esc(x.side === "buy" ? "Buy" : "Sell")} ${esc(qtyOf(x.qty))} ${esc(x.base || "")} · ${esc(typeText(x))}</div><div class="t2">${esc(x.venueName || nameOf(x.venue))} · ${esc(x.agent ? keyName(x.agent) : "you")} · ${esc(qtyOf(x.filledQty || 0))} of ${esc(qtyOf(x.qty))} filled</div></div>${cancel}</div>`);
   }
   // what was paid, said once: the row's own cost entry (a position's is in its line already)
@@ -1073,7 +1097,8 @@ function mkHeldHtml(o) {
   const paid = !cost ? "" : cost.coveredQty > 0 || cost.realizedUsd
     ? `<p class="mk-cost">${cost.avgCostUsd !== undefined ? `Paid ${esc(ev ? mkCents(cost.avgCostUsd) : mkUsd(cost.avgCostUsd))} on average` : "Paid"}${cost.unrealizedUsd !== undefined ? ` · ${chg(cost.unrealizedUsd, "$")} since bought` : ""}${cost.realizedUsd ? ` · ${chg(cost.realizedUsd, "$")} realised` : ""} <span class="dim">(${esc(cost.words)}, from ${esc(cost.source)})</span></p>`
     : `<p class="mk-quiet">${esc(cost.words)}: the account never saw it bought (it came in from elsewhere, or before the account).</p>`;
-  const missing = (a.missing || []).length ? `<p class="mk-quiet">Not read this time: ${a.missing.map((m) => `${esc(m.venueName)} (${esc(mkSaid(m.why))})`).join(" · ")}.</p>` : "";
+  const failed = (a.missing || []).filter((m) => !awayMiss(m));
+  const missing = `${awayLine((a.missing || []).filter(awayMiss), { cls: "mk-quiet" })}${failed.length ? `<p class="mk-quiet">Not read this time: ${failed.map((m) => `${esc(m.venueName)} (${esc(mkSaid(m.why))})`).join(" · ")}.</p>` : ""}`;
   return `${lines.length ? `<div class="feed mk-held">${lines.join("")}</div>${paid}` : "<p class=\"empty\">You don’t hold any.</p>"}${missing}`;
 }
 /* where a sell can go: a venue that holds it and takes the order — of the row's own kind. A coin, a share or a token is sold from what is
@@ -1108,15 +1133,18 @@ function mkAcrossHtml(o) {
   const c = pre ? null : cmp;
   const rows = [];
   for (const r of c ? c.rows : []) rows.push({ venue: r.venue, venueName: r.venueName, symbol: r.symbol, price: r.price, spread: r.spreadPct, note: r.note, best: r.best, ready: r.ready, connected: true });
-  for (const a of it.at) if (a.symbol && !rows.some((r) => r.venue === a.venue)) rows.push({ venue: a.venue, venueName: a.venueName, symbol: a.symbol, price: a.price, note: a.note, connected: a.connected, public: a.public, connector: a.connector, connectTo: a.connectTo, implied: a.implied });
+  for (const a of it.at) if (a.symbol && !rows.some((r) => r.venue === a.venue) && mkServes(a)) rows.push({ venue: a.venue, venueName: a.venueName, symbol: a.symbol, price: a.price, note: a.note, connected: a.connected, public: a.public, connector: a.connector, connectTo: a.connectTo, implied: a.implied });
   // an order goes here (its note is the venue's: fees, slippage); or only public prices list it (connect it); or the venue says why not
-  const takes = (r) => { const v = mkVenue(r.venue); return !!v && canTrade(v) && mkAtOf(it, r.venue).canTrade !== false; };
+  const takes = (r) => { const v = mkVenue(r.venue); return !!v && canTrade(v) && mkAtOf(it, r.venue).canTrade !== false && !mkCloseOnly(it, r.venue); };
   // a public line is a price; it offers its connection only where none of the owner's venues trades the thing (and its venue is not on)
   const cell = (r) => {
     const v = mkVenue(r.venue);
     if (takes(r)) return `<button type="button" class="btn btn-sm" data-act="trade-at" data-venue="${esc(r.venue)}" data-symbol="${esc(r.symbol)}"${ev && it.outcomes ? ` data-outcome="${esc(it.outcomes[0].label)}"` : ""} data-fk="trade-at:${esc(r.venue)}"${mkDis()}>Trade</button>`;
+    // a connected venue that lets this network only close: that state in a word, its own words on hover (what is held there is sold above)
+    if (v && mkCloseOnly(it, r.venue)) return `<span class="why" title="${esc((v.closeOnly && v.closeOnly.said) || "")}"><b>Close only here</b></span>`;
     const no = !v && r.connector ? venueRefuses(r.connector) : null;
-    if (no) return `<span class="why"><b>${esc(no.word)}</b>${no.said ? ` — ${esc(mkSaid(no.said))}` : ""}</span>`;
+    // close-only, or something to set up here first: its word, the venue's sentence on hover
+    if (no) return `<span class="why" title="${esc(no.said || "")}"><b>${esc(no.word)}</b></span>`;
     const terms = !v && r.connector ? venueTermsSay(r.connector) : null;
     if (terms && connectionOf(r.connector) && !mkTradedHere(it) && !(r.connectTo && mkVenue(r.connectTo))) return `<span class="why"><b>${esc(terms.word)}</b>${terms.said ? ` — ${esc(mkSaid(terms.said))}` : ""}</span> <button type="button" class="btn btn-sm" data-act="connect" data-connector="${esc(r.connector)}" data-name="${esc(r.venueName)}" data-fk="connect-at:${esc(r.venue)}"${mkDis()}>Connect to trade</button>`;
     if (!v && r.connector && connectionOf(r.connector) && !mkTradedHere(it) && !(r.connectTo && mkVenue(r.connectTo))) return `<button type="button" class="btn btn-sm" data-act="connect" data-connector="${esc(r.connector)}" data-name="${esc(r.venueName)}" data-fk="connect:${esc(r.venue)}"${mkDis()}>${icon("plug", "sm")}Connect to trade</button>`;
@@ -1129,7 +1157,9 @@ function mkAcrossHtml(o) {
     { label: "", sr: "Actions", r: true, cell },
   ], rows, { empty: "No venue lists it right now.", cls: "mk-t" });
   const miss = c ? (c.missing || []).filter((m) => !/no .*market|lists no/i.test(m.why)) : [];
-  return `${t}${miss.length ? `<p class="mk-missing">Not compared: ${miss.map((m) => `<b>${esc(m.venueName)}</b>: ${esc(mkSaid(m.why))}`).join(" · ")}.</p>` : ""}${!pre && o.compare && !c && o.compare !== null ? `<p class="mk-missing">${esc(refusalOf(o.compare))}</p>` : ""}`;
+  // a venue that does not serve this network now is a state, named once in a quiet line (its words on hover), never "Not compared: <its sentence>"
+  const failed = miss.filter((m) => !awayMiss(m));
+  return `${t}${awayLine(miss.filter(awayMiss), { cls: "mk-quiet" })}${failed.length ? `<p class="mk-missing">Not compared: ${failed.map((m) => `<b>${esc(m.venueName)}</b>: ${esc(mkSaid(m.why))}`).join(" · ")}.</p>` : ""}${!pre && o.compare && !c && o.compare !== null ? `<p class="mk-missing">${esc(refusalOf(o.compare))}</p>` : ""}`;
 }
 /* the company a pre-IPO contract is on: the venue's group, else the row's base */
 const mkCompanyOf = (item) => String((item.group && item.group.title) || item.base || "").trim();
@@ -1154,7 +1184,7 @@ function mkAgentsHtml(it) {
   const on = mkAgentsOn(it);
   const lines = [
     ...on.cards.map((c) => `<div><span class="mk warn-t" aria-hidden="true">!</span><div><div class="t1">${esc(c.agentName || keyName(c.agent))} asks: ${esc(c.reason)}</div><div class="t2">Waiting for you · <button type="button" class="link" data-act="review" data-card="${esc(c.id)}" data-fk="review:${esc(c.id)}">Review</button></div></div></div>`),
-    ...on.orders.map((x) => `<div><span class="mk" aria-hidden="true">${x.side === "buy" ? "+" : "−"}</span><div><div class="t1">${esc(keyName(x.agent))}: ${esc(x.side === "buy" ? "buy" : "sell")} ${esc(qtyOf(x.qty))} ${esc(x.base)} · ${esc(x.type)}${x.limitPrice ? ` ${esc(px(x.limitPrice))}` : ""}</div><div class="t2">${esc(x.id)} · ${esc(x.venueName)} · ${esc(x.status)}${x.filledQty ? ` · ${esc(qtyOf(x.filledQty))} filled` : ""}</div></div></div>`),
+    ...on.orders.map((x) => `<div><span class="mk" aria-hidden="true">${x.side === "buy" ? "+" : "−"}</span><div><div class="t1">${esc(keyName(x.agent))}: ${esc(x.side === "buy" ? "buy" : "sell")} ${esc(qtyOf(x.qty))} ${esc(x.base)} · ${esc(x.type)}${x.limitPrice ? ` ${esc(px(x.limitPrice))}` : ""}</div><div class="t2">${esc(x.id)} · ${esc(x.venueName)} · ${x.unfollowed ? `<span${x.note ? ` title="${esc(x.note)}"` : ""}>Not followed</span>` : esc(x.status)}${x.filledQty ? ` · ${esc(qtyOf(x.filledQty))} filled` : ""}</div></div></div>`),
     ...on.intents.map((x) => `<div><span class="mk" aria-hidden="true">→</span><div><div class="t1">You to ${esc(x.agent === "*" ? "every agent" : x.agentName)}: “${esc(x.text)}”</div><div class="t2">${x.report ? `${esc(x.report.byName)}: ${esc(x.report.status)}${x.report.note ? ` · ${esc(x.report.note)}` : ""}` : "No report yet"} · until ${esc(nyDay(x.validUntil))}</div></div></div>`),
   ];
   return lines.length ? `<div class="feed">${lines.join("")}</div>` : `<p class="empty">No agent is working on it.</p>`;
@@ -1256,7 +1286,10 @@ function mkDrawerParts(o) {
     watchedNow || mkWatchTarget(it) ? `<button type="button" class="btn" data-act="watch" data-fk="d-watch" aria-pressed="${String(watchedNow)}"${mkDis()}>${icon("star", `sm${watchedNow ? " mk-on" : ""}`)}${watchedNow ? "Watching" : "Watch"}</button>` : "",
   ].filter(Boolean);
   // a dollar held (a stablecoin, cash) is moved, not traded: nothing to explain
-  const why = r.act === "why" && it.kind !== "stable" && it.kind !== "cash" ? `<div class="callout"><div class="label">Can't trade it here</div><p>${esc(r.text)}</p></div>` : "";
+  // a state in a word (Not served here, Close only here) is said as that, the venue's own words folded away; an issuer's rule or another
+  // reason keeps the callout
+  const words = r.word ? mkSaid(r.said || r.text) : "";
+  const why = r.act !== "why" || it.kind === "stable" || it.kind === "cash" ? "" : r.word ? `<div class="mk-state"><span class="chip" title="${esc(r.text)}">${esc(r.word)}</span>${words ? `<details class="inl"><summary>The venue's words</summary>${esc(words)}.</details>` : ""}</div>` : `<div class="callout"><div class="label">Can't trade it here</div><p>${esc(r.text)}</p></div>`;
   const key = mkAssetKey(it);
   const leg = mkCandleLeg(it);
   const iss = mkIssuer(it);

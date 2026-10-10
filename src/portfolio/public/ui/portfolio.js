@@ -23,6 +23,12 @@ const pfDollarRow = (r) => pfDollars(r.class) || (r.class === "earn" && isDollar
 const pfWalletVenue = (name) => `agent-${slug(name)}`;
 /* a venue's sentence without its full stop, so it reads on in another */
 const pfSaid = (t) => String(t || "").trim().replace(/[.\s]+$/, "");
+/* the connections the owner signed whose venues have not answered this network yet (connectLive.waiting): on the account, waiting, read
+   nowhere. The account asks each venue again when a check of this network finds it answering, and sends it nothing until then */
+const pfWaiting = (venueIn = () => true, a = A) => (((a && a.connectLive) || {}).waiting || []).filter((w) => venueIn(w.venue));
+/* a waiting connection that a restart could not bring back carries what its venue held at its last good read (lastUsd, lastAt): shown dim
+   on its row, counted in no total */
+const pfLastRead = (w) => !!w && w.lastUsd !== undefined && w.lastUsd !== null && Number.isFinite(Number(w.lastUsd));
 
 // ---- what the lens lets through ------------------------------------------------------------------------------------------------------
 
@@ -157,7 +163,9 @@ function pfAgentLines({ agents = [], lines = [] } = {}) {
 function pfSteps(a) {
   const agents = (a.keys || []).filter((k) => k.status === "ok");
   return [
-    { id: "connect", done: (a.venues || []).some((v) => v.live), title: "Connect an account" },
+    // a connection waiting for its venue to answer this network is on the account too: the step is done. One the venue refused (stopped)
+    // is not connected until the owner connects it again
+    { id: "connect", done: (a.venues || []).some((v) => v.live) || pfWaiting(() => true, a).some((w) => !w.stopped), title: "Connect an account" },
     { id: "agent", done: agents.length > 0, title: "Connect an agent" },
     { id: "limit", done: (a.spend || []).some((s) => !s.expired && s.budgetUsd > 0 && agents.some((k) => k.address === s.agent)), title: "Give it a limit" },
   ];
@@ -165,11 +173,13 @@ function pfSteps(a) {
 
 // ---- what an account can do from here, in words (moved here from the Venues board) --------------------------------------------------
 
-/** a venue's health, as its reads went: `bad` when the last read failed (a geoblock in the venue's own words), `read` when it ever answered */
+/** a venue's health, as its reads went: `bad` when the last read failed, `read` when it ever answered, `away` when it does not serve the
+ * network the account runs on now (its place rule, or the server in front of it): a state, said as one, not a read that failed — its
+ * numbers are the last good read's, and it is asked again when a check of this network finds it answering */
 function pfHealth(v) {
   const h = (A.health || {})[v.id] || {};
   const failed = h.lastFailAt && (!h.lastOkAt || Date.parse(h.lastFailAt) >= Date.parse(h.lastOkAt));
-  if (failed && h.code === "E_VENUE_GEOBLOCKED") return { bad: true, read: !!h.lastOkAt, text: `${pfSaid(h.message) || `${v.name} does not serve this location`}. That is ${v.name}'s own rule for this location.` };
+  if (v.notServed || (failed && h.code === "E_VENUE_GEOBLOCKED")) return { bad: false, away: true, read: !!(h.lastOkAt || v.asOf), text: `${pfSaid((v.notServed && v.notServed.said) || h.message) || `${v.name} does not serve this location`}. Its numbers are from the last good read${v.asOf ? ` at ${nyTime(v.asOf)}` : ""}; it is asked again when a check of this network finds it answering.` };
   if (failed) return { bad: true, read: !!h.lastOkAt, text: `Didn't answer at ${nyTime(h.lastFailAt)}: ${pfSaid(h.message || h.code)}.` };
   if (v.stale) return { bad: true, read: true, text: `Last read failed: ${pfSaid(v.stale)}.` };
   if (h.lastOkAt) return { bad: false, read: true, text: `Answered at ${nyTime(h.lastOkAt)}${h.ms !== undefined ? ` · ${h.ms} ms` : ""}` };
@@ -180,6 +190,8 @@ function pfHealth(v) {
 function pfTrades(v) {
   if (!writesOn()) return { can: false, text: "Read-only: this server places no orders." };
   if (watched(v)) return { can: false, text: "Watched address: nothing is traded from it." };
+  // close-only on this network: what is held there is sold or closed from here, and nothing new is bought
+  if (canTrade(v) && v.closeOnly) return { can: true, text: "Sells only on this network: what you hold there can be sold or closed; nothing new is bought." };
   if (canTrade(v)) return { can: true, text: `Trades ${v.trade.what}.` };
   if (v.trade && v.trade.can === false) return { can: false, rekey: typeof connectorOfVenue === "function" && !!connectorOfVenue(v), text: `This key can't trade. ${typeof keyHowFor === "function" ? keyHowFor(v) : ""}`.trim() };
   // nothing is placed here from the account: the venue's own words (as it said them), or what its way in gives
@@ -302,7 +314,12 @@ function pfStepsHtml(owner, fresh) {
    curve's history), the curve, and one ⓘ holding the footnotes */
 function pfWorthHtml(l, venueIn, rows) {
   const L = connected().filter((v) => venueIn(v.id));
-  if (!connected().length) return `<section class="sec pf-worth"><div class="label">Net worth</div><div class="num">${money(0)}</div><p class="dim">Nothing is connected yet. Connect an account and what it holds shows here.</p></section>`;
+  if (!connected().length) {
+    // nothing read yet; a connection may be on the account all the same, waiting for its venue to answer this network (one the venue
+    // refused is under Venues, with Connect again)
+    const w = pfWaiting().filter((x) => !x.stopped).length;
+    return `<section class="sec pf-worth"><div class="label">Net worth</div><div class="num">${money(0)}</div><p class="dim">${w ? `Nothing is read yet: ${plural(w, "connection")} ${w === 1 ? "waits for its venue" : "wait for their venues"} to answer this network (see Venues).` : "Nothing is connected yet. Connect an account and what it holds shows here."}</p></section>`;
+  }
   // the figure and today's change come from one read where they can (the holdings read says both), so they never disagree by a tick
   const usd = l.kind === "all" ? (PF.hold && Number.isFinite(Number(PF.hold.totalUsd)) ? Number(PF.hold.totalUsd) : A.liveUsd) : L.reduce((s, v) => s + v.usd, 0);
   const label = l.kind === "all" ? "Net worth" : l.kind === "venue" ? `Net worth · ${l.name}` : `${l.name} · agent wallets`;
@@ -436,7 +453,8 @@ function pfIntents(el, drawn) {
 /* the dollars that are ready: one figure, one line, and the way to put them to earn where a venue takes them */
 function pfCashHtml(l, venueIn, owner) {
   const L = connected().filter((v) => venueIn(v.id));
-  const earn = typeof openEarn === "function" && L.some((v) => v.earn && v.earn.can !== false) ? pfBtn("earn", "Earn…", { cls: "btn btn-sm", off: !owner, title: owner ? "" : PF_LOOK_ONLY }) : "";
+  // offered where a venue that serves this network takes money to earn
+  const earn = typeof openEarn === "function" && L.some((v) => v.earn && v.earn.can !== false && servedHere(v)) ? pfBtn("earn", "Earn…", { cls: "btn btn-sm", off: !owner, title: owner ? "" : PF_LOOK_ONLY }) : "";
   const head = `<div class="sec-head"><div class="label">Cash ready</div>${earn}</div>`;
   if (!PF.hold) return `${head}${PF.holdErr ? `<div class="msg no">${esc(PF.holdErr)}</div>` : '<span class="skel" aria-hidden="true"></span>'}`;
   const c = pfCash(PF.hold.money, venueIn);
@@ -490,7 +508,7 @@ function pfEarnLines(r) {
 /* where an Earning row earns: the venue, the product, its yield as the venue says it */
 const pfEarnWhere = (r) => (r.earn ? [r.earn.venueName, r.earn.name, r.earn.apy !== undefined ? `${Number((r.earn.apy * 100).toFixed(2))}% a year` : ""] : [...new Set(r.venues.map((x) => [x.venueName, x.productName].filter(Boolean).join(" · ")))]).filter(Boolean).join(" · ");
 /* money can be taken out of an earn product at this venue from here: this browser signs, trading is on, the venue earns and its key may */
-const pfEarnOutAt = (venue) => { const v = connected().find((x) => x.id === venue); return owns() && writesOn() && !!v && !!v.earn && v.earn.can !== false; };
+const pfEarnOutAt = (venue) => { const v = connected().find((x) => x.id === venue); return owns() && writesOn() && !!v && !!v.earn && v.earn.can !== false && servedHere(v); };
 
 function pfAssetsHtml(l, rows) {
   if (!rows) return PF.holdErr ? `<div class="msg no">${esc(PF.holdErr)}</div>` : '<div class="skel-rows" aria-hidden="true"><span class="skel"></span><span class="skel"></span><span class="skel" style="width:60%"></span></div>';
@@ -503,8 +521,10 @@ function pfAssetsHtml(l, rows) {
     { label: "24h", r: true, cell: (r) => (pfDollarRow(r) ? '<span class="flat">—</span>' : `<span title="${esc(r.changeFrom ? `as ${r.changeFrom.venueName} reports it` : "no venue reported it")}">${chg(r.changePct24h)}</span>`) },
     { label: "Value", r: true, cell: (r) => `<b>${money(r.usd)}</b>` },
   ], rows, { empty: l.kind === "agent" ? "Its wallet holds nothing yet." : "Nothing held here yet.", rowAttr: (r) => (r.class === "earn" ? 'class="pf-earn-row"' : `class="click" data-pf-act="asset" data-key="${esc(r.key)}"`) });
+  // a venue that does not serve this network now is named once, quietly (its words on hover); a read that failed says so in its words
   const miss = (PF.hold.missing || []).filter((m) => m.part !== "positions");
-  return `${t}${miss.length ? `<p class="small dim pf-miss">Not read this time: ${miss.map((m) => `${esc(m.venueName)} (${esc(m.why)})`).join(" · ")}</p>` : ""}`;
+  const failed = miss.filter((m) => !awayMiss(m));
+  return `${t}${awayLine(miss.filter(awayMiss), { cls: "small dim pf-miss" })}${failed.length ? `<p class="small dim pf-miss">Not read this time: ${failed.map((m) => `${esc(m.venueName)} (${esc(m.why)})`).join(" · ")}</p>` : ""}`;
 }
 
 function pfPositionsHtml(l, venueIn, owner) {
@@ -525,7 +545,8 @@ function pfPositionsHtml(l, venueIn, owner) {
     { cell: (p) => (closable(p) ? pfBtn("close", verb(p), { cls: "btn btn-sm", data: { venue: p.venue, symbol: p.symbol } }) : "") },
   ], list, { empty: l.kind === "agent" ? "An agent's wallet holds coins, not positions." : "Nothing held in positions." });
   const miss = PF.pos.missing.filter((m) => venueIn(m.venue));
-  return `${t}${miss.length ? `<ul class="pf-miss-l">${miss.map((m) => `<li><b>${esc(m.venueName)}</b> could not be read: ${esc(m.why)}</li>`).join("")}</ul>` : ""}`;
+  const failed = miss.filter((m) => !awayMiss(m));
+  return `${t}${awayLine(miss.filter(awayMiss), { cls: "small dim pf-miss" })}${failed.length ? `<ul class="pf-miss-l">${failed.map((m) => `<li><b>${esc(m.venueName)}</b> could not be read: ${esc(m.why)}</li>`).join("")}</ul>` : ""}`;
 }
 
 /* how an account is reached, in a few words (the drawer's) */
@@ -538,10 +559,18 @@ function pfCaption(v) {
 /* an account's standing, as chips: its health first (✓ answers · ✗ not answering, the whole of it on hover), then what it can do from here */
 function pfChips(v) {
   const h = pfHealth(v);
-  const word = h.bad ? "Not answering" : h.read ? "Answers" : "Not read yet";
+  const word = h.away ? "Not served here" : h.bad ? "Not answering" : h.read ? "Answers" : "Not read yet";
+  // a venue that does not serve this network: that one state, and what serves the user instead when the venue has an edition for where
+  // they are; what it can do from here waits until it answers again
+  if (h.away) {
+    const ed = v.notServed && v.notServed.edition;
+    return [`<span class="chip pf-health away" title="${esc(h.text)}"><span aria-hidden="true">·</span>${esc(word)}</span>`, ed ? `<span class="chip" title="${esc(ed.said)}">${esc(ed.name)} serves where you are</span>` : ""].filter(Boolean).join(" ");
+  }
   return [
     `<span class="chip pf-health${h.bad ? " bad" : ""}" title="${esc(h.text)}"><span aria-hidden="true">${h.bad ? "✗" : h.read ? "✓" : "·"}</span>${esc(word)}</span>`,
-    canTrade(v) ? '<span class="chip warm">Trades</span>' : "",
+    // a venue that lets this network only close what is held: that state in a word, its own words on hover; it sells, it buys nothing
+    v.closeOnly ? `<span class="chip" title="${esc(v.closeOnly.said || "")}">Close only here</span>` : "",
+    canTrade(v) ? `<span class="chip warm">${v.closeOnly ? "Sells only" : "Trades"}</span>` : "",
     canMove(v) ? '<span class="chip warm">Moves money</span>' : "",
     canReceive(v) ? '<span class="chip">Receives</span>' : "",
     v.earn && v.earn.can !== false ? '<span class="chip">Earns</span>' : "",
@@ -560,14 +589,21 @@ const pfSwitchHtml = (v, on, owner) => `<button type="button" role="switch" clas
 function pfAccountsHtml(venueIn, owner) {
   const L = connected().filter((v) => venueIn(v.id));
   const revoked = new Set((A.dial && A.dial.revoked) || []);
+  // under the connected accounts, each connection on the account that nothing was read from: one waiting for its venue to answer this
+  // network, or one its venue answered and refused (stopped: the key, the account). Neither has a value, a standing of its own or a
+  // switch; the venue's words are on the chip. A waiting one is asked again (free, any browser) or taken off the account (signed); a
+  // stopped one is connected again by the owner's new signature, since a check does not retry it, or taken off
+  const rows = [...L.map((v) => ({ v })), ...pfWaiting(venueIn).map((w) => ({ w }))];
+  const look = owner ? "" : PF_LOOK_ONLY;
   return table([
-    { label: "Account", cell: (v) => `<div class="who">${avatar(v.name)}<div><b>${esc(v.name)}</b></div></div>` },
-    { label: "Value", r: true, cell: (v) => money(v.usd) },
-    { label: "Status", cell: (v) => `<span class="pf-chips">${pfChips(v)}</span>` },
-    { label: "Open to agents", cell: (v) => pfSwitchHtml(v, !revoked.has(v.id), owner) },
+    { label: "Account", cell: ({ v, w }) => `<div class="who">${avatar((v || w).name)}<div><b>${esc((v || w).name)}</b>${w ? `<span class="dim small">${w.stopped ? (w.by === "account" ? "not connected: the key could not be read" : "the venue refused the connection") : "waiting for the venue"}${pfLastRead(w) && w.lastAt ? ` · last read ${esc(nyTime(w.lastAt))}` : ""}</span>` : ""}</div></div>` },
+    // a connection a restart could not bring back: what its venue held at the last good read, dim, in no total
+    { label: "Value", r: true, cell: ({ v, w }) => (v ? money(v.usd) : pfLastRead(w) ? `<span class="dim" title="${esc(`Last read before the restart${w.lastAt ? `, ${nyDay(w.lastAt)} ${nyTime(w.lastAt)}` : ""}`)}">${money(w.lastUsd)}</span>` : "—") },
+    { label: "Status", cell: ({ v, w }) => `<span class="pf-chips">${v ? pfChips(v) : `${w.stopped ? `<span class="chip pf-health bad" title="${esc(w.said)}"><span aria-hidden="true">✗</span>Not connected</span>` : `<span class="chip" title="${esc(w.said)}">Waiting for the venue</span>`}<span class="dim small">since ${esc(pfWhen(w.since))}</span>`}</span>` },
+    { label: "Open to agents", cell: ({ v }) => (v ? pfSwitchHtml(v, !revoked.has(v.id), owner) : "—") },
     // the rest of what an account can do from here — Trade…, Move…, Receive, a new key, Disconnect… — is in its drawer
-    { cell: (v) => `<div class="acts pf-acts">${pfBtn("acct-details", "Details", { cls: "btn btn-sm btn-ghost", data: { venue: v.id } })}</div>` },
-  ], L, { empty: "No account here.", cls: "pf-acct-t" });
+    { cell: ({ v, w }) => `<div class="acts pf-acts">${v ? `${v.notServed && v.notServed.edition && typeof connectVia === "function" ? pfBtn("edition", `Connect ${v.notServed.edition.name}`, { cls: "btn btn-sm", data: { venue: v.id }, off: !owner, title: owner ? v.notServed.edition.said : PF_LOOK_ONLY }) : ""}${pfBtn("acct-details", "Details", { cls: "btn btn-sm btn-ghost", data: { venue: v.id } })}` : `${w.stopped ? pfBtn("reconnect", "Connect again", { cls: "btn btn-sm", data: { venue: w.venue }, off: !owner, title: look }) : pfBtn("recheck", "Check again", { cls: "btn btn-sm btn-ghost", data: { connector: w.connector }, title: `Ask ${w.name} again now` })}${pfBtn("unwait", "Disconnect", { cls: "btn btn-sm btn-ghost", data: { venue: w.venue }, off: !owner, title: look })}`}</div>` },
+  ], rows, { empty: "No account here.", cls: "pf-acct-t" });
 }
 
 // ---- the Account's Venues (round 7, F5) ------------------------------------------------------------------------------------------
@@ -581,7 +617,18 @@ function renderVenues({ el, owner }) {
   const L = connected().filter((v) => venueIn(v.id));
   const tools = `${typeof downloadBalances === "function" && L.length ? pfBtn("csv", `${icon("download", "sm")}CSV`, { cls: "btn btn-sm btn-ghost" }) : ""}${A.connectLive ? pfBtn("connect", `${icon("plug", "sm")}Connect an account`, { cls: "btn btn-primary btn-sm", off: !owner, title: owner ? "" : PF_LOOK_ONLY }) : ""}`;
   const agents = A.keys.filter((k) => k.status === "ok").length;
-  const sub = L.length ? `${plural(L.length, "account")} · ${money(L.reduce((t, v) => t + num(v.usd), 0))}${agents ? ` · where ${agents === 1 ? "your agent" : "your agents"} may act is each one's switch` : ""}` : "Connect an exchange, a broker, a wallet or a prediction market: each is read through its own interface, and nothing moves without your signature.";
+  // the connections on the account that nothing is read from are counted apart from the accounts: the ones waiting for their venue to
+  // answer this network, and the ones a venue answered and refused (stopped), connected again only by the owner
+  const held = pfWaiting(venueIn);
+  const W = held.filter((w) => !w.stopped).length;
+  const X = held.length - W;
+  const waits = W ? `waiting for ${W === 1 ? "its venue" : "their venues"}` : "";
+  const refused = X ? `${X} not connected` : "";
+  const sub = L.length
+    ? `${plural(L.length, "account")} · ${money(L.reduce((t, v) => t + num(v.usd), 0))}${agents ? ` · where ${agents === 1 ? "your agent" : "your agents"} may act is each one's switch` : ""}${W ? ` · ${W} ${waits}` : ""}${X ? ` · ${refused}` : ""}`
+    : held.length
+      ? `${[W ? `${plural(W, "connection")} ${waits}: nothing is read from ${W === 1 ? "it until it answers" : "them until they answer"} this network` : "", X ? `${refused}: ${X === 1 ? "connect it again, or disconnect it" : "connect them again, or disconnect them"}` : ""].filter(Boolean).join(" · ")}.`
+      : "Connect an exchange, a broker, a wallet or a prediction market: each is read through its own interface, and nothing moves without your signature.";
   pfPut(el, "venues", `<div class="sec-head"><div class="pf-venues-t"><h2 class="h2" id="pf-venues-h">Venues</h2><span class="dim small">${esc(sub)}</span></div><span class="tools">${tools}</span></div>${pfAccountsHtml(venueIn, owner)}`);
 }
 
@@ -690,6 +737,10 @@ async function pfAct(act, d) {
     case "earn-row-out": return void pfEarnRowOut(d.key);
     case "agents": return void pfAgentsSwitch(d.venue, d.on === "true");
     case "acct-details": return void pfDetails(d.venue);
+    case "recheck": return void pfRecheck(d.connector);
+    case "edition": return void pfEdition(d.venue);
+    case "reconnect": return void pfReconnect(d.venue);
+    case "unwait": return void pfUnwait(d.venue);
     case "csv": return void (typeof downloadBalances === "function" && downloadBalances());
     case "statement": return void (typeof openStatement === "function" && openStatement());
     case "all":
@@ -697,6 +748,13 @@ async function pfAct(act, d) {
       return void render();
     default:
   }
+}
+/* a connection its venue answered and refused (stopped: the key, the account), connected again by the owner: the connection's own form, on
+   the same name and key file (or address), through connect.js connectVia. A check of this network does not retry it; a new signature does */
+function pfReconnect(venue) {
+  const w = pfWaiting().find((x) => x.venue === venue);
+  if (!w || !owns() || typeof connectVia !== "function") return;
+  connectVia(w.connector, { name: w.name, label: w.name, ref: w.keyFile || w.address || "", fromWait: true });
 }
 
 /* the order ticket (the Trade pane's), at a venue when one is named */
@@ -753,6 +811,39 @@ async function pfDisconnect(venue) {
   }
 }
 
+/* a waiting connection's venue asked again now: its first, keyless question for this network, forced (connect.js askReach). When it
+   answers (close-only is an answer: what is held there can be sold), the account connects the connection; the page reads the account again
+   to see. When it still does not, that is said as the state it is, in a neutral word, never as an error in the venue's words (those stay
+   on the row's chip, on hover) */
+async function pfRecheck(connector) {
+  if (typeof askReach === "function") await askReach([connector], true);
+  const r = typeof REACH !== "undefined" ? REACH.get(connector) : null;
+  const answers = !!r && (r.state === "ok" || r.state === "close-only");
+  if (r && !answers) {
+    const w = pfWaiting().find((x) => x.connector === connector);
+    toast(`${w ? w.name : "The venue"} still doesn't answer this network. It stays on the account and comes back by itself when it does.`, "info");
+  }
+  await load();
+  // the venue answered: the account is connecting the connection behind this answer, and says so on its next read
+  if (answers) setTimeout(() => void load(), 2500);
+}
+/* a connected venue that does not serve this network, and its edition that serves where the user is: that edition's own form (a separate
+   company, its own account and keys) */
+function pfEdition(venue) {
+  const v = A.venues.find((x) => x.id === venue);
+  const ed = v && v.notServed && v.notServed.edition;
+  if (!ed || !owns() || typeof connectVia !== "function") return;
+  connectVia(ed.connector, { name: ed.name });
+}
+/* a waiting or stopped connection taken off the account, after a yes: nothing was read from its venue in this run, so nothing there changes;
+   a key file stays where it is */
+async function pfUnwait(venue) {
+  const w = pfWaiting().find((x) => x.venue === venue);
+  if (!w || !owns()) return;
+  const ok = await confirmSheet(`Disconnect ${w.name}? The connection comes off the account and ${w.name} is not asked again. ${w.how === "restart" ? "Nothing has been read from it since the restart" : "Nothing was ever read from it"}${w.keyFile ? ", and its key file stays where it is" : ""}.`, { title: "Disconnect", yes: "Disconnect" });
+  if (ok) await own({ type: "disconnectVenue", venue: w.venue });
+}
+
 /** "Open to agents": closing is free (POST /api/revoke: agents keep reads only); reopening widens what they may do, so it is signed */
 async function pfAgentsSwitch(venueId, isOpen) {
   const v = connected().find((x) => x.id === venueId);
@@ -795,8 +886,9 @@ function pfDetails(venue) {
       v.earn ? `Earn: ${v.earn.what}${v.earn.can === false && v.earn.whyNot ? ` · ${v.earn.whyNot}` : ""}.` : "",
       v.noTradeBecause && writesOn() && !t.text.includes(v.noTradeBecause) ? v.noTradeBecause : "",
       v.readOnlyBecause && writesOn() && !canTrade(v) && !t.text.includes(v.readOnlyBecause) ? v.readOnlyBecause : "",
-      v.stale ? `Last read failed: ${v.stale}` : "",
-      h && h.lastFailAt ? `Last failed ${nyDay(h.lastFailAt)} ${nyTime(h.lastFailAt)}: ${h.message || h.code || ""}` : "",
+      // where it stands, said once: not served on this network (a state), or a read that failed (its words, and since when)
+      pfHealth(v).away ? `Not served on this network now: ${pfHealth(v).text}` : v.stale ? `Could not be read${v.asOf ? ` since ${nyTime(v.asOf)}` : ""}: ${v.stale}` : h && h.lastFailAt && !(h.lastOkAt && Date.parse(h.lastOkAt) > Date.parse(h.lastFailAt)) ? `Last failed ${nyDay(h.lastFailAt)} ${nyTime(h.lastFailAt)}: ${h.message || h.code || ""}` : "",
+      v.notServed && v.notServed.edition ? `${v.notServed.edition.said}.` : "",
       h && h.lastOkAt ? `Last answered ${nyTime(h.lastOkAt)}${h.ms ? ` in ${h.ms} ms` : ""}.` : "",
     ].filter(Boolean);
     const ticket = typeof openTicket === "function";
@@ -900,7 +992,7 @@ function pfLimitForm({ agent = "", venue = "", usd = "", ask = null } = {}) {
   const keys = A.keys.filter((k) => k.status === "ok");
   if (!keys.length) return void toast("Let an agent in first: a limit is given to an agent.", "no");
   const L = connected();
-  const scopes = [["trade", "Trading", L.filter(canTrade)], ["venues", "Moving money between your accounts", [...L.filter(canMove), ...L.filter((v) => v.id.startsWith("agent-") && !canMove(v))]], ["earn", "Putting money into earn products", L.filter((v) => v.earn && v.earn.can !== false)]].filter(([, , vs]) => vs.length);
+  const scopes = [["trade", "Trading", L.filter(canTrade)], ["venues", "Moving money between your accounts", [...L.filter(canMove), ...L.filter((v) => v.id.startsWith("agent-") && !canMove(v))]], ["earn", "Putting money into earn products", L.filter((v) => v.earn && v.earn.can !== false && servedHere(v))]].filter(([, , vs]) => vs.length);
   if (!scopes.length) return void toast("No connected account trades or moves money from here, so there is nothing to give a limit for.", "no");
   const who = keys.find((k) => k.address === String(agent).toLowerCase()) || keys[0];
   const had = (a, scope) => A.spend.find((s) => s.agent === a && s.scope === scope && !s.expired);

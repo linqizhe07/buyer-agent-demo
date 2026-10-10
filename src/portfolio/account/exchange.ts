@@ -150,8 +150,9 @@ export interface Host {
   /** the earn of the venues connected live (live/earn.ts): each venue's earner, where it has one (absent: none earns) */
   liveEarn?(): EarnDesk | undefined;
   /** where the user can connect, as the host last judged it from the network it runs on (live/availability.ts): a venue that refuses this
-   * network, or offers no way in, is never asked of the owner by an agent. Undefined: not judged yet */
-  venueVerdict?(venue: string): { name: string; verdict: string; said?: string | undefined; edition?: { venue: string; name: string } | undefined } | undefined;
+   * network, or offers no way in, is never asked of the owner by an agent. `waiting`: the owner has connected the venue already and it has
+   * not answered this network yet (verdict "waiting"): not asked of the owner either. Undefined: not judged yet */
+  venueVerdict?(venue: string): { name: string; verdict: string; said?: string | undefined; edition?: { venue: string; name: string } | undefined; waiting?: { code: string; said: string } | undefined } | undefined;
   /** what the agents remember (account/memory.ts): the conversation the account keeps for them, their notes and the owner's About you
    * (absent: this account keeps no memory) */
   memory?(): MemoryStore | undefined;
@@ -173,12 +174,50 @@ export interface LiveOption {
   kind: string;
 }
 
+/** A connection the owner signed whose venue has not answered this network: it refuses the network (its place rule, its edge), did not
+ * answer, or sent the request elsewhere. The connection is kept — the venue, the connector, the key file's place or the address, as the
+ * owner signed them — asked again (a venue that did not answer on a backoff; one that refuses the network when a check of the network finds
+ * it answering: Check again, or the half-hourly check), and connected the moment the venue answers. Nothing is sent to it meanwhile. The
+ * same whether the owner connected it just now (`how: connect`) or a restart found the network not letting it back (`how: restart`): what
+ * the network answers decides nothing about the account's structure, only about when the venue is read */
+export interface WaitingConnection {
+  venue: string;
+  name: string;
+  connector: string;
+  needs: LiveOption["needs"];
+  /** a key-file connection: the file it reads (a path, never what is in it) */
+  keyFile?: string | undefined;
+  /** an address connection: the address, as the owner gave it */
+  address?: string | undefined;
+  /** why it waits, in the venue's own words for this network, and when it is asked again */
+  said: string;
+  /** the last refusal's code: E_VENUE_GEOBLOCKED (the venue's place rule or its edge), E_VENUE_UNREACHABLE (no answer, a ban or a wait it
+   * asked for), E_VENUE_REJECTED (sent elsewhere by something on this network); a stopped one's, the no itself */
+  code: string;
+  /** whose no the last refusal is: the venue's own, or this account's own check before anything was sent (a key file not there or
+   * unreadable, mm not installed, no sign-in on this server) */
+  by: "venue" | "account";
+  /** when the owner connected it, or when the restart began (ISO) */
+  since: string;
+  /** a connection a restart could not bring back: what the venue held at its last good read before the restart, and when (the net worth
+   * log's newest point that counted it) — shown, not added to any total */
+  lastUsd?: number | undefined;
+  lastAt?: string | undefined;
+  how: "connect" | "restart";
+  /** the venue answered this network and refused the connection itself (the key, the account), or this account's own check did (`by`):
+   * not asked again on its own, by no check either; `said` has the words; the owner connects it again (another key, one signature) or
+   * disconnects it */
+  stopped?: true | undefined;
+}
+
 export interface LiveOptions {
   /** the home directory key files live in */
   home: string;
   options: LiveOption[];
   /** whether this server moves real money, the most one movement may be, and how to turn it on */
   writes?: { on: boolean; capUsd: number; turnOn: string } | undefined;
+  /** the connections the owner signed whose venues have not answered this network yet: on the account, waiting, read nowhere */
+  waiting?: WaitingConnection[] | undefined;
 }
 
 export interface Connectable {
@@ -796,6 +835,8 @@ export class AccountEngine {
     // form and decides — shown, never enforced, as the venue's own sign-up checks residency
     if (a.kind === "venue" && a.venue) {
       const v = this.host.venueVerdict?.(a.venue);
+      // the owner has connected it already, and it waits for the venue to answer this network: there is nothing to ask the owner for
+      if (v?.waiting) return no(v.waiting.code === "E_VENUE_GEOBLOCKED" ? "E_VENUE_GEOBLOCKED" : "E_VENUE_UNREACHABLE", { venue: a.venue, message: `the owner is not asked: ${v.name} is connected already and waits for the venue to answer the network this account runs on. ${v.waiting.said}. It is read, and open to agents the owner lets in, once it answers`, detail: { waiting: true } });
       if (v && (v.verdict === "not-served" || v.verdict === "closed")) {
         const why = v.verdict === "closed" ? "E_ACCOUNT_BAD_ACTION" : "E_VENUE_GEOBLOCKED";
         // its edition for where the user is, when one serves the place under its own terms (Binance.US for Binance): named, for the agent to ask for
@@ -1467,7 +1508,7 @@ export interface AccountPage {
   inFlightUsd: number;
   /** what open payment sessions hold in escrow that is still the user's */
   heldUsd: number;
-  venues: Array<{ id: string; name: string; /** the connection it was made with, as the owner signed it (`live:exchange:okx`, `live:wallet`, `live:metamask`) */ connector?: string; /** a venue connected by API key: the key file it reads, as the owner signed it (a path in the home folder, never what is in it) */ keyFile?: string; frontLine: string; usd: number; cashUsd: number; holdings: Array<{ asset: string; amount: number; usd: number; class: Holding["class"]; note?: string | undefined; inTransit: boolean; /** class `earn`: the product it is in (live/earn.ts), its yield and its name, as the venue says them */ earn?: EarnHolding | undefined }>; restricted?: string; /** the owner plugged it in: it can be unplugged */ plugged?: boolean; via?: string; /** its balances are the real venue's */ live?: true; /** connected read-only: every door through it is shut */ watchOnly?: string; asOf?: string; stale?: string; proven?: string; liveCan?: Account["liveCan"]; readOnlyBecause?: string; /** orders can be placed here: may the key trade, and what is traded */ trade?: Account["liveTrade"]; noTradeBecause?: string; /** money can be put to earn here (live/earn.ts): may the key or wallet put money in, and what is earned */ earn?: { can: boolean | "unknown"; what: string; whyNot?: string }; address?: string; in: RunwayLabel; out: RunwayLabel; /** it moves dollars by ACH, not stablecoins on a chain */ fiat: boolean; ledgers: string[]; swaps: Array<{ pair: [string, string]; feeBps: number; minUsd: number; access: string }>; agentKey: Door["agentKey"]; runways: RunwayRow[] }>;
+  venues: Array<{ id: string; name: string; /** the connection it was made with, as the owner signed it (`live:exchange:okx`, `live:wallet`, `live:metamask`) */ connector?: string; /** a venue connected by API key: the key file it reads, as the owner signed it (a path in the home folder, never what is in it) */ keyFile?: string; frontLine: string; usd: number; cashUsd: number; holdings: Array<{ asset: string; amount: number; usd: number; class: Holding["class"]; note?: string | undefined; inTransit: boolean; /** class `earn`: the product it is in (live/earn.ts), its yield and its name, as the venue says them */ earn?: EarnHolding | undefined }>; restricted?: string; /** the owner plugged it in: it can be unplugged */ plugged?: boolean; via?: string; /** its balances are the real venue's */ live?: true; /** connected read-only: every door through it is shut */ watchOnly?: string; asOf?: string; stale?: string; /** the venue does not serve the network the account runs on now (its place rule, or the server in front of it, met by a read here): its words, the edition for where the user is when one serves it, and its numbers are the last good read's (`asOf`) — asked again when a check of this network finds it answering */ notServed?: { said: string; edition?: { connector: string; name: string; said: string } | undefined }; /** the venue lets the network the account runs on only close what is held (Polymarket for a US network): sells and closes go, buys are refused — its words */ closeOnly?: { said: string }; proven?: string; liveCan?: Account["liveCan"]; readOnlyBecause?: string; /** orders can be placed here: may the key trade, and what is traded */ trade?: Account["liveTrade"]; noTradeBecause?: string; /** money can be put to earn here (live/earn.ts): may the key or wallet put money in, and what is earned */ earn?: { can: boolean | "unknown"; what: string; whyNot?: string }; address?: string; in: RunwayLabel; out: RunwayLabel; /** it moves dollars by ACH, not stablecoins on a chain */ fiat: boolean; ledgers: string[]; swaps: Array<{ pair: [string, string]; feeBps: number; minUsd: number; access: string }>; agentKey: Door["agentKey"]; runways: RunwayRow[] }>;
   payments: Payment[];
   /** orders placed at venues connected live, newest first */
   orders: LiveOrder[];

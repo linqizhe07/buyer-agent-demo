@@ -350,6 +350,7 @@ if (!REAL) {
 
 /** what this seat may ask of a venue connected live, in the words the page uses */
 function liveMoney(v: AccountLite["venues"][number], writes: boolean): string {
+  if (v.notServed) return `nothing now: ${v.name} does not serve the network the account runs on (its own rule); asked again when a check of this network finds it answering`;
   if (v.readOnlyBecause) return `read only: ${v.readOnlyBecause}`;
   if (!writes) return "read only: this server moves no real money";
   const c = v.liveCan;
@@ -363,9 +364,12 @@ function liveMoney(v: AccountLite["venues"][number], writes: boolean): string {
 /** what this seat may trade at a venue connected live, in the words the page uses */
 function liveTrading(v: AccountLite["venues"][number], writes: boolean): string {
   if (!writes) return "no orders: this server was started read-only";
+  // the venue's own rule for the network the account runs on now: nothing is sent to it until a check of this network finds it answering
+  if (v.notServed) return `no orders now: ${v.name} does not serve the network the account runs on (its own rule)${v.notServed.edition ? `; ${v.notServed.edition.name} serves where the user is (a separate company: ask the owner to connect venue "${v.notServed.edition.connector.replace(/^live:(exchange:)?/, "")}")` : ""}`;
   if (!v.trade) return `no orders: ${v.noTradeBecause ?? `${v.via ?? "this connection"} gives no interface for orders here`}`;
   if (v.trade.can === false) return "no orders: this key may not trade (that is set on the key at the venue)";
   if (v.address && !v.proven) return "no orders: a watched address, not proven the user's";
+  if (v.closeOnly) return `sells and closes only: ${v.name} lets the network the account runs on close what is held and open nothing (its own rule) — a buy there is refused`;
   return `trades ${v.trade.what}: portfolio_live_markets to find a market, portfolio_live_order to place one (inside your trading limit)`;
 }
 
@@ -381,7 +385,7 @@ interface AccountLite {
   totalUsd: number;
   inFlightUsd: number;
   /** a venue: on the real account the simulation's runway rows, doors, swap table and ledgers do not travel with it (server.ts realPage) */
-  venues: Array<{ id: string; name: string; frontLine: string; usd: number; cashUsd: number; restricted?: string; via?: string; in?: { text: string; access: string; why?: string }; out?: { text: string; access: string; why?: string }; ledgers?: string[]; live?: true; liveCan?: { withdraw: boolean | "unknown"; ledgers: string[]; transfer: boolean | "unknown"; swap: boolean | "unknown"; receive: boolean; send: "wallet" | "mm" | "account" | false; why?: Partial<Record<"withdraw" | "transfer" | "swap" | "send", string>> }; trade?: { can: boolean | "unknown"; what: string; kinds?: string[] }; noTradeBecause?: string; readOnlyBecause?: string; proven?: string; address?: string; stale?: string; holdings?: Array<{ asset: string; amount: number; usd: number; class: string; note?: string; inTransit?: boolean }> }>;
+  venues: Array<{ id: string; name: string; frontLine: string; usd: number; cashUsd: number; restricted?: string; via?: string; in?: { text: string; access: string; why?: string }; out?: { text: string; access: string; why?: string }; ledgers?: string[]; live?: true; liveCan?: { withdraw: boolean | "unknown"; ledgers: string[]; transfer: boolean | "unknown"; swap: boolean | "unknown"; receive: boolean; send: "wallet" | "mm" | "account" | false; why?: Partial<Record<"withdraw" | "transfer" | "swap" | "send", string>> }; trade?: { can: boolean | "unknown"; what: string; kinds?: string[] }; noTradeBecause?: string; readOnlyBecause?: string; proven?: string; address?: string; stale?: string; asOf?: string; notServed?: { said: string; edition?: { connector: string; name: string; said: string } }; closeOnly?: { said: string }; holdings?: Array<{ asset: string; amount: number; usd: number; class: string; note?: string; inTransit?: boolean }> }>;
   orders?: Array<Record<string, unknown>>;
   connectLive?: { options?: Array<{ connector: string; label: string; needs: string; example?: string; venues?: unknown }>; writes?: { on: boolean; capUsd: number } };
   payments: PaymentLite[];
@@ -402,7 +406,7 @@ server.registerTool(
   "portfolio_account",
   {
     description:
-      "The ACCOUNT as this seat sees it — read this before trading, moving or paying anything. It returns this seat's own key (its address, and whether the owner has authorised it: an unauthorised key can do nothing, and the owner authorises it on the Account page), the limits the owner signed for it (`approvals` — `trade`: placing orders, with a per-order maximum, a budget of orders and what is left of it; `venues`: moving money between the user's own venues; `payees`: paying someone else; `earn`: putting money into venues' earn products — portfolio_earn, portfolio_live_earn), every venue connected live (`venues`, `live: true`) with what it holds, what this seat may trade there (`trading`) and what real money may be asked of it (`realMoney`: withdraw, send, transfer, swap, receive — or why nothing, in the venue's words), the orders on the account (yours marked `mine`) and where each stands, your agent wallets (`floats`: what the chains say they hold), recent payments with their status (a payment in flight is in no balance until it lands; a bridge carries its carrier's own estimate, `etaSec`), what is held by asset (`assets`) and the dollars ready to use (`readyCashUsd`), the cards waiting on the owner that are THIS seat's (`waitingForOwner`; other agents' only as a count, `othersWaiting`), the venues the owner could connect from where the user is (`connectable`: each with its `verdict` — `connectable`, or why not in the venue's own words: `not-served` this network, `close-only` (positions there may be closed, none opened), `terms-exclude` where the user is, `setup`, `closed`, `no-answer` — and `edition` where a separate company serves the user's place instead under its own terms (Binance.US for Binance); portfolio_venues has every detail. The owner connects them, not you — portfolio_ask can ask; an ask for a venue that refuses this network or offers no way in is refused at the door), the owner's mode (`mode`: `guard` — what you ask for waits for the owner on a card; `open` — inside your limits it goes at once) and `modeRules`: door by door, what Guard and Beast do with an agent's request (rows { door, guard, beast }) and how long a card waits for the owner (`cardMinutes`). A venue the owner connects later appears here; it is in none of your approvals until the owner names it. A seat whose key is not let in asks to be, once, under its client's name. `memory`: how much this seat remembers about the owner, kept by the account (portfolio_memory reads it; read it when a session starts), and the owner's switches for it (`mayLearn`, `ownerAsksFirst`). A read.",
+      "The ACCOUNT as this seat sees it — read this before trading, moving or paying anything. It returns this seat's own key (its address, and whether the owner has authorised it: an unauthorised key can do nothing, and the owner authorises it on the Account page), the limits the owner signed for it (`approvals` — `trade`: placing orders, with a per-order maximum, a budget of orders and what is left of it; `venues`: moving money between the user's own venues; `payees`: paying someone else; `earn`: putting money into venues' earn products — portfolio_earn, portfolio_live_earn), every venue connected live (`venues`, `live: true`) with what it holds (as of its last good read, `asOf`; `stale`: the last read did not answer, in its words; `notServed`: it does not serve the network the account runs on now — its own rule, nothing is sent to it until a check of this network finds it answering, so do not try it), what this seat may trade there (`trading`) and what real money may be asked of it (`realMoney`: withdraw, send, transfer, swap, receive — or why nothing, in the venue's words), the orders on the account (yours marked `mine`) and where each stands, your agent wallets (`floats`: what the chains say they hold), recent payments with their status (a payment in flight is in no balance until it lands; a bridge carries its carrier's own estimate, `etaSec`), what is held by asset (`assets`) and the dollars ready to use (`readyCashUsd`), the cards waiting on the owner that are THIS seat's (`waitingForOwner`; other agents' only as a count, `othersWaiting`), the venues the owner could connect from where the user is (`connectable`: each with its `verdict` — `connectable`, or why not in the venue's own words: `not-served` this network, `close-only` (positions there may be closed, none opened), `terms-exclude` where the user is, `setup`, `closed`, `no-answer` — and `edition` where a separate company serves the user's place instead under its own terms (Binance.US for Binance); `waiting` on one the owner has connected already whose venue has not answered this network yet — it is read once it answers; portfolio_venues has every detail. The owner connects them, not you — portfolio_ask can ask; an ask for a venue that refuses this network, offers no way in, or is connected and waiting is refused at the door), the owner's mode (`mode`: `guard` — what you ask for waits for the owner on a card; `open` — inside your limits it goes at once) and `modeRules`: door by door, what Guard and Beast do with an agent's request (rows { door, guard, beast }) and how long a card waits for the owner (`cardMinutes`). A venue the owner connects later appears here; it is in none of your approvals until the owner names it. A seat whose key is not let in asks to be, once, under its client's name. `memory`: how much this seat remembers about the owner, kept by the account (portfolio_memory reads it; read it when a session starts), and the owner's switches for it (`mayLearn`, `ownerAsksFirst`). A read.",
     inputSchema: {},
     annotations: { readOnlyHint: true },
   },
@@ -412,7 +416,7 @@ server.registerTool(
     const a = r.body as AccountLite;
     const [vr, mr] = await Promise.all([call("GET", "/api/account/venues").catch(() => ({ status: 0, body: undefined })), call("GET", `/api/account/memory/agent?address=${seatKey().address}`).catch(() => ({ status: 0, body: undefined }))]);
     const kept = mr.status === 200 ? (mr.body as { notes?: unknown[]; waiting?: unknown[]; rules?: { learn?: boolean; ask?: boolean } }) : undefined;
-    const venuesHere = vr.status === 200 && Array.isArray((vr.body as { venues?: unknown })?.venues) ? ((vr.body as { venues: Array<{ connector: string; name: string; needs: string; verdict: string; said?: string; edition?: { connector: string; name: string; said: string }; connected?: boolean }> }).venues) : [];
+    const venuesHere = vr.status === 200 && Array.isArray((vr.body as { venues?: unknown })?.venues) ? ((vr.body as { venues: Array<{ connector: string; name: string; needs: string; verdict: string; said?: string; edition?: { connector: string; name: string; said: string }; connected?: boolean; waiting?: string }> }).venues) : [];
     const me = seatKey().address;
     const key = a.keys.find((k) => k.address === me);
     // a key the account does not know asks to be let in, once, under its client's name
@@ -436,10 +440,12 @@ server.registerTool(
         const live = a.venues.find((v) => v.id === `agent-${s.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")}`);
         return { name: s.name, address: s.address, balanceUsd: live ? live.usd : s.balanceUsd, capUsd: s.capUsd, ...(live ? { holdings: (live.holdings ?? []).filter((h) => h.amount).map((h) => ({ asset: h.asset, amount: h.amount, usd: h.usd })) } : {}) };
       }),
-      venues: a.venues.map((v) => (v.live ? { id: v.id, name: v.name, frontLine: v.frontLine, usd: v.usd, live: true, trading: liveTrading(v, !!a.connectLive?.writes?.on), realMoney: liveMoney(v, !!a.connectLive?.writes?.on), holdings: (v.holdings ?? []).filter((h) => h.amount).slice(0, 30).map((h) => ({ asset: h.asset, amount: h.amount, usd: h.usd })), ...(v.address ? { address: v.address, proven: v.proven ?? "watched, not proven" } : {}) } : { id: v.id, name: v.name, frontLine: v.frontLine, usd: v.usd, movableUsd: v.cashUsd, ...(v.restricted ? { restricted: v.restricted } : v.in && v.out ? { moneyIn: `${v.in.text} (${v.in.access})`, moneyOut: `${v.out.text} (${v.out.access})${v.out.why ? ` — ${v.out.why}` : ""}` } : {}), ...(v.ledgers?.length ? { ledgers: v.ledgers } : {}) })),
+      // a venue's numbers are its last good read (`asOf`); `stale`: the last read did not answer, in its words; `notServed`: it does not serve
+      // the network the account runs on now — its numbers stand from `asOf`, nothing is sent to it until a check finds it answering
+      venues: a.venues.map((v) => (v.live ? { id: v.id, name: v.name, frontLine: v.frontLine, usd: v.usd, live: true, ...(v.asOf ? { asOf: v.asOf } : {}), ...(v.notServed ? { notServed: true } : v.stale ? { stale: v.stale } : {}), trading: liveTrading(v, !!a.connectLive?.writes?.on), realMoney: liveMoney(v, !!a.connectLive?.writes?.on), holdings: (v.holdings ?? []).filter((h) => h.amount).slice(0, 30).map((h) => ({ asset: h.asset, amount: h.amount, usd: h.usd })), ...(v.address ? { address: v.address, proven: v.proven ?? "watched, not proven" } : {}) } : { id: v.id, name: v.name, frontLine: v.frontLine, usd: v.usd, movableUsd: v.cashUsd, ...(v.restricted ? { restricted: v.restricted } : v.in && v.out ? { moneyIn: `${v.in.text} (${v.in.access})`, moneyOut: `${v.out.text} (${v.out.access})${v.out.why ? ` — ${v.out.why}` : ""}` } : {}), ...(v.ledgers?.length ? { ledgers: v.ledgers } : {}) })),
       ...(a.connectLive?.writes?.on ? { realMoney: { on: true, capUsd: a.connectLive.writes.capUsd } } : {}),
       // what is held, by asset across the venues connected live (portfolio_holdings adds the last 24 hours), and the dollars ready to use
-      assets: held.rows.slice(0, 30).map((x) => ({ key: x.key, asset: x.asset, class: x.class, amount: x.amount, usd: x.usd, venues: x.venues.map((l) => l.venue) })),
+      assets: held.rows.slice(0, 30).map((x) => ({ key: x.key, asset: x.asset, class: x.class, amount: x.amount, usd: x.usd, venues: x.venues.map((l) => l.venue), ...(x.venues.some((l) => (l as { stale?: unknown }).stale) ? { fromLastGoodRead: true } : {}) })),
       readyCashUsd: held.money.readyUsd,
       // this seat's own cards only; how many other agents' are waiting is a count
       waitingForOwner: mine.map((c) => ({ id: c.id, flight: c.flight, usd: c.usd, reason: c.reason, ...(c.kind ? { kind: c.kind } : {}), ...(c.expiresAt ? { expiresAt: c.expiresAt } : {}) })),
@@ -450,7 +456,7 @@ server.registerTool(
       // where the user can connect, from the network the Account runs on (portfolio_venues has every field): a venue that refuses it, or offers
       // no way in, is never asked of the owner; one whose terms exclude where the user is still is (shown, never enforced); one that cannot be
       // used from here names its edition for the user's place when a separate company serves it under its own terms
-      connectable: venuesHere.length ? venuesHere.map((v) => ({ connector: v.connector, name: v.name, needs: v.needs, verdict: v.verdict, ...(v.said ? { said: v.said } : {}), ...(v.edition ? { edition: v.edition } : {}), ...(v.connected ? { connected: true } : {}) })) : (a.connectLive?.options ?? []).map((o) => ({ connector: o.connector, label: o.label, needs: o.needs })),
+      connectable: venuesHere.length ? venuesHere.map((v) => ({ connector: v.connector, name: v.name, needs: v.needs, verdict: v.verdict, ...(v.said ? { said: v.said } : {}), ...(v.edition ? { edition: v.edition } : {}), ...(v.connected ? { connected: true } : {}), ...(v.waiting ? { waiting: v.waiting } : {}) })) : (a.connectLive?.options ?? []).map((o) => ({ connector: o.connector, label: o.label, needs: o.needs })),
       // the simulated statement's payees paid, payment sessions and builder fees, where the account sends them
       ...(a.pay ? { payees: a.pay.payees, sessions: a.pay.sessions } : {}),
       ...(a.fees ? { appFees: a.fees } : {}),
@@ -538,7 +544,7 @@ server.registerTool(
   "portfolio_live_compare",
   {
     description:
-      "Where is it cheapest to buy, or best to sell? The same coin or stock (`base`: BTC, ETH, SOL, AAPL …) at every venue the owner connected live that trades it, ranked by the price an order would take there: the ask for a buy, the bid for a sell. Each row has the venue, its own symbol for it (send that to portfolio_live_order), the price, bid/ask and spread, whether it is open and whether this account can trade there now, and how much worse than the best it is. `usd` checks the size fits each venue's smallest order. Fees are not guessed: a venue's own note says so when it knows. A venue that does not answer in four seconds is listed under `missing`. A price far from the others is marked not ready: it may be another token under the same name. `asset` (stock | crypto) says which is meant where a name is both a coin and a stock. A read.",
+      "Where is it cheapest to buy, or best to sell? The same coin or stock (`base`: BTC, ETH, SOL, AAPL …) at every venue the owner connected live that trades it, ranked by the price an order would take there: the ask for a buy, the bid for a sell. Each row has the venue, its own symbol for it (send that to portfolio_live_order), the price, bid/ask and spread, whether it is open and whether this account can trade there now, and how much worse than the best it is. `usd` checks the size fits each venue's smallest order. Fees are not guessed: a venue's own note says so when it knows. A venue that does not answer in four seconds is listed under `missing`; a venue that does not serve the network the Account runs on is not compared, and one that said so during this read is named in `notServedHere` (a state, not an error: do not retry it). A price far from the others is marked not ready: it may be another token under the same name. `asset` (stock | crypto) says which is meant where a name is both a coin and a stock. A read.",
     inputSchema: { base: z.string().describe("what to compare: BTC, ETH, AAPL"), side: z.enum(["buy", "sell"]), usd: z.number().positive().optional().describe("the size in dollars, to check it fits each venue's smallest order"), asset: z.enum(["stock", "crypto"]).optional().describe("which is meant where a name is both a coin and a stock") },
     annotations: { readOnlyHint: true },
   },
@@ -546,7 +552,7 @@ server.registerTool(
     const r = await call("GET", `/api/account/compare?${new URLSearchParams({ base, side, ...(usd !== undefined ? { usd: String(usd) } : {}), ...(asset ? { asset } : {}) })}`);
     const b = r.body as { refusal?: { code: string; message: string } } & Record<string, unknown>;
     if (b.refusal) return text({ ok: false, code: b.refusal.code, message: b.refusal.message }, true);
-    return text(b);
+    return text(served(b));
   },
 );
 
@@ -615,7 +621,7 @@ server.registerTool(
     const r = await call("GET", `/api/account/positions${venue ? `?${new URLSearchParams({ venue })}` : ""}`);
     const b = r.body as { refusal?: { code: string; message: string }; positions?: unknown; missing?: unknown };
     if (b.refusal) return text({ ok: false, code: b.refusal.code, message: b.refusal.message }, true);
-    return text({ ok: true, positions: b.positions, ...(venue ? {} : { missing: b.missing ?? [] }) });
+    return text(served({ ok: true, positions: b.positions, ...(venue ? {} : { missing: b.missing ?? [] }) }));
   },
 );
 
@@ -767,7 +773,23 @@ async function read(path: string, pick?: (b: Record<string, unknown>) => unknown
   if (r.status === 404) return text({ ok: false, error: "this service runs without the account layer (--classic)" }, true);
   if (b.refusal) return text({ ok: false, code: b.refusal.code, message: b.refusal.message, ...(b.refusal.detail !== undefined ? { detail: b.refusal.detail } : {}) }, true);
   if (r.status >= 400) return text({ ok: false, error: b.error ?? `HTTP ${r.status}` }, true);
-  return text(pick ? pick(b) : b);
+  return text(served(pick ? pick(b) : b));
+}
+
+/** A read's `missing` list, split: a venue whose own rule does not serve the network the account runs on is a state, not a read that failed —
+ * named once in `notServedHere` (its words are in portfolio_venues), so an agent neither retries it nor relays its refusal as an error; what
+ * did not answer stays in `missing` */
+function served<T>(b: T): T {
+  const x = b as { missing?: unknown };
+  if (!x || typeof x !== "object" || !Array.isArray(x.missing)) return b;
+  const list = x.missing as Array<{ venue?: string; venueName?: string; code?: string; connected?: boolean; scope?: string }>;
+  // only a venue's line for the whole network: a rule for one product, the leverage, or close-only (it still closes) stays where it was
+  const whole = (m: { code?: string; scope?: string }) => m.code === "E_VENUE_GEOBLOCKED" && m.scope === undefined;
+  const geo = list.filter(whole);
+  if (!geo.length) return b;
+  const names = new Map<string, { venue: string; venueName: string; connected?: boolean }>();
+  for (const m of geo) if (m.venueName && !names.has(m.venueName)) names.set(m.venueName, { venue: m.venue ?? "", venueName: m.venueName, ...(m.connected !== undefined ? { connected: m.connected } : {}) });
+  return { ...(b as object), missing: list.filter((m) => !whole(m)), notServedHere: [...names.values()] } as T;
 }
 
 server.registerTool(
@@ -836,7 +858,7 @@ server.registerTool(
   "portfolio_venues",
   {
     description:
-      "WHERE THIS USER CAN CONNECT, detected automatically from the network the Account runs on — read it before asking the owner to connect anything, and to know what is open to them. Every venue the account knows (exchanges by their own id, brokers, wallets, prediction markets, Hyperliquid, OUSG), each with a `verdict`: `connectable`; `not-served` (the venue refuses this network: its own rule, in its words in `said`); `close-only` (the venue lets this network close positions and open none — Polymarket's rule for the United States among other places: connected, what is held can be sold, and a buy is refused in its words); `terms-exclude` (the venue answers here, but its own published terms exclude where the user is — `terms` has the venue's words, link and date; shown, never enforced: the venue's own sign-up checks residency, and the owner decides); `setup` (something on this machine first, e.g. mm signed in); `closed`; `no-answer` (did not answer just now; connecting asks again). Also: `connected` (already on the account), `needs` (how the owner connects it: key-file, sign-in, address, cli), `group`, `readOnly` for venues read by address, and `edition` beside a venue that cannot be used from here: its edition for the user's place — a separate company, with its own account and API keys, offered only when it answers this network and its own published terms serve the place (ask the owner for that one instead). The place itself is never returned or kept. Asked automatically every 30 minutes; `fresh: true` asks every venue again now. Nothing here grants anything: connecting is the owner's signed act.",
+      "WHERE THIS USER CAN CONNECT, detected automatically from the network the Account runs on — read it before asking the owner to connect anything, and to know what is open to them. Every venue the account knows (exchanges by their own id, brokers, wallets, prediction markets, Hyperliquid, OUSG), each with a `verdict`: `connectable`; `not-served` (the venue refuses this network: its own rule, in its words in `said`); `close-only` (the venue lets this network close positions and open none — Polymarket's rule for the United States among other places: connected, what is held can be sold, and a buy is refused in its words); `terms-exclude` (the venue answers here, but its own published terms exclude where the user is — `terms` has the venue's words, link and date; shown, never enforced: the venue's own sign-up checks residency, and the owner decides); `setup` (something on this machine first, e.g. mm signed in); `closed`; `no-answer` (did not answer just now; connecting asks again). Also: `connected` (already on the account — read, or `waiting`: the owner has connected it and the venue has not answered this network yet; `waiting` says why and when it is asked again; it is read, and open to agents the owner lets in, once it answers — do not ask the owner for it), `needs` (how the owner connects it: key-file, sign-in, address, cli), `group`, `readOnly` for venues read by address, and `edition` beside a venue that cannot be used from here: its edition for the user's place — a separate company, with its own account and API keys, offered only when it answers this network and its own published terms serve the place (ask the owner for that one instead). The place itself is never returned or kept. Asked automatically every 30 minutes; `fresh: true` asks every venue again now. Nothing here grants anything: connecting is the owner's signed act.",
     inputSchema: { fresh: z.boolean().optional().describe("ask every venue again now instead of the answer kept (up to 30 minutes old)") },
     annotations: { readOnlyHint: true },
   },

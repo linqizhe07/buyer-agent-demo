@@ -80,7 +80,7 @@
  */
 import { isRefusal, type Refusal } from "../../core/errors.ts";
 import { isExcludedCategory, isIpoCategory, isRwaMarket, TABS, type TabId } from "./categories.ts";
-import { normalBase, type CompareMissing, type PlaceRule } from "./compare.ts";
+import { normalBase, scopeOf, type CompareMissing, type PlaceRule } from "./compare.ts";
 import { impliedUsd, PER_SHARE, PRE_IPO_CATEGORY, PRE_IPO_GROUP, PRE_IPO_PER_POINT } from "./preipo.ts";
 import type { EventsQuery, Listing, PublicSource } from "./public-markets.ts";
 import { inDollars, type LiveTrader, type Market, type MarketSession, type MarketStats } from "./trade.ts";
@@ -126,6 +126,9 @@ export interface ExploreOptions {
   /** what "closing soon" means, in milliseconds from now (a day) */
   closingWithinMs?: number | undefined;
   clock?: (() => number) | undefined;
+  /** does this source's venue serve the network the account runs on (its own answer to it, as the account last learned it): one that does
+   * not — or offers no way in — is not asked, and its markets are not listed; a note names it, without its words. Absent: every source is */
+  serves?: ((r: { id: string; name: string; connected: boolean; connector?: string | undefined }) => boolean) | undefined;
 }
 
 /** one venue where a row's thing is listed */
@@ -137,6 +140,8 @@ export interface ExploreAt {
   symbol: string;
   /** the owner has connected this venue */
   connected: boolean;
+  /** a connected venue that lets the network the account runs on only close what is held (its own rule): no buy is offered there */
+  closeOnly?: true | undefined;
   /** may the connected key or sign-in trade there: what the venue said (`unknown`: its first refusal will say); a public listing: false */
   canTrade: boolean | "unknown";
   /** read from the venue's public market data, without a key */
@@ -442,7 +447,8 @@ async function atSource(r: Reader, o: { q: string; ms: number; perSource: number
     if (!s.done) failed.push(gone(`did not answer in ${seconds(o.ms)}`, { code: "E_VENUE_UNREACHABLE", part: s.part }));
     else if (isRefusal(s.v)) {
       const said = wordsOf(s.v);
-      failed.push(gone(s.v.message, { code: s.v.code, part: s.part, ...(said ? { said } : {}) }));
+      const scope = scopeOf(s.v);
+      failed.push(gone(s.v.message, { code: s.v.code, part: s.part, ...(said ? { said } : {}), ...(scope ? { scope } : {}) }));
     } else if (s.v instanceof Error || (s.part === "stats" ? !(s.v instanceof Map) : !Array.isArray(s.v))) failed.push(gone("answered in a way this could not read", { part: s.part }));
   }
   // what a source says its list is made of, only when its listing answered: a source that refused this network, timed out or could not be
@@ -457,10 +463,21 @@ async function atSource(r: Reader, o: { q: string; ms: number; perSource: number
   return { got, missing: [whole], notes };
 }
 
+/** the venues that do not serve this network, in a line under 160 characters: named, never quoted */
+function awayNote(names: string[]): string {
+  const cut = (n: string) => (n.length > 24 ? `${n.slice(0, 23)}…` : n);
+  const shown = names.length > 4 ? [...names.slice(0, 3).map(cut), `${names.length - 3} more`] : names.map(cut);
+  const list = shown.length > 1 ? `${shown.slice(0, -1).join(", ")} and ${shown[shown.length - 1]}` : shown[0]!;
+  const line = `${list} ${names.length === 1 ? "does" : "do"} not serve this network: ${names.length === 1 ? "its" : "their"} markets are not listed here.`;
+  return line.length <= 160 ? line : `${names.length} venues do not serve this network: their markets are not listed here.`;
+}
+
+/** one line per thing missing: a source that is missing as a whole (no part, no symbol) is one line per venue name and reason, so an exchange
+ * read through two public sources (its spot tickers and its pre-IPO perpetuals) that both refused with the same words is named once */
 const dedupe = (list: ExploreMissing[]): ExploreMissing[] => {
   const keys = new Set<string>();
   return list.filter((m) => {
-    const k = `${m.venue}|${m.part ?? ""}|${m.why}|${m.symbol ?? ""}`;
+    const k = m.part === undefined && m.symbol === undefined && !m.connected ? `whole|${m.venueName}|${m.why}` : `${m.venue}|${m.part ?? ""}|${m.why}|${m.symbol ?? ""}`;
     return !keys.has(k) && keys.add(k) !== undefined;
   });
 };
@@ -574,6 +591,8 @@ function atOf(r: Reader, m: Market, symbol = m.symbol, price = priceOf(m), open 
     connected: r.connected,
     canTrade: r.connected ? (ordersTaken ? r.canTrade : false) : false,
     public: !r.connected,
+    // a connected venue that lets this network only close what is held: sells and closes go there, a buy does not (the page offers no buy)
+    ...(r.connected && r.closeOnly !== undefined ? { closeOnly: true as const } : {}),
     ...(price !== undefined ? { price } : {}),
     ...(pos(m.bid) !== undefined ? { bid: m.bid } : {}),
     ...(pos(m.ask) !== undefined ? { ask: m.ask } : {}),
@@ -834,7 +853,10 @@ export async function exploreAcross(sources: ExploreSources, opts: ExploreOption
   const connected = sources.connected ?? [];
   // a source nothing is ever traded through (Stock Tokens) is the public side of no connection: it is always asked
   const covered = (s: PublicSource) => s.readOnly === undefined && connected.some((v) => v.id === s.connectTo || (v.connector !== undefined && v.connector === s.connector));
-  const readers = [...connected.map(fromVenue), ...(sources.public ?? []).filter((s) => !covered(s)).map((s) => fromPublic(s, perSource))];
+  const every = [...connected.map(fromVenue), ...(sources.public ?? []).filter((s) => !covered(s)).map((s) => fromPublic(s, perSource))];
+  // the markets listed are the ones of the venues that serve the network the account runs on: the others are not asked, and named once
+  const readers = opts.serves ? every.filter((r) => opts.serves!(r)) : every;
+  const away = [...new Set(every.filter((r) => !readers.includes(r)).map((r) => r.name))];
   const answers = await Promise.all(readers.map((r) => atSource(r, { q, ms, perSource, closingWithinMs: window })));
   const missing: ExploreMissing[] = answers.flatMap((a) => a.missing);
   const now = clock();
@@ -870,6 +892,7 @@ export async function exploreAcross(sources: ExploreSources, opts: ExploreOption
   const kept = curated ? new Set(curated) : undefined;
   const all = kept ? made.filter((i) => i.kind !== "event" || kept.has(i)) : made;
   const notes = [...new Set(answers.flatMap((a) => a.notes))];
+  if (away.length) notes.push(awayNote(away));
   if (curated?.length) notes.push(`Predictions: at most ${PREDICTIONS_MAX} rows, each venue's busiest in turn, without sports, weather and entertainment; a search reaches everything the venues' listings loaded.`);
   if (curated && ipo.length) notes.push("Predictions: and the IPO questions at Kalshi and Polymarket, beside the busiest few.");
   if (all.some((i) => i.tabs.includes("preipo"))) notes.push("Pre-IPO perpetuals are contracts on a venue's estimate of a private company's valuation, not shares; each venue says who may trade them once a key connects.");

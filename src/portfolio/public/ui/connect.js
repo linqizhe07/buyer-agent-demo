@@ -74,10 +74,21 @@ const optionOf = (kind) => ((A.connectLive || {}).options || []).find((o) => o.k
 /* an address-based connection numbers itself after the first of its kind */
 const BY_ADDRESS = new Set(["wallet", "polymarket", "hyperliquid", "ondo"]);
 const isOn = (kind, extra) => (kind === "wallet" ? false : A.venues.some((v) => v.id === (extra || kind) || (BY_ADDRESS.has(kind) && v.id.startsWith(`${kind}-`))));
+/* the connection a tile stands for that the owner signed while its venue refused this network, or did not answer: on the account, waiting,
+   read nowhere (connectLive.waiting); the account asks the venue again when a check of this network finds it answering. One the venue
+   answered and refused itself (the key, the account: `stopped`) is in the same list, asked again only by the owner's new signature. One
+   read by address (BY_ADDRESS) is `live:<kind>` whatever its number, so any such one of the kind counts. Null when none is on the account */
+const waitingOf = (kind, extra) => {
+  // a browser wallet signs for itself each time: a watched address that waits is the watch tile's, never the browser wallet's
+  if (kind === "wallet" && extra !== "watch") return null;
+  const c = tileConnector(kind, extra);
+  return (c && ((A.connectLive || {}).waiting || []).find((w) => w.connector === c)) || null;
+};
 
 /* what each tile's venue answered from this machine before any key was made: its own first, keyless question (GET
    /api/account/connect/reach, live/reach.ts). A venue that does not serve this location says so on its tile and in its form, in its own
-   words, before a key is made that it would refuse; nothing here looks for a way around it */
+   words, before a key is made that it would refuse; nothing here looks for a way around it. Its form stays open all the same: a connection
+   signed while the venue refuses is kept on the account, waiting, and asked again when a check of this network finds it answering */
 const REACH = new Map();
 /* the connection a tile asks about: an exchange by its id; the ones read by address ask their host one keyless question about nobody
    (Polymarket's data API, Hyperliquid's info endpoint, each chain's public endpoint): a network may refuse or filter it too */
@@ -98,11 +109,15 @@ async function askReach(connectors, force = false) {
 /* a trading connection whose venue can also be watched by an address: the address one, its tile's name, and the offer to watch instead */
 const WATCH_INSTEAD = { "polymarket-trade": ["polymarket", "Polymarket · by address", "Watch a Polymarket wallet by its address instead"], "hyperliquid-trade": ["hyperliquid", "Hyperliquid · by address", "Watch a Hyperliquid account by its address instead"] };
 /* the form's note: the venue's no in its words and when it was asked, "Check again"; Polymarket's and Hyperliquid's add the way to see the
-   account there by its address, and a venue with an edition for where the user is (Binance.US for Binance) offers that edition's form */
-function reachNoteHtml(r, kind) {
+   account there by its address, and a venue with an edition for where the user is (Binance.US for Binance) offers that edition's form.
+   Under a refusal of this network, one more line: the connection can still be saved (`name`: the venue's, as the form has it) */
+function reachNoteHtml(r, kind, name = "") {
   if (!r || r.state === "ok") return "";
-  return `${reachSaysHtml(r, kind)}${r.edition && optionOf((tileOf(r.edition.connector) || [])[0]) ? ` <button type="button" class="link" data-reach="edition" title="${esc(r.edition.said)}">Connect ${esc(r.edition.name)} instead</button>` : ""}`;
+  return `${reachSaysHtml(r, kind)}${r.edition && optionOf((tileOf(r.edition.connector) || [])[0]) ? ` <button type="button" class="link" data-reach="edition" title="${esc(r.edition.said)}">Connect ${esc(r.edition.name)} instead</button>` : ""}${r.state === "location" ? stillConnectHtml(name) : ""}`;
 }
+/* what the account does with a connection signed while its venue refuses this network: keeps it, asks the venue again when a check of this
+   network finds it answering, sends it nothing meanwhile. Nothing here looks for a way around the venue's rule */
+const stillConnectHtml = (name) => `<div class="dim small reach-still">You can still connect it: the account keeps the connection and asks ${esc(name || "the venue")} again when a check of this network finds it answering (Check again, or the half-hourly check). Nothing is sent to it until then.</div>`;
 function reachSaysHtml(r, kind) {
   // the venue lets this location only close what is held: its words, and the form stays open — connected, what is held can be sold
   if (r.state === "close-only") return `${esc(r.said || "")}${r.at ? ` <span class="dim">(asked ${esc(nyTime(r.at))})</span>` : ""} <button type="button" class="link" data-reach="again">Check again</button>`;
@@ -113,20 +128,26 @@ function reachSaysHtml(r, kind) {
   return `${esc(r.said || "")}${r.at ? ` <span class="dim">(asked ${esc(nyTime(r.at))})</span>` : ""} <button type="button" class="link" data-reach="again">Check again</button>${instead}`;
 }
 /* what a tile's venue answered, from this form's own check (REACH, the freshest) or the account's detection (core VENUES): a venue that
-   refuses this network, wants something on this machine first, or offers no way in closes the form (`shut`); one that lets this location
-   only close what is held, or whose own terms exclude where the user is, says so in its words and does not close it — connected, what is
-   held can be sold; the venue's sign-up checks residency, the account only shows it */
+   wants something on this machine first, or offers no way in for this account, closes the form (`shut`). One that refuses this network says
+   so in its words and does not close it: the connection is kept on the account, waiting, and asked again when a check of this network
+   finds the venue answering. One that lets this location only close what is held, or whose own terms exclude where the user is, says so
+   and does not close it either — connected, what is held can be sold; the venue's sign-up checks residency, the account only shows it */
 function tileSays(connector) {
   const t = tileSaysOwn(connector);
   return t ? { ...t, edition: editionOf(connector) } : null;
 }
+/* the answers that close the form: a geo restriction of this machine's network is not one of them */
+const SHUTS = new Set(["setup", "closed"]);
 function tileSaysOwn(connector) {
   if (!connector) return null;
   const r = REACH.get(connector);
   const v = typeof VENUES !== "undefined" ? VENUES.get(connector) : undefined;
   if ((r && r.state === "close-only") || (!r && v && v.verdict === "close-only")) return { word: "Close only here", state: "close-only", said: (r || v).said || "", at: r ? r.at : v.asked, shut: false };
-  if (r && REACH_WORD[r.state]) return { word: REACH_WORD[r.state], state: r.state, said: r.said || "", at: r.at, shut: true };
-  if (!r && v && VENUE_NO[v.verdict]) return { word: VENUE_NO[v.verdict], state: v.verdict === "not-served" ? "location" : v.verdict, said: v.said || "", at: v.asked, shut: true };
+  if (r && REACH_WORD[r.state]) return { word: REACH_WORD[r.state], state: r.state, said: r.said || "", at: r.at, shut: SHUTS.has(r.state) };
+  if (!r && v && VENUE_NO[v.verdict]) {
+    const state = v.verdict === "not-served" ? "location" : v.verdict;
+    return { word: VENUE_NO[v.verdict], state, said: v.said || "", at: v.asked, shut: SHUTS.has(state) };
+  }
   if (v && v.verdict === "terms-exclude") return { word: "Its terms exclude where you are", state: "terms", said: v.said || "", at: v.asked, shut: false };
   return null;
 }
@@ -134,7 +155,8 @@ function tileSaysOwn(connector) {
 function markTiles() {
   for (const b of document.querySelectorAll("#modal button.tile")) {
     const t = tileSays(tileConnector(b.dataset.kind, b.dataset.extra));
-    if (!t || b.querySelector("em.on")) continue;
+    // a tile saying Connected, or whose connection is on the account (waiting, or refused by the venue), keeps what the list drew
+    if (!t || b.querySelector("em.on") || waitingOf(b.dataset.kind, b.dataset.extra)) continue;
     b.classList.add("tile-off");
     b.title = t.said;
     b.querySelector("span").innerHTML = `<em class="off">${esc(t.word)}</em>`;
@@ -150,9 +172,12 @@ function catalog(owner, wide = "") {
     if (!o) return "";
     const how = kind === "wallet" ? (extra === "watch" ? "Address" : "Sign one sentence") : o.needs === "cli" && kind !== "metamask" ? "On this machine" : HOW[o.needs] || "";
     const on = isOn(kind, extra);
-    const t = on ? null : tileSays(tileConnector(kind, extra));
+    // a connection the owner signed while the venue refused this network, or did not answer: on the account, waiting; not the venue's no.
+    // One the venue answered and refused (stopped) is connected again from its tile, by the owner's new signature
+    const w = on ? null : waitingOf(kind, extra);
+    const t = on || w ? null : tileSays(tileConnector(kind, extra));
     const word = t && t.word;
-    const own = `<button type="button" class="tile${word ? " tile-off" : ""}" data-kind="${esc(kind)}" data-extra="${esc(extra)}"${word ? ` title="${esc(t.said)}"` : ""}${owner ? "" : " disabled"}><b>${esc(name)}</b><span>${on ? '<em class="on">Connected</em> · add another' : word ? `<em class="off">${esc(word)}</em>` : esc(edition ? `${how} · serves where you are` : how)}</span></button>`;
+    const own = `<button type="button" class="tile${word ? " tile-off" : ""}" data-kind="${esc(kind)}" data-extra="${esc(extra)}"${word ? ` title="${esc(t.said)}"` : w ? ` title="${esc(w.said)}"` : ""}${owner ? "" : " disabled"}><b>${esc(name)}</b><span>${on ? '<em class="on">Connected</em> · add another' : w ? (w.stopped ? '<em class="off">Not connected</em> · connect it again' : '<em class="on">Connected</em> · waiting for it to answer this network') : word ? `<em class="off">${esc(word)}</em>` : esc(edition ? `${how} · serves where you are` : how)}</span></button>`;
     // beside a venue that cannot be used from here: its edition for where the user is, as a tile of its own
     const ed = !edition && t && t.edition && !shown.has(t.edition.connector) ? tileOf(t.edition.connector) : null;
     return own + (ed ? tile([ed[0], ed[1], t.edition.name], true) : "");
@@ -176,12 +201,13 @@ function connectionOf(connector) {
 }
 /** "Connect to trade": the one short form for the connection a public listing names, opened straight away. False when this server offers
  * no such connection (nothing opens) */
-function connectVia(connector, { name = "", label = "", ref = "" } = {}) {
+function connectVia(connector, { name = "", label = "", ref = "", fromWait = false } = {}) {
   const c = connectionOf(connector);
   if (!c) return false;
   // a browser wallet names itself when it signs; a watched address is named by the owner. `label` keeps a venue's own name when it is
-  // connected again (a second account the owner named), so it comes back as the same venue; `ref` its own key file (venues[].keyFile)
-  openConnect(c.o, { exchange: c.exchange, name: c.o.kind === "wallet" ? "" : name, label, ref });
+  // connected again (a second account the owner named), so it comes back as the same venue; `ref` its own key file (venues[].keyFile);
+  // `fromWait`: Connect again on a connection that waits, or was refused — its own form, on its name and file or address
+  openConnect(c.o, { exchange: c.exchange, name: c.o.kind === "wallet" ? "" : name, label, ref, fromWait });
   return true;
 }
 /** the connection a venue on the account was made with: the one the account names for it (venues[].connector), when this server still
@@ -236,9 +262,18 @@ function openPicker() {
 }
 
 /** one way of connecting, as one short form */
-async function openConnect(o, { exchange = "", watch = false, name = "", back = false, label: shownAs = "", ref: keyRef = "" } = {}) {
+async function openConnect(o, { exchange = "", watch = false, name = "", back = false, label: shownAs = "", ref: keyRef = "", fromWait = false } = {}) {
   if (!o) return;
   clearInterval(CONNECT_TIMER);
+  /* a connection of this kind waits on the account (signed while its venue refused this network, or did not answer), or was refused:
+     connecting it again replaces it, so the form opens on the same name and the same key file, unless the opener named them. A key-file
+     connection's tile does so by itself (its file is the venue's own); one read by an address only from Connect again (`fromWait`), so that
+     its tile still adds another address */
+  const waits = waitingOf(o.kind, o.kind === "exchange" ? exchange : watch ? "watch" : "");
+  if (waits && (fromWait || o.needs === "key-file")) {
+    shownAs = shownAs || waits.name;
+    keyRef = keyRef || waits.keyFile || waits.address || "";
+  }
   /* the venue's name, and what the dialog is called: watching an address connects nothing that could move */
   const title = o.kind === "exchange" && !exchange ? "an exchange" : name || o.label.split(" · ")[0];
   const heading = watch ? "Watch an address" : o.kind === "wallet" ? "Connect a browser wallet" : `Connect ${title}`;
@@ -266,8 +301,10 @@ async function openConnect(o, { exchange = "", watch = false, name = "", back = 
     if (o.needs === "address") return A.venues.some((v) => v.id === o.kind) ? `${o.kind}-${ref.slice(2, 8).toLowerCase()}` : o.kind;
     return o.kind;
   };
-  /* what this form's venue answered from here before anything was made (live/reach.ts): a no closes the way in — the steps folded away,
-     Connect off — and says why in the venue's words; "Check again" asks it again now */
+  /* what this form's venue answered from here before anything was made (live/reach.ts): something wanted on this machine first, or no way
+     in, closes the way in — the steps folded away, Connect off — and says why in the venue's words; a refusal of this network is said the
+     same way, in red (quiet, when this connection already waits on the account), but the steps stay and Connect works: the connection is
+     kept waiting. "Check again" asks the venue again now */
   const connNow = () => (o.kind === "exchange" ? (exchangeId() ? `live:exchange:${exchangeId()}` : "") : tileConnector(o.kind, ""));
   let reachShut = false;
   const showReach = () => {
@@ -277,8 +314,11 @@ async function openConnect(o, { exchange = "", watch = false, name = "", back = 
     const was = reachShut;
     reachShut = !!(t && t.shut);
     note.hidden = !t;
-    note.className = `reach-note msg ${reachShut ? "no" : "wait"}`;
-    note.innerHTML = t ? reachNoteHtml(t, o.kind) : "";
+    // a connection already on the account, waiting for this venue to answer this network: its refusal is the state it waits in, not an error
+    const onAccount = !!waitingOf(o.kind, o.kind === "exchange" ? exchangeId() : watch ? "watch" : "");
+    note.className = `reach-note msg ${reachShut || (t && t.state === "location" && !onAccount) ? "no" : "wait"}`;
+    // the venue named as the form has it; a wallet's "venue" is a chain's endpoint, named by nobody here
+    note.innerHTML = t ? reachNoteHtml(t, o.kind, o.kind === "exchange" ? exchangeName() : o.kind === "wallet" ? "" : title) : "";
     for (const el of form.querySelectorAll("#live-body .steps, #live-body details.opts")) el.hidden = reachShut;
     if (reachShut) $("modal-go").disabled = true;
     else if (was) $("modal-go").disabled = Owner.role !== "owner" || (o.needs === "sign-in" && !form.elements.ref.value);
@@ -393,6 +433,8 @@ async function openConnect(o, { exchange = "", watch = false, name = "", back = 
     const walletTiles = wallets.length ? `<div class="wallets">${wallets.map((w, i) => `<button type="button" data-wallet="${i}">${/^data:image\//.test(w.info.icon || "") ? `<img src="${esc(w.info.icon)}" alt="" width="18" height="18" />` : ""}${esc(w.info.name)}</button>`).join("")}</div><div class="path dim small">Your wallet gives its address and signs one sentence. Nothing is approved or moved.</div><div class="or">or watch an address</div>` : o.kind === "wallet" && !watch ? '<div class="path dim small">No wallet in this browser. Open this page where your wallet is installed, or watch an address.</div>' : "";
     $("live-body").innerHTML = `${walletTiles}<div class="row">${field("Address", '<input name="ref" maxlength="80" autocomplete="off" spellcheck="false" placeholder="0x…" />')}${field("Shown as", '<input name="label" maxlength="40" autocomplete="off" />')}</div>${o.kind !== "wallet" ? `<div class="path dim small">${esc(o.example)}</div>` : ""}`;
     form.elements.label.value = shownAs || (name && !/watch|browser/i.test(name) ? name : "");
+    // a waiting connection's own address, so the owner lands on the same one
+    if (keyRef) form.elements.ref.value = keyRef;
     form.elements.ref.addEventListener("input", () => { proven = null; });
     for (const b of $("live-body").querySelectorAll("button[data-wallet]")) {
       b.addEventListener("click", async () => {

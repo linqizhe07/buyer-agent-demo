@@ -155,7 +155,8 @@ describe("Hyperliquid trading: what its edge, a ban, a page in its place and a r
       // nothing asked after the refused order: it was never placed
       expect(types(net.seen).filter((x) => x !== "geo")).toEqual(["exchange"]);
       if (page === WAF) expect(r.native).toMatchObject({ status: 403, edge: true });
-      else expect(r.message).toContain("configured to block access from your country");
+      // its place words are kept for whoever asks (native), out of the message every order screen shows
+      else expect([r.message.includes("does not serve this location"), String((r.native as { said?: string }).said)]).toEqual([true, expect.stringContaining("configured to block access from your country")]);
     }
     // the same edge at /info: a read refused in its words, not "could not be reached"
     const { source, net } = await connected();

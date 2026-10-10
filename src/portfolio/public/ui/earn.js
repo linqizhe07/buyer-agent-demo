@@ -23,6 +23,19 @@ function enList(view, kind) {
   const ready = new Set(open.filter((p) => enReady(p) > 0));
   return [...open.filter((p) => ready.has(p)), ...open.filter((p) => !ready.has(p)), ...view.products.filter((p) => !p.canSupply)];
 }
+/* a connected venue that does not serve the network the account runs on now (core servedHere): nothing goes in or out of earn there from
+   here, so its products are not offered; it is named once instead */
+const enAwayAt = (id) => !servedHere(((typeof A !== "undefined" && A && A.venues) || []).find((v) => v.id === id));
+/** what Earn could not list, each venue once: the ones that do not serve this network now (the read's place rule, or a venue on the account
+ * that earns and is marked so) — a state, named in one quiet line — and the reads that failed, each in its own words */
+function enMissing(missing, within) {
+  const mine = (missing || []).filter((m) => within(m.venue));
+  const away = new Map();
+  for (const m of mine) if (awayMiss(m) && !away.has(m.venue)) away.set(m.venue, m);
+  for (const v of (typeof A !== "undefined" && A && A.venues) || []) if (v.live && v.earn && !servedHere(v) && within(v.id) && !away.has(v.id)) away.set(v.id, { venue: v.id, venueName: v.name, why: (v.notServed && v.notServed.said) || "" });
+  const seen = new Set(away.keys());
+  return { away: [...away.values()], failed: mine.filter((m) => !seen.has(m.venue) && seen.add(m.venue)) };
+}
 /* money into or out of one product, as the account prepares it: the product's own asset, the amount typed — or "all" of it out */
 const enDraft = (p, kind, amount) => ({ type: "liveEarn", venue: p.venue, kind: kind === "withdraw" ? "withdraw" : "supply", product: p.id, asset: p.asset, amount: String(amount ?? "").trim() });
 /* a yield as the venue states it: 5.2% APY, or a range */
@@ -56,10 +69,18 @@ function openEarn(preset = {}) {
     const products = enList(view, kind);
     const held = (p) => view.positions.find((h) => h.venue === p.venue && h.product === p.id);
     if (!chosen || !products.some((p) => `${p.venue}|${p.id}` === chosen)) chosen = products.length ? `${products[0].venue}|${products[0].id}` : "";
-    const refusing = view.venues.filter((v) => v.can === false && inLens(v.venue)).map((v) => `<p class="dim small">${esc(v.venueName)}: ${esc(v.whyNot || "this key can't put money to earn")}</p>`).join("");
-    const missing = view.missing.filter((m) => inLens(m.venue)).map((m) => `<p class="dim small">${esc(m.venueName)} could not be read: ${esc(m.why)}</p>`).join("");
+    // a venue that does not serve this network now is a state, named once in a quiet line (its words folded away); a read that failed says so
+    const miss = enMissing(view.missing, inLens);
+    const awayIds = new Set(miss.away.map((m) => m.venue));
+    // the sheet opened for one venue that does not serve this network now: that, in place of an empty list
+    const presetAway = !!preset.venue && (awayIds.has(preset.venue) || enAwayAt(preset.venue));
+    const awayName = presetAway ? (miss.away.find((m) => m.venue === preset.venue) || {}).venueName || nameOf(preset.venue) : "";
+    const refusing = view.venues.filter((v) => v.can === false && inLens(v.venue) && !awayIds.has(v.venue)).map((v) => `<p class="dim small">${esc(v.venueName)}: ${esc(v.whyNot || "this key can't put money to earn")}</p>`).join("");
+    const missing = miss.failed.map((m) => `<p class="dim small">${esc(m.venueName)} could not be read: ${esc(m.why)}</p>`).join("");
+    const away = awayLine(miss.away, { fold: true, named: !presetAway });
+    const none = presetAway ? `${awayName} doesn't serve the network you're on now. What it holds in earn stays there, and shows here again when it answers.` : kind === "supply" ? "No product takes money from here right now." : "Nothing is earning to take out.";
     const hand = typeof openHandToAgent === "function" && A.keys.some((k) => k.status === "ok") ? '<button type="button" class="btn btn-sm" data-en-hand>Hand to agent</button>' : "";
-    root.innerHTML = `<div class="en-top"><div data-kind></div>${hand}</div>${products.length ? `<div class="en-where" role="group" aria-label="Product">${products.slice(0, 12).map((p) => enRow(p, { chosen, kind, held: held(p) })).join("")}</div>` : `<p class="empty">${kind === "supply" ? "No product takes money from here right now." : "Nothing is earning to take out."}</p>`}<form class="en-form" novalidate autocomplete="off"${products.length ? "" : " hidden"}><div class="row2"><label class="fld"><span data-amt-l>Amount</span><input name="amount" inputmode="decimal" placeholder="25" /></label><div class="en-max"><span class="en-max-l">${kind === "withdraw" ? '<button type="button" class="link" data-all>All of it</button> · ' : ""}<button type="button" class="link" data-max>Max</button></span><span class="dim small" data-have></span></div></div><div class="quote real" data-q><span class="dim">Type an amount.</span></div><div data-sign></div><div class="msg" data-msg role="status"></div><button type="submit" class="btn btn-primary btn-block" data-go disabled>${kind === "supply" ? "Sign and put in" : "Sign and take out"}</button></form>${refusing}${missing}`;
+    root.innerHTML = `<div class="en-top"><div data-kind></div>${hand}</div>${products.length ? `<div class="en-where" role="group" aria-label="Product">${products.slice(0, 12).map((p) => enRow(p, { chosen, kind, held: held(p) })).join("")}</div>` : `<p class="empty">${esc(none)}</p>`}<form class="en-form" novalidate autocomplete="off"${products.length ? "" : " hidden"}><div class="row2"><label class="fld"><span data-amt-l>Amount</span><input name="amount" inputmode="decimal" placeholder="25" /></label><div class="en-max"><span class="en-max-l">${kind === "withdraw" ? '<button type="button" class="link" data-all>All of it</button> · ' : ""}<button type="button" class="link" data-max>Max</button></span><span class="dim small" data-have></span></div></div><div class="quote real" data-q><span class="dim">Type an amount.</span></div><div data-sign></div><div class="msg" data-msg role="status"></div><button type="submit" class="btn btn-primary btn-block" data-go disabled>${kind === "supply" ? "Sign and put in" : "Sign and take out"}</button></form>${refusing}${away}${missing}`;
     root.querySelector("[data-kind]").innerHTML = seg([["supply", "Put in"], ["withdraw", "Take out"]], kind, (v) => {
       kind = v;
       draw();
@@ -179,8 +200,17 @@ function openEarn(preset = {}) {
     if (!live()) return;
     const b = await api(`/api/account/earn${preset.venue ? `?${new URLSearchParams({ venue: preset.venue })}` : ""}`);
     if (!live()) return;
+    // the one venue asked about refused this network: the state the sheet says, not an error
+    const geo = !!b && b.ok === false && !!b.refusal && b.refusal.code === "E_VENUE_GEOBLOCKED";
+    if (preset.venue && b && b.ok === false && (geo || enAwayAt(preset.venue))) {
+      view = { products: [], positions: [], venues: [], missing: [{ venue: preset.venue, venueName: nameOf(preset.venue), why: refusalOf(b), code: "E_VENUE_GEOBLOCKED" }] };
+      return void draw();
+    }
     if (!b || b.ok === false) return void (root.innerHTML = `<div class="msg no">${esc(refusalOf(b) || "Earn could not be read.")}</div>`);
-    view = { products: (b.products || []).filter((p) => inLens(p.venue)), positions: (b.positions || []).filter((h) => inLens(h.venue)), venues: b.venues || [], missing: b.missing || [] };
+    // nothing is offered at a venue that does not serve this network now (marked on the account, or refused in this read)
+    const away = new Set((b.missing || []).filter(awayMiss).map((m) => m.venue));
+    const here = (id) => inLens(id) && !away.has(id) && !enAwayAt(id);
+    view = { products: (b.products || []).filter((p) => here(p.venue)), positions: (b.positions || []).filter((h) => here(h.venue)), venues: b.venues || [], missing: b.missing || [] };
     draw();
   };
   refresh();
@@ -321,7 +351,8 @@ function openSellMany(preset = {}) {
     const s = smSellable(b, inVenue);
     items = s.items;
     hidden = s.hidden;
-    const missing = s.missing.map((m) => `<p class="dim small">${esc(m.venueName)} could not be read: ${esc(m.why)}</p>`).join("");
+    // a venue that does not serve this network now is named once, quietly; a read that failed says so in its words
+    const missing = `${awayLine(s.missing.filter(awayMiss))}${s.missing.filter((m) => !awayMiss(m)).map((m) => `<p class="dim small">${esc(m.venueName)} could not be read: ${esc(m.why)}</p>`).join("")}`;
     if (!items.length) return void (box.innerHTML = `<p class="empty">${hidden ? `Nothing here can be sold right now: ${plural(hidden, "holding")} ${hidden === 1 ? "is" : "are"} left out.` : "Nothing to sell: everything here is in dollars."}</p>${missing}`);
     pickList();
     if (missing) box.insertAdjacentHTML("beforeend", missing);
