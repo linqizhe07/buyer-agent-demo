@@ -7,7 +7,7 @@
  * session. Nothing leaves the process. */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { regularSession } from "../../src/portfolio/account/calendar.ts";
-import { signDevice, simKey, type OwnerAction } from "../../src/portfolio/account/sign.ts";
+import { signDevice, simKey, type OwnerAction, type SimKey } from "../../src/portfolio/account/sign.ts";
 import { toStep } from "../standin/model.ts";
 import { startStandin, type Standin } from "../standin/ui-standin.ts";
 import { stockSession } from "../standin/venues.ts";
@@ -35,6 +35,13 @@ const sign = async (a: Record<string, unknown>) => {
   const { body } = await get("/api/now");
   const action = { ...a, nonce: body.ms as number } as OwnerAction;
   return post("/api/exchange", { action, nonce: action.nonce, signature: signDevice(browser, action) });
+};
+/** an owner's key signs what the account prepared, as the page does for an order */
+const signPrepared = async (key: SimKey, draft: Record<string, unknown>): Promise<{ status: number; body: any }> => {
+  const p = await post("/api/account/prepare", { draft });
+  if (p.status !== 200) return p;
+  const action = p.body.action as OwnerAction;
+  return post("/api/exchange", { action, nonce: action.nonce, signature: signDevice(key, action) });
 };
 
 beforeAll(async () => {
@@ -238,16 +245,32 @@ describe("the stand-in account", () => {
     clockMs += 3_000;
     await s.step();
     expect(s.world.ex.market("BTC/USDT")!.price).not.toBe(before);
-    // the owner's SOL limit rests under the market: on the stand-in's own curve, find when SOL comes down past it, and go there
-    const order = (await get("/api/account")).body.orders.find((o: { id: string }) => o.id === s.seeded.orders.solLimit);
-    expect(order.status).toBe("open");
-    let t = clockMs;
-    while (s.world.prices.at("SOL", t) > order.limitPrice * 0.996 && t < clockMs + 7 * 86_400_000) t += 60_000;
-    expect(t).toBeLessThan(clockMs + 7 * 86_400_000);
-    clockMs = t;
+    // the owner's seeded SOL limit rests under the market. When the curve comes down to it depends on the hour the stand-in started: near
+    // the bottom of SOL's slower waves, not within a week
+    const seeded = (await get("/api/account")).body.orders.find((o: { id: string }) => o.id === s.seeded.orders.solLimit);
+    expect(seeded.status).toBe("open");
+    expect(seeded.limitPrice).toBeLessThan(s.world.ex.market("SOL/USDT")!.bid!);
+    // so the browser rests one of its own where the curve does come down to. At any hour the ten-minute wave falls half a percent within a
+    // quarter of an hour (its swing is about six times what the hourly wave moves meanwhile): on the stand-in's own curve, find that fall,
+    // place the limit just above where it falls to — the margin is more than a tick's jitter — and go there
+    const curve = (t: number) => s.world.prices.at("SOL", t);
+    let t0 = 0;
+    let t1 = 0;
+    search: for (let a = clockMs; a < clockMs + 60 * 60_000; a += 60_000)
+      for (let b = a + 60_000; b <= a + 10 * 60_000; b += 60_000)
+        if (curve(b) <= curve(a) * 0.995) {
+          [t0, t1] = [a, b];
+          break search;
+        }
+    expect(t1).toBeGreaterThan(0);
+    clockMs = t0;
+    const limit = toStep(s.world.ex.market("SOL/USDT")!.ask! * (curve(t1) / curve(t0)) * 1.002, 0.01, "ceil");
+    const placed = await signPrepared(browser, { type: "liveOrder", venue: "ex", symbol: "SOL/USDT", side: "buy", orderType: "limit", qty: "0.5", limitPrice: String(limit) });
+    expect(placed.body.order).toMatchObject({ status: "open" });
+    clockMs = t1;
     await s.step();
-    const filled = (await get("/api/account")).body.orders.find((o: { id: string }) => o.id === s.seeded.orders.solLimit);
-    expect(filled).toMatchObject({ status: "filled", filledQty: 0.5 });
+    const filled = (await get("/api/account")).body.orders.find((o: { id: string }) => o.id === placed.body.order.id);
+    expect(filled).toMatchObject({ status: "filled", filledQty: 0.5, avgPrice: limit });
   });
 });
 
@@ -260,12 +283,7 @@ describe("the Stand-in Broker keeps New York's market hours: a stand-in started 
     s = await startStandin({ port: 0, tickMs: 0, agentMs: 0, clock: () => clockMs });
   };
   /** the seed key (an owner) signs what the account prepared, as the page does */
-  const own = async (draft: Record<string, unknown>): Promise<{ status: number; body: any }> => {
-    const p = await post("/api/account/prepare", { draft });
-    if (p.status !== 200) return p;
-    const action = p.body.action as OwnerAction;
-    return post("/api/exchange", { action, nonce: action.nonce, signature: signDevice(s.seed, action) });
-  };
+  const own = (draft: Record<string, unknown>) => signPrepared(s.seed, draft);
   const orderOf = async (id: string) => (await get("/api/account")).body.orders.find((o: { id: string }) => o.id === id);
   /** a session wholly ahead of the real clock, so the stand-in's clock never runs behind it (an agent's card is timed by the real one) */
   const ahead = ((now) => (now.open ? stockSession(now.closesAt) : now))(stockSession(Date.now()));
