@@ -285,22 +285,57 @@ function mkIssuer(item) {
   const eligibility = (item && item.eligibility) || a.eligibility || "";
   return issuer || eligibility ? { issuer, eligibility } : null;
 }
-/* the issuer's words, short enough for a row (all of them in the title, and in the drawer) */
-const mkClip = (t, n = 72) => { const s = String(t || "").trim(); return s.length > n ? `${s.slice(0, n - 1).replace(/\s+\S*$/, "")}…` : s; };
-/* a row's issuer line: who issues it, and the start of whom it is for */
-function mkIssuerLine(item) {
-  // a pre-IPO perpetual is written by its venue, not by the company: the company's own notice is said in the drawer and the ticket
-  if (typeof mkIsPreipo === "function" && mkIsPreipo(item)) return "";
-  const i = mkIssuer(item);
-  if (!i) return "";
-  const all = [i.issuer ? `Issued by ${i.issuer}` : "", i.eligibility].filter(Boolean).join(" · ");
-  return `<span class="mk-iss" title="${esc(all)}">${esc([i.issuer ? `Issued by ${i.issuer}` : "", mkClip(i.eligibility, i.issuer ? 56 : 72)].filter(Boolean).join(" · "))}</span>`;
+/* who issues it and whom it is for, in one line of the issuer's words: a hover card's, and a screen reader's. A pre-IPO perpetual is written
+   by its venue, not by the company: the company's own notice is said in the drawer and the ticket */
+function mkIssuerWords(item) {
+  const i = mkIsPreipo(item) ? null : mkIssuer(item);
+  return i ? [i.issuer ? `Issued by ${i.issuer}` : "", i.eligibility].filter(Boolean).join(" · ") : "";
 }
 
 /* a row's letter tile: its symbol; an event's, the venue's word for what it is about */
 const mkAv = (item, size = "") => avatar(item.kind === "event" ? String(item.category || "Event").slice(0, 4) : item.base || item.name, size);
-/* the line under a market's name: its symbol, what kind of thing it is; a pre-IPO contract says so */
+/* what kind of thing a market is, in a few words: its symbol, what it is; a pre-IPO contract says so (the hover card's second line) */
 const mkSub = (item) => (mkIsPreipo(item) ? "Pre-IPO · Perpetual" : item.kind === "perp" ? (/perp/i.test(item.name) ? item.base || "" : `${item.base || ""} · Perpetual`) : item.base && item.base !== item.name ? item.base : MKT_KIND[item.kind] || "");
+/** a market's name, short: an event's market as its venue names it inside its event — the event's title and the market's own words beside
+ * it ("Fed decision in Oct 2026?" · "Fed maintains rate"), where the venue gives them (live/public-markets.ts `event`); anything else, and an
+ * event the venue gives no title for, by its name. The market's whole question is in its hover card and in the drawer */
+function mkShort(item) {
+  const e = item && item.kind === "event" && item.event && item.event.title ? item.event : null;
+  if (!e) return { name: String((item && item.name) || ""), opt: "" };
+  const title = String(e.title);
+  const opt = e.market && !title.toLowerCase().includes(String(e.market).toLowerCase()) ? String(e.market) : "";
+  return { name: title, opt };
+}
+/* the short name as a line draws it: the market's own words quieter than the event's */
+const mkShortHtml = (item) => { const s = mkShort(item); return `${esc(s.name)}${s.opt ? `<span class="mk-opt"> · ${esc(s.opt)}</span>` : ""}`; };
+/* what the hover card says, as words for a screen reader (the card is a pointer's): the whole question where the line says it short, what
+   kind of thing it is, when it closes — a time, not a countdown — and who issues it */
+function mkAbout(item) {
+  const s = mkShort(item);
+  const ev = item.kind === "event";
+  const close = ev && item.closeTime && Number.isFinite(Date.parse(item.closeTime)) ? `closes ${nyDay(item.closeTime)}, ${nyTime(item.closeTime)} New York` : "";
+  return [s.name !== item.name ? item.name : "", ev ? item.category || "Prediction" : mkSub(item), close, mkIssuerWords(item)].filter(Boolean).join(" · ");
+}
+/** a market as a row names it: its tile and its short name, on one line, as one button that opens the drawer. What is said of it beyond
+ * that — the whole question, what kind of thing it is, its countdown, who issues it, where it is listed — is in the card a pointer resting
+ * on it shows (data-peek: mkPeek), in words for a screen reader, and in the drawer */
+function mkNameBtn(item, i) {
+  const about = mkAbout(item);
+  return `<button type="button" class="mk-name" data-act="open" data-i="${i}" data-fk="open:${esc(item.key)}" data-peek="${i}">${mkAv(item)}<span class="mk-nm"><b>${mkShortHtml(item)}</b>${about ? `<span class="sr">. ${esc(about)}</span>` : ""}</span></button>`;
+}
+/** what a market's hover card says: its whole name (an event's question, with the market's own words), what kind of thing it is — an
+ * event's category and its countdown, which ticks with the others — who issues it and whom it is for in the issuer's words, and where it is
+ * listed: the venues connected, then the ones whose public prices list it, quieter */
+function mkPeekHtml(item) {
+  const ev = item.kind === "event";
+  const close = ev && item.closeTime ? mkCloseHtml(item, mkEnded(item)) : "";
+  const kind = [ev ? esc(item.category || "Prediction") : esc(mkSub(item)), close].filter(Boolean).join(" · ");
+  const iss = mkIssuerWords(item);
+  const seen = new Set();
+  const at = [...item.at.filter((a) => a.connected), ...item.at.filter((a) => !a.connected)].filter((a) => !seen.has(a.venueName) && seen.add(a.venueName));
+  const where = at.map((a) => (a.connected ? esc(a.venueName) : `<span class="dim">${esc(a.venueName)}</span>`)).join(" · ");
+  return `<b class="mk-peek-n">${esc(item.name)}</b>${kind ? `<span class="mk-peek-k">${kind}</span>` : ""}${iss ? `<span class="mk-peek-i">${esc(iss)}</span>` : ""}${where ? `<span class="mk-peek-w">${where}</span>` : ""}`;
+}
 /* a row, by its place in what was drawn (data-i) */
 const mkReg = (item) => MKT.reg.push(item) - 1;
 const mkPublicOnly = (item) => !item.at.some((a) => a.connected);
@@ -318,13 +353,11 @@ function mkStar(item, i, since) {
 function mkWhere(item) {
   const seen = new Set();
   const at = [...item.at.filter((a) => a.connected), ...item.at.filter((a) => !a.connected)].filter((a) => !seen.has(a.venueName) && seen.add(a.venueName));
-  // two venues by name (yours first), the rest as "+N" with their names in its title: a row stays one or two lines high
+  // two venues by name (yours first), the rest as "+N" with their names in its title (and all of them in the row's hover card)
   const name = (a) => (a.connected ? `<span class="mk-v">${esc(a.venueName)}</span>` : `<span class="mk-v pub" title="Public prices, read without a key">${esc(a.venueName)}</span>`);
   const more = at.length > 2 ? ` <span class="dim mk-more" title="${esc(at.slice(2).map((a) => a.venueName).join(", "))}">+${at.length - 2}</span>` : "";
   return `<span class="mk-where">${at.slice(0, 2).map(name).join(" · ")}${more}</span>`;
 }
-/* the same, as a line under the market's name: drawn in place of the Where column when the window is too narrow for it (markets.css) */
-const mkWhereLine = (item) => `<div class="mk-where-l">${mkWhere(item)}</div>`;
 /* the ONE button on a row: Trade where an order can go, Connect to trade where only public prices list it, else why not (the drawer says it
    in full; the drawer is also where Hand to agent is) */
 function mkActs(item, i) {
@@ -368,25 +401,23 @@ function mkClosedTag(item) {
 }
 /* the volume cell: dollars, or contracts where the venue counts those */
 const mkVolCell = (item) => (item.volumeUsd24h !== undefined ? mkVol(item.volumeUsd24h) : item.contracts24h !== undefined ? `${mkCount(item.contracts24h)} contracts` : "—");
-/** the table: ★ · Market · Where · Price · 24h · Volume · one action. An event is a row too (All, a search): its question, a countdown that
- * ticks in place, its lead outcome in cents */
+/** the table: ★ · Market · Where · Price · 24h · Volume · one action, a row one line high. An event is a row too (All, a search): its
+ * short name, its lead outcome in cents; its question and its countdown are in its hover card */
 function mkTable(items, empty) {
   const cols = [
     { label: "", sr: "Watch", cell: (x) => mkStar(x.item, x.i) },
-    { label: "Market", cls: "mk-c-name", cell: (x) => {
-      const it = x.item;
-      const ev = it.kind === "event";
-      const sub = ev ? `${esc(it.category || "Prediction")}${it.closeTime ? ` · ${mkCloseHtml(it, mkEnded(it))}` : ""}` : esc(mkSub(it));
-      return `<button type="button" class="mk-name" data-act="open" data-i="${x.i}" data-fk="open:${esc(it.key)}">${mkAv(it)}<span><b>${esc(it.name)}</b><span class="dim">${sub}</span>${mkIssuerLine(it)}</span></button>${mkWhereLine(it)}`;
-    } },
+    { label: "Market", cls: "mk-c-name", cell: (x) => mkNameBtn(x.item, x.i) },
     { label: "Where", cls: "mk-c-where", cell: (x) => mkWhere(x.item) },
     { label: "Price", r: true, cell: (x) => mkPriceCell(x.item) },
     { label: "24h", r: true, cell: (x) => (x.item.kind === "event" ? mkEventChg(x.item) : chg(x.item.changePct24h)) },
     { label: "Volume", r: true, cell: (x) => mkVolCell(x.item) },
     { label: "", sr: "Actions", r: true, cell: (x) => mkActs(x.item, x.i) },
   ];
-  // a row's markets at connected venues: priced again while the row is in view (the first two legs); the row is kept by its market's key
-  const rowAttr = (x) => { const pairs = mkAllPairs(x.item).slice(0, 2); return `data-k="${esc(x.item.key)}"${pairs.length ? ` data-pairs="${esc(pairs.join(","))}"` : ""}`; };
+  // a row's markets at connected venues: priced again while the row is in view (the first two legs); the row is kept by its market's key.
+  // An event that has not closed carries its close (data-ends): its countdown is in its hover card, and the row still sends the list to be
+  // read again the moment it closes (mkTickPlan), as a countdown would
+  const ends = (it) => (it.kind === "event" && it.closeTime && Date.parse(it.closeTime) > Date.now() ? ` data-ends="${esc(it.closeTime)}"` : "");
+  const rowAttr = (x) => { const pairs = mkAllPairs(x.item).slice(0, 2); return `data-k="${esc(x.item.key)}"${pairs.length ? ` data-pairs="${esc(pairs.join(","))}"` : ""}${ends(x.item)}`; };
   return table(cols, items.map((item) => ({ item, i: mkReg(item) })), { empty, cls: "mk-t", rowAttr });
 }
 
@@ -399,10 +430,10 @@ function mkYn(item, i, o, oi) {
   const after = r.act === "connect" ? `: connect ${r.venueName} to trade` : r.act === "why" ? (r.word ? `: ${r.word.toLowerCase()}` : ": can't be traded here") : "";
   return `<button type="button" class="${oi === 0 ? "yes" : "no-btn"}" data-act="yn" data-i="${i}" data-o="${oi}" data-fk="yn:${esc(item.key)}:${oi}"${r.act !== "why" ? mkDis() : ""}>${esc(label)} · <span${leg ? ` data-q="${esc(`${leg.venue}|${leg.symbol}`)}" data-fmt="c"` : ""}>${mkCents(m ? m.ask ?? m.price : o.ask ?? o.price)}</span>${after ? `<span class="sr">${esc(after)}</span>` : ""}</button>`;
 }
-/** an event as a card: a live countdown, the question, and its first two outcomes to buy — with one line of facts (what it is about · where ·
- * how much traded) unless `lean` (under Predictions the tab says what they are). A market the venue has closed shows the venue's words in
- * place of the buttons; one past its estimated end date that the venue still trades keeps them, and says so. `reg` registers the card's
- * row for its buttons (the pane's list, or a drawer's own) */
+/** an event as a card: a live countdown, its short name (the whole question in its hover card), and its first two outcomes to buy — with
+ * one line of facts (what it is about · where · how much traded) unless `lean` (under Predictions the tab says what they are). A market
+ * the venue has closed shows the venue's words in place of the buttons; one past its estimated end date that the venue still trades keeps
+ * them, and says so. `reg` registers the card's row for its buttons (the pane's list, or a drawer's own) */
 function mkCard(item, { lean = false, reg = mkReg } = {}) {
   const i = reg(item);
   const outs = (item.outcomes || []).slice(0, 2);
@@ -413,7 +444,7 @@ function mkCard(item, { lean = false, reg = mkReg } = {}) {
   const shut = state.ended && !state.trading;
   const foot = shut ? `<p class="dim small mk-shut">${esc(mkRoute(item).text)}</p>` : outs.length ? `<div class="mk-yn">${outs.map((o, oi) => mkYn(item, i, o, oi)).join("")}</div>` : "";
   const facts = lean ? "<span></span>" : `<span class="dim">${esc([item.category || "", names, vol].filter(Boolean).join(" · "))}</span>`;
-  return `<div class="box mk-card" data-k="${esc(item.key)}"${pairs.length && !shut ? ` data-pairs="${esc(pairs.slice(0, 4).join(","))}"` : ""}><div class="mk-card-top">${facts}${mkCloseHtml(item, state)}</div><button type="button" class="mk-card-q" data-act="open" data-i="${i}" data-fk="open:${esc(item.key)}">${esc(item.name)}</button><div class="mk-card-foot">${foot}</div></div>`;
+  return `<div class="box mk-card" data-k="${esc(item.key)}"${pairs.length && !shut ? ` data-pairs="${esc(pairs.slice(0, 4).join(","))}"` : ""}><div class="mk-card-top">${facts}${mkCloseHtml(item, state)}</div><button type="button" class="mk-card-q" data-act="open" data-i="${i}" data-fk="open:${esc(item.key)}" data-peek="${i}"><span>${mkShortHtml(item)}${mkShort(item).name !== item.name ? `<span class="sr">. ${esc(item.name)}</span>` : ""}</span></button><div class="mk-card-foot">${foot}</div></div>`;
 }
 const mkCards = (items, opts) => `<div class="cards-grid mk-cards">${items.map((x) => mkCard(x, opts)).join("")}</div>`;
 const mkSkelCards = (n) => `<div class="cards-grid" aria-hidden="true">${Array.from({ length: n }, () => '<div class="box mk-card"><span class="skel" style="width:50%"></span><span class="skel" style="height:36px"></span><span class="skel" style="height:44px"></span></div>').join("")}</div>`;
@@ -491,14 +522,15 @@ function mkWatchingHtml(lens) {
   if (!rows.length) return '<div class="card"><p class="empty">Nothing watched. Press ★ on a market to watch it: your agents read the watchlist.</p></div>';
   const cols = [
     { label: "", sr: "Watch", cell: (x) => mkStar(x.item, x.i, x.w.at) },
-    { label: "Market", cls: "mk-c-name", cell: (x) => `<button type="button" class="mk-name" data-act="open" data-i="${x.i}" data-fk="open:${esc(x.item.key)}">${mkAv(x.item)}<span><b>${esc(x.item.name)}</b><span class="dim">${esc(x.oi !== undefined ? mkLabel(x.item.outcomes[x.oi].label) : x.item.base || MKT_KIND[x.item.kind] || "")}</span></span></button>${mkWhereLine(x.item)}` },
+    { label: "Market", cls: "mk-c-name", cell: (x) => mkNameBtn(x.item, x.i) },
     { label: "Where", cls: "mk-c-where", cell: (x) => mkWhere(x.item) },
     { label: "Price", r: true, cell: (x) => {
       const ev = x.item.kind === "event";
       const m = mkVenue(x.w.venue) ? mkFresh(`${x.w.venue}|${x.w.symbol}`) : null;
       const o = x.oi !== undefined ? x.item.outcomes[x.oi] : null;
       const shown = m ? (ev ? mkCents(m.price ?? m.ask) : mkUsd(m.price ?? m.ask)) : ev ? mkCents(o ? o.price : x.item.price) : mkUsd(x.item.price);
-      return `${ev ? "" : mkClosedTag(x.item)}<span${mkVenue(x.w.venue) ? ` data-q="${esc(`${x.w.venue}|${x.w.symbol}`)}" data-fmt="${ev ? "c-last" : "usd"}"` : ""}>${shown}</span>`;
+      // the outcome watched is said beside its price, as a row of All says its lead outcome
+      return `${ev ? "" : mkClosedTag(x.item)}<span${mkVenue(x.w.venue) ? ` data-q="${esc(`${x.w.venue}|${x.w.symbol}`)}" data-fmt="${ev ? "c-last" : "usd"}"` : ""}>${shown}</span>${o ? `<span class="dim small"> ${esc(mkLabel(o.label))}</span>` : ""}`;
     } },
     { label: "24h", r: true, cell: (x) => (x.item.kind === "event" ? chg(x.oi !== undefined && x.item.outcomes[x.oi].change24h !== undefined ? x.item.outcomes[x.oi].change24h * 100 : undefined, "¢") : chg(x.item.changePct24h)) },
     { label: "", sr: "Actions", r: true, cell: (x) => mkActs(x.item, x.i) },
@@ -565,6 +597,8 @@ function renderMarkets(ctx) {
     ctx.el.addEventListener("click", mkPaneClick);
     // the footer's fold does not bubble: heard in capture, so a redraw keeps it as the owner left it
     ctx.el.addEventListener("toggle", mkPaneToggle, true);
+    // a market's hover card
+    mkPeekWire(ctx.el);
     MKT.el = ctx.el;
   }
   MKT.reg = [];
@@ -594,11 +628,13 @@ function renderMarkets(ctx) {
   }
   paint(ctx.el, `<div class="mk">${mkTabs(p, tabsFrom || (MKT.good && MKT.good.body))}${body}${foot}</div>`);
   mkObserve(ctx.el);
+  mkPeekKeep();
   mkStart();
 }
 
 /* one click handler for the pane, which is drawn again and again */
 function mkPaneClick(e) {
+  mkPeekHide();
   const t = e.target;
   const b = t && t.closest && t.closest("[data-act]");
   if (!b || b.disabled) return;
@@ -735,6 +771,7 @@ function mkSecond() {
 }
 const mkPaneNeeds = (tab) => tab === "markets" || tab === "trade";
 onRoute((tab) => {
+  mkPeekHide();
   if (!mkPaneNeeds(tab) && !MKT.open) mkStop();
 });
 const mkDrawerBody = () => { const d = $("drawer"); return d && d.open ? d.querySelector("[data-mk-drawer]") : null; };
@@ -796,9 +833,10 @@ function mkTickOne(el, now) {
  * ended, which are marked all the same. Null when nothing changes */
 function mkTickPlan() {
   if (document.hidden) return null;
-  // the countdowns on the page, looked for again only after something was drawn
+  // the countdowns on the page, and the table rows whose countdown is in their hover card (data-ends: only their end is watched), looked
+  // for again only after something was drawn
   if (!MKT.closes || MKT.closeGen !== paintGen) {
-    MKT.closes = [...document.querySelectorAll(".mk-close[data-close]")];
+    MKT.closes = [...document.querySelectorAll(".mk-close[data-close]"), ...document.querySelectorAll(".mk-t tr[data-ends]")];
     MKT.closeGen = paintGen;
   }
   const now = Date.now();
@@ -806,11 +844,12 @@ function mkTickPlan() {
   const ended = [];
   for (const el of MKT.closes) {
     if (el.isConnected === false) continue;
-    if (!MKT.watched.has(el) || MKT.seen.has(el)) {
+    const words = !!el.dataset.close;
+    if (words && (!MKT.watched.has(el) || MKT.seen.has(el))) {
       const t = mkCloseText(el, now);
       if (el.textContent !== t) texts.push([el, t]);
     }
-    if (Date.parse(el.dataset.close) - now <= 0 && !el.hasAttribute("data-closed")) ended.push(el);
+    if (Date.parse(words ? el.dataset.close : el.dataset.ends) - now <= 0 && !el.hasAttribute("data-closed")) ended.push(el);
   }
   return texts.length || ended.length ? { texts, ended } : null;
 }
@@ -829,6 +868,113 @@ function mkTickApply(plan) {
  * use data-close for buttons */
 function mkTick() {
   mkTickApply(mkTickPlan());
+}
+
+// ---- a market's hover card -----------------------------------------------------------------------------------
+
+/* ONE card for the pane (#mk-peek, on the page's body, so no table's scroll cuts it): what a row or a card names short, said in full
+   (mkPeekHtml), beside the market a mouse rests on — or a key reached — under its row, above it near the window's foot. It takes no click (a
+   click goes to what is under it) and goes when the pointer leaves, the page scrolls, Escape is pressed or anything is clicked. A touch has
+   no hover: a tap opens the drawer, which says it all. A screen reader hears the same words from the name itself (mkAbout), so the card is
+   for the eye only */
+const MK_PEEK = { el: null, at: null, html: "", show: 0, hide: 0, wired: false };
+/* how long a resting pointer waits for it; while one is shown, the next market's comes at once */
+const MK_PEEK_MS = 300;
+function mkPeekEl() {
+  if (MK_PEEK.el && MK_PEEK.el.isConnected) return MK_PEEK.el;
+  const el = document.createElement("div");
+  el.id = "mk-peek";
+  el.className = "mk-peek";
+  el.setAttribute("aria-hidden", "true");
+  el.hidden = true;
+  document.body.appendChild(el);
+  return (MK_PEEK.el = el);
+}
+const mkPeekShown = () => !!(MK_PEEK.el && !MK_PEEK.el.hidden && MK_PEEK.at);
+/* the pane's listeners, once: a pointer over a market, out of it, a key's focus; the page's scroll and Escape put the card away */
+function mkPeekWire(el) {
+  el.addEventListener("pointerover", mkPeekOver);
+  el.addEventListener("pointerout", mkPeekOut);
+  el.addEventListener("focusin", mkPeekFocus);
+  el.addEventListener("focusout", mkPeekOut);
+  if (MK_PEEK.wired) return;
+  MK_PEEK.wired = true;
+  addEventListener("scroll", mkPeekHide, { capture: true, passive: true });
+  addEventListener("keydown", (e) => e.key === "Escape" && mkPeekHide());
+}
+const mkPeekOf = (t) => (t && t.closest ? t.closest("[data-peek]") : null);
+function mkPeekOver(e) {
+  // a finger's touch is no hover: its tap opens the drawer
+  if (e.pointerType === "touch") return;
+  const a = mkPeekOf(e.target);
+  if (a) mkPeekAim(a, false);
+}
+/* a key that reaches a market's name shows its card at once (a click's focus does not: that click opens the drawer) */
+function mkPeekFocus(e) {
+  const a = mkPeekOf(e.target);
+  if (a && a === e.target && a.matches && a.matches(":focus-visible")) mkPeekAim(a, true);
+}
+function mkPeekAim(a, now) {
+  clearTimeout(MK_PEEK.hide);
+  if (MK_PEEK.at === a && mkPeekShown()) return;
+  clearTimeout(MK_PEEK.show);
+  MK_PEEK.show = setTimeout(() => mkPeekShow(a), now || mkPeekShown() ? 0 : MK_PEEK_MS);
+}
+function mkPeekOut(e) {
+  const a = mkPeekOf(e.target);
+  // still on the same market (from its tile to its words)
+  if (!a || (e.relatedTarget && a.contains(e.relatedTarget))) return;
+  clearTimeout(MK_PEEK.show);
+  clearTimeout(MK_PEEK.hide);
+  MK_PEEK.hide = setTimeout(mkPeekHide, 80);
+}
+/* the card for a market's name, written where its words changed, and placed */
+function mkPeekShow(a) {
+  const item = a && a.isConnected ? MKT.reg[Number(a.dataset.peek)] : null;
+  if (!item) return void mkPeekHide();
+  const el = mkPeekEl();
+  const html = mkPeekHtml(item);
+  if (html !== MK_PEEK.html) {
+    el.innerHTML = html;
+    MK_PEEK.html = html;
+    // its countdown is one of the page's: looked for again on the next second
+    MKT.closes = null;
+  }
+  MK_PEEK.at = a;
+  el.hidden = false;
+  mkPeekPlace(a, el);
+}
+/* under the market's row (a card's question: under the question), its words' left edge; above it where the window ends first; inside the
+   window either way */
+function mkPeekPlace(a, el) {
+  const box = (a.closest("tr") || a).getBoundingClientRect();
+  const words = (a.querySelector(".mk-nm") || a.querySelector("span") || a).getBoundingClientRect();
+  const vw = document.documentElement.clientWidth || innerWidth;
+  const vh = document.documentElement.clientHeight || innerHeight;
+  const w = el.offsetWidth;
+  const h = el.offsetHeight;
+  const below = box.bottom + 6 + h <= vh - 8 || box.top - 6 - h < 8;
+  el.style.left = `${Math.round(Math.max(8, Math.min(words.left, vw - w - 8)))}px`;
+  el.style.top = `${Math.round(below ? box.bottom + 6 : box.top - 6 - h)}px`;
+}
+function mkPeekHide() {
+  clearTimeout(MK_PEEK.show);
+  clearTimeout(MK_PEEK.hide);
+  MK_PEEK.at = null;
+  const el = MK_PEEK.el;
+  if (!el || el.hidden) return;
+  el.hidden = true;
+  el.innerHTML = "";
+  MK_PEEK.html = "";
+  MKT.closes = null;
+}
+/* after a draw: the card stays with its market while the market is drawn (its words read again: a fresh read may have changed them), else
+   it goes */
+function mkPeekKeep() {
+  const a = MK_PEEK.at;
+  if (!a) return;
+  if (!a.isConnected || !mkPeekShown()) return void mkPeekHide();
+  mkPeekShow(a);
 }
 
 // ---- one market, in the drawer ----------------------------------------------------------------------------

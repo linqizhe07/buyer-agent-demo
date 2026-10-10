@@ -209,8 +209,8 @@ export interface ExploreItem {
   closeTime?: string | undefined;
   /** an event whose `closeTime` has passed (see the top of this file: a Polymarket market may still trade then) */
   pastEnd?: boolean | undefined;
-  /** the venue's event an event market belongs to, where an event holds several */
-  event?: { id: string; title: string } | undefined;
+  /** the venue's event an event market belongs to, where an event holds several, and the market's own short name inside it (Listing) */
+  event?: { id: string; title: string; market?: string | undefined } | undefined;
   /** a perpetual's funding rate per interval and when it is next paid, from its most traded venue that says */
   fundingRate?: number | undefined;
   nextFundingAt?: string | undefined;
