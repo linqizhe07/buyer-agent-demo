@@ -55,10 +55,10 @@
 import { isRefusal, type Refusal } from "../../core/errors.ts";
 import { no } from "../refuse.ts";
 import type { KeyFile } from "./credentials.ts";
-import { exchangeSaidNo, isBinance, isBybit, isOkx, type ExchangeClient } from "./exchange.ts";
+import { exchangeSaidNo, isBinance, isBybit, isOkx, thrownHttp, type ExchangeClient } from "./exchange.ts";
 import { impliedUsd, PRE_IPO_CATEGORY, preIpoOf } from "./preipo.ts";
 import { badOrder, ceilTo, floorTo, inDollars, notionalOf, onStep, pick, plain, CANDLE_INTERVALS, DONE, type Candle, type CandleInterval, type LiveTrader, type Market, type MarketStats, type OrderChange, type OrderRequest, type OrderState, type OrderStatus, type OrderType, type Position, type TimeInForce } from "./trade.ts";
-import { num, redact, type LiveProbe, type MarginMode, type MarketExtras } from "./types.ts";
+import { num, redact, transportCode, type LiveProbe, type MarginMode, type MarketExtras } from "./types.ts";
 
 type Dict = Record<string, unknown>;
 type Kind = "spot" | "perp" | "future";
@@ -91,6 +91,23 @@ const dayFamilyOf = (id: string): DayFamily | undefined => familyOf(id) ?? (id =
 const TRIGGER = "trigger:";
 const triggerId = (ref: string): string | undefined => (ref.startsWith(TRIGGER) && ref.length > TRIGGER.length ? ref.slice(TRIGGER.length) : undefined);
 
+/** an order id as an exchange gives one: letters, digits and a few joiners, with no space and no markup. Anything else where an id should
+ * be — MEXC's parser takes any string answer as the order's id, so a filtering network's 200 page would become one — is not an id */
+const ID = /^[A-Za-z0-9_:.-]{1,128}$/;
+
+/** What the exchange holds an order at, as it says it: its whole size (in the units it was placed in: coins, or contracts), its limit and its
+ * stop. Carried beside trade.ts's OrderState, which names none of them, so the account can tell a change it did not hear confirmed from one
+ * the exchange made (account/live-orders.ts) */
+export interface OrderHeld {
+  qty?: number | undefined;
+  limitPrice?: number | undefined;
+  stopPrice?: number | undefined;
+}
+
+/** an order the account could not hear placed, looked up again by the account's own id for it (account/live-orders.ts follows such an
+ * order): its state; `null` when the exchange shows none under that id; `undefined` when it cannot be asked that way through the library */
+export type ByClient = (clientId: string, symbol: string, type: OrderType) => Promise<OrderState | null | undefined | Refusal>;
+
 /** how the library counts a precision (base/functions/number.js): a step, a number of decimal places, or a number of significant digits */
 const DECIMAL_PLACES = 2;
 const SIGNIFICANT_DIGITS = 3;
@@ -113,6 +130,11 @@ const BAR_MS: Record<CandleInterval, number> = { "5m": 300_000, "1h": 3_600_000,
 
 const obj = (v: unknown): Dict => (v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Dict) : {});
 const str = (v: unknown): string | undefined => (typeof v === "string" && v !== "" ? v : typeof v === "number" ? String(v) : undefined);
+/** the order's id, when it is one (ID) */
+const idOf = (o: Dict): string | undefined => {
+  const v = str(o.id);
+  return v !== undefined && ID.test(v) ? v : undefined;
+};
 const pos = (v: unknown): number | undefined => (num(v) > 0 ? num(v) : undefined);
 const finite = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : typeof v === "string" && v.trim() !== "" && Number.isFinite(Number(v)) ? Number(v) : undefined);
 const yes = (v: unknown): boolean => v === true || v === "true";
@@ -146,8 +168,18 @@ const CLOSED = /market is closed|not open yet|not available for api trading|UNTR
 const NO_PERMISSION = /EAccount:Invalid permissions|EGeneral:Permission denied|PERMISSION_DENIED|not permitted for this account|may not place or cancel orders|trading is not enabled/i;
 const INVALID = /filter failure|too much precision|INVALID_(SIZE|PRICE)_PRECISION|INVALID_LIMIT_PRICE|minimum not met|tick size|invalid price|invalid arguments:(volume|price)|lot size|"(51020|51121|51006|51007|51116|51137|51138)"/i;
 const INVALID_KINDS = new Set(["InvalidOrder", "BadSymbol", "DuplicateOrderId", "OrderImmediatelyFillable", "OrderNotFillable", "ContractUnavailable"]);
-/** an order call that failed this way may still have reached the exchange (OKX 50004: "does not indicate success or failure of order") */
-const UNSURE = new Set(["RequestTimeout", "NetworkError", "ExchangeNotAvailable", "TimeoutError", "AbortError"]);
+/** an order call that failed this way may still have reached the exchange (OKX 50004: "does not indicate success or failure of order"),
+ * and so may one cut off beneath the library (the names exchange.ts reads as a connection cut) */
+const UNSURE = new Set(["RequestTimeout", "NetworkError", "ExchangeNotAvailable", "TimeoutError", "AbortError", "SocketError", "BodyTimeoutError", "HeadersTimeoutError", "RequestAbortedError"]);
+/** A write whose answer was lost: what the library threw says the exchange did not answer (never a ban or a wait it asked for), and the
+ * call may have reached it — a timeout, a connection cut or reset, a gateway's 5xx, a page answered in the exchange's place. Such a write is
+ * never told as refused (live/earn.ts reads its moves by the same rule) */
+export function lostAnswer(err: unknown, r: Refusal): boolean {
+  if (r.code !== "E_VENUE_UNREACHABLE" || (r.native as { until?: unknown } | undefined)?.until !== undefined) return false;
+  const kind = String((err as { name?: string })?.name ?? "");
+  const status = thrownHttp(String((err as { message?: string })?.message ?? err))?.status ?? 0;
+  return UNSURE.has(kind) || status >= 500 || transportCode(err) !== undefined || (r.native as { page?: unknown } | undefined)?.page === true;
+}
 /** a leverage or margin mode that is already what was asked: Binance -4046 "No need to change margin type." (the library's
  * MarginModeAlreadySet), Bybit 110026 (the same class) and 110043 "Set leverage not modified" (filed as a bad request) */
 const UNCHANGED = /"?110043"?|leverage not modified|No need to change margin type/i;
@@ -232,33 +264,47 @@ export function exchangeTrader(client: ExchangeClient, venue: string, name: stri
    * futures algo order, Bybit on a conditional order, OKX on its futures' and perpetuals' trigger orders only (advanceOrdType) */
   const childTif = (kind: Kind): boolean => fam === "binance" || fam === "bybit" || (fam === "okx" && kind !== "spot");
 
-  /** what the library threw, as the account's refusal, in the exchange's own words with nothing secret in them */
+  /** what the library threw, as the account's refusal, in the exchange's own words with nothing secret in them. The words are read whole
+   * and kept cut: Coinbase's error_response carries its failure reason after the message, preview_failure_reason and error_details, well
+   * past the first 240 characters */
   const fail = (err: unknown, ref?: string): Refusal => {
     if (isRefusal(err)) return err;
     const kind = String((err as { name?: string })?.name ?? "");
-    const said = redact(String((err as { message?: string })?.message ?? err), secrets).replace(/\s+/g, " ").slice(0, 240);
+    const whole = redact(String((err as { message?: string })?.message ?? err), secrets).replace(/\s+/g, " ");
+    const said = whole.slice(0, 240);
     const native = { error: kind, said };
     const plainNo = exchangeSaidNo(venue, name, err, key);
     if (plainNo.code === "E_VENUE_GEOBLOCKED") return plainNo;
-    // Coinbase's place rule arrives as an order failure reason, which the library files as a plain error (ccxt.md §6, region row)
-    if (/GEOFENCING_RESTRICTION/.test(said)) return no("E_VENUE_GEOBLOCKED", { venue, message: `${name} does not serve this location: that is its own rule, and the account does not look for a way around it`, native });
-    if (kind === "OrderNotFound" || NOT_FOUND.test(said)) return no("E_ACCOUNT_ORDER_UNKNOWN", { venue, message: ref ? `${name} has no order ${ref} for this key` : `${name} has no such order for this key`, ...(ref ? { detail: { order: ref } } : {}), native });
-    if (kind === "InsufficientFunds" || INSUFFICIENT.test(said)) return no("E_VENUE_INSUFFICIENT", { venue, message: `${name}: not enough balance there for this order`, native });
-    if (kind === "MarketClosed" || CLOSED.test(said)) return no("E_VENUE_MARKET_CLOSED", { venue, message: `${name} takes no orders in this market now`, native });
-    if (NO_PERMISSION.test(said)) return no("E_VENUE_PERMISSION", { venue, message: `${name} refused: the key lacks the permission for this, or this machine's IP is not on the key's list`, native });
+    // Coinbase's place rule arrives as an order failure reason, which the library files as a plain error (ccxt.md §6, region row); where it
+    // lies past the cut, the reason itself is kept with the words
+    const fence = /"?(new_order_failure_reason|preview_failure_reason|failure_reason|error)"?\s*:\s*"?GEOFENCING_RESTRICTION/.exec(whole)?.[1];
+    if (/GEOFENCING_RESTRICTION/.test(whole)) return no("E_VENUE_GEOBLOCKED", { venue, message: `${name} does not serve this location: that is its own rule, and the account does not look for a way around it`, native: { ...native, ...(said.includes("GEOFENCING_RESTRICTION") ? {} : { reason: `${fence ?? "failure_reason"}: GEOFENCING_RESTRICTION` }) } });
+    if (kind === "OrderNotFound" || NOT_FOUND.test(whole)) return no("E_ACCOUNT_ORDER_UNKNOWN", { venue, message: ref ? `${name} has no order ${ref} for this key` : `${name} has no such order for this key`, ...(ref ? { detail: { order: ref } } : {}), native });
+    if (kind === "InsufficientFunds" || INSUFFICIENT.test(whole)) return no("E_VENUE_INSUFFICIENT", { venue, message: `${name}: not enough balance there for this order`, native });
+    if (kind === "MarketClosed" || CLOSED.test(whole)) return no("E_VENUE_MARKET_CLOSED", { venue, message: `${name} takes no orders in this market now`, native });
+    if (NO_PERMISSION.test(whole)) return no("E_VENUE_PERMISSION", { venue, message: `${name} refused: the key lacks the permission for this, or this machine's IP is not on the key's list`, native });
     if (plainNo.code !== "E_VENUE_REJECTED") return plainNo;
-    if (INVALID_KINDS.has(kind) || INVALID.test(said)) return { ...badOrder(venue, name, "it does not take this order as written (its size, step, price or minimum)"), native };
+    if (INVALID_KINDS.has(kind) || INVALID.test(whole)) return no("E_VENUE_ORDER_INVALID", { venue, message: `${name}: it does not take this order as written (its size, step, price or minimum)`, native });
     return plainNo;
   };
   /** a refusal that is the exchange's own and final, after which nothing more is asked of it */
   const final = (r: Refusal) => r.code === "E_VENUE_PERMISSION" || r.code === "E_VENUE_UNAUTHORIZED" || r.code === "E_VENUE_GEOBLOCKED" || r.code === "E_VENUE_UNREACHABLE";
 
-  /** the library's market list, kept five minutes; a list that cannot be reloaded is used as it was */
+  /** the library's market list, kept five minutes; a list that cannot be reloaded is used as it was. A load that failed is let go: the
+   * library keeps the failed promise and hands it to every later call that does not ask for a reload — its own createOrder and fetchBalance
+   * among them — without asking the exchange again (base/Exchange.js loadMarkets), so one timeout or one edge page at the first load would
+   * refuse every trade on this client until a restart. Let go, the next call asks the exchange; after a failed reload, the list already
+   * loaded answers the library's own calls */
   const load = async (): Promise<Refusal | undefined> => {
     if (loadedAt && now() - loadedAt < LIST_MS) return undefined;
     try {
       await client.loadMarkets?.(loadedAt > 0);
     } catch (err) {
+      const kept = client as { marketsLoading?: unknown; reloadingMarkets?: boolean };
+      if ("marketsLoading" in kept) {
+        kept.marketsLoading = undefined;
+        kept.reloadingMarkets = false;
+      }
       if (loadedAt) return undefined;
       return fail(err);
     }
@@ -425,8 +471,9 @@ export function exchangeTrader(client: ExchangeClient, venue: string, name: stri
     return { m: toMarket(r, kind), raw: r, kind };
   };
 
-  /** an order as the account keeps it: what filled decides, the status word only where nothing says otherwise */
-  const stateOf = (o: Dict, contractSize: number | undefined, ref?: string): OrderState => {
+  /** an order as the account keeps it: what filled decides, the status word only where nothing says otherwise; and what the exchange holds
+   * it at (OrderHeld) */
+  const stateOf = (o: Dict, contractSize: number | undefined, ref?: string): OrderState & OrderHeld => {
     const word = str(o.status);
     const filledKnown = o.filled !== undefined && o.filled !== null;
     const filled = Math.max(0, num(o.filled));
@@ -443,8 +490,18 @@ export function exchangeTrader(client: ExchangeClient, venue: string, name: stri
     const average = pos(o.average) ?? (filled > 0 && pos(o.cost) ? num(o.cost) / (filled * (contractSize ?? 1)) : undefined);
     const fee = feeUsd(o);
     const venueWord = venueWordOf(o);
-    const native: Dict = { id: str(o.id) ?? ref ?? null, clientOrderId: str(o.clientOrderId) ?? null, symbol: str(o.symbol) ?? null, type: str(o.type) ?? null, side: str(o.side) ?? null, status: word ?? null, ...(venueWord ? { venueStatus: venueWord } : {}), amount: o.amount ?? null, filled: o.filled ?? null, average: o.average ?? null, cost: o.cost ?? null, fees: Array.isArray(o.fees) ? o.fees : [] };
-    return { ref: str(o.id) ?? ref ?? "", status, filledQty: filled, ...(average !== undefined ? { avgPrice: average } : {}), ...(fee !== undefined ? { feeUsd: fee } : {}), native };
+    const native: Dict = { id: idOf(o) ?? ref ?? null, clientOrderId: str(o.clientOrderId) ?? null, symbol: str(o.symbol) ?? null, type: str(o.type) ?? null, side: str(o.side) ?? null, status: word ?? null, ...(venueWord ? { venueStatus: venueWord } : {}), amount: o.amount ?? null, filled: o.filled ?? null, average: o.average ?? null, cost: o.cost ?? null, fees: Array.isArray(o.fees) ? o.fees : [] };
+    const qty = pos(o.amount);
+    const limitPrice = str(o.type) === "limit" ? pos(o.price) : undefined;
+    const stopPrice = pos(o.triggerPrice) ?? pos(o.stopPrice);
+    return { ref: idOf(o) ?? ref ?? "", status, filledQty: filled, ...(average !== undefined ? { avgPrice: average } : {}), ...(fee !== undefined ? { feeUsd: fee } : {}), native, ...(qty !== undefined ? { qty } : {}), ...(limitPrice !== undefined ? { limitPrice } : {}), ...(stopPrice !== undefined ? { stopPrice } : {}) };
+  };
+  /** an answer that is the exchange's about order `id`: it names that order, and says something of it (its status or its size). A page a
+   * filtering network answered with, or an empty body, parses into an order with no id — or, at Kraken, with the id that was asked and
+   * nothing else — and is not the exchange saying "pending, nothing filled" */
+  const theOrder = (o: Dict, id: string): Dict => {
+    if (idOf(o) === id && (str(o.status) !== undefined || pos(o.amount) !== undefined)) return o;
+    throw no("E_VENUE_UNREACHABLE", { venue, message: `${name} did not answer about order ${id}: what came back names no such order, so it is not taken as ${name}'s answer`, detail: { order: id }, native: { answer: "not the order" } });
   };
   /** the exchange's own status word for an order, from what the library left in `info` (an algo order's `state` at OKX, `algoStatus` at Binance) */
   function venueWordOf(o: Dict): string | undefined {
@@ -514,11 +571,11 @@ export function exchangeTrader(client: ExchangeClient, venue: string, name: stri
     if (word !== "effective" && word !== "partially_effective" && word !== "TRIGGERED" && word !== "FINISHED") return { fired: false };
     const many = Array.isArray(info.ordIdList) ? info.ordIdList.map(str).filter((x): x is string => x !== undefined) : [];
     const child = str(info.ordId) ?? many[0] ?? str(info.actualOrderId);
-    return { fired: true, ...(child ? { child } : {}) };
+    return { fired: true, ...(child && ID.test(child) ? { child } : {}) };
   };
 
   /** a trigger order as its book shows it, when there is no order it placed to read instead */
-  const algoState =(algo: Dict, contractSize: number | undefined, ref: string): OrderState => {
+  const algoState =(algo: Dict, contractSize: number | undefined, ref: string): OrderState & OrderHeld => {
     const s = { ...stateOf(algo, contractSize, ref), ref };
     const word = venueWordOf(algo);
     // fired with the order it placed not named yet, or on its way to the order book (Binance TRIGGERING): taken, not settled. Never filled
@@ -530,14 +587,15 @@ export function exchangeTrader(client: ExchangeClient, venue: string, name: stri
   };
 
   /** what became of an order, under the ref the account follows it by. An order in a trigger book is read there; once it has fired, the order
-   * it placed is read instead and answered under its own id, which the account follows from then on */
-  const read = async (ref: string, symbol: string, contractSize: number | undefined): Promise<OrderState> => {
+   * it placed is read instead and answered under its own id, which the account follows from then on. Only an answer about that order is
+   * one (theOrder): anything else throws, and the account keeps what it knew */
+  const read = async (ref: string, symbol: string, contractSize: number | undefined): Promise<OrderState & OrderHeld> => {
     const t = triggerId(ref);
-    if (t === undefined) return stateOf(await lookup(ref, symbol), contractSize, ref);
-    const algo = obj(await client.fetchOrder!(t, symbol, { trigger: true }));
+    if (t === undefined) return stateOf(theOrder(await lookup(ref, symbol), ref), contractSize, ref);
+    const algo = theOrder(obj(await client.fetchOrder!(t, symbol, { trigger: true })), t);
     const { child } = firedAs(algo);
     if (child === undefined) return algoState(algo, contractSize, ref);
-    const s = stateOf(await lookup(child, symbol), contractSize, child);
+    const s = stateOf(theOrder(await lookup(child, symbol), child), contractSize, child);
     return { ...s, native: { ...(s.native as Dict), trigger: { id: t, status: venueWordOf(algo) ?? null } } };
   };
 
@@ -545,10 +603,14 @@ export function exchangeTrader(client: ExchangeClient, venue: string, name: stri
    * `null`: looked, and none is there; `undefined`: this exchange cannot be asked that way through the library. `book`: the order went to the
    * exchange's trigger book, where OKX knows it by algoClOrdId and Binance by clientAlgoId (the library maps clientOrderId to both) */
   const byClientId = async (symbol: string, cid: string, book: boolean): Promise<Dict | null | undefined> => {
-    const mine = (rows: unknown) => (Array.isArray(rows) ? rows.map(obj).find((o) => str(o.clientOrderId) === cid) : undefined);
+    // the order the exchange shows under the account's id: one with an id of its own, carrying that client id back (in a trigger book, as
+    // OKX's algoClOrdId or Binance's clientAlgoId). An answer that names neither is not "none there" — it cannot tell
+    const isMine = (o: Dict) => idOf(o) !== undefined && [o.clientOrderId, ...(book ? [obj(o.info).algoClOrdId, obj(o.info).clientAlgoId] : [])].some((c) => str(c) === cid);
+    const mine = (rows: unknown) => (Array.isArray(rows) ? rows.map(obj).find(isMine) : undefined);
     if ((isOkx(id) || isBinance(id)) && client.fetchOrder) {
       try {
-        return obj(await client.fetchOrder(undefined, symbol, { clientOrderId: cid, ...(book ? { trigger: true } : {}) }));
+        const o = obj(await client.fetchOrder(undefined, symbol, { clientOrderId: cid, ...(book ? { trigger: true } : {}) }));
+        return isMine(o) ? o : undefined;
       } catch (err) {
         if (String((err as { name?: string })?.name) === "OrderNotFound") return null;
         throw err;
@@ -563,11 +625,11 @@ export function exchangeTrader(client: ExchangeClient, venue: string, name: stri
     }
     return undefined;
   };
-  /** an order found by the account's id, as the account keeps it: under the trigger book's ref when it went there */
-  const foundState = (found: Dict, contractSize: number | undefined, book: boolean): OrderState => {
+  /** an order found by the account's id (byClientId: it has an id of its own), as the account keeps it: under the trigger book's ref when it
+   * went there */
+  const foundState = (found: Dict, contractSize: number | undefined, book: boolean): OrderState & OrderHeld => {
     if (!book) return stateOf(found, contractSize);
-    const ref = TRIGGER + (str(found.id) ?? "");
-    return algoState(found, contractSize, ref);
+    return algoState(found, contractSize, TRIGGER + idOf(found)!);
   };
 
   /** the account's id as the exchange takes it: Coinbase as client_order_id; OKX alphanumeric up to 32; Kraken a short UUID (32 hex) or up to
@@ -788,9 +850,13 @@ export function exchangeTrader(client: ExchangeClient, venue: string, name: stri
       if (t !== undefined && s.ref !== ref && !DONE.has(s.status)) return cancel(s.ref, symbol);
       return s;
     } catch {
-      // the cancel was taken but what became of the order cannot be read now: it is not called canceled with nothing filled (it may have
-      // filled in part, or still fill on the way: Bybit and Coinbase cancel later), so the account follows it until the exchange says
-      return { ...stateOf(answer, cs, ref), ref };
+      // the cancel was taken — the answer names the order, or is Kraken's count of orders canceled — but what became of the order cannot be
+      // read now: it is not called canceled with nothing filled (it may have filled in part, or still fill on the way: Bybit and Coinbase
+      // cancel later), so the account follows it until the exchange says. An answer that names no order is not the exchange's yes: a page
+      // or an empty body in its place, and the order may still be open
+      const taken = idOf(answer) === (t ?? ref) || (id === "kraken" && num(obj(obj(answer.info).result).count) > 0);
+      if (taken) return { ...stateOf(answer, cs, ref), ref };
+      return no("E_VENUE_UNREACHABLE", { venue, message: `${name} did not confirm the cancel: the order may still be open. Look at it at ${name}, or cancel it again`, detail: { order: ref, unsure: true }, native: { answer: "names no order" } });
     }
   };
 
@@ -862,11 +928,27 @@ export function exchangeTrader(client: ExchangeClient, venue: string, name: stri
       call = () => lib.editOrder!(ref, sym, "limit", order.side, change.qty, change.limitPrice, change.stopPrice !== undefined ? { stopLossPrice: change.stopPrice } : {});
     } else return closed("changes no order in place through the account: cancel it and place another");
 
+    /** A change whose answer was lost (the call cut off mid-flight, a gateway's 5xx, an answer that names no order): the exchange may have
+     * made it. The order itself is read: where it already holds what was asked, the change was made; otherwise it is said to be unsure —
+     * never "could not be reached", after which the account would give back what the change grew by and keep the old size while the
+     * exchange may hold the new one */
+    const unsure = async (native: unknown): Promise<OrderState | Refusal> => {
+      try {
+        const s = await read(ref, sym, m.contractSize);
+        const near = (a: number | undefined, b: number | undefined) => b === undefined || (a !== undefined && Math.abs(a - b) <= Math.max(1e-12, Math.abs(b) * 1e-9));
+        if (s.ref === ref && near(s.qty, change.qty) && near(s.limitPrice, change.limitPrice) && near(s.stopPrice, change.stopPrice)) return { ...s, native: { ...(s.native as Dict), changed: true } };
+      } catch {
+        // it does not show the order now either
+      }
+      return no("E_VENUE_UNREACHABLE", { venue, message: `${name} did not confirm the change: it may or may not have been made. Look at the order before changing it again`, detail: { order: ref, unsure: true }, native });
+    };
     let answer: Dict;
     try {
       answer = obj(await call());
     } catch (err) {
       const r = fail(err, ref);
+      // a ban, a rate limit, the place, the key or its permission: the exchange's own no, and final. A lost answer is not one of them
+      if (lostAnswer(err, r)) return unsure(r.native);
       if (final(r)) return r;
       // an order that filled or was canceled before the change reached it, or a stop that fired: said so, and the account's next look shows it
       try {
@@ -885,7 +967,12 @@ export function exchangeTrader(client: ExchangeClient, venue: string, name: stri
       const why = errors.map((e) => str(e.edit_failure_reason) ?? str(e.preview_failure_reason)).find((x) => x && !/^UNKNOWN_/.test(x));
       return no("E_VENUE_REJECTED", { venue, message: `${name} did not change the order${why ? ` (${why})` : ""}`, native: { said: why ?? null } });
     }
-    // the order as it stands after: under its own ref, which a change in place keeps (Kraken answers with the change's own id, not the order's)
+    // the exchange's yes names the order — Kraken's names the change instead (its amend_id), Coinbase's is success true, OKX's amend-algos
+    // answers in its own shape (data[0].algoId, sCode "0"). An answer that says none of these is not a yes: a page or an empty body in its place
+    const algo = obj(Array.isArray(answer.data) ? answer.data[0] : undefined);
+    const confirmed = idOf(answer) === ref || (fam === "kraken" && ID.test(str(info.amend_id) ?? "")) || (fam === "coinbase" && info.success === true) || (t !== undefined && str(algo.algoId) === t && str(algo.sCode) === "0");
+    if (!confirmed) return unsure({ answer: "names no order" });
+    // the order as it stands after: under its own ref, which a change in place keeps
     try {
       return await read(ref, sym, m.contractSize);
     } catch {
@@ -1259,7 +1346,7 @@ export function exchangeTrader(client: ExchangeClient, venue: string, name: stri
         created = obj(await client.createOrder!(symbol, type, o.side, o.qty, price, params));
       } catch (err) {
         const r = fail(err);
-        if (r.code !== "E_VENUE_UNREACHABLE" || !UNSURE.has(String((err as { name?: string })?.name ?? ""))) return r;
+        if (!lostAnswer(err, r)) return r;
         // the order call did not come back: whether the order is at the exchange is asked by the account's id, before anything else is said
         let found: Dict | null | undefined;
         try {
@@ -1270,11 +1357,13 @@ export function exchangeTrader(client: ExchangeClient, venue: string, name: stri
         if (found) return foundState(found, m.contractSize, book);
         return no("E_VENUE_UNREACHABLE", { venue, message: found === null ? `${name} did not confirm the order, and shows none under the account's id ${cid} now: look at its open orders before placing it again` : `${name} did not confirm the order: it may or may not have been placed. Look at its open orders before placing it again (the account's id for it: ${cid})`, detail: { clientOrderId: cid }, native: r.native });
       }
-      const venueId = str(created.id);
+      // an answer with no order id in it — or something in an id's place that is not one (MEXC takes any string answer, a page included, as
+      // the order's id) — is not the exchange's yes: whether the order is there is asked by the account's id, and never stored from the answer
+      const venueId = idOf(created);
       if (!venueId) {
         const found = await byClientId(symbol, cid, book).catch(() => undefined);
         if (found) return foundState(found, m.contractSize, book);
-        return no("E_VENUE_REJECTED", { venue, message: `${name} answered the order without an order id: look at its open orders before placing it again (the account's id for it: ${cid})`, detail: { clientOrderId: cid } });
+        return no("E_VENUE_UNREACHABLE", { venue, message: found === null ? `${name} did not confirm the order (what came back named no order), and shows none under the account's id ${cid} now: look at its open orders before placing it again` : `${name} did not confirm the order (what came back named no order): it may or may not have been placed. Look at its open orders before placing it again (the account's id for it: ${cid})`, detail: { clientOrderId: cid }, native: { answer: "names no order" } });
       }
       const ref = book ? TRIGGER + venueId : venueId;
       // what the order call answered is little more than the id at most exchanges: what became of it is asked at once
@@ -1312,6 +1401,19 @@ export function exchangeTrader(client: ExchangeClient, venue: string, name: stri
   if (fam !== undefined && !(fam === "binance" && !contractsHere) && client.has?.editOrder === true && typeof lib.editOrder === "function") trader.amend = amend;
   if ((fam === "okx" || fam === "binance" || fam === "bybit") && contractsHere && client.has?.fetchPositions === true && typeof lib.fetchPositions === "function") trader.positions = positions;
   if (leverageHere) trader.setLeverage = setLeverage;
+  // an order the account could not hear placed, looked up again by its id for it: where the exchange can be asked that way (byClientId)
+  const byClient: ByClient = async (clientId, symbol, type) => {
+    const f = await find(symbol, true);
+    if (isRefusal(f)) return f;
+    const book = (type === "stop" || type === "stop_limit") && (fam === "okx" || (fam === "binance" && f.kind !== "spot"));
+    try {
+      const found = await byClientId(f.m.symbol, idParam(clientId).cid, book);
+      return found ? foundState(found, f.m.contractSize, book) : found;
+    } catch (err) {
+      return fail(err);
+    }
+  };
+  (trader as LiveTrader & { byClient?: ByClient }).byClient = byClient;
   // reading the market: many tickers where the library reads them (one at a time where it reads only one), price history where it has it
   if (able("fetchTickers") || typeof client.fetchTicker === "function") trader.stats = stats;
   if (able("fetchOHLCV")) trader.candles = candles;

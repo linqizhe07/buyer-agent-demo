@@ -190,6 +190,8 @@ describe("F5 · Hyperliquid by address (address.ts:104) states the venue's rule 
     const type = (JSON.parse(String(init?.body ?? "{}")) as { type?: string }).type;
     if (type === "clearinghouseState") return json({ marginSummary: { accountValue: "25.5" }, withdrawable: "25.5" });
     if (type === "spotClearinghouseState") return json({ balances: [] });
+    // the account's kind (an ordinary one): read so that a unified account is not counted twice
+    if (type === "userAbstraction") return json("default");
     return json({ error: "not set up" }, 404);
   };
   it("neither readOnlyBecause nor noTradeBecause claims 'does not serve this location' (nothing about the location was asked: the only calls are clearinghouseState and spotClearinghouseState)", async () => {

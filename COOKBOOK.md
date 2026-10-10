@@ -780,7 +780,7 @@ npx vitest run test/attack
 | 接交易所时说 "refuses this key from this machine's address" | 钥匙绑了 IP，这台机器现在的地址不在名单上（家里的宽带换了地址、换了网络，或者钥匙是在别的机器上建的）。去交易所的 API 管理页，把这台机器现在的地址加进钥匙的 IP 名单，或者重建钥匙；钥匙和地区都没问题 |
 | 说 "has banned this machine's address for too many requests until …" | 场所因为请求太多封了这个地址（Binance 的 418），封到它说的时间；账户到那时之前不再问它 |
 | 说 "refuses this network: the server in front of it answered HTTP 403 … and gave no reason" | 场所前面的服务器拒绝了这个网络，没说为什么（按地方，或者按这个地址的信誉）；那是它的回答，账户不找别的路 |
-| Markets 底下 "Why these, and what's not shown ⓘ" 里说某个场所没答或不服务这里，或一行写 "Not served here · why" | 那是场所自己的话（在开发者那台美国的机器上，Binance 451、Bybit 403 是按地区拒绝；别处照各自的网络算）；`npm run account:check` 把每家对这台机器的回答列出来；没答的那家整个搁 20 秒不再问，说不服务这个地区的搁 10 分钟；连接器抛了异常也算没答（`E_VENUE_UNREACHABLE` · "answered in a way the account could not read"），异常文字只进服务器日志 |
+| Markets 底下 "Why these, and what's not shown ⓘ" 里说某个场所没答或不服务这里，或一行写 "Not served here · why" | 那是场所自己的话（在开发者那台美国的机器上，Binance 451、Bybit 403 是按地区拒绝；别处照各自的网络算）；`npm run account:check` 把每家对这台机器的回答列出来；没答的那家整个搁 20 秒不再问，说不服务这个地区的（或场所前面的服务器拒绝这个网络的）搁 10 分钟，限流和封地址按场所自己说的时间（Retry-After、“banned until”；限流没说就一分钟）；连接器抛了异常也算没答（`E_VENUE_UNREACHABLE` · "answered in a way the account could not read"），异常文字只进服务器日志 |
 | 净值曲线不画，或只写 "since …" | 不到两个点，或历史还短：账户每五分钟记一个点，之前的不知道，见第 2b 条 |
 | Assets 写 "Cost known for 1 of 3" | 有的币是账户之前就有的、或从别处转进来的，账户没见过它的成本，见第 2b 条 |
 | 代币化股票的签名按钮按不下去 | 发行方关了或限制了它（OUSG、BUIDL 从不 swap），原话写在按钮上方，见第 5b 条 |
@@ -822,6 +822,6 @@ npx vitest run test/attack
 | `E_VENUE_CURRENCY` · `E_VENUE_BAD_SIGNER` | 场所不换这两种币，或这条链上账户不认识这个币（Receive、桥）；Polymarket 不认这个签名人：钥匙文件里的 `funderAddress` / `signatureType` 说的谁下单、谁签，和它记的对不上 |
 | `E_WALLET_FLOAT_CAP` · `E_WALLET_INSUFFICIENT` · `E_WALLET_BLOCKLIST` | float 满了、不够，或者地址在黑名单上 |
 | `E_WALLET_ACCOUNT_UNKNOWN` · `E_WALLET_UNKNOWN_VENUE` | 来源或目的地不是接在账户上的场所（agent 挪真钱只在接上的场所之间），或没有这个子账户；统一接口库不认识这个交易所 id，或连接器名字不对 |
-| `E_ACCOUNT_CREDENTIAL` · `E_VENUE_UNREACHABLE` · `E_VENUE_GEOBLOCKED` · `E_VENUE_UNAUTHORIZED` | 真实连接：钥匙文件不能用（席位和 agent 钱包的钥匙文件也一样，拒绝里只说是哪把钥匙，路径在 `detail`）、场所没应答或答得账户读不懂（或因为请求太多封了这个地址，到它说的时间）、场所不服务这个地区（含只能平仓的地方的买入、场所前面的服务器拒绝这个网络）、场所不认这把钥匙 |
+| `E_ACCOUNT_CREDENTIAL` · `E_VENUE_UNREACHABLE` · `E_VENUE_GEOBLOCKED` · `E_VENUE_UNAUTHORIZED` | 真实连接：钥匙文件不能用（席位和 agent 钱包的钥匙文件也一样，拒绝里只说是哪把钥匙，路径在 `detail`）、场所没应答或答得账户读不懂（或因为请求太多封了这个地址，到它说的时间；网络上别的东西冒充场所回了一页，也算没答）、场所不服务这个地区（含只能平仓的地方的买入、场所前面的服务器拒绝这个网络；只针对某个交易对或产品的地区规矩带 `detail.scope`，不挡这家的其它东西）、场所不认这把钥匙。`E_VENUE_UNREACHABLE` 带 `detail.unsure: true`（或 `placed: "unknown"`）的不是拒绝：单子或转账的答复在路上丢了，可能已经成了——先去场所看，别重发；能按账户自己的 id 跟的，账户在跟（付款显示 pending） |
 | `E_WALLET_LIVE_WRITES_OFF` | 这个服务是 `--read-only` 起的，或者 MetaMask 自己的开关没开 |
 | `E_WALLET_SESSION_EXPIRED` · `E_WALLET_ACCOUNT_REVOKED` · `E_WALLET_REACH` | agent 的会话结束了；这个场所对 agent 关着（Portfolio › Accounts 的 "Open to agents"）；owner 没对 agent 开放这家的这一类动作（`setPolicy reach`：交易、放进 / 取出 earn） |

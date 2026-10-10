@@ -14,7 +14,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { Refusal } from "../../core/errors.ts";
 import { no } from "../refuse.ts";
-import { redact, type Http, type HttpReply } from "./types.ts";
+import { bannedUntil, edgeRefused, notTheApi, notTheApiWords, REGION, redact, unreachable, venueSaidNo, type Http, type HttpReply } from "./types.ts";
 
 interface Endpoints {
   issuer: string;
@@ -101,18 +101,21 @@ export class OAuthSignIn {
     const s = q.state ? this.sessions.get(q.state) : undefined;
     if (!s) return no("E_ACCOUNT_BAD_ACTION", { venue: this.o.venue, message: "this sign-in is not one this server started, or it ran out: start it again from the account page" });
     if (s.status !== "waiting") return no("E_ACCOUNT_BAD_ACTION", { venue: this.o.venue, message: "this sign-in has already come back" });
-    const fail = (message: string): Refusal => {
-      s.status = "failed";
-      s.error = message;
-      return no("E_VENUE_REJECTED", { venue: this.o.venue, message });
+    const fail = (why: string | Refusal): Refusal => {
+      const r = typeof why === "string" ? no("E_VENUE_REJECTED", { venue: this.o.venue, message: why }) : why;
+      s.error = r.message;
+      // no answer (a dropped connection, an outage, a rate limit) is not the venue's no: the sign-in waits, and the owner can come back to it
+      if (r.code !== "E_VENUE_UNREACHABLE") s.status = "failed";
+      return r;
     };
     if (q.error) return fail(`${this.o.name} said no: ${redact(`${q.error}${q.error_description ? ` (${q.error_description})` : ""}`, [q.code]).slice(0, 200)}`);
     const e = this.endpoints!;
     if (q.iss !== undefined ? q.iss !== e.issuer : e.issOnReturn) return fail(`the answer did not come from ${this.o.name}'s own sign-in (its issuer is ${e.issuer})`);
     if (!q.code) return fail(`${this.o.name} came back without a code`);
-    const r = await this.post(e.token, new URLSearchParams({ grant_type: "authorization_code", code: q.code, redirect_uri: s.redirectUri, client_id: s.clientId, code_verifier: s.verifier, resource: this.o.resource }).toString(), "application/x-www-form-urlencoded", [q.code, s.verifier]);
-    if ("ok" in r) return fail(r.message);
-    const took = this.took(s, r);
+    const secrets = [q.code, s.verifier];
+    const r = await this.post(e.token, new URLSearchParams({ grant_type: "authorization_code", code: q.code, redirect_uri: s.redirectUri, client_id: s.clientId, code_verifier: s.verifier, resource: this.o.resource }).toString(), "application/x-www-form-urlencoded", secrets);
+    if ("ok" in r) return fail(r);
+    const took = this.took(s, r, "trading the code for a token", secrets);
     return took === true ? { ok: true } : fail(took);
   }
 
@@ -124,14 +127,19 @@ export class OAuthSignIn {
     if (!s.refresh) return no("E_ACCOUNT_CREDENTIAL", { venue: this.o.venue, message: `${this.o.name}'s sign-in ran out: sign in again from the account page` });
     const r = await this.post(this.endpoints!.token, new URLSearchParams({ grant_type: "refresh_token", refresh_token: s.refresh, client_id: s.clientId, resource: this.o.resource }).toString(), "application/x-www-form-urlencoded", [s.refresh]);
     if ("ok" in r) return r;
-    const took = this.took(s, r);
-    return took === true ? s.access! : no("E_ACCOUNT_CREDENTIAL", { venue: this.o.venue, message: `${this.o.name}'s sign-in ran out and could not be renewed: sign in again from the account page` });
+    const took = this.took(s, r, "renewing the sign-in", [s.refresh]);
+    if (took === true) return s.access!;
+    // only the OAuth answers that say so mean the sign-in ran out (RFC 6749 §5.2: the refresh token, or this client, is no longer good);
+    // anything else — this network refused, a ban, a rate limit, no answer — is said as that, the sign-in stays, and the next call asks again
+    const err = (r.body as { error?: unknown } | undefined)?.error;
+    if (took.code === "E_VENUE_REJECTED" && (r.status === 400 || r.status === 401) && (err === "invalid_grant" || err === "invalid_token" || err === "invalid_client")) return no("E_ACCOUNT_CREDENTIAL", { venue: this.o.venue, message: `${this.o.name}'s sign-in ran out and could not be renewed: sign in again from the account page`, native: { status: r.status, error: err } });
+    return took;
   }
 
-  /** the venue's token answer, kept in memory; anything else is said in the venue's words, with the secrets taken out */
-  private took(s: Session, r: HttpReply): true | string {
+  /** the venue's token answer, kept in memory; anything else is the venue's no, with the secrets taken out */
+  private took(s: Session, r: HttpReply, doing: string, secrets: Array<string | undefined>): true | Refusal {
     const b = (r.body ?? {}) as { access_token?: unknown; refresh_token?: unknown; expires_in?: unknown };
-    if (r.status !== 200 || typeof b.access_token !== "string" || !b.access_token) return this.said("trading the code for a token", r).message;
+    if (r.status !== 200 || typeof b.access_token !== "string" || !b.access_token) return this.said(doing, r, secrets);
     s.access = b.access_token;
     if (typeof b.refresh_token === "string" && b.refresh_token) s.refresh = b.refresh_token;
     s.expiresAt = typeof b.expires_in === "number" && b.expires_in > 0 ? this.o.clock() + b.expires_in * 1000 : undefined;
@@ -141,16 +149,22 @@ export class OAuthSignIn {
   }
 
   /** whether a sign-in could start here: the discovery alone (its two public metadata documents), and that the venue lets a client
-   * register itself. Nothing is registered (live/reach.ts, before the owner presses Sign in) */
+   * register itself. Nothing is registered (live/reach.ts, before the owner presses Sign in). Asked of the venue every time, never from
+   * what was found before: the network this machine is on may have changed since */
   async reachable(): Promise<Refusal | undefined> {
-    const e = await this.discover();
+    const e = await this.fetchEndpoints();
     if ("ok" in e) return e;
     if (!e.registration) return no("E_VENUE_REJECTED", { venue: this.o.venue, message: `${this.o.name} does not let a new client register itself, so this account cannot sign in there` });
     return undefined;
   }
 
   private async discover(): Promise<Endpoints | Refusal> {
-    if (this.endpoints) return this.endpoints;
+    return this.endpoints ?? this.fetchEndpoints();
+  }
+
+  /** the two metadata documents, asked now. Only a yes is kept: a failure leaves what an earlier discovery found, which a sign-in under way
+   * still needs */
+  private async fetchEndpoints(): Promise<Endpoints | Refusal> {
     const pr = await this.get(wellKnown(this.o.resource, "oauth-protected-resource"));
     if ("ok" in pr) return pr;
     const issuer = https((pr.body as { authorization_servers?: unknown[] } | undefined)?.authorization_servers?.[0]);
@@ -171,7 +185,7 @@ export class OAuthSignIn {
     try {
       return await this.o.http(url, { headers: { accept: "application/json" } });
     } catch (err) {
-      return no("E_VENUE_UNREACHABLE", { venue: this.o.venue, message: `${this.o.name}'s sign-in could not be reached`, native: { error: String((err as Error)?.message ?? err).slice(0, 200) } });
+      return unreachable(this.o.venue, `${this.o.name}'s sign-in`, err);
     }
   }
 
@@ -179,13 +193,19 @@ export class OAuthSignIn {
     try {
       return await this.o.http(url, { method: "POST", headers: { "content-type": type, accept: "application/json" }, body });
     } catch (err) {
-      return no("E_VENUE_UNREACHABLE", { venue: this.o.venue, message: `${this.o.name}'s sign-in could not be reached`, native: { error: redact(String((err as Error)?.message ?? err).slice(0, 200), secrets) } });
+      return unreachable(this.o.venue, `${this.o.name}'s sign-in`, err, secrets);
     }
   }
 
-  private said(doing: string, r: HttpReply): Refusal {
+  /** An answer that is not a yes. First what it says of this network, as every connection reads it (types.ts venueSaidNo): the venue's place
+   * rule, the server in front of it refusing this network, a ban or a rate limit, no answer, a page in the API's place — so that a
+   * network the venue refuses is never told as the venue refusing this account a way in, nor as a sign-in that ran out. Then the venue's
+   * OAuth no, in its words */
+  private said(doing: string, r: HttpReply, secrets: Array<string | undefined> = []): Refusal {
+    if (notTheApi(r)) return no("E_VENUE_UNREACHABLE", { venue: this.o.venue, message: notTheApiWords(this.o.name), native: { status: r.status, page: true } });
+    if (r.status === 451 || (r.status >= 400 && REGION.test(r.text)) || edgeRefused(r.status, r.text) || r.status === 418 || bannedUntil(r.text) !== undefined || r.status === 429 || r.status >= 500 || r.status === 0) return venueSaidNo(this.o.venue, this.o.name, r.status, r.text, secrets, r);
     const words = (r.body as { error_description?: unknown; error?: unknown } | undefined) ?? {};
     const what = typeof words.error_description === "string" ? words.error_description : typeof words.error === "string" ? words.error : `HTTP ${r.status}`;
-    return no("E_VENUE_REJECTED", { venue: this.o.venue, message: `${this.o.name} refused ${doing}: ${what.slice(0, 160)}`, native: { status: r.status } });
+    return no("E_VENUE_REJECTED", { venue: this.o.venue, message: `${this.o.name} refused ${doing}: ${redact(what, secrets).slice(0, 160)}`, native: { status: r.status } });
   }
 }

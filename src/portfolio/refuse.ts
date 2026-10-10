@@ -5,6 +5,7 @@
  * refusal raised in this subsystem reaches people through the page and through
  * whatever agent is talking to them over MCP, so every one of them is raised
  * through `no()`, which supplies the English sentence. */
+import { isIPv6 } from "node:net";
 import { refuse, type Code, type Refusal } from "../core/errors.ts";
 
 const EN: Partial<Record<Code, string>> = {
@@ -73,20 +74,36 @@ export function no(code: Code, extra: { venue?: string; tool?: string; detail?: 
   const message = extra.message ?? EN[code];
   // a venue that repeats the address this machine reached it from (OKX's and MEXC's IP-list answers do, an edge's error page may) has it
   // taken out here, where every refusal is made: a refusal is logged and lands in the ledger, and an address says where the user is
-  const clean = { ...extra, ...(extra.native !== undefined ? { native: unaddressedDeep(extra.native) } : {}) };
+  const clean = { ...extra, ...(extra.native !== undefined ? { native: unaddressedDeep(extra.native) } : {}), ...(extra.detail !== undefined ? { detail: unaddressedDeep(extra.detail) as Record<string, unknown> } : {}) };
   return refuse(code, message === undefined ? clean : { ...clean, message: unaddressed(message) });
 }
 
 /** a public network address (IPv4, or IPv6) in a venue's words, as "this machine's address"; a loopback or private one says nothing about
  * where the user is and stays */
-const IPV4 = /\b(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}\b/g;
-const IPV6 = /(?<![0-9a-f:])(?:(?:[0-9a-f]{1,4}:){7}[0-9a-f]{1,4}|(?:[0-9a-f]{1,4}:){1,6}:(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,5})?|::(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){1,6}))(?![0-9a-f:])/gi;
+// an IPv4 address with no digit or dotted digit run touching it: "ip_<addr>" and "IP<addr>" are still found, a longer dotted number is not
+const IPV4 = /(?<![\d.])(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}(?!\d|\.\d)/g;
+// a run of hex digits, colons and dots with at least two colons: the IPv6 address in it, if any, is the longest part of it that starts at its
+// beginning or just after a colon and is one ("IP:<addr>", "whitelist:<addr>" are found)
+const V6_RUN = /(?<![0-9a-f:.])[0-9a-f:.]*:[0-9a-f:.]*:[0-9a-f:.]*/gi;
 const PRIVATE_V4 = /^(?:127\.|10\.|0\.|192\.168\.|169\.254\.|172\.(?:1[6-9]|2\d|3[01])\.)/;
+const saysNothing6 = (ip: string): boolean => /^(?:::1$|fe80:|f[cd][0-9a-f]{2}:)/i.test(ip) || ip.split(":").filter(Boolean).length < 3;
+function scrub6(run: string): string {
+  for (let i = 0; i < run.length; i++) {
+    if (i > 0 && run[i - 1] !== ":") continue;
+    // trailing punctuation is the sentence's, not the address's; an address is at most 45 characters
+    for (let end = Math.min(run.length, i + 45); end > i; end--) {
+      const ip = run.slice(i, end);
+      if (/[.:]$/.test(ip) && !ip.endsWith("::")) continue;
+      if (isIPv6(ip)) return saysNothing6(ip) ? run : `${run.slice(0, i)}(this machine's address)${run.slice(end)}`;
+    }
+  }
+  return run;
+}
 export function unaddressed(text: string): string {
   if (typeof text !== "string" || !/[.:]/.test(text)) return text;
-  return text.replace(IPV4, (ip) => (PRIVATE_V4.test(ip) ? ip : "(this machine's address)")).replace(IPV6, (ip) => (/^(?:::1|fe80:|f[cd][0-9a-f]{2}:)/i.test(ip) || ip.split(":").filter(Boolean).length < 3 ? ip : "(this machine's address)"));
+  return text.replace(IPV4, (ip) => (PRIVATE_V4.test(ip) ? ip : "(this machine's address)")).replace(V6_RUN, scrub6);
 }
-const unaddressedDeep = (v: unknown, depth = 0): unknown => {
+export const unaddressedDeep = (v: unknown, depth = 0): unknown => {
   if (typeof v === "string") return unaddressed(v);
   if (depth > 6 || v === null || typeof v !== "object") return v;
   if (Array.isArray(v)) return v.map((x) => unaddressedDeep(x, depth + 1));

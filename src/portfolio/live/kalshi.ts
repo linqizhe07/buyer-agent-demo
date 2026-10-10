@@ -42,7 +42,7 @@ import { isRefusal, type Refusal } from "../../core/errors.ts";
 import { no } from "../refuse.ts";
 import { readSecretFile, type KeyFile, type KeyShape } from "./credentials.ts";
 import { badOrder, onStep, pick, plain, type Candle, type CandleInterval, type LiveTrader, type Market, type OrderRequest, type OrderState, type OrderStatus, type Position, type Side, type TimeInForce } from "./trade.ts";
-import { asRefusal, num, redact, REGION, unreachable, venueSaidNo, type Http, type HttpReply, type LiveBalance, type LiveSource } from "./types.ts";
+import { asRefusal, networkNo, notTheApi, num, redact, REGION, unreachable, venueSaidNo, type Http, type HttpReply, type LiveBalance, type LiveSource } from "./types.ts";
 
 export const KALSHI_KEY: KeyShape = { required: ["keyId"], optional: ["privateKeyFile", "privateKey", "demo"], example: '{"keyId": "…", "privateKeyFile": "credentials/kalshi/private-key.pem"} (the .pem is the file Kalshi gives you when the key is made; a key made with write access places orders, a read-only one only reads)' };
 
@@ -83,7 +83,7 @@ export async function kalshiSource(req: { venue: string; label: string; referenc
     } catch (err) {
       throw unreachable(req.venue, name, err, secrets);
     }
-    if (r.status !== 200 || !r.body || typeof r.body !== "object") throw venueSaidNo(req.venue, name, r.status, r.text, secrets);
+    if (r.status !== 200 || !r.body || typeof r.body !== "object") throw venueSaidNo(req.venue, name, r.status, r.text, secrets, r);
     return r.body as Record<string, unknown>;
   };
   /** any signed request, its answer as it came: the trader reads the status itself, because a 201, a 404 and a 409 each mean something */
@@ -348,6 +348,7 @@ const FOLD_MS: Partial<Record<CandleInterval, number>> = { "5m": 5 * 60_000 };
 /** a dollar string Kalshi gave, or nothing for a field that is absent or null (a candle's prices are null when nothing traded) */
 const dollars = (v: unknown): number | undefined => (typeof v === "string" && v.trim() !== "" && Number.isFinite(Number(v)) ? Number(v) : undefined);
 
+
 /** Kalshi's answer that is not a yes, as the account's refusal, with Kalshi's own words in `native`. Kalshi does not enumerate its REST
  * order-error codes, so this reads the HTTP status first and then the words: `available_balance_too_low` and `invalid_order_size` are
  * documented (changelog 2026-01-26); the rest are the exchange's own reason names (MARKET_INACTIVE, INVALID_PRICE …, fix/order-entry.md).
@@ -359,20 +360,24 @@ function kalshiNo(venue: string, name: string, r: HttpReply, secrets: string[], 
   // redacted before anything else is done to it: a PEM has line breaks, and folding them first would hide it from redact()
   const text = redact(words || r.text || "", secrets);
   const native = { status: r.status, said: saidOf(text, secrets) };
-  if (r.status === 429 || r.status === 401 || r.status === 0 || r.status >= 500) return venueSaidNo(venue, name, r.status, text, secrets);
+  const net = networkNo(venue, name, r, native);
+  if (net) return net;
+  if (r.status === 401 || r.status === 0 || r.status >= 500) return venueSaidNo(venue, name, r.status, text, secrets, r);
   // where the account is: Kalshi's own rule — a lapsed location attestation, for one, stops a key in Sports, Elections and Entertainment markets
   if (r.status === 451 || REGION.test(text) || /attest/i.test(text) || (r.status === 403 && /location/i.test(text))) return no("E_VENUE_GEOBLOCKED", { venue, message: `${name} does not take this order from where this account is: that is its own rule, and the account does not look for a way around it`, native });
   if (r.status === 403) return no("E_VENUE_PERMISSION", { venue, message: `${name} refused: this key may not trade. A Kalshi key keeps the scopes it was made with; one that trades has write (or write::trade)`, native });
   const t = text.toLowerCase();
+  // the order as written, in Kalshi's words: native goes into no(), where a refusal's words are made safe to keep
+  const asWritten = (message: string): Refusal => no("E_VENUE_ORDER_INVALID", { venue, message: `${name}: ${message}`, native });
   if (/balance_too_low|insufficient/.test(t)) return no("E_VENUE_INSUFFICIENT", { venue, message: `${name}: not enough cash for this order on the exchange shard its market trades on${shard !== undefined ? ` (shard ${shard})` : ""}. An order sent through Kalshi's API counts only the cash already on that shard`, native });
-  if (/invalid_order_size|incorrect quantity|order size/.test(t)) return { ...badOrder(venue, name, "Kalshi does not take an order of this size (counts are in steps of 0.01 contracts)"), native };
+  if (/invalid_order_size|incorrect quantity|order size/.test(t)) return asWritten("Kalshi does not take an order of this size (counts are in steps of 0.01 contracts)");
   if (/market_inactive|market_already_closed|market_closed|market is closed|not active|exchange_paused|trading_paused|paused/.test(t)) return no("E_VENUE_MARKET_CLOSED", { venue, message: `${name}: the market takes no orders now`, native });
   // a post-only order that would cross is canceled rather than refused (its last_update_reason is PostOnlyCrossCancel, changelog 2026-06-04),
   // but a batch reported it as an error ("invalid order" · "post only cross", changelog 2025-10-24): either way it is said as what it is
-  if (/post.?only/.test(t)) return { ...badOrder(venue, name, "post-only: at this price the order would have taken from the book at once, so Kalshi did not rest it"), native };
-  if (/invalid_price|price|tick/.test(t)) return { ...badOrder(venue, name, "the price is not on this market's price grid"), native };
-  if (/risk_limit|position limit|position_floor/.test(t)) return { ...badOrder(venue, name, "over Kalshi's limit for one market"), native };
-  if (/invalid_order/.test(t)) return { ...badOrder(venue, name, "Kalshi does not take this order as written"), native };
+  if (/post.?only/.test(t)) return asWritten("post-only: at this price the order would have taken from the book at once, so Kalshi did not rest it");
+  if (/invalid_price|price|tick/.test(t)) return asWritten("the price is not on this market's price grid");
+  if (/risk_limit|position limit|position_floor/.test(t)) return asWritten("over Kalshi's limit for one market");
+  if (/invalid_order/.test(t)) return asWritten("Kalshi does not take this order as written");
   return no("E_VENUE_REJECTED", { venue, message: `${name} refused the request (HTTP ${r.status})`, native });
 }
 
@@ -443,7 +448,8 @@ function kalshiTrader(o: { venue: string; name: string; keyId: string; call: Cal
   const look = async (ticker: string): Promise<Look | Refusal> => {
     const [r, paused] = await Promise.all([call("GET", `/markets/${enc(ticker)}`), pausedFor(), learn()]);
     if (r.status === 404) return no("E_VENUE_REJECTED", { venue, message: `${name} has no market ${ticker}`, native: { status: 404, said: saidOf(r.text, secrets) } });
-    if (r.status !== 200) return fail(r);
+    // a page answered with a 200 in Kalshi's place is no answer, not a market Kalshi left out
+    if (r.status !== 200 || notTheApi(r)) return fail(r);
     const m = isRec(r.body) && isRec(r.body.market) ? r.body.market : undefined;
     if (!m) return no("E_VENUE_REJECTED", { venue, message: `${name} answered without the market ${ticker}` });
     if (!dollarPriced(m)) return no("E_ACCOUNT_UNPRICED", { venue, message: `${name} shows no dollar price for ${ticker}: the account trades markets priced in dollars` });
@@ -558,7 +564,7 @@ function kalshiTrader(o: { venue: string; name: string; keyId: string; call: Cal
   const orderOf = async (ref: string): Promise<Rec | Refusal> => {
     const r = await call("GET", `/portfolio/orders/${enc(ref)}`);
     if (r.status === 404) return no("E_ACCOUNT_ORDER_UNKNOWN", { venue, message: `${name} has no order ${ref} for this key (an order done before Kalshi's historical cutoff is only in GET /historical/orders)`, native: { status: 404, said: saidOf(r.text, secrets) } });
-    if (r.status !== 200) return fail(r);
+    if (r.status !== 200 || notTheApi(r)) return fail(r);
     const ord = isRec(r.body) && isRec(r.body.order) ? r.body.order : undefined;
     return ord ?? no("E_VENUE_REJECTED", { venue, message: `${name} answered without the order ${ref}` });
   };

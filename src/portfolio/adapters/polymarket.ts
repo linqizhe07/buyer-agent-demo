@@ -15,14 +15,20 @@
  *                          market takes none.
  *   polymarketLiveAccount  reads the real `mm predict` (status, geoblock) and
  *                          the real market behind a contract (top of book, an
- *                          order preview — public data, no funds needed). When
- *                          the caller's region is restricted the credential's
- *                          scope simply has no `trade`. Writes build the exact
- *                          `mm predict` command and run it only when
+ *                          order preview — public data, no funds needed). The
+ *                          location check is read with Polymarket's own lists
+ *                          (live/polymarket-clob.ts polymarketScope): blocked
+ *                          completely takes `trade` out of the credential's
+ *                          scope; close-only keeps it, and a buy is refused
+ *                          while a sell of shares held goes. The check is asked
+ *                          again before every order: where this machine is
+ *                          now, not where it was at start-up. Writes build the
+ *                          exact `mm predict` command and run it only when
  *                          PORTFOLIO_MM_WRITES=1.
  */
 import { priceOf, r2, r8, usdOf, type Account, type AccountAdapter, type Capability, type Holding, type Intent, type LiveMarket } from "../accounts.ts";
 import { eventState, parseEventSymbol, PREDICTION_VENUES } from "../events.ts";
+import { CLOSE_ONLY_WORDS, closeOnlyBuy, polymarketScope, type PolymarketScope } from "../live/polymarket-clob.ts";
 import { no } from "../refuse.ts";
 import { fillAt } from "../venues.ts";
 import { mm, type MmLiveOptions } from "./metamask.ts";
@@ -140,36 +146,64 @@ export function polymarketSimAccount(seed: PolymarketSeed, now: () => string): A
 
 // ---- live --------------------------------------------------------------------
 
+interface PredictAccount {
+  depositWalletAddress?: string;
+  deployed?: boolean;
+  credentials?: boolean;
+  setupComplete?: boolean;
+}
 interface PredictStatus {
-  result?: { account?: { depositWalletAddress?: string; deployed?: boolean; credentials?: boolean; setupComplete?: boolean } };
+  result?: { account?: PredictAccount };
 }
 
 interface PredictMarket {
   result?: { market?: { question?: string; conditionId?: string; bestBid?: number; bestAsk?: number; outcomes?: Array<{ name?: string; tokenId?: string }> } };
 }
 
-/** what `mm predict geoblock` says, without the caller's IP: the portfolio has no use for it */
-export function geoblockOf(data: unknown): Geoblock {
-  const r = ((data ?? {}) as { result?: { blocked?: unknown; country?: unknown; region?: unknown } }).result ?? {};
-  // blocked or not, and nothing else: the place and the IP it names are not kept
-  return { blocked: r.blocked === true };
+const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+
+/** what `mm predict geoblock` says, read with Polymarket's own lists: open, close-only (positions may be closed, none opened) or blocked
+ * completely — undefined when it says neither. The IP, the country and the region it names are matched in memory and kept nowhere */
+export function scopeOf(data: unknown): PolymarketScope | undefined {
+  const d = isObj(data) ? data : undefined;
+  return polymarketScope(isObj(d?.result) ? d.result : d);
 }
 
-/** what the credential can do right now: nothing but reads until `mm predict setup` has run, and no orders from a restricted region */
-export function liveScope(setupComplete: boolean, geo: Geoblock): Capability[] {
+/** what the credential can do right now: nothing but reads until `mm predict setup` has run, and no orders where Polymarket's check answered
+ * blocked completely. Close-only keeps `trade` (a sell of shares held closes a position), and so does a check that did not answer at
+ * start-up: every order asks it again, and nothing is placed without its answer */
+export function liveScope(setupComplete: boolean, scope: PolymarketScope | undefined): Capability[] {
   const can: Capability[] = ["read"];
-  if (setupComplete && !geo.blocked) can.push("trade");
+  if (setupComplete && scope !== "blocked") can.push("trade");
   if (setupComplete) can.push("move", "redeem");
   return can;
 }
 
+/** the region line of the live credential's scope: what Polymarket's check answered at start-up, in its words, never the place */
+const scopeLimit = (s: PolymarketScope | undefined): string =>
+  s === "blocked" ? "region check: restricted, Polymarket takes no orders from here (PREDICT_GEOBLOCKED)" : s === "close-only" ? `region check: ${CLOSE_ONLY_WORDS} · asked again before every order` : s === "open" ? "region check: not restricted · asked again before every order" : "region check: Polymarket's location check did not answer at start-up · asked again before every order, and nothing is placed without its answer";
+
 export async function polymarketLiveAccount(opts: MmLiveOptions = {}): Promise<AccountAdapter> {
   const bin = opts.bin ?? "mm";
   const timeoutMs = opts.timeoutMs ?? 45_000;
-  const status = (await mm<PredictStatus>(bin, ["predict", "status"], timeoutMs)).result?.account ?? {};
-  const geo = geoblockOf(await mm<unknown>(bin, ["predict", "geoblock"], timeoutMs));
-  const setup = status.setupComplete === true;
-  const wallet = status.depositWalletAddress ?? "";
+  /** Polymarket's own check, asked now through `mm predict geoblock`: its scope, or undefined when it did not answer. mm's own region refusal
+   * (PREDICT_GEOBLOCKED) is the check answering blocked, as the live mm trader reads it */
+  const ask = async (): Promise<PolymarketScope | undefined> => {
+    try {
+      return scopeOf(await mm<unknown>(bin, ["predict", "geoblock"], timeoutMs));
+    } catch (err) {
+      return /PREDICT_GEOBLOCKED|PREDICT_UNAVAILABLE_FOR_LEGAL_REASONS/.test(String((err as Error)?.message ?? err)) ? "blocked" : undefined;
+    }
+  };
+  // a start-up read that fails (mm stopped, polymarket.com not answering on this network) leaves the account reading — it never stops the
+  // server — and says so in the credential's scope
+  const status: PredictAccount | undefined = await mm<PredictStatus>(bin, ["predict", "status"], timeoutMs).then(
+    (s) => s.result?.account ?? {},
+    () => undefined,
+  );
+  const scope = await ask();
+  const setup = status?.setupComplete === true;
+  const wallet = status?.depositWalletAddress ?? "";
   const account: Account = {
     id: "polymarket",
     name: "Polymarket",
@@ -178,15 +212,15 @@ export async function polymarketLiveAccount(opts: MmLiveOptions = {}): Promise<A
     credentialRef: "~/.metamask-agent-wallet (mm predict)",
     credentialKind: `CLOB API key + deposit wallet ${wallet.slice(0, 10)}… (derived from the wallet's signature)`,
     scope: {
-      can: liveScope(setup, geo),
-      limits: [regionLimit(geo), `deposit wallet ${status.deployed ? "deployed" : "not deployed"} · ${status.credentials ? "CLOB credentials stored" : "no CLOB credentials"}${setup ? "" : " (mm predict setup has not been run)"}`, ...RULES],
+      can: liveScope(setup, scope),
+      limits: [scopeLimit(scope), status ? `deposit wallet ${status.deployed ? "deployed" : "not deployed"} · ${status.credentials ? "CLOB credentials stored" : "no CLOB credentials"}${setup ? "" : " (mm predict setup has not been run)"}` : "mm predict status did not answer at start-up: reads only until the server starts again", ...RULES],
       enforcedBy: "venue",
     },
     settlement: "the CLOB fills instantly · a market settles when UMA resolves the question · $1 per winning share",
     live: true,
     address: wallet,
     chain: "Polygon",
-    ...(geo.blocked ? { closed: { trade: `takes no orders from ${place(geo)}` } } : setup ? {} : { closed: { trade: "has not been set up (mm predict setup)" } }),
+    ...(scope === "blocked" ? { closed: { trade: "takes no orders from this location" } } : setup ? {} : { closed: { trade: status ? "has not been set up (mm predict setup)" : "mm predict status did not answer at start-up" } }),
   };
   const real = async (symbol: string) => {
     const p = parseEventSymbol(symbol);
@@ -222,8 +256,14 @@ export async function polymarketLiveAccount(opts: MmLiveOptions = {}): Promise<A
       };
     },
     async execute(i: Intent) {
-      if (i.kind === "trade" && geo.blocked) return no("E_VENUE_GEOBLOCKED", { venue: "polymarket", message: `Polymarket takes no orders from ${place(geo)}`, native: { error: "PREDICT_GEOBLOCKED", country: geo.country, region: geo.region } });
-      if (!setup) return no("E_VENUE_REJECTED", { venue: "polymarket", message: "mm predict setup has not been run: there is no deposit wallet and no CLOB credential to act with", native: { error: "PREDICT_NOT_SET_UP" } });
+      if (i.kind === "trade") {
+        // Polymarket's check, asked again for this order: where this machine is now, not where it was when the server started
+        const here = await ask();
+        if (here === undefined) return no("E_VENUE_UNREACHABLE", { venue: "polymarket", message: "Polymarket's location check did not answer (mm predict geoblock): nothing was placed, and it is asked again on the next order", native: { error: "PREDICT_GEOBLOCK_NO_ANSWER" } });
+        if (here === "blocked") return no("E_VENUE_GEOBLOCKED", { venue: "polymarket", message: "Polymarket takes no orders from this location", native: { error: "PREDICT_GEOBLOCKED", blocked: true } });
+        if (here === "close-only" && i.side === "buy") return closeOnlyBuy("polymarket", `buy ${i.qty} shares of ${i.symbol}`);
+      }
+      if (!setup) return no("E_VENUE_REJECTED", { venue: "polymarket", message: status ? "mm predict setup has not been run: there is no deposit wallet and no CLOB credential to act with" : "mm predict status did not answer when the server started: nothing is acted on until it starts again and mm answers", native: { error: status ? "PREDICT_NOT_SET_UP" : "PREDICT_STATUS_NO_ANSWER" } });
       let cmd: string[] | undefined;
       if (i.kind === "trade") {
         const m = await real(i.symbol);

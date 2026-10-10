@@ -7,7 +7,7 @@ import { type Account, type Intent } from "../../src/portfolio/accounts.ts";
 import { binanceAccount } from "../../src/portfolio/adapters/binance.ts";
 import { kalshiAccount } from "../../src/portfolio/adapters/kalshi.ts";
 import { metamaskSimAccount } from "../../src/portfolio/adapters/metamask.ts";
-import { geoblockOf, liveScope, polymarketSimAccount } from "../../src/portfolio/adapters/polymarket.ts";
+import { liveScope, polymarketSimAccount, scopeOf } from "../../src/portfolio/adapters/polymarket.ts";
 import { eventMark, eventState, EVENTS, findEvent, isEventSymbol, levelsFor, parseEventSymbol, rawEvent } from "../../src/portfolio/events.ts";
 import { okxAccount } from "../../src/portfolio/adapters/okx.ts";
 import { ondoAccount } from "../../src/portfolio/adapters/ondo.ts";
@@ -657,10 +657,11 @@ describe("prediction markets: event contracts", () => {
     expect(blocked.account).toMatchObject({ scope: { can: ["read", "move", "redeem"] }, closed: { trade: "takes no orders from this location" } });
     expect(blocked.account.scope.limits[0]).toContain("PREDICT_GEOBLOCKED");
     expect(await blocked.execute({ kind: "trade", symbol: FED, side: "buy", qty: 10 })).toMatchObject({ code: "E_VENUE_GEOBLOCKED", message: "Polymarket takes no orders from this location", native: { error: "PREDICT_GEOBLOCKED", country: "US", region: "NY" } });
-    // the live read: what `mm predict geoblock` and `mm predict status` say becomes the credential's scope; the caller's IP is dropped
-    // blocked or not, and nothing else: the IP and the place it names are not kept
-    expect(geoblockOf({ result: { blocked: true, ip: "203.0.113.9", country: "US", region: "NY" } })).toEqual({ blocked: true });
-    expect([liveScope(false, { blocked: true }), liveScope(true, { blocked: true }), liveScope(true, { blocked: false })]).toEqual([["read"], ["read", "move", "redeem"], ["read", "trade", "move", "redeem"]]);
+    // the live read: what `mm predict geoblock` and `mm predict status` say becomes the credential's scope, read with Polymarket's own lists;
+    // the IP and the place it names are matched in memory and not kept
+    expect([scopeOf({ result: { blocked: true, ip: "203.0.113.9", country: "US", region: "NY" } }), scopeOf({ result: { blocked: true, country: "IR" } }), scopeOf({ result: { blocked: false } }), scopeOf({})]).toEqual(["close-only", "blocked", "open", undefined]);
+    // close-only keeps `trade` (a sell of shares held closes a position); only blocked completely takes it away
+    expect([liveScope(false, "blocked"), liveScope(true, "blocked"), liveScope(true, "close-only"), liveScope(true, "open")]).toEqual([["read"], ["read", "move", "redeem"], ["read", "trade", "move", "redeem"], ["read", "trade", "move", "redeem"]]);
   });
 
   it("Kalshi: whole contracts paid in USD; the key trades and cannot move money", async () => {

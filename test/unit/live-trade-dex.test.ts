@@ -417,7 +417,7 @@ describe("a wallet's swaps through LI.FI: refusals", () => {
       ["https://li.quest/v1/quote", { status: 400, body: said }],
     ]);
     let no = refusal(await trader(http, chainStandIn({ held: { "Base:USDC": 100, Base: 0.01 } })).place(BUY_ORDER));
-    expect([no.code, no.message, no.native]).toEqual(["E_VENUE_ORDER_INVALID", 'LI.FI: /toAmount must pass "isBigNumberish" keyword validation', { status: 400, said: JSON.stringify(said) }]);
+    expect([no.code, no.message, no.native]).toEqual(["E_VENUE_ORDER_INVALID", 'LI.FI: /toAmount must pass "isBigNumberish" keyword validation', { status: 400, said: JSON.stringify(said), party: "lifi" }]);
     // no route: too big for the liquidity there, with the reasons LI.FI gives
     const noRoute = { message: "No available quotes for the requested transfer", code: 1002, errors: { filteredOut: [{ overallPath: "8453:USDC~8453:WETH", reason: "Price impact of 99.9% is higher than the max allowed 10%" }], failed: [{ overallPath: "8453:USDC~8453:WETH", subpaths: { "8453:USDC~8453:WETH": [{ errorType: "NO_QUOTE", code: "AMOUNT_TOO_HIGH", tool: "kyberswap", message: "AmountIn is greater than max allowed when route" }] } }] } };
     http = lifi([

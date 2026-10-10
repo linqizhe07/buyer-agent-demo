@@ -33,6 +33,7 @@ import { no } from "../refuse.ts";
 import { isExpired } from "../openness.ts";
 import { CHAIN_BY_ID, CHAINS, STABLECOINS, type ChainName, type ChainReader } from "../live/chain.ts";
 import type { PayHttp, PayResponse } from "../live/guarded-http.ts";
+import { edgeRefused, edgeWords, REGION } from "../live/types.ts";
 import { agentWalletVenue } from "../live/agent-wallet.ts";
 import { agentIdOf, CARD_TTL_MS, slug, type AccountEngine, type CardLike, type CardOffer, type Outcome, type PayAction, type Payer, type PayView } from "./exchange.ts";
 import type { Payment, PaymentLeg } from "./payments.ts";
@@ -262,13 +263,38 @@ export class RealPayer implements Payer {
   /** ask the payee, and speak whatever it answers in */
   private async ask(c: Ctx): Promise<Outcome> {
     const first = await this.send(c);
-    if (first.status === 0) return no("E_PAYEE_REJECTED", { venue: c.host, message: `${c.host} did not answer${first.error ? ` (${first.error})` : ""}` });
-    if (first.status >= 300 && first.status < 400) return no("E_PAYEE_REDIRECT", { venue: c.host, message: `${c.host} sent the request on to ${first.headers.location ?? "another address"}: a payment does not follow a redirect`, detail: { location: first.headers.location } });
+    if (first.status === 0) {
+      // the reason is the guard's own sentence of its kind, never the network's words (a filter's sinkhole address, the names on a certificate
+      // an interceptor answered with): those would tell an agent, and the ledger, where the user is
+      const why = first.kind && first.error ? ` (${first.error})` : "";
+      // this network keeping the request from the payee is said as that, not as the payee failing to answer
+      if (first.kind === "filtered-address" || first.kind === "certificate") return no("E_PAYEE_REJECTED", { venue: c.host, message: `this network did not let the request reach ${c.host}${why}: nothing was paid`, detail: { reason: first.kind } });
+      return no("E_PAYEE_REJECTED", { venue: c.host, message: `${c.host} did not answer${why}`, ...(first.kind ? { detail: { reason: first.kind } } : {}) });
+    }
+    if (first.status >= 300 && first.status < 400) {
+      // where it pointed, by host only: a geo-redirect's path and query carry the country, the region, even the address
+      const to = (() => {
+        try {
+          return first.headers.location ? new URL(first.headers.location, c.url).host : "";
+        } catch {
+          return "";
+        }
+      })();
+      // where it pointed is not named: a network's block page or a regional site says roughly where the user is
+      return no("E_PAYEE_REDIRECT", { venue: c.host, message: `${c.host} sent the request on to ${to === c.host ? "another page of its own" : "another address"}: a payment does not follow a redirect`, detail: { ownHost: to === c.host } });
+    }
     if (first.status === 402 && first.headers["payment-required"]) return this.x402(c, first, 2);
     const v1 = first.body as { x402Version?: unknown; accepts?: unknown } | undefined;
     if (first.status === 402 && v1?.x402Version === 1 && Array.isArray(v1.accepts)) return this.x402(c, first, 1);
     if (first.status === 402 && first.headers["www-authenticate"]) return this.mpp(c, first);
     if (first.status >= 200 && first.status < 300) return { ok: true, kind: "result", result: { paid: false, status: first.status, data: first.body }, flight: c.flight };
+    // a payee that does not serve this location (451, or its own words for that), or the server in front of it refusing this network with a
+    // page: its rule, said as that — not "no payment method", which would send an agent looking for another way to pay
+    const text = typeof first.body === "string" ? first.body : JSON.stringify(first.body ?? "");
+    if (first.status === 451 || (first.status >= 400 && first.status !== 402 && REGION.test(text))) return no("E_VENUE_GEOBLOCKED", { venue: c.host, message: `${c.host} does not serve this location: that is its own rule; nothing was paid, and the account does not look for a way around it`, native: { status: first.status } });
+    if (edgeRefused(first.status, text)) return no("E_VENUE_GEOBLOCKED", { venue: c.host, message: `${edgeWords(c.host, first.status, text)}. Nothing was paid`, native: { status: first.status, edge: true } });
+    if (first.status === 429) return no("E_PAYEE_REJECTED", { venue: c.host, message: `${c.host} is busy (HTTP 429): nothing was paid; try again later`, detail: { status: first.status } });
+    if (first.status >= 500) return no("E_PAYEE_REJECTED", { venue: c.host, message: `${c.host} did not answer (HTTP ${first.status}): nothing was paid`, detail: { status: first.status } });
     return no("E_PAYEE_UNSUPPORTED", { venue: c.host, message: `${c.host} answered ${first.status} with no payment method this account speaks`, detail: { status: first.status } });
   }
 
@@ -288,7 +314,9 @@ export class RealPayer implements Payer {
     if (limit) return limit;
     // what the agent wallet holds of that token, on that chain, now
     const held = await this.deps.chain.tokens(c.key.account.address as Hex, [{ chain: o.chain, asset: "USDC", address: o.token }]);
-    if (held.failed.length) return no("E_VENUE_UNREACHABLE", { venue: agentWalletVenue(c.sub.name), message: `${o.chain} did not answer: the agent wallet's balance there is not known, so nothing is signed` });
+    // a chain whose endpoint refused or rate-limited this machine has not said the wallet holds nothing: it did not answer, in its words
+    // — and nor has one that answered without USDC's row (its balance call reverted)
+    if (held.failed.length || !held.rows.length) return no("E_VENUE_UNREACHABLE", { venue: agentWalletVenue(c.sub.name), message: `${o.chain} did not answer${held.said?.[o.chain] ? ` (${held.said[o.chain]})` : ""}: the agent wallet's balance there is not known, so nothing is signed` });
     const have = Math.round((held.rows[0]?.amount ?? 0) * 1e6);
     if (o.amountMicro > have) return no("E_WALLET_INSUFFICIENT", { venue: agentWalletVenue(c.sub.name), message: `the agent wallet "${c.sub.name}" holds ${usd(have)} USDC on ${o.chain}; this needs ${usd(o.amountMicro)}`, detail: { subAccount: c.sub.name, chain: o.chain, balance: have / 1e6, needs: o.amountMicro / 1e6 } });
     const hash = offerHash(c.who.hash, c.host, o);
@@ -378,7 +406,8 @@ export class RealPayer implements Payer {
     const from = c.key.account.address as Hex;
     const used = await this.deps.chain.authorizationUsed?.(o.chain, o.token, from, r.nonce);
     // the transfer the receipt names: from the agent wallet, to the address that was approved, of exactly the amount
-    const tx = /^0x[0-9a-fA-F]{64}$/.test(r.txHash ?? "") ? await this.deps.chain.receipt(o.chain, r.txHash as Hex) : undefined;
+    // (a chain that does not answer just now proves nothing either way: the authorisation's nonce, above, or a later tick decides)
+    const tx = /^0x[0-9a-fA-F]{64}$/.test(r.txHash ?? "") ? await this.deps.chain.receipt(o.chain, r.txHash as Hex).catch(() => undefined) : undefined;
     const proved = !!tx && tx.status === "success" && tx.logs.some((l) => {
       if (!same(l.address, o.token)) return false;
       try {

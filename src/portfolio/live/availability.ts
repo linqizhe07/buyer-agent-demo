@@ -22,7 +22,9 @@
  * none — Polymarket's rule for the United States and other places: connecting reads what is held, and it can be sold) · terms-exclude (the
  * venue answers here, but its own terms exclude where the user is) · setup (something on this machine first: mm installed, mm signed in) · closed (the venue offers no way in for this
  * account) · no-answer (it did not answer just now; connecting asks again). The connections read by address (a watched wallet, a
- * Hyperliquid or Polymarket account by its address, OUSG) read public data the same everywhere: connectable, read only.
+ * Hyperliquid or Polymarket account by its address, OUSG) are asked like the rest — a network may refuse or filter the host they read
+ * (Ukraine's order to block polymarket.com) — and are never judged by terms: what they read is public, read only. A connection nothing
+ * answered for carries no `asked` time: the list's own time is not an answer.
  */
 import { servesPlace } from "./eligibility.ts";
 import type { Reach } from "./reach.ts";
@@ -60,8 +62,8 @@ export interface VenueHere {
   /** this venue cannot be used from here, and its edition for where the user is can: a separate company that answers this network and
    * whose own terms serve the place */
   edition?: { connector: string; name: string; said: string } | undefined;
-  /** when the venue was asked (ISO) */
-  asked: string;
+  /** when the venue was asked (ISO); absent when nothing answered for it */
+  asked?: string | undefined;
 }
 
 /** the exchanges asked by default: the tiles of Connect an account, the venues Markets reads, the pre-IPO venues, and a few well-known
@@ -114,7 +116,7 @@ export function verdictOf(r: Reach | undefined, terms: (TermsLine & { excludesHe
   if (r && r.state === "setup") return { verdict: "setup", said: r.said };
   if (r && r.state === "closed") return { verdict: "closed", said: r.said };
   if (r && r.state === "unreachable") return { verdict: "no-answer", said: r.said };
-  // read by address: public data, the same everywhere
+  // read by address: public data, never judged by terms (the venue's answer to this network, above, still decides)
   if (needs === "address") return { verdict: "connectable" };
   if (terms && terms.excludesHere === true) return { verdict: "terms-exclude", said: `its terms exclude where you are (${terms.url}, read ${terms.read}): “${terms.says}” — the venue checks residency when an account is opened; the account does not${terms.note ? `. ${terms.note}` : ""}` };
   return { verdict: "connectable" };
@@ -124,8 +126,8 @@ export function verdictOf(r: Reach | undefined, terms: (TermsLine & { excludesHe
  * edition for the place when there is one that can */
 export async function venuesHere(d: AvailabilityDeps): Promise<VenueHere[]> {
   const place = d.place ? await d.place().catch(() => undefined) : undefined;
-  const asked = new Date(d.clock()).toISOString();
-  const answers = await d.reach(d.connections.filter((c) => c.needs !== "address").map((c) => c.connector));
+  // every connection, the ones read by address too: the host they read answers this network, or it does not
+  const answers = await d.reach(d.connections.map((c) => c.connector));
   const byConnector = new Map(answers.map((r) => [r.connector, r]));
   const out: VenueHere[] = d.connections.map((c) => {
     const r = byConnector.get(c.connector);
@@ -141,7 +143,7 @@ export async function venuesHere(d: AvailabilityDeps): Promise<VenueHere[]> {
       ...(terms ? { terms } : {}),
       connected: d.connected(c.connector),
       ...(c.needs === "address" ? { readOnly: true } : {}),
-      asked: r?.at ?? asked,
+      ...(r?.at ? { asked: r.at } : {}),
     };
   });
   const judged = new Map(out.map((v) => [v.connector, v]));

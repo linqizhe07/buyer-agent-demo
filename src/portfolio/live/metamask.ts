@@ -46,11 +46,11 @@ import { holdingsOf, type MmBalance, type MmShow } from "../adapters/metamask.ts
 import { no } from "../refuse.ts";
 import { CHAIN_BY_ID, CHAINS, STABLECOINS, type ChainName } from "./chain.ts";
 import { known as knownFigure, once, type EarnPosition, type EarnProduct, type EarnSource, type EarnState, type LiveEarner } from "./earn.ts";
-import { HL_TERMS, HYPERLIQUID_RULE, type Locator } from "./location.ts";
-import { CLOSE_ONLY_WORDS, polymarketScope } from "./polymarket-clob.ts";
+import { HL_TERMS, HYPERLIQUID_RULE, placeOf, type Locator } from "./location.ts";
+import { CLOSE_ONLY_WORDS, polymarketScope, readablePlace } from "./polymarket-clob.ts";
 import type { Price } from "./prices.ts";
 import { badOrder, ceilTo, DONE, floorTo, inDollars, onStep, pick, plain, type LiveTrader, type Market, type MarketKind, type OrderRequest, type OrderState, type OrderStatus, type Position, type TimeInForce } from "./trade.ts";
-import { asRefusal, isStable, num, redact, REGION, type LiveBalance, type LiveSource } from "./types.ts";
+import { asRefusal, edgeWords, isStable, num, redact, REGION, type LiveBalance, type LiveSource } from "./types.ts";
 import { mmWriter } from "./writes.ts";
 
 /** one mm command, its `data` back; a failure throws mm's own error. A write asks for a longer wait than a read */
@@ -119,7 +119,9 @@ function failureIn(v: unknown): MmFailure | undefined {
  *   failure      stderr, one JSON document `{"ok": false, "error": {code, message, hint}}`, exit 1
  *   a pause      stdout turns into JSON lines: `{"_notice": …}` for each notice (Guard's AWAITING_MFA), then `{"_summary": …}` on success;
  *                a failure after a notice is `{"_error": …}` on stderr
- * Anything else (a crash, a Node too old for mm) is UNPARSEABLE with mm's raw words. */
+ * An answer printed whole is mm's answer whatever the exit code: mm 7.0.0's SIGINT and SIGTERM handlers exit 130 or 143 after it has
+ * answered. Anything else (a crash, a Node too old for mm) is UNPARSEABLE with mm's raw words — never with JSON mm printed, which may say
+ * where this machine is (`mm predict geoblock`'s answer does). */
 export function parseMm(stdout: string, stderr: string, exitCode: number | null): MmParsed {
   const lines = stdout
     .split("\n")
@@ -130,21 +132,30 @@ export function parseMm(stdout: string, stderr: string, exitCode: number | null)
     const n = obj(o?._notice);
     return n ? [n as MmNotice] : [];
   });
-  if (exitCode === 0) {
+  const answer = (): MmParsed | undefined => {
     const summary = lines.find((o) => o !== undefined && "_summary" in o);
     if (summary) return { ok: true, data: summary._summary, notices };
     const whole = obj(jsonOf(stdout));
-    if (whole?.ok === true && "data" in whole) return { ok: true, data: whole.data, notices };
+    return whole?.ok === true && "data" in whole ? { ok: true, data: whole.data, notices } : undefined;
+  };
+  if (exitCode === 0) {
+    const a = answer();
+    if (a) return a;
   }
   const errLines = stderr
     .split("\n")
     .map((l) => l.trim())
     .filter(Boolean)
     .reverse();
-  const error = failureIn(jsonOf(stderr)) ?? errLines.map((l) => failureIn(jsonOf(l))).find((f) => f !== undefined) ?? failureIn(jsonOf(stdout)) ?? lines.map((o) => failureIn(o)).find((f) => f !== undefined);
+  const failed = failureIn(jsonOf(stderr)) ?? errLines.map((l) => failureIn(jsonOf(l))).find((f) => f !== undefined);
+  if (failed) return { ok: false, error: failed, notices };
+  const late = answer();
+  if (late) return late;
+  const error = failureIn(jsonOf(stdout)) ?? lines.map((o) => failureIn(o)).find((f) => f !== undefined);
   if (error) return { ok: false, error, notices };
-  const raw = (stderr.trim() || stdout.trim()).replace(/\s+/g, " ").slice(0, 300);
-  return { ok: false, error: { code: "UNPARSEABLE", message: raw || `mm exited with ${exitCode ?? "a signal"} and said nothing` }, notices };
+  const printed = lines.some((o) => o !== undefined);
+  const raw = (stderr.trim() || (printed ? "" : stdout.trim())).replace(/\s+/g, " ").slice(0, 300);
+  return { ok: false, error: { code: "UNPARSEABLE", message: raw || (printed ? `mm printed an answer this could not read and exited with ${exitCode ?? "a signal"}` : `mm exited with ${exitCode ?? "a signal"} and said nothing`) }, notices };
 }
 
 function runMm(bin: string, args: string[], timeoutMs: number): Promise<unknown> {
@@ -176,14 +187,19 @@ export const realMm =
 export async function metamaskSource(req: { venue: string; label: string; run: RunMm; env?: Record<string, string | undefined> | undefined; now?: (() => number) | undefined; price?: Price | undefined; where?: Locator | undefined }): Promise<{ source: LiveSource & EarnSource; first: LiveBalance[] } | Refusal> {
   const name = req.label || "MetaMask Agent Wallet";
   const env = req.env ?? process.env;
-  // redacted before it is cut short, so half a secret is never kept
-  const saidOf = (err: unknown): string => redact(String((err as Error)?.message ?? err), [env.MM_PASSWORD, env.MM_MNEMONIC]).slice(0, 200);
+  const voice = mmVoice(req.venue, req.run, env);
   let show: MmShow;
   try {
     show = await req.run<MmShow>(["wallet", "show"]);
   } catch (err) {
-    const said = saidOf(err);
-    return no("E_ACCOUNT_CREDENTIAL", { venue: req.venue, message: /ENOENT|not found/i.test(said) ? "the mm command line is not installed on this machine" : "mm could not show the wallet: sign in with the mm command line first (mm wallet show must work in a terminal)", native: { said } });
+    // `mm wallet show` asks MetaMask's servers for the wallet and its policy: a network that does not reach them, a rate limit or a place
+    // rule is told as what it is (saidNo), and only mm's own "not signed in" sends the owner to sign in again
+    const f = voice.failureOf(err);
+    const native = { command: "mm wallet show", code: f.code, said: voice.said(f.message) };
+    if (f.code === "ENOENT") return no("E_ACCOUNT_CREDENTIAL", { venue: req.venue, message: "the mm command line is not installed on this machine", native });
+    if (f.code === "UNSUPPORTED_NODE") return no("E_ACCOUNT_CREDENTIAL", { venue: req.venue, message: `mm could not run on this machine: ${native.said}`, native });
+    if ((UNAUTHORIZED.has(f.code) && !/introspect failed with HTTP 5\d\d/i.test(f.message)) || SIGNED_OUT.has(f.code)) return no("E_ACCOUNT_CREDENTIAL", { venue: req.venue, message: "mm could not show the wallet: sign in with the mm command line first (mm wallet show must work in a terminal)", native });
+    return voice.saidNo(f, "MetaMask", "show the wallet", ["wallet", "show"], "order");
   }
   const yaml = show.policyYaml ?? "";
   const rolling = /rolling_24h:\s*([\d.]+)/.exec(yaml)?.[1];
@@ -192,7 +208,7 @@ export async function metamaskSource(req: { venue: string; label: string; run: R
     try {
       b = await req.run<MmBalance>(["wallet", "balance"]);
     } catch (err) {
-      throw no("E_VENUE_UNREACHABLE", { venue: req.venue, message: "mm could not read the balance", native: { said: saidOf(err) } });
+      throw voice.saidNo(voice.failureOf(err), "MetaMask", "read the balance", ["wallet", "balance"], "order");
     }
     return holdingsOf(b).map((h) => ({ asset: h.asset, amount: h.amount, usd: h.usd, ...(h.note ? { where: h.note } : {}) }));
   };
@@ -200,7 +216,7 @@ export async function metamaskSource(req: { venue: string; label: string; run: R
     const first = await read();
     const trader = mmTrader({ venue: req.venue, name, address: show.address, run: req.run, env, now: req.now ?? Date.now, where: req.where });
     const earner = mmEarner({ venue: req.venue, name, address: show.address, run: req.run, env, now: req.now ?? Date.now, price: req.price });
-    const source: LiveSource & EarnSource = { name, kind: "agent-wallet", reference: "the mm command line's session on this machine", via: "MetaMask · mm command line", address: show.address, probe: { can: ["read", "transfer", "swap"], note: `MetaMask's Guard decides what goes out without asking (${rolling !== undefined ? `$${rolling} a rolling day` : "its policy"}); above that it asks you by email`, native: { address: show.address, tradingMode: show.tradingMode, rolling24h: rolling ?? null } }, read, writer: mmWriter(show.address as `0x${string}`, req.run, req.env), trader, earner };
+    const source: LiveSource & EarnSource = { name, kind: "agent-wallet", reference: "the mm command line's session on this machine", via: "MetaMask · mm command line", address: show.address, probe: { can: ["read", "transfer", "swap"], note: `MetaMask's Guard decides what goes out without asking (${rolling !== undefined ? `$${rolling} a rolling day` : "its policy"}); above that it asks you by email`, native: { address: show.address, tradingMode: show.tradingMode, rolling24h: rolling ?? null } }, read, writer: mmWriter(show.address as `0x${string}`, req.run, req.env, mmSendVoice("metamask", req.run, env)), trader, earner };
     return { source, first };
   } catch (err) {
     return err as Refusal;
@@ -256,12 +272,25 @@ const INSUFFICIENT = new Set(["INSUFFICIENT_FUNDS", "INSUFFICIENT_GAS", "INSUFFI
 const INVALID = new Set(["INVALID_AMOUNT", "INVALID_INPUT", "INVALID_SWAP_PARAMS", "AMOUNT_TOO_LOW", "AMOUNT_TOO_HIGH", "SLIPPAGE_TOO_HIGH", "SLIPPAGE_TOO_LOW", "TOKEN_NOT_FOUND", "TOKEN_NOT_SUPPORTED", "NATIVE_ASSET_UNSUPPORTED", "UNSUPPORTED_CHAIN", "REFUEL_UNSUPPORTED_ROUTE", "RWA_NATIVE_TOKEN_UNSUPPORTED", "INVALID_TICK_SIZE", "INVALID_ORDER_TYPE", "INVALID_SIDE", "PREDICT_ORDER_SIZE_TOO_SMALL", "MISSING_FLAG", "MISSING_SWAP_PARAMS", "MISSING_CHAIN", "INVALID_CHAIN", "INVALID_SYMBOL", "INVALID_SIZE", "INVALID_LEVERAGE", "INVALID_PRICE", "INVALID_SLIPPAGE", "AMBIGUOUS_VAULT"]);
 const PERMISSION = new Set(["WRONG_WALLET_MODE", "TX_DENIED", "TX_EXPIRED", "PREDICT_SETUP_REQUIRED", "PREDICT_AUTH_REQUIRED", "PREDICT_INSUFFICIENT_ALLOWANCE"]);
 const UNAUTHORIZED = new Set(["AUTH_FAILED", "AUTH_ERROR", "TOKEN_INVALID", "TOKEN_REFRESH_FAILED", "NOT_INITIALIZED", "PREDICT_AUTH_INVALID"]);
-const REGION_CODES = new Set(["PREDICT_GEOBLOCKED", "PREDICT_UNAVAILABLE_FOR_LEGAL_REASONS", "RWA_GEO_RESTRICTED"]);
-const DOWN = new Set(["RATE_LIMITED", "NETWORK_UNREACHABLE", "QUOTE_RETRY", "MM_TIMEOUT", "ENOENT", "UNSUPPORTED_NODE"]);
+/** mm has no session on this machine at all: the owner signs in with mm */
+const SIGNED_OUT = new Set(["MISSING_AUTH_TOKEN", "AUTH_REQUIRED"]);
+/** a place rule of the venue's, for everything mm reaches there. MetaMask's RWA_GEO_RESTRICTED is not one: it is one asset's rule (saidNo) */
+const REGION_CODES = new Set(["PREDICT_GEOBLOCKED", "PREDICT_UNAVAILABLE_FOR_LEGAL_REASONS"]);
+const DOWN = new Set(["RATE_LIMITED", "NETWORK_UNREACHABLE", "NETWORK_TIMEOUT", "QUOTE_RETRY", "MM_TIMEOUT", "JOB_TIMEOUT", "ABORTED", "ENOENT", "UNSUPPORTED_NODE"]);
 const UNKNOWN_ORDER = new Set(["QUOTE_NOT_FOUND", "MISSING_QUOTE_ID", "REQUEST_NOT_FOUND"]);
 /** a swap mm stopped waiting for that MetaMask may still send: JOB_TIMEOUT and RELAY_TIMEOUT say "the job may still complete"; an execute
  * that ended with no envelope at all (killed, crashed) may have submitted its job too (trade spec 1.4) */
 const MAY_LAND = new Set(["JOB_TIMEOUT", "RELAY_TIMEOUT", "MM_TIMEOUT", "ABORTED", "UNPARSEABLE"]);
+/** a write whose connection dropped or timed out: mm 7.0.0's NETWORK_UNREACHABLE ("Could not reach the Polymarket endpoint (fetch failed).")
+ * does not tell a connection refused before the request from one reset after it, so it may have landed; so may one a gateway answered
+ * with a 5xx */
+const LOST = new Set(["NETWORK_UNREACHABLE", "NETWORK_TIMEOUT"]);
+const LOST_WORDS = /fetch failed|ECONNRESET|ETIMEDOUT|socket hang up|other side closed|\b(?:bad gateway|service unavailable|gateway time-?out|internal server error)\b|\bHTTP 5\d\d\b|failed: 5\d\d\b/i;
+/** mm's own failure of Polymarket's location check, which mm runs before anything is sent (`predict geoblock`, and `predict place`'s sign-in
+ * step): "Polymarket check geoblock failed: <the HTTP reason>". The operation's name is mm's, not Polymarket's word about a place */
+const CHECK_FAILED = /^Polymarket check geoblock failed: /i;
+/** that check answered by a bare 403: the server in front of Polymarket refusing this network, by place or by the address's standing */
+const CHECK_403 = /^Polymarket check geoblock failed: (?:Forbidden|403)\s*$/i;
 
 const same = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
 const short = (s: string): string => (s.length > 14 ? `${s.slice(0, 6)}…${s.slice(-4)}` : s);
@@ -422,23 +451,35 @@ function mmVoice(venue: string, run: RunMm, env: Record<string, string | undefin
     return { code: /ENOENT/.test(text) ? "ENOENT" : "UNKNOWN", message: text, notices: [] };
   };
 
-  /** mm's refusal as the account's, with mm's own code and words in `native` */
-  const saidNo = (f: MmFailure, who: string, doing: string, args: string[], when: "order" | "track"): Refusal => {
+  /** mm's refusal as the account's, with mm's own code and words in `native` (and `extra`, what the caller read of the answer) */
+  const saidNo = (f: MmFailure, who: string, doing: string, args: string[], when: "order" | "track", extra: Record<string, unknown> = {}): Refusal => {
     const words = said(f.message);
-    const native = { command: cmd(args), code: f.code, said: words, ...(f.hint ? { hint: said(f.hint) } : {}) };
+    const native = { command: cmd(args), code: f.code, said: words, ...(f.hint ? { hint: said(f.hint) } : {}), ...extra };
     const say = (code: Code, message: string): Refusal => no(code, { venue, message, native });
     const m = f.message;
-    if (REGION_CODES.has(f.code) || /closed only mode/i.test(m) || REGION.test(m)) return say("E_VENUE_GEOBLOCKED", `${who} does not serve this location: that is its own rule, and the account does not look for a way around it`);
+    // a place rule keeps only mm's code: mm's words for one may name the place ("… not available in your region (<region>, <country>)"),
+    // and its own name for what failed ("Polymarket check geoblock failed: …") is not a word about a place
+    if (REGION_CODES.has(f.code) || REGION.test(m.replace(/^Polymarket [a-z ]+ failed: /i, ""))) return no("E_VENUE_GEOBLOCKED", { venue, message: `${who} does not serve this location: that is its own rule, and the account does not look for a way around it`, native: { command: cmd(args), code: f.code } });
+    if (CHECK_403.test(m)) return no("E_VENUE_GEOBLOCKED", { venue, message: edgeWords(PM, 403, ""), native: { command: cmd(args), code: f.code, status: 403, edge: true } });
+    // MetaMask will not swap this one asset from here (an RWA stock token's rule): that asset's no, in MetaMask's words — not the venue's
+    // place, so nothing else mm reaches is held back for it
+    if (f.code === "RWA_GEO_RESTRICTED") return say("E_VENUE_REJECTED", `${who} will not trade this asset from here: MetaMask says "${words}" — its own rule for this one asset, and the account does not look for a way around it`);
+    // Polymarket holds this wallet to closing positions: a state of the wallet, as the CLOB connection reads it (polymarket-clob.ts), never
+    // "does not serve this location" — sells still go
+    if (/closed only mode/i.test(m)) return no("E_VENUE_PERMISSION", { venue, message: `${PM} holds this wallet to closing positions (its words: ${words}): a buy opens one, so nothing was placed; a sell of shares the wallet holds still goes`, native: { ...native, closeOnly: true } });
     if (INSUFFICIENT.has(f.code) || /insufficient (funds|balance|native balance|token balance|margin)|not enough balance/i.test(m)) return say("E_VENUE_INSUFFICIENT", `${who}: not enough to ${doing} (${words})`);
     if (f.code === "TX_DENIED" || f.code === "TX_EXPIRED") return say("E_VENUE_PERMISSION", `MetaMask's Guard asked you to approve this, and ${f.code === "TX_DENIED" ? "it was denied" : "the approval window passed"}: nothing was sent`);
     if (f.code === "PREDICT_SETUP_REQUIRED" || f.code === "PREDICT_AUTH_REQUIRED") return say("E_VENUE_PERMISSION", `the wallet is not set up to trade on ${PM}: run mm predict setup --wait in a terminal first`);
     if (f.code === "PREDICT_INSUFFICIENT_ALLOWANCE") return say("E_VENUE_PERMISSION", `the Predict deposit wallet has not allowed ${PM}'s exchange to use its funds: run mm predict approve --wait in a terminal`);
     if (PERMISSION.has(f.code) || /address banned/i.test(m)) return say("E_VENUE_PERMISSION", `${who} refused to ${doing}: ${words}`);
+    // MetaMask's sign-in server failing (AUTH_ERROR "introspect failed with HTTP 5xx") is no answer, not a session that lapsed
+    if (f.code === "AUTH_ERROR" && /introspect failed with HTTP 5\d\d/i.test(m)) return say("E_VENUE_UNREACHABLE", `MetaMask's sign-in server did not answer just now: try again in a minute`);
     if (UNAUTHORIZED.has(f.code) || /unauthori[sz]ed|invalid api key/i.test(m)) return say("E_VENUE_UNAUTHORIZED", who === PM ? `${PM} no longer accepts mm's trading credentials: run mm predict auth --refresh in a terminal` : "mm is not signed in, or MetaMask no longer accepts its session: sign in with mm in a terminal (mm wallet show must work)");
     if (f.code === "RWA_MARKET_UNAVAILABLE" || /not yet ready|no orderbook exists|cancel-only|post-only mode|trading is currently disabled/i.test(m)) return say("E_VENUE_MARKET_CLOSED", `${who} takes no orders here now: ${words}`);
     // a post-only order that would have taken at once is refused as written ("invalid post-only order: order crosses book")
-    if (INVALID.has(f.code) || /invalid price|invalid tick size|tick size rule|align to tick|lower than the minimum|invalid expiration|invalid post-only order|crosses (the )?book|minimum value of \$/i.test(m)) return { ...badOrder(venue, who, words), native };
-    if (DOWN.has(f.code) || /too many requests|HTTP (429|5\d\d)|order timed out|\b425\b|ECONNRESET|ETIMEDOUT/i.test(m)) return say("E_VENUE_UNREACHABLE", f.code === "ENOENT" || f.code === "UNSUPPORTED_NODE" ? `mm could not run on this machine: ${words}` : `${who} did not answer in time, or is limiting requests: try again in a minute`);
+    if (INVALID.has(f.code) || /invalid price|invalid tick size|tick size rule|align to tick|lower than the minimum|invalid expiration|invalid post-only order|crosses (the )?book|minimum value of \$/i.test(m)) return say("E_VENUE_ORDER_INVALID", `${who}: ${words}`);
+    // an outage or a rate limit, in mm's words or the HTTP reason it passes on ("Polymarket fetch positions failed: Bad Gateway")
+    if (DOWN.has(f.code) || /too many requests|HTTP (429|5\d\d)|order timed out|\b425\b|ECONNRESET|ETIMEDOUT|\b(?:service unavailable|bad gateway|gateway time-?out|internal server error)\b|failed: (?:429|5\d\d)\b/i.test(m)) return say("E_VENUE_UNREACHABLE", f.code === "ENOENT" || f.code === "UNSUPPORTED_NODE" ? `mm could not run on this machine: ${words}` : `${who} did not answer in time, or is limiting requests: try again in a minute`);
     if (when === "track" && (UNKNOWN_ORDER.has(f.code) || /invalid orderid|not found/i.test(m))) return say("E_ACCOUNT_ORDER_UNKNOWN", `${who} does not know this order: ${words}`);
     return say("E_VENUE_REJECTED", `${who} refused to ${doing}: ${words}`);
   };
@@ -460,13 +501,64 @@ function mmVoice(venue: string, run: RunMm, env: Record<string, string | undefin
     const noHash = f.code === "EXECUTE_FAILED" && /no hash is available yet/i.test(f.message);
     return MAY_LAND.has(f.code) || mfa || noHash ? { mfa } : undefined;
   };
+  /** is it a write whose answer was lost on the way — mm stopped waiting, or the connection dropped or a gateway answered after mm sent
+   * it — so that it may have been taken: never told as refused. A failure of the location check mm runs first sent nothing */
+  const lost = (f: MmFailure): boolean => !CHECK_FAILED.test(f.message) && (MAY_LAND.has(f.code) || LOST.has(f.code) || LOST_WORDS.test(f.message));
 
-  return { said, cmd, writesOn, off, failureOf, saidNo, call, unread, jobOf, mayLand };
+  return { said, cmd, writesOn, off, failureOf, saidNo, call, unread, jobOf, mayLand, lost };
+}
+
+/** What a transfer mm was asked to send needs of mm's language (live/writes.ts mmWriter): whether a failure is a job that may still land (mm
+ * stopped waiting, Guard is asking the owner) — then it is followed, never told as "not sent" — and, for one that may, how its wallet job
+ * stands now (`mm wallet requests list`) */
+export function mmSendVoice(venue: string, run: RunMm, env: Record<string, string | undefined>): MmSendVoice {
+  const { failureOf, saidNo, call, jobOf, mayLand, said } = mmVoice(venue, run, env);
+  return {
+    mayLand(err) {
+      const f = failureOf(err);
+      const m = mayLand(f);
+      return m ? { job: jobOf(f), code: f.code, said: said(f.message), mfa: m.mfa } : undefined;
+    },
+    refusal: (err, args) => saidNo(failureOf(err), "MetaMask", "send it", args, "order"),
+    async landed(job) {
+      let data: unknown;
+      try {
+        data = await call(["wallet", "requests", "list", "--json"], "MetaMask", `read wallet request ${job}`, "track");
+      } catch {
+        return "pending";
+      }
+      const j = arr(obj(data)?.requests)
+        .map(obj)
+        .find((x) => str(x?.pollingId) === job);
+      const st = str(j?.status).toUpperCase();
+      if (st === "DENIED" || st === "EXPIRED" || st === "FAILED" || st === "BROADCAST_FAILED") return "failed";
+      return st === "COMPLETE" || st === "CONFIRMED" || (st !== "" && str(j?.txHash) !== "" && st !== "PENDING") ? "settled" : "pending";
+    },
+  };
+}
+export interface MmSendVoice {
+  mayLand(err: unknown): { job?: string | undefined; code: string; said: string; mfa: boolean } | undefined;
+  refusal(err: unknown, args: string[]): Refusal;
+  landed(job: string): Promise<"pending" | "settled" | "failed">;
 }
 
 export function mmTrader(d: MmTraderDeps): LiveTrader & { kinds: MarketKind[] } {
   const { venue, run, env, now } = d;
-  const { said, cmd, writesOn, off, failureOf, saidNo, call, unread } = mmVoice(venue, run, env);
+  const { said, cmd, writesOn, off, failureOf, saidNo, call, unread, lost } = mmVoice(venue, run, env);
+  /** an order mm sent whose answer was lost (lost above), and that could not be found taken: it may have been. Said as that — never as
+   * refused — with what the owner looks at, and kept under its client id so the same order is not sent again */
+  const unsure = (f: MmFailure, who: string, doing: string, args: string[], look: string, detail: Record<string, unknown> = { placed: "unknown" }): Refusal =>
+    no("E_VENUE_UNREACHABLE", { venue, message: `${who} did not answer whether it took this (${doing}): it may have. Look at ${look} before asking again`, detail: { unsure: true, ...detail }, native: { command: cmd(args), code: f.code, said: said(f.message) } });
+  /** when a resting order's row says it was made, in milliseconds (Polymarket's created_at is in seconds), or nothing */
+  const madeAt = (v: unknown): number | undefined => {
+    const n = known(v);
+    return n === undefined || n <= 0 ? undefined : n > 1e12 ? n : n * 1000;
+  };
+  /** an order sent within this long of the answer being lost is the one found resting like it (clocks differ a little) */
+  const SINCE_MS = 5_000;
+  /** the venue ids this trader has already handed out: an order found resting like a lost one is never one the account already follows —
+   * a second identical order would otherwise take the first one's id, and cancelling one would cancel the other */
+  const handedOut = new Set<string>();
 
   const seen = new Map<string, Seen>();
   const infos = new Map<string, PmInfo>();
@@ -624,18 +716,19 @@ export function mmTrader(d: MmTraderDeps): LiveTrader & { kinds: MarketKind[] } 
     };
   }
 
-  /** an execute mm stopped waiting for: Guard is asking the owner, or the job may still finish. It is pending, never refused, so it is not sent twice */
+  /** an execute mm stopped waiting for: Guard is asking the owner, or the job may still finish — or the connection dropped after it was
+   * sent. It is pending, never refused, so it is not sent twice: its quote id is followed (mm swap status) */
   function swapStuck(f: MmFailure & { notices: MmNotice[] }, q: Quoted, args: string[]): OrderState | Refusal {
     const mfa = (f.code === "EXECUTE_FAILED" && /awaiting MFA approval/i.test(f.message)) || f.notices.some((n) => n.kind === "AWAITING_MFA");
     const noHash = f.code === "EXECUTE_FAILED" && /no hash is available yet/i.test(f.message);
-    if (!MAY_LAND.has(f.code) && !(f.code === "EXECUTE_FAILED" && (mfa || noHash))) return saidNo(f, SWAPS, `swap ${q.native.spend} for ${q.dst.symbol}`, args, "order");
+    if (!lost(f) && !(f.code === "EXECUTE_FAILED" && (mfa || noHash))) return saidNo(f, SWAPS, `swap ${q.native.spend} for ${q.dst.symbol}`, args, "order");
     const job = f.notices.find((n) => str(n.pollingId))?.pollingId ?? /requests watch\s+([\w-]+)/.exec(`${f.hint ?? ""} ${f.message}`)?.[1] ?? /\(request ([\w-]+)\)/.exec(f.message)?.[1];
     return {
       ref: refOf(q.id, undefined, job),
       status: "pending",
       filledQty: 0,
       ...(q.feeUsd !== undefined ? { feeUsd: q.feeUsd } : {}),
-      native: { command: cmd(args), quote: q.native, waiting: mfa ? "MetaMask's Guard asked you to approve this swap, by email or on MetaMask Mobile: it goes when you approve it" : "mm stopped waiting before it saw the swap sent: MetaMask may still send it", code: f.code, said: said(f.message), ...(job ? { pollingId: job } : {}) },
+      native: { command: cmd(args), quote: q.native, waiting: mfa ? "MetaMask's Guard asked you to approve this swap, by email or on MetaMask Mobile: it goes when you approve it" : MAY_LAND.has(f.code) ? "mm stopped waiting before it saw the swap sent: MetaMask may still send it" : "the connection dropped after the swap was sent: MetaMask may still send it", code: f.code, said: said(f.message), ...(job ? { pollingId: job } : {}) },
     };
   }
 
@@ -820,16 +913,24 @@ export function mmTrader(d: MmTraderDeps): LiveTrader & { kinds: MarketKind[] } 
   async function geoblock(args: string[], side: "buy" | "sell"): Promise<Refusal | undefined> {
     let data: unknown;
     try {
-      data = await call(args, PM, "say whether it serves this location", "order");
-    } catch (e) {
-      return isRefusal(e) ? e : asRefusal(venue, "MetaMask", e);
+      data = await run<unknown>(args);
+    } catch (err) {
+      // the check's own failure is read by mm's code, never by its words: "Polymarket check geoblock failed: Service Unavailable" names the
+      // operation, not a place, and mm's region words name the place. Only mm's code is kept
+      const f = failureOf(err);
+      const native = { command: cmd(args), code: f.code };
+      if (REGION_CODES.has(f.code)) return no("E_VENUE_GEOBLOCKED", { venue, message: `${PM} does not serve this location (as mm says): that is its own rule, and the account does not look for a way around it. Nothing was placed`, native });
+      if (CHECK_403.test(f.message)) return no("E_VENUE_GEOBLOCKED", { venue, message: `${edgeWords(PM, 403, "")}. Nothing was placed`, native: { ...native, status: 403, edge: true } });
+      if (f.code === "ENOENT" || f.code === "UNSUPPORTED_NODE" || UNAUTHORIZED.has(f.code) || SIGNED_OUT.has(f.code)) return saidNo(f, PM, "say whether it serves this location", args, "order");
+      // an outage, a rate limit, a dropped connection, an answer mm could not read: no answer, and no answer is not a yes
+      return no("E_VENUE_UNREACHABLE", { venue, message: `${PM}'s location check did not answer: nothing goes to Polymarket without it`, native });
     }
     const g = obj(obj(data)?.result) ?? obj(data);
     // the IP and the place mm reports are left out of everything kept: a refusal is logged and lands in the ledger
     const scope = polymarketScope(g);
     if (scope === "blocked") return no("E_VENUE_GEOBLOCKED", { venue, message: `${PM} does not take orders from this location (as mm predict geoblock says): that is its own rule, and the account does not look for a way around it. Nothing was placed`, native: { command: cmd(args), blocked: true } });
     if (scope === "close-only" && side === "buy") return no("E_VENUE_GEOBLOCKED", { venue, message: `${CLOSE_ONLY_WORDS} (as mm predict geoblock says). A buy opens a position, so nothing was placed; a sell of shares the wallet holds closes one`, native: { command: cmd(args), blocked: true, closeOnly: true } });
-    if (scope === undefined) return no("E_VENUE_REJECTED", { venue, message: `mm did not say whether ${PM} serves this location, so nothing was placed`, native: { command: cmd(args) } });
+    if (scope === undefined) return no("E_VENUE_UNREACHABLE", { venue, message: `${PM}'s location check did not answer (mm did not say whether ${PM} serves this location): nothing goes to Polymarket without it`, native: { command: cmd(args) } });
     return undefined;
   }
 
@@ -877,11 +978,15 @@ export function mmTrader(d: MmTraderDeps): LiveTrader & { kinds: MarketKind[] } 
     if (!writesOn()) return off([geo, args]);
     const blocked = await geoblock(geo, o.side);
     if (blocked) return blocked;
+    const doing = `${o.side} ${plain(o.qty)} ${m.base} shares in ${m.name}`;
+    const sent = now();
     let data: unknown;
     try {
-      data = await call(args, PM, `${o.side} ${plain(o.qty)} ${m.base} shares in ${m.name}`, "order", { timeoutMs: MM_WRITE_TIMEOUT_MS });
-    } catch (e) {
-      return isRefusal(e) ? e : asRefusal(venue, "MetaMask", e);
+      data = await run<unknown>(args, { timeoutMs: MM_WRITE_TIMEOUT_MS });
+    } catch (err) {
+      const f = failureOf(err);
+      if (!lost(f)) return saidNo(f, PM, doing, args, "order");
+      return (await pmTaken(spot, o.side, o.qty, price, sent)) ?? unsure(f, PM, doing, args, `${PM}'s open orders and positions in ${m.name}`);
     }
     const res = obj(obj(obj(data)?.result)?.response);
     // an ok envelope is not acceptance: Polymarket can answer 200 with success false and its reason
@@ -902,6 +1007,24 @@ export function mmTrader(d: MmTraderDeps): LiveTrader & { kinds: MarketKind[] } 
     else status = "pending";
     const avg = shares > 0 && usd > 0 ? sig(usd / shares) : status === "filled" ? price : undefined;
     return { ref: str(res.orderId), status, filledQty: filled, ...(avg !== undefined ? { avgPrice: avg } : {}), native: { command: cmd(args), answer: { orderId: str(res.orderId), status: st, makingAmount: str(res.makingAmount), takingAmount: str(res.takingAmount), transactionHashes: arr(res.transactionHashes).map(str) } } };
+  }
+
+  /** an order whose answer was lost, found among the open ones in its market (`mm predict orders`): the same outcome, side, price and size,
+   * made since it was sent. mm takes no client id, so nothing else names it, and an order like it made before is not taken for it */
+  async function pmTaken(spot: PmSpot, side: "buy" | "sell", qty: number, price: number, sent: number): Promise<OrderState | undefined> {
+    const args = ["predict", "orders", "--market", spot.conditionId, "--json"];
+    let data: unknown;
+    try {
+      data = await run<unknown>(args);
+    } catch {
+      return undefined;
+    }
+    const o = arr(obj(obj(data)?.result)?.orders)
+      .map(obj)
+      .find((x) => x && !handedOut.has(str(x.id)) && str(x.asset_id) === spot.tokenId && same(str(x.side), side) && Math.abs(num(x.price) - price) < 1e-9 && Math.abs(num(x.original_size) - qty) < 1e-9 && (madeAt(x.created_at) ?? 0) >= sent - SINCE_MS);
+    if (!o) return undefined;
+    const matched = num(o.size_matched);
+    return { ref: str(o.id), status: matched > 0 ? "partial" : "open", filledQty: matched, ...(matched > 0 && num(o.price) > 0 ? { avgPrice: num(o.price) } : {}), native: { command: cmd(args), found: "mm predict place's answer was lost: this order, resting since then with the same outcome, side, price and size, is it", order: { id: str(o.id), status: str(o.status), side: str(o.side), price: str(o.price), original_size: str(o.original_size), size_matched: str(o.size_matched) } } };
   }
 
   /** the market's condition id, which `mm predict orders` is filtered by */
@@ -1101,12 +1224,14 @@ export function mmTrader(d: MmTraderDeps): LiveTrader & { kinds: MarketKind[] } 
     let country = "";
     let region = "";
     // mm could not say where this machine is: the account's own sources are asked instead (location.ts) — a network that blocks Polymarket
-    // blocks mm's check too, and the users Hyperliquid serves there must not be refused for that; not known there either, nothing is sent
-    const instead = async (why: string, native: Record<string, unknown>): Promise<Refusal | undefined> => {
-      const v = d.where ? await d.where.verdict(HYPERLIQUID_RULE) : "unknown";
+    // blocks mm's check too, and the users Hyperliquid serves there must not be refused for that; not known there either, nothing is sent,
+    // and the place not known now is asked again next time (E_VENUE_UNREACHABLE, as location.ts heldTo says it)
+    const instead = async (why: string, native: Record<string, unknown>, inCountry?: string): Promise<Refusal | undefined> => {
+      // asked now, not the place of a network the user may have left: an order goes from the network this machine is on
+      const v = d.where ? await d.where.verdict(HYPERLIQUID_RULE, { fresh: true, ...(inCountry ? { country: inCountry } : {}) }) : "unknown";
       if (v === "served") return undefined;
       if (v === "closed") return no("E_VENUE_GEOBLOCKED", { venue, message: `${HYPERLIQUID_RULE.closedWords}. Nothing was sent to ${doing}`, native: { ...native, terms: HL_TERMS } });
-      return no("E_VENUE_REJECTED", { venue, message: why, native });
+      return no("E_VENUE_UNREACHABLE", { venue, message: `${why}. Try again in a moment`, native });
     };
     try {
       const data = await run<unknown>(args);
@@ -1121,17 +1246,17 @@ export function mmTrader(d: MmTraderDeps): LiveTrader & { kinds: MarketKind[] } 
         country = where.at(-1) ?? "";
         region = where.length > 1 ? where[0]! : "";
       }
-      if (!/^[A-Z]{2}$/.test(country)) return instead(`mm could not say where this machine is, so ${HL}'s own line (its Terms of Use §1.6) could not be checked: nothing was sent`, { command: cmd(args), code: f.code, said: said(f.message) });
+      // only mm's code is kept: its words may carry the place, or (an answer printed and an exit that was not 0) the whole of its answer
+      if (!readablePlace(country)) return instead(`mm could not say where this machine is, so ${HL}'s own line (its Terms of Use §1.6) could not be checked: nothing was sent`, { command: cmd(args), code: f.code });
     }
-    if (!/^[A-Z]{2}$/.test(country)) return instead(`mm did not say where this machine is, so ${HL}'s own line (its Terms of Use §1.6) could not be checked: nothing was sent`, { command: cmd(args) });
+    if (!readablePlace(country)) return instead(`mm did not say where this machine is, so ${HL}'s own line (its Terms of Use §1.6) could not be checked: nothing was sent`, { command: cmd(args) });
+    // a US territory given as the US and its code is held as the territory itself, as the direct connection holds it (location.ts placeOf)
+    ({ country, region } = placeOf(country, region));
     if (HYPERLIQUID_RULE.closes(country, region)) return no("E_VENUE_GEOBLOCKED", { venue, message: `${HL} does not serve this location (where mm places this machine): its Terms of Use (§1.6) close it to anyone located in the United States, Ontario or a sanctioned territory. That is its own rule, and the account does not look for a way around it. Nothing was sent to ${doing}`, native: { command: cmd(args), terms: HL_TERMS } });
     // a country the line closes in part (Canada: Ontario; Ukraine: Crimea, Donetsk, Luhansk) without the part: the account's own sources
-    // are asked for it; not known, nothing is sent
-    if (!region && HYPERLIQUID_RULE.splits?.(country)) {
-      const v = d.where ? await d.where.verdict(HYPERLIQUID_RULE) : "unknown";
-      if (v === "closed") return no("E_VENUE_GEOBLOCKED", { venue, message: `${HYPERLIQUID_RULE.closedWords}. Nothing was sent to ${doing}`, native: { command: cmd(args), terms: HL_TERMS } });
-      if (v !== "served") return no("E_VENUE_REJECTED", { venue, message: `mm said the country but not the part of it this machine is in, and ${HL}'s own line (its Terms of Use §1.6) closes part of it: nothing was sent`, native: { command: cmd(args) } });
-    }
+    // are asked for it; not known, nothing is sent — said as the direct connection says it (location.ts heldTo), which names no country:
+    // that the line closes part of it would tell where the user is
+    if (!region && HYPERLIQUID_RULE.splits?.(country)) return instead(`where this machine is could not be learned just now, so ${HL}'s own line (its Terms of Use §1.6) could not be held to it: nothing was sent (${doing})`, { command: cmd(args) }, country);
     return undefined;
   }
 
@@ -1143,7 +1268,7 @@ export function mmTrader(d: MmTraderDeps): LiveTrader & { kinds: MarketKind[] } 
     const filled = knownFigure(row.filledSize) ?? 0;
     const avg = knownFigure(row.averagePrice);
     const native = { command: cmd(args), answer: { orderId: str(row.orderId), status: st, ...(str(row.averagePrice) ? { averagePrice: str(row.averagePrice) } : {}), ...(str(row.filledSize) ? { filledSize: str(row.filledSize) } : {}), ...(str(row.error) ? { error: said(str(row.error)) } : {}) } };
-    if (st === "rejected") return { ...saidNo({ code: "ORDER_REJECTED", message: str(row.error) || `${HL} rejected it and gave no reason` }, HL, doing, args, "order"), native };
+    if (st === "rejected") return saidNo({ code: "ORDER_REJECTED", message: str(row.error) || `${HL} rejected it and gave no reason` }, HL, doing, args, "order", { answer: native.answer });
     const status: OrderStatus = st === "filled" ? (filled > 0 && filled < qty - 1e-12 ? "canceled" : "filled") : st === "resting" ? (filled > 0 ? "partial" : "open") : "pending";
     // an IOC that filled in part is done: what did not fill at once was canceled. Without an order id the order is the account's own id
     return { ref: str(row.orderId) || `hl:${clientId}`, status, filledQty: status === "filled" && filled === 0 ? qty : filled, ...(avg !== undefined && avg > 0 ? { avgPrice: avg } : {}), native };
@@ -1194,15 +1319,39 @@ export function mmTrader(d: MmTraderDeps): LiveTrader & { kinds: MarketKind[] } 
     const args = ["perps", "open", "--venue", "hyperliquid", "--symbol", spot.coin, "--side", side, "--size", plain(o.qty, spot.szDecimals), "--leverage", String(lev), ...how, "--wallet-timeout", String(WALLET_TIMEOUT_S), "--json"];
     const geo = ["predict", "geoblock", "--json"];
     if (!writesOn()) return off([geo, args]);
-    const line = await hlLine(`${o.side} ${plain(o.qty)} ${spot.coin}`);
+    const doing = `${o.side} ${plain(o.qty)} ${spot.coin}`;
+    const line = await hlLine(doing);
     if (line) return line;
+    const sent = now();
     let data: unknown;
     try {
-      data = await call(args, HL, `${o.side} ${plain(o.qty)} ${spot.coin}`, "order", { timeoutMs: MM_WRITE_TIMEOUT_MS });
-    } catch (e) {
-      return isRefusal(e) ? e : asRefusal(venue, "MetaMask", e);
+      data = await run<unknown>(args, { timeoutMs: MM_WRITE_TIMEOUT_MS });
+    } catch (err) {
+      const f = failureOf(err);
+      if (!lost(f)) return saidNo(f, HL, doing, args, "order");
+      // a limit order rests, and may be found; a market order is an IOC, filled into the position or gone at once
+      const found = o.type === "limit" ? await perpTaken(spot.coin, side, o.qty, o.limitPrice!, sent) : undefined;
+      return found ?? unsure(f, HL, doing, args, `${HL}'s open orders and positions in ${spot.coin}`);
     }
-    return perpState(obj(data), args, o.qty, `${o.side} ${plain(o.qty)} ${spot.coin}`, o.clientId);
+    return perpState(obj(data), args, o.qty, doing, o.clientId);
+  }
+
+  /** a limit order whose answer was lost, found among the resting ones (`mm perps orders`): the same coin, side, price and size, made since
+   * it was sent. An order like it made before is not taken for it, nor one whose row does not say when it was made */
+  async function perpTaken(coin: string, side: "long" | "short", qty: number, price: number, sent: number): Promise<OrderState | undefined> {
+    const args = ["perps", "orders", "--venue", "hyperliquid", "--json"];
+    let data: unknown;
+    try {
+      data = await run<unknown>(args);
+    } catch {
+      return undefined;
+    }
+    const o = arr(data)
+      .map(obj)
+      .find((x) => x && !handedOut.has(str(x.orderId)) && same(str(x.symbol), coin) && (side === "long" ? ["long", "buy", "b"] : ["short", "sell", "a"]).includes(str(x.side).toLowerCase()) && Math.abs(num(x.limitPrice) - price) < 1e-9 && Math.abs((knownFigure(x.originalSize) ?? num(x.size)) - qty) < 1e-12 && (madeAt(x.timestamp) ?? 0) >= sent - SINCE_MS);
+    if (!o || !/^\d{1,20}$/.test(str(o.orderId))) return undefined;
+    const filled = Math.max(0, sig(qty - num(o.size)));
+    return { ref: str(o.orderId), status: filled > 0 ? "partial" : "open", filledQty: filled, ...(filled > 0 ? { avgPrice: price } : {}), native: { command: cmd(args), found: "mm perps open's answer was lost: this order, resting since then with the same coin, side, price and size, is it", order: { orderId: str(o.orderId), symbol: str(o.symbol), side: str(o.side), size: str(o.size), originalSize: str(o.originalSize), limitPrice: str(o.limitPrice) } } };
   }
 
   /** `mm perps positions`: the SDK's rows (symbol, side, size, entryPrice, positionValue, unrealizedPnl, marginUsed, leverage,
@@ -1283,16 +1432,19 @@ export function mmTrader(d: MmTraderDeps): LiveTrader & { kinds: MarketKind[] } 
     const args = ["perps", "close", "--venue", "hyperliquid", "--symbol", str(pos?.symbol) || coin, ...(all ? [] : ["--size", plain(Math.min(qty, have), sz)]), "--max-slippage-bps", String(ROOM * 10_000), "--wallet-timeout", String(WALLET_TIMEOUT_S), "--json"];
     const geo = ["predict", "geoblock", "--json"];
     if (!writesOn()) return off([geo, args]);
-    const line = await hlLine(`close ${plain(qty)} ${coin}`);
+    const doing = `close ${plain(qty)} ${coin}`;
+    const line = await hlLine(doing);
     if (line) return line;
     let data: unknown;
     try {
-      data = await call(args, HL, `close ${plain(qty)} ${coin}`, "order", { timeoutMs: MM_WRITE_TIMEOUT_MS });
-    } catch (e) {
-      return isRefusal(e) ? e : asRefusal(venue, "MetaMask", e);
+      data = await run<unknown>(args, { timeoutMs: MM_WRITE_TIMEOUT_MS });
+    } catch (err) {
+      const f = failureOf(err);
+      // a close is Hyperliquid's own IOC: it never rests, so only the position says whether it went
+      return lost(f) ? unsure(f, HL, doing, args, `${HL}'s position in ${coin}`) : saidNo(f, HL, doing, args, "order");
     }
     const row = arr(data).map(obj).find((r) => r && same(str(r.symbol), coin));
-    return perpState(row, args, all ? have : qty, `close ${plain(qty)} ${coin}`, clientId);
+    return perpState(row, args, all ? have : qty, doing, clientId);
   }
 
   // ---- the trader --------------------------------------------------------------------------------------
@@ -1324,9 +1476,11 @@ export function mmTrader(d: MmTraderDeps): LiveTrader & { kinds: MarketKind[] } 
     if (prior) return prior;
     const p = placeOnce(o);
     placing.set(o.clientId, p);
-    // a refusal placed nothing: the same id may be tried again
+    // a refusal placed nothing: the same id may be tried again — unless it may have been placed (its answer was lost), when the same id is
+    // the same answer, never a second order
     void p.then((r) => {
-      if (isRefusal(r)) placing.delete(o.clientId);
+      if (isRefusal(r) && !(r.detail as { unsure?: unknown } | undefined)?.unsure) placing.delete(o.clientId);
+      else if (!isRefusal(r) && r.ref) handedOut.add(r.ref);
     });
     return p;
   }
@@ -1456,9 +1610,10 @@ export function mmTrader(d: MmTraderDeps): LiveTrader & { kinds: MarketKind[] } 
       if (line) return line;
       let data: unknown;
       try {
-        data = await call(args, HL, `set ${spot.coin} to ${leverage}x`, "order", { timeoutMs: MM_WRITE_TIMEOUT_MS });
-      } catch (e) {
-        return isRefusal(e) ? e : asRefusal(venue, "MetaMask", e);
+        data = await run<unknown>(args, { timeoutMs: MM_WRITE_TIMEOUT_MS });
+      } catch (err) {
+        const f = failureOf(err);
+        return lost(f) ? unsure(f, HL, `set ${spot.coin} to ${leverage}x`, args, `${HL}'s leverage for ${spot.coin}`, {}) : saidNo(f, HL, `set ${spot.coin} to ${leverage}x`, args, "order");
       }
       const row = arr(data).map(obj).find((r) => r && same(str(r.symbol), spot.coin));
       if (!row || str(row.status).toLowerCase() === "rejected") return saidNo({ code: "ORDER_REJECTED", message: str(row?.error) || `${HL} did not take the leverage` }, HL, `set ${spot.coin} to ${leverage}x`, args, "order");
@@ -1541,7 +1696,7 @@ const VAULT_ID = /^(\d{1,10}):(0x[0-9a-fA-F]{40})$/;
  * MetaMask's own switch as well as the server's, and MetaMask's Guard may ask the owner to approve it (mm waits up to ten minutes) */
 export function mmEarner(d: MmEarnerDeps): LiveEarner {
   const { venue, run, env, now } = d;
-  const { said, cmd, writesOn, off, failureOf, saidNo, call, unread, jobOf, mayLand } = mmVoice(venue, run, env);
+  const { said, cmd, writesOn, off, failureOf, saidNo, call, unread, jobOf, mayLand, lost } = mmVoice(venue, run, env);
   const lists = new Map<string, { at: number; rows: Array<Record<string, unknown>> }>();
   const apys = new Map<string, number>();
   const submit = once<EarnState>();
@@ -1631,8 +1786,8 @@ export function mmEarner(d: MmEarnerDeps): LiveEarner {
     }
   };
 
-  /** money in or out: one wallet job. A job mm stopped waiting for (Guard asking the owner, a timeout) is pending, never refused: it may
-   * still go through, and is not sent twice */
+  /** money in or out: one wallet job. A job mm stopped waiting for (Guard asking the owner, a timeout), or one whose connection dropped after
+   * it was sent, is pending, never refused: it may still go through, and is not sent twice */
   const send = (args: string[], doing: string, clientId: string): Promise<EarnState | Refusal> =>
     submit(clientId, async () => {
       if (!writesOn()) return off([args]);
@@ -1641,10 +1796,10 @@ export function mmEarner(d: MmEarnerDeps): LiveEarner {
         data = await run<unknown>(args, { timeoutMs: MM_WRITE_TIMEOUT_MS });
       } catch (err) {
         const f = failureOf(err);
-        const waits = mayLand(f);
+        const waits = mayLand(f) ?? (lost(f) ? { mfa: false } : undefined);
         if (!waits) return saidNo(f, EARN, doing, args, "order");
         const job = jobOf(f);
-        return { ref: job ? `job:${job}` : `earn:${clientId}`, status: "pending", native: { command: cmd(args), waiting: waits.mfa ? "MetaMask's Guard asked you to approve this, by email or on MetaMask Mobile: it goes when you approve it" : "mm stopped waiting before it saw the transaction sent: MetaMask may still send it", code: f.code, said: said(f.message), ...(job ? { pollingId: job } : {}) } };
+        return { ref: job ? `job:${job}` : `earn:${clientId}`, status: "pending", native: { command: cmd(args), waiting: waits.mfa ? "MetaMask's Guard asked you to approve this, by email or on MetaMask Mobile: it goes when you approve it" : MAY_LAND.has(f.code) ? "mm stopped waiting before it saw the transaction sent: MetaMask may still send it" : "the connection dropped after it was sent: MetaMask may still send it (mm wallet requests list shows it)", code: f.code, said: said(f.message), ...(job ? { pollingId: job } : {}) } };
       }
       const x = obj(data);
       const hash = str(x?.hash);

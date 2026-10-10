@@ -80,7 +80,7 @@
  */
 import { isRefusal, type Refusal } from "../../core/errors.ts";
 import { isExcludedCategory, isIpoCategory, isRwaMarket, TABS, type TabId } from "./categories.ts";
-import { normalBase, type CompareMissing } from "./compare.ts";
+import { normalBase, type CompareMissing, type PlaceRule } from "./compare.ts";
 import { impliedUsd, PER_SHARE, PRE_IPO_CATEGORY, PRE_IPO_GROUP, PRE_IPO_PER_POINT } from "./preipo.ts";
 import type { EventsQuery, Listing, PublicSource } from "./public-markets.ts";
 import { inDollars, type LiveTrader, type Market, type MarketSession, type MarketStats } from "./trade.ts";
@@ -93,6 +93,9 @@ export interface ExploreVenue {
   trader: LiveTrader;
   /** the connection it was made with (`live:exchange:okx`, `live:kalshi`): a public source of the same connection is then not asked */
   connector?: string | undefined;
+  /** the venue's own place rule for this network, judged just now (compare.ts PlaceRule): `closed` — its lines cannot trade here, and say
+   * why in its words; `close-only` — they can (a sell closes), and say that only closing is taken */
+  place?: PlaceRule | undefined;
 }
 
 export interface ExploreSources {
@@ -260,6 +263,8 @@ interface Reader {
   connected: boolean;
   canTrade: boolean | "unknown";
   whyNot?: string | undefined;
+  /** the venue's close-only rule for this network, in its words: it trades, but only what closes */
+  closeOnly?: string | undefined;
   readOnly?: string | undefined;
   connectTo?: string | undefined;
   connector?: string | undefined;
@@ -320,6 +325,11 @@ function fromVenue(v: ExploreVenue): Reader {
   } catch {
     canTrade = "unknown";
   }
+  // the venue's own rule takes no order from this network: whatever the key may do, nothing trades there from here
+  if (v.place?.rule === "closed") {
+    canTrade = false;
+    whyNot = v.place.words;
+  }
   const t = v.trader;
   return {
     id: v.id,
@@ -327,6 +337,7 @@ function fromVenue(v: ExploreVenue): Reader {
     connected: true,
     canTrade,
     whyNot,
+    ...(v.place?.rule === "close-only" ? { closeOnly: v.place.words } : {}),
     connector: v.connector,
     family: v.connector ?? v.id,
     kalshi: /kalshi/i.test(v.id) || /^live:kalshi/.test(v.connector ?? ""),
@@ -434,7 +445,10 @@ async function atSource(r: Reader, o: { q: string; ms: number; perSource: number
       failed.push(gone(s.v.message, { code: s.v.code, part: s.part, ...(said ? { said } : {}) }));
     } else if (s.v instanceof Error || (s.part === "stats" ? !(s.v instanceof Map) : !Array.isArray(s.v))) failed.push(gone("answered in a way this could not read", { part: s.part }));
   }
-  const notes = notesOf(r, o.q);
+  // what a source says its list is made of, only when its listing answered: a source that refused this network, timed out or could not be
+  // read is described by its line in `missing`, not by a list it did not give (nor by what an earlier network's listing showed)
+  const listed = seen.some((s) => s.part === "markets" && s.done && Array.isArray(s.v));
+  const notes = listed ? notesOf(r, o.q) : [];
   if (got.length) return { got, missing: dedupe(failed), notes };
   // nothing to show: the source is missing as a whole, for its listing's reason first
   const first = failed.find((f) => f.part === "markets") ?? failed[0];
@@ -552,7 +566,7 @@ function atOf(r: Reader, m: Market, symbol = m.symbol, price = priceOf(m), open 
   // the venue's own words where it takes no order now, or where its market is out of its session (a stock at night: the venue says what it
   // does with an order until the open)
   const session = sessionOf(m);
-  const note = (r.connected && r.canTrade === false ? r.whyNot : undefined) ?? r.readOnly ?? issuerWords ?? ((open === false || session?.open === false) && typeof m.note === "string" && m.note ? m.note : undefined);
+  const note = (r.connected && r.canTrade === false ? r.whyNot : undefined) ?? (r.connected ? r.closeOnly : undefined) ?? r.readOnly ?? issuerWords ?? ((open === false || session?.open === false) && typeof m.note === "string" && m.note ? m.note : undefined);
   return {
     venue: r.id,
     venueName: lineName(r, m),

@@ -40,7 +40,7 @@ describe("Bybit, read by default", () => {
     const price = publicPrices({ open, clock: () => NOW });
     expect(await price("PENGU")).toBe(0.0123);
     expect(opened).toEqual(["kraken", "coinbase", "okx", "binance", "bybit"]);
-    // Binance said no once: the library keeps that failed load, so the next asset costs it nothing
+    // Binance said no once: its place rule holds it back ten minutes, so the next asset costs it nothing (then it is asked again, afresh)
     expect(await price("NOTLISTED")).toBeUndefined();
     expect(binance.counts.loads).toBe(1);
   });
@@ -137,10 +137,15 @@ describe("pre-IPO perpetuals at Binance and Bybit, from their documented shapes"
     expect(got[0]).toMatchObject({ name: "Anthropic pre-IPO perpetual on Bybit", base: "ANTHROPIC", quote: "USDT", price: 1987.1, bid: 1987, ask: 1987.2, open: true, change24h: -42.9, changePct24h: -2.1133, volumeUsd24h: 35511230.12, fundingRate: 0.00005, nextFundingAt: "2026-10-08T20:00:00.000Z", maxLeverage: 20, implied: { perPoint: 1_000_000_000, unit: UNIT, usd: 1_987_100_000_000 }, issuer: "Anthropic" });
     // the two pages, then a ticker for each contract: GETs to Bybit's host only
     expect(net.sent.map((s) => s.url.replace("https://api.bybit.com/v5/market/", ""))).toEqual(["instruments-info?category=linear&limit=1000", "instruments-info?category=linear&limit=1000&cursor=cursor-2", "tickers?category=linear&symbol=ANTHROPICUSDT", "tickers?category=linear&symbol=OPENAIUSDT", "tickers?category=linear&symbol=OURAUSDT"]);
-    // a list answered with a retCode is Bybit's refusal, in its own words
-    const bad = network([["/v5/market/instruments-info", json({ retCode: 10006, retMsg: "Too many visits!", result: {}, retExtInfo: {}, time: NOW })]]);
-    const r = await preIpoPublic(venueOf("bybit"), { http: bad.http, clock: () => NOW }).listings({ limit: 5 });
-    expect(r).toMatchObject({ code: "E_VENUE_REJECTED", venue: "bybit-preipo", message: "Bybit refused the request (retCode 10006)", native: { status: 200, said: '{"retCode":10006,"retMsg":"Too many visits!"}' } });
+    // a list answered with a retCode is Bybit's refusal, in its own words: its rate limit (10006) is a wait, held a minute
+    const busy = network([["/v5/market/instruments-info", json({ retCode: 10006, retMsg: "Too many visits!", result: {}, retExtInfo: {}, time: NOW })]]);
+    const r = await preIpoPublic(venueOf("bybit"), { http: busy.http, clock: () => NOW }).listings({ limit: 5 });
+    expect(r).toMatchObject({ code: "E_VENUE_UNREACHABLE", venue: "bybit-preipo", message: "Bybit is rate-limiting this machine: try again in a minute", native: { said: '{"retCode":10006,"retMsg":"Too many visits!"}' } });
+    expect(isRefusal(r) && holdBackMs(r)).toBeGreaterThan(59_000);
+    // a retCode it does not know is a no, in its retMsg
+    const bad = network([["/v5/market/instruments-info", json({ retCode: 10001, retMsg: "params error", result: {}, retExtInfo: {}, time: NOW })]]);
+    const no = await preIpoPublic(venueOf("bybit"), { http: bad.http, clock: () => NOW }).listings({ limit: 5 });
+    expect(no).toMatchObject({ code: "E_VENUE_REJECTED", venue: "bybit-preipo", message: "Bybit refused the request (retCode 10001)", native: { status: 200, said: '{"retCode":10001,"retMsg":"params error"}' } });
   });
 
   it("Binance's 451 and Bybit's 403 are each its own refusal of this location, in its own words — Binance's sentence whole — said once and held back ten minutes", async () => {

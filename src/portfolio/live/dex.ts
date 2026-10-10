@@ -49,10 +49,11 @@ import { decodeEventLog, decodeFunctionData, encodeFunctionData, erc20Abi, forma
 import { isRefusal, type Refusal } from "../../core/errors.ts";
 import { no } from "../refuse.ts";
 import { RWA_CATEGORY } from "./categories.ts";
-import { CHAIN_BY_ID, CHAINS, STABLECOINS, type ChainName, type ChainReader, type TokenRef } from "./chain.ts";
+import { CHAIN_BY_ID, CHAINS, STABLECOINS, type ChainName, type ChainReader, type Mined, type SentTx, type TokenRef } from "./chain.ts";
+import { holdBackMs } from "./public-markets.ts";
 import { STOCK_TOKEN_ISSUER, STOCK_TOKEN_TERMS, stockTokens, type StockToken } from "./robinhood.ts";
 import { DONE, badOrder, floorTo, inDollars, pick, plain, type LiveTrader, type Market, type OrderRequest, type OrderState } from "./trade.ts";
-import { edgeRefused, edgeWords, REGION, isStable, num, redact, unreachable, venueSaidNo, type Http, type HttpReply, type LiveBalance } from "./types.ts";
+import { edgeRefused, edgeWords, REGION, isStable, notTheApi, notTheApiWords, num, redact, unreachable, venueSaidNo, type Http, type HttpReply, type LiveBalance } from "./types.ts";
 
 const LIFI = "https://li.quest/v1";
 const NAME = "LI.FI";
@@ -256,12 +257,16 @@ interface Tok {
 }
 
 interface Listed {
+  /** when LI.FI's list was read: it is kept five minutes */
   at: number;
+  /** LI.FI's list as it answered, by chain id: the markets are built again from it when Robinhood's list answers after it */
+  all: Obj;
   /** by the account's symbol in capitals */
   bySymbol: Map<string, { base: Tok; usdc: Tok }>;
   markets: Market[];
-  /** why Robinhood Chain's Stock Tokens are not listed this time */
-  robinhoodUnread?: string | undefined;
+  /** why Robinhood Chain's Stock Tokens are not listed this time, in Robinhood's own answer, and until when that is kept before Robinhood's
+   * list is asked again (its own hold: twenty seconds for no answer, ten minutes for a place rule or an edge, a ban's own time) */
+  robinhoodUnread?: { until: number; said: Refusal } | undefined;
 }
 
 /** an order prepared for the wallet: kept so that a retry is the same order, and so that the hash the wallet sends can be judged */
@@ -328,17 +333,33 @@ function parseSymbol(venue: string, symbol: string): { base: string; quote: stri
   return { base: m[1]!.trim(), quote: dollar, chain };
 }
 
-/** LI.FI's answer when it is not a yes, as one of the account's refusals, with LI.FI's own words */
-function lifiNo(venue: string, r: HttpReply): Refusal {
+/** a refusal made again through no(), with what is added inside its native or its detail — never spread over it after, which would undo the
+ * address scrub no() does */
+const remade = (r: Refusal, extra: { native?: Record<string, unknown>; detail?: Record<string, unknown> }): Refusal =>
+  no(r.code, { ...(r.venue !== undefined ? { venue: r.venue } : {}), ...(r.tool !== undefined ? { tool: r.tool } : {}), message: r.message, native: { ...(r.native && typeof r.native === "object" ? (r.native as Record<string, unknown>) : {}), ...extra.native }, ...(r.detail || extra.detail ? { detail: { ...r.detail, ...extra.detail } } : {}) });
+/** a refusal given by another party than the venue it was met at (LI.FI, for a wallet's swaps and bridges): `native.party` names it, so the
+ * account holds that party back and not the wallet (service.ts) */
+export const byParty = (r: Refusal, party: string): Refusal => remade(r, { native: { party } });
+/** an issuer's refusal about one token (xStocks' record of it, Robinhood's Stock Token list, Ondo's contract): `detail.scope`, so nothing
+ * else of the wallet is held back for it (public-markets.ts holdBackMs). This file keeps it for that token for the hold its own refusal
+ * says (`issuerHoldMs`) */
+const forProduct = (r: Refusal): Refusal => remade(r, { detail: { scope: "product" } });
+/** how long an issuer's refusal holds that token back: holdBackMs read without the product scope that keeps it from holding anything else */
+const issuerHoldMs = (r: Refusal, now: number): number => holdBackMs({ ...r, detail: { ...r.detail, scope: undefined } }, now);
+
+/** LI.FI's answer when it is not a yes, as one of the account's refusals, with LI.FI's own words (cleaned of any address before they are
+ * cut). LI.FI ANSWERING is read first — a request it did not take, no route — and only then words about a place, in LI.FI's own top-level
+ * message: a DEX or a bridge LI.FI asked from its own servers may say "unavailable from a restricted jurisdiction", and that is the tool's
+ * word about LI.FI's servers, quoted with the tool's name, never LI.FI's rule for this network */
+export function lifiNo(venue: string, r: HttpReply): Refusal {
   const b = obj(r.body);
-  const said = redact(r.text.replace(/\s+/g, " ").trim().slice(0, 220), []);
-  const native = { status: r.status, said };
-  if (r.status === 451 || REGION.test(r.text)) return venueSaidNo(venue, NAME, r.status, r.text);
-  // a 403 is LI.FI's (or its edge's) no to this request: its own words when it gives some; a page with none refuses this network. It answers
-  // from a US network (checked 2026-10-08: /v1/chains and /v1/quote both 200), so nothing here says whom its terms exclude
-  if (edgeRefused(r.status, r.text)) return no("E_VENUE_GEOBLOCKED", { venue, message: edgeWords(NAME, r.status, r.text), native: { status: r.status, edge: true } });
-  if (r.status === 403) return no("E_VENUE_PERMISSION", { venue, message: `${NAME} refused this request (HTTP 403)${str(b.message) ? `: “${str(b.message)}”` : ""}. That is its own answer, and the account does not look for a way around it`, native });
-  if (r.status === 400) return { ...badOrder(venue, NAME, str(b.message) || "it did not take the request as written"), native };
+  const said = redact(r.text, []).replace(/\s+/g, " ").trim().slice(0, 220);
+  const native = { status: r.status, said, party: "lifi" };
+  // LI.FI's own words: its top-level message when it answered JSON, the page when it did not — never what a tool it asked said, nested in
+  // its answer
+  const own = r.body !== undefined && typeof r.body === "object" ? str(b.message) : r.text;
+  if (r.status === 451 || REGION.test(own)) return byParty(venueSaidNo(venue, NAME, r.status, r.text, [], r), "lifi");
+  if (r.status === 400) return no("E_VENUE_ORDER_INVALID", { venue, message: `${NAME}: ${str(b.message) || "it did not take the request as written"}`, native });
   if (r.status === 404 && num(b.code) === 1002) {
     // no route: `errors` is { filteredOut: [{ reason }], failed: [{ subpaths: { path: [{ tool, code, message }] } }] }, or a flat list of the same
     const errors = b.errors;
@@ -346,10 +367,31 @@ function lifiNo(venue: string, r: HttpReply): Refusal {
     const reasons = [...arr(obj(errors).filteredOut).map((f) => str(f.reason)), ...tools.map((t) => `${str(t.tool)}: ${str(t.code)}${t.message ? ` (${str(t.message)})` : ""}`)].filter(Boolean);
     const codes = tools.map((t) => str(t.code));
     if (codes.length && codes.every((c) => c === "RPC_ERROR" || c === "TOOL_TIMEOUT" || c === "RATE_LIMIT_EXCEEDED")) return no("E_VENUE_UNREACHABLE", { venue, message: `${NAME} could not reach the DEXes on that chain just now: try again in a minute`, native: { ...native, codes } });
-    return { ...badOrder(venue, NAME, `no route for this swap${reasons.length ? `: ${[...new Set(reasons)].slice(0, 3).join("; ")}` : ""}`), native: { ...native, codes } };
+    return no("E_VENUE_ORDER_INVALID", { venue, message: `${NAME}: no route for this swap${reasons.length ? `: ${[...new Set(reasons)].slice(0, 3).join("; ")}` : ""}`, native: { ...native, codes } });
   }
-  if (r.status === 429) return no("E_VENUE_UNREACHABLE", { venue, message: `${NAME} is rate-limiting this machine: without a key it answers 75 quotes in two hours. Try again later`, native });
-  return venueSaidNo(venue, NAME, r.status, r.text);
+  // a 403 is LI.FI's (or its edge's) no to this request: its own words when it gives some; a page with none refuses this network. It answers
+  // from a US network (checked 2026-10-08: /v1/chains and /v1/quote both 200), so nothing here says whom its terms exclude
+  if (edgeRefused(r.status, r.text)) return no("E_VENUE_GEOBLOCKED", { venue, message: edgeWords(NAME, r.status, r.text), native: { status: r.status, edge: true, party: "lifi" } });
+  if (r.status === 403) return no("E_VENUE_PERMISSION", { venue, message: `${NAME} refused this request (HTTP 403)${str(b.message) ? `: “${str(b.message)}”` : ""}. That is its own answer, and the account does not look for a way around it`, native });
+  if (r.status === 429) return no("E_VENUE_UNREACHABLE", { venue, message: `${NAME} is rate-limiting this machine: without a key it answers 75 quotes in two hours. Try again later`, native: { ...native, ...(r.retryAfterMs ? { until: Date.now() + r.retryAfterMs } : {}) } });
+  return byParty(venueSaidNo(venue, NAME, r.status, own || said, [], r), "lifi");
+}
+
+/** LI.FI holding this machine back — a place rule or an edge page (ten minutes), a ban or a wait it named (its own time), a rate limit (a
+ * minute), no answer (twenty seconds): public-markets.ts holdBackMs. Kept by the network it is asked through, so the wallet's prices of its
+ * tokenised shares, its swaps and its bridges ask LI.FI alike: one refusal is one answer, and one hold, for all of them. LI.FI saying the
+ * DEXes or bridges it asked did not answer is about them, not about this machine reaching LI.FI, and holds nothing */
+const lifiHeld = new WeakMap<Http, { until: number; said: Refusal }>();
+export function lifiHold(http: Http, said: Refusal, now: number): void {
+  const ms = holdBackMs(said, now);
+  if (ms <= 0 || (said.native as { codes?: unknown } | undefined)?.codes !== undefined) return;
+  const was = lifiHeld.get(http);
+  if (!was || was.until <= now || was.until < now + ms) lifiHeld.set(http, { until: now + ms, said });
+}
+/** the refusal that holds LI.FI back now, if one does, as met at `venue` */
+export function lifiHolding(http: Http, now: number, venue: string): Refusal | undefined {
+  const h = lifiHeld.get(http);
+  return h && now < h.until ? { ...h.said, venue } : undefined;
 }
 
 /** the swap LI.FI answered, held to what was asked before a wallet is shown it (the checks are the ones in LI.FI's own contract) */
@@ -388,30 +430,48 @@ function verifyRoute(q: Obj, want: { chainId: number; diamond: Hex; owner: Hex; 
   return { fromAmount, minOut, value };
 }
 
+/** LI.FI's price of a tokenised share a wallet holds, by the network asked through, then by chain and address: kept a minute */
+const issuedPrices = new WeakMap<Http, Map<string, { at: number; price: number }>>();
+const PRICE_MS = 60_000;
+
 /** The best-known Ondo Stocks and xStocks (KNOWN) an address holds, read from the chains, each held one priced by LI.FI's GET /v1/token
- * (nothing is asked when nothing is held). They are held as RWAs, and sold from the wallet as the market their row finds by symbol and
- * chain (`NVDAon/USDC@Ethereum`). A chain that does not answer is named in `failed`, not thrown */
-export async function issuedHoldings(holder: Hex, chain: ChainReader, http: Http): Promise<{ rows: LiveBalance[]; failed: ChainName[] }> {
+ * (nothing is asked when nothing is held; a price is kept a minute). They are held as RWAs, and sold from the wallet as the market their row
+ * finds by symbol and chain (`NVDAon/USDC@Ethereum`). A chain that does not answer is named in `failed`, not thrown. LI.FI refusing this
+ * machine is `unpriced`, in LI.FI's words: the tokens are shown without a price, LI.FI is not asked for the others in this read, and not
+ * again while its refusal holds it back (lifiHold) — the trader's reads of the same markets see the same refusal */
+export async function issuedHoldings(holder: Hex, chain: ChainReader, http: Http, opts: { venue?: string | undefined; now?: (() => number) | undefined } = {}): Promise<{ rows: LiveBalance[]; failed: ChainName[]; unpriced?: Refusal | undefined }> {
+  const venue = opts.venue ?? "wallet";
+  const now = opts.now ?? Date.now;
   const read = await chain.tokens(
     holder,
     KNOWN.map((k) => ({ chain: k.chain, asset: k.symbol, address: k.address })),
   );
   const held = read.rows.filter((b) => b.amount > 0);
-  const rows = await Promise.all(
-    held.map(async (b): Promise<LiveBalance> => {
-      const k = KNOWN.find((x) => x.chain === b.chain && x.symbol === b.asset)!;
-      let price: number | undefined;
+  const prices = issuedPrices.get(http) ?? new Map<string, { at: number; price: number }>();
+  issuedPrices.set(http, prices);
+  let refused = lifiHolding(http, now(), venue);
+  const rows: LiveBalance[] = [];
+  // one at a time: a refusal from LI.FI stops the asking for the rest of this read
+  for (const b of held) {
+    const k = KNOWN.find((x) => x.chain === b.chain && x.symbol === b.asset)!;
+    const key = `${k.chain}|${k.address.toLowerCase()}`;
+    const kept = prices.get(key);
+    let price = kept && now() - kept.at < PRICE_MS ? kept.price : undefined;
+    if (price === undefined && !refused) {
       try {
         const r = await http(`${LIFI}/token?chain=${chainId(k.chain)}&token=${k.address}`, { headers: { accept: "application/json" }, timeoutMs: 10_000 });
         const t = obj(r.body);
-        if (r.status === 200 && same(t.address, k.address) && num(t.priceUSD) > 0) price = num(t.priceUSD);
-      } catch {
-        // no price: the token is shown, and counts for nothing
+        if (r.status === 200 && same(t.address, k.address) && num(t.priceUSD) > 0) prices.set(key, { at: now(), price: (price = num(t.priceUSD)) });
+        else if (r.status !== 200) refused = lifiNo(venue, r);
+        // a 200 that is not LI.FI's price of this token: no price this time, the token shown and counted for nothing
+      } catch (err) {
+        refused = byParty(unreachable(venue, NAME, err), "lifi");
       }
-      return { asset: b.asset, amount: b.amount, ...(price !== undefined ? { usd: b.amount * price } : {}), where: `${b.chain} · ${ISSUERS[k.issuer].kind}`, class: "rwa" };
-    }),
-  );
-  return { rows, failed: read.failed };
+      if (refused) lifiHold(http, refused, now());
+    }
+    rows.push({ asset: b.asset, amount: b.amount, ...(price !== undefined ? { usd: b.amount * price } : {}), where: `${b.chain} · ${ISSUERS[k.issuer].kind}`, class: "rwa" });
+  }
+  return { rows, failed: read.failed, ...(refused && rows.some((r) => r.usd === undefined) ? { unpriced: refused } : {}) };
 }
 
 export function dexTrader(req: DexRequest): LiveTrader {
@@ -424,16 +484,29 @@ export function dexTrader(req: DexRequest): LiveTrader {
   const valued = new Map<string, number>();
   const routes = new Map<string, Route>();
   const byHash = new Map<string, Route>();
-  /** what each issuer last said of a token, by chain and address */
-  const confirmed = new Map<string, { at: number; said: Confirmed | Refusal }>();
-
+  /** what each issuer last said of a token, by chain and address, and until when it is kept */
+  const confirmed = new Map<string, { until: number; said: Confirmed | Refusal }>();
+  /** LI.FI asked — not while a refusal of its holds it back (lifiHold), and one that holds it back is kept for every later ask */
   const call = async (path: string, timeoutMs = 10_000): Promise<HttpReply | Refusal> => {
+    const held = lifiHolding(http, now(), venue);
+    if (held) return held;
     try {
       return await http(`${LIFI}${path}`, { headers: { accept: "application/json" }, timeoutMs });
     } catch (err) {
-      return unreachable(venue, NAME, err);
+      const u = byParty(unreachable(venue, NAME, err), "lifi");
+      lifiHold(http, u, now());
+      return u;
     }
   };
+  /** LI.FI's no, as lifiNo reads it, held back as long as it says */
+  const lifiSaid = (r: HttpReply): Refusal => {
+    const x = lifiNo(venue, r);
+    lifiHold(http, x, now());
+    return x;
+  };
+  /** a 200 that is not LI.FI's JSON (a filtering network's page, a captive portal, an empty or cut answer): no answer, kept nowhere, and none
+   * of the page's text in it — such a page may print this machine's address */
+  const notLifi = (r: HttpReply, what: string): Refusal => no("E_VENUE_UNREACHABLE", { venue, message: notTheApi(r) ? notTheApiWords(NAME) : `${NAME} answered something that is not ${what}: try again shortly`, native: { status: r.status, party: "lifi" } });
 
   const marketOf = (t: Tok, price: number | undefined): Market => {
     const dollar = dollarOn(t.chain).symbol;
@@ -449,21 +522,32 @@ export function dexTrader(req: DexRequest): LiveTrader {
    * carries it (LI.FI says symbols are not unique: Base has a USDT and a USD₮0), and never when LI.FI flags it. A token an issuer stands
    * behind is found by its address, first (see the top of this file) */
   const list = async (): Promise<Listed | Refusal> => {
-    if (listed && now() - listed.at < LIST_MS) return listed;
-    const r = await call(`/tokens?chains=${DEX_CHAINS.map(chainId).join(",")}`, 20_000);
-    if (isRefusal(r)) return r;
-    if (r.status !== 200) return lifiNo(venue, r);
+    const fresh = listed && now() - listed.at < LIST_MS ? listed : undefined;
+    // kept, unless Robinhood's list was unread when it was built and its hold is over: then Robinhood is asked again, and the markets built
+    // again from LI.FI's kept list — not left unread for as long as LI.FI's list is kept
+    if (fresh && !(fresh.robinhoodUnread && now() >= fresh.robinhoodUnread.until)) return fresh;
+    let all: Obj;
+    let at: number;
+    if (fresh) ({ all, at } = fresh);
+    else {
+      const r = await call(`/tokens?chains=${DEX_CHAINS.map(chainId).join(",")}`, 20_000);
+      if (isRefusal(r)) return r;
+      if (r.status !== 200) return lifiSaid(r);
+      if (r.body === undefined || typeof r.body !== "object") return notLifi(r, "its token list");
+      // the answer is { tokens: { "<chain id>": [Token] } } (docs.li.fi shows the chain ids at the top; what LI.FI sends wraps them)
+      all = obj(obj(r.body).tokens ?? r.body);
+      at = now();
+    }
     // Robinhood's own list: what makes a token on Robinhood Chain a Stock Token
     let robinhood: StockToken[] | undefined;
-    let robinhoodUnread: string | undefined;
+    let robinhoodUnread: Listed["robinhoodUnread"];
     try {
       robinhood = (await stockTokens(http, now())).filter((t) => t.chain === "Robinhood Chain");
     } catch (err) {
-      robinhoodUnread = `Robinhood's Stock Token list did not answer${isRefusal(err) ? ` (${err.message})` : ""}: its tokens on Robinhood Chain cannot be told from others under the same symbols just now`;
+      const said = robinhoodNo(err);
+      robinhoodUnread = { until: now() + Math.max(issuerHoldMs(said, now()), 20_000), said };
     }
     const rhSet = robinhood ? new Set(robinhood.map((t) => t.address.toLowerCase())) : undefined;
-    // the answer is { tokens: { "<chain id>": [Token] } } (docs.li.fi shows the chain ids at the top; what LI.FI sends wraps them)
-    const all = obj(obj(r.body).tokens ?? r.body);
     const bySymbol = new Map<string, { base: Tok; usdc: Tok }>();
     const known: Market[] = [];
     const rest: Market[] = [];
@@ -516,13 +600,19 @@ export function dexTrader(req: DexRequest): LiveTrader {
       const t = f?.find(symbol);
       if (f && t) add(t, f.usdc, known);
     }
-    // then any token LI.FI verifies, by a symbol that names one token on its chain
-    for (const [, f] of found) for (const t of f.tokens) if (!t.issuer && t.verified && f.find(t.symbol) === t) add(t, f.usdc, rest);
+    // then any token LI.FI verifies, by a symbol that names one token on its chain — on Robinhood Chain only while Robinhood's list says
+    // which tokens there are its own: without it, a verified "NVDA" there may be another's, and is offered as nothing at all
+    for (const [c, f] of found) for (const t of f.tokens) if (!t.issuer && t.verified && f.find(t.symbol) === t && (c !== "Robinhood Chain" || rhSet)) add(t, f.usdc, rest);
     // to start from: the best-known coins, then the best-known tokenised shares LI.FI prices, then the rest
     const startRwa = RWA_START.map(([c, s]) => issued.find((m) => m.symbol.toUpperCase() === `${s}/${dollarOn(c).symbol}@${c}`.toUpperCase() && m.price !== undefined)).filter((m): m is Market => m !== undefined);
-    listed = { at: now(), bySymbol, markets: [...known.slice(0, COINS_FIRST), ...startRwa, ...known.slice(COINS_FIRST), ...rest, ...issued.filter((m) => !startRwa.includes(m))], ...(robinhoodUnread ? { robinhoodUnread } : {}) };
+    // a list with no chain's dollar in it is not LI.FI's list of these chains: it is not kept
+    if (!found.size) return notLifi({ status: 200, body: {}, text: "" }, "its token list");
+    listed = { at, all, bySymbol, markets: [...known.slice(0, COINS_FIRST), ...startRwa, ...known.slice(COINS_FIRST), ...rest, ...issued.filter((m) => !startRwa.includes(m))], ...(robinhoodUnread ? { robinhoodUnread } : {}) };
     return listed;
   };
+  /** Robinhood's Stock Token list not read, in Robinhood's own answer: its place rule, its edge page, its ban with its time, or no answer —
+   * the code and the hold its own (robinhood.ts stockTokens) — as Robinhood's about its tokens, holding back nothing else of the wallet */
+  const robinhoodNo = (err: unknown): Refusal => forProduct(isRefusal(err) ? { ...err, venue } : unreachable(venue, "Robinhood's Stock Token list", err));
 
   const lookup = async (symbol: string): Promise<{ base: Tok; usdc: Tok; chain: ChainName } | Refusal> => {
     const p = parseSymbol(venue, symbol);
@@ -531,7 +621,10 @@ export function dexTrader(req: DexRequest): LiveTrader {
     if (isRefusal(l)) return l;
     const hit = l.bySymbol.get(`${p.base}/${p.quote}@${p.chain}`.toUpperCase());
     if (!hit) {
-      if (p.chain === "Robinhood Chain") return no(l.robinhoodUnread ? "E_VENUE_UNREACHABLE" : "E_ACCOUNT_BAD_ACTION", { venue, message: l.robinhoodUnread ?? `Robinhood's own list names no Stock Token ${p.base} on Robinhood Chain: only Robinhood's Stock Tokens are swapped there from here` });
+      if (p.chain === "Robinhood Chain") {
+        const u = l.robinhoodUnread?.said;
+        return u ? { ...u, message: `${u.message}: its tokens on Robinhood Chain cannot be told from others under the same symbols just now` } : no("E_ACCOUNT_BAD_ACTION", { venue, message: `Robinhood's own list names no Stock Token ${p.base} on Robinhood Chain: only Robinhood's Stock Tokens are swapped there from here` });
+      }
       // a share an issuer has on another chain: say where it is
       const elsewhere = [...l.bySymbol.values()].filter((h) => h.base.issuer && h.base.symbol.toUpperCase() === p.base.toUpperCase()).map((h) => h.base);
       if (elsewhere.length) return no("E_ACCOUNT_BAD_ACTION", { venue, message: `${elsewhere[0]!.symbol}, issued by ${ISSUERS[elsewhere[0]!.issuer!].issuer}, is swapped here on ${[...new Set(elsewhere.map((t) => t.chain))].join(" and ")}, not on ${p.chain}: ${elsewhere.map((t) => marketOf(t, undefined).symbol).join(", ")}` });
@@ -540,26 +633,34 @@ export function dexTrader(req: DexRequest): LiveTrader {
     return { ...hit, chain: p.chain };
   };
 
-  /** the issuer's own word on a token before it is priced or swapped: its list, its contract (kept a minute; an issuer that did not answer
-   * is asked again next time). A token whose contract moves it only between approved wallets is refused here, with the issuer's rule */
+  /** the issuer's own word on a token before it is priced or swapped: its list, its contract (kept a minute; an issuer that cannot be asked
+   * just now — no answer, its place rule, its edge, its ban — is held back for as long as its own refusal says, holdBackMs). A token whose
+   * contract moves it only between approved wallets is refused here, with the issuer's rule */
   const confirm = async (t: Tok): Promise<Confirmed | Refusal> => {
     if (!t.issuer) return {};
     const is = ISSUERS[t.issuer];
     if (is.restricted) return no("E_VENUE_TRANSFER_RESTRICTED", { venue, message: `${t.symbol} on ${t.chain}: ${is.terms}. Nothing was prepared`, native: { token: t.address, chain: t.chain, issuer: is.issuer } });
     const key = `${t.chain}|${t.address.toLowerCase()}`;
     const kept = confirmed.get(key);
-    if (kept && now() - kept.at < CONFIRM_MS) return kept.said;
-    const said = await askIssuer(t);
-    if (!(isRefusal(said) && said.code === "E_VENUE_UNREACHABLE")) confirmed.set(key, { at: now(), said });
+    if (kept && now() < kept.until) return kept.said;
+    const asked = await askIssuer(t);
+    // the issuer's refusal is about this token: it holds back nothing else of the wallet, and this token for as long as it says
+    const said = isRefusal(asked) ? forProduct(asked) : asked;
+    const ms = isRefusal(said) && (said.code === "E_VENUE_UNREACHABLE" || said.code === "E_VENUE_GEOBLOCKED") ? issuerHoldMs(said, now()) : CONFIRM_MS;
+    if (ms > 0) confirmed.set(key, { until: now() + ms, said });
     return said;
   };
   const askIssuer = async (t: Tok): Promise<Confirmed | Refusal> => {
     const native = { token: t.address, chain: t.chain };
+    /** the issuer not answering, or refusing this network, in its own refusal — its code, its words, its hold — and what that leaves undone */
+    const unconfirmed = (said: Refusal): Refusal => no(said.code, { venue, message: `${said.message}: ${t.symbol} could not be confirmed as its own, so nothing was prepared`, native: { ...(said.native && typeof said.native === "object" ? (said.native as Record<string, unknown>) : {}), ...native } });
     if (t.issuer === "robinhood") {
       let list: StockToken[];
       try {
         list = await stockTokens(http, now());
-      } catch {
+      } catch (err) {
+        // Robinhood's own no (robinhood.ts: its place rule, an edge page, a ban) kept as it is; only a real throw is "did not answer"
+        if (isRefusal(err)) return unconfirmed(err);
         return no("E_VENUE_UNREACHABLE", { venue, message: `Robinhood's Stock Token list did not answer: ${t.symbol} could not be confirmed as Robinhood's own token, so nothing was prepared`, native });
       }
       if (!list.some((s) => s.chain === t.chain && same(s.address, t.address))) return no("E_VENUE_REJECTED", { venue, message: `Robinhood's own list no longer names ${t.address} as its ${t.symbol} Stock Token: it is not traded from here`, native });
@@ -587,18 +688,26 @@ export function dexTrader(req: DexRequest): LiveTrader {
       return no("E_VENUE_UNREACHABLE", { venue, message: `xStocks did not answer: ${t.symbol} could not be confirmed as its own, so nothing was prepared`, native });
     }
     if (r.status === 404) return no("E_VENUE_REJECTED", { venue, message: `xStocks' own list has no ${t.symbol}: it is not traded from here as an xStock`, native });
-    if (r.status !== 200) return no("E_VENUE_UNREACHABLE", { venue, message: `xStocks answered HTTP ${r.status}: ${t.symbol} could not be confirmed as its own, so nothing was prepared`, native: { ...native, status: r.status } });
+    if (r.status !== 200) {
+      // xStocks' own answer: its place rule, its edge's page, its ban with its time, a rate limit, an outage — read as every answer is. Its
+      // API takes no key, so a 401 or a 403 that is none of those is xStocks refusing the request, not a key's permission
+      const said = venueSaidNo(venue, "xStocks", r.status, r.text, [], r);
+      return unconfirmed(said.code === "E_VENUE_UNAUTHORIZED" || said.code === "E_VENUE_PERMISSION" ? no("E_VENUE_REJECTED", { venue, message: `xStocks refused the request (HTTP ${r.status})`, native: { status: r.status } }) : said);
+    }
+    // a 200 that is not xStocks' record (a filtering network's page, an empty or cut answer) says nothing of what xStocks lists
+    if (r.body === undefined || !Array.isArray(obj(r.body).deployments)) return no("E_VENUE_UNREACHABLE", { venue, message: `xStocks answered something that is not its record of ${t.symbol}: it could not be confirmed as its own, so nothing was prepared`, native: { ...native, status: r.status } });
     const b = obj(r.body);
     const at = arr(b.deployments).find((d) => str(d.network) === network);
     if (!at || !same(at.address, t.address)) return no("E_VENUE_REJECTED", { venue, message: `xStocks' own list does not name ${t.address} as its ${t.symbol} on ${t.chain}: it is not traded from here`, native: { ...native, listed: str(at?.address) || undefined } });
     return b.isTradingHalted === true || obj(b.trading).isTradingHalted === true ? { said: `xStocks reports trading in ${t.symbol} halted: its price may not follow the share until it resumes` } : {};
   };
 
-  /** what the wallet holds of a token on a chain, in whole tokens */
+  /** what the wallet holds of a token on a chain, in whole tokens. An endpoint that refused or rate-limited this machine has not said the
+   * wallet holds nothing, and nor has a chain that answered without the token's row (its balance call reverted): both are "did not answer" */
   const holds = async (c: ChainName, t: { address: Hex; symbol: string }): Promise<number | Refusal> => {
     const r = t.address === NATIVE ? await chain.native(owner, [c]) : await chain.tokens(owner, [{ chain: c, asset: t.symbol, address: t.address }]);
-    if (r.failed.length) return no("E_VENUE_UNREACHABLE", { venue, message: `${c} did not answer: the wallet's ${t.symbol} could not be read, so nothing was prepared` });
-    return r.rows[0]?.amount ?? 0;
+    if (r.failed.length || !r.rows.length) return no("E_VENUE_UNREACHABLE", { venue, message: `${c} did not answer${r.said?.[c] ? ` (${r.said[c]})` : ""}: the wallet's ${t.symbol} could not be read, so nothing was prepared` });
+    return r.rows[0]!.amount;
   };
   const short = (c: ChainName, asset: string, have: number, need: number, what = "this swap needs"): Refusal => no("E_VENUE_INSUFFICIENT", { venue, message: `the wallet holds ${plain(have, 8)} ${asset} on ${c}; ${what} ${plain(need, 8)}`, native: { asset, chain: c, have, need } });
 
@@ -624,7 +733,13 @@ export function dexTrader(req: DexRequest): LiveTrader {
   /** the chain's own answer: not mined yet, reverted, or LI.FI's contract saying what this wallet received */
   const fromReceipt = async (ref: Hex, c: ChainName, known: Route | undefined, base: Tok | undefined, lifi: unknown): Promise<OrderState> => {
     const pending: OrderState = { ref, status: "pending", filledQty: 0, native: { lifi, chain: "not mined yet" } };
-    const rc = await chain.receipt(c, ref);
+    let rc: Mined | undefined;
+    try {
+      rc = await chain.receipt(c, ref);
+    } catch (err) {
+      // the chain's endpoint not answering, or refusing this network, is not "not mined yet": it is said in its words, and asked again later
+      return { ...pending, native: { lifi, chain: isRefusal(err) ? err.message : `${c} did not answer` } };
+    }
     if (!rc) return pending;
     if (rc.status === "reverted") return { ref, status: "rejected", filledQty: 0, native: { lifi, receipt: "reverted: nothing moved but the network fee" } };
     const usdc = dollarOn(c).address;
@@ -663,7 +778,10 @@ export function dexTrader(req: DexRequest): LiveTrader {
       if (!isRefusal(hit)) base = hit.base;
     }
     const r = await call(`/status?txHash=${ref}&fromChain=${chainId(c)}&toChain=${chainId(c)}`);
-    let lifi: unknown = isRefusal(r) ? { unreachable: r.message } : { status: r.status, said: redact(r.text.replace(/\s+/g, " ").trim().slice(0, 220), []) };
+    // LI.FI refusing this machine (its edge, a ban, a rate limit) holds it back for every ask, this order's next look too: the chain is the
+    // record meanwhile. Its words are cleaned of any address before they are cut, and before they ride on the order to the page and the ledger
+    if (!isRefusal(r) && r.status !== 200 && r.status !== 400 && r.status !== 404) lifiSaid(r);
+    let lifi: unknown = isRefusal(r) ? { unreachable: r.message } : { status: r.status, said: redact(r.text, []).replace(/\s+/g, " ").trim().slice(0, 220) };
     if (!isRefusal(r) && r.status === 400) return no("E_ACCOUNT_ORDER_UNKNOWN", { venue, message: `${NAME} does not know ${ref}: ${str(obj(r.body).message) || "not a transaction it can look up"}`, native: lifi });
     if (!isRefusal(r) && r.status === 200) {
       const b = obj(r.body);
@@ -749,7 +867,8 @@ export function dexTrader(req: DexRequest): LiveTrader {
     // a buy names what is received (GET /v1/quote/toAmount: LI.FI works out what is spent); a sell names what is spent (GET /v1/quote)
     const r = await call(`/quote${buy ? "/toAmount" : ""}?${q.toString()}`, 20_000);
     if (isRefusal(r)) return r;
-    if (r.status !== 200) return lifiNo(venue, r);
+    if (r.status !== 200) return lifiSaid(r);
+    if (r.body === undefined || typeof r.body !== "object") return notLifi(r, "a quote");
     const quote = obj(r.body);
     const ok = verifyRoute(quote, { chainId: id, diamond, owner, from: from.address, to: to.address });
     if (typeof ok === "string") return no("E_VENUE_REJECTED", { venue, message: `${NAME} answered a swap this account will not hand your wallet: ${ok}. Nothing was prepared`, native: { route: str(quote.id), tool: str(quote.tool) } });
@@ -848,9 +967,22 @@ export function dexTrader(req: DexRequest): LiveTrader {
     const c = CHAIN_BY_ID.get(want.chainId);
     if (!c || !DEX_CHAINS.includes(c)) return no("E_VENUE_REJECTED", { venue, message: `the swap built for this order is for chain ${want.chainId}, not one swapped on here: ${hash} is not followed` });
     const notIt = (why: string[]): Refusal => no("E_VENUE_REJECTED", { venue, message: `transaction ${hash} is not this order's swap: ${why.join("; ")}. The order still waits for your wallet`, native: { hash, chain: c } });
+    // the chain's endpoint not answering, or refusing this network, in its words: that is not "not on chain yet"
+    let unanswered: Refusal | undefined;
     for (let i = 0; i < SEEN_TRIES; i++) {
       if (i) await pause(SEEN_MS);
-      const t = chain.transaction ? await chain.transaction(c, hash) : undefined;
+      let t: SentTx | undefined;
+      let rc: Mined | undefined;
+      try {
+        t = chain.transaction ? await chain.transaction(c, hash) : undefined;
+        rc = t ? undefined : await chain.receipt(c, hash);
+        unanswered = undefined;
+      } catch (err) {
+        unanswered = isRefusal(err) ? err : no("E_VENUE_UNREACHABLE", { venue, message: `${c} did not answer` });
+        // a place rule, an edge, or a wait the endpoint named will not end within these few seconds: not asked again now
+        if (unanswered.code === "E_VENUE_GEOBLOCKED" || (unanswered.native as { until?: unknown } | undefined)?.until !== undefined) break;
+        continue;
+      }
       if (t) {
         const why = [
           ...(same(t.from, want.from) ? [] : ["it is from another address"]),
@@ -861,7 +993,6 @@ export function dexTrader(req: DexRequest): LiveTrader {
         ];
         return why.length ? notIt(why) : true;
       }
-      const rc = await chain.receipt(c, hash);
       if (rc) {
         // a reader that cannot read the transaction itself: its receipt (the sender, the contract) and LI.FI's own log of the swap, with the
         // id written into this swap's call, paying this wallet
@@ -883,6 +1014,7 @@ export function dexTrader(req: DexRequest): LiveTrader {
         return logged ? true : notIt([`${NAME}'s contract logged no swap with this order's id to this wallet in it`]);
       }
     }
+    if (unanswered) return no("E_VENUE_UNREACHABLE", { venue, message: `${unanswered.message}: transaction ${hash} could not be held to this order's swap, so the order still waits for your wallet. Tell the account the hash again once ${c} can be read`, native: { hash, chain: c, unanswered: true } });
     return no("E_VENUE_UNREACHABLE", { venue, message: `${c} does not show transaction ${hash} yet, so it could not be held to this order's swap: the order still waits for your wallet. Tell the account the hash again in a minute`, native: { hash, chain: c } });
   };
 
@@ -913,7 +1045,8 @@ export function dexTrader(req: DexRequest): LiveTrader {
       // the price now, not the list's: GET /v1/token
       const r = await call(`/token?chain=${chainId(hit.chain)}&token=${hit.base.address}`);
       if (isRefusal(r)) return r;
-      if (r.status !== 200) return lifiNo(venue, r);
+      if (r.status !== 200) return lifiSaid(r);
+      if (r.body === undefined || typeof r.body !== "object") return notLifi(r, "its token's price");
       const t = obj(r.body);
       if (!same(t.address, hit.base.address) || num(t.decimals) !== hit.base.decimals) return no("E_VENUE_REJECTED", { venue, message: `${NAME} answered another token for ${symbol}`, native: { asked: hit.base.address, answered: str(t.address) } });
       if (str(t.verificationStatus) === "flagged") return badOrder(venue, NAME, `${NAME} flags ${hit.base.symbol} on ${hit.chain}: it is not traded from here`);

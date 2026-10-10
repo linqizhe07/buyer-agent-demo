@@ -25,7 +25,8 @@
  *                       "{ error:The Amazon CloudFront distribution is configured to block access from your country }" (96 bytes), which the
  *                       library labels RateLimitExceeded: the words decide, not the label (exchange.ts, and exchangeNo here, which reads
  *                       the whole message). Either answers in one round trip, well inside the Markets read's four seconds. Nothing here
- *                       looks for another way in.
+ *                       looks for another way in. Only their spot markets are loaded (keylessSpot): Binance's, Bybit's and OKX's
+ *                       derivatives hosts are not asked, so a rule for derivatives alone is not taken for the spot tickers' answer.
  *   Kalshi              a few of its busiest SERIES, not its whole list (the owner asked for a few hot markets, not every bet): for each
  *                       series in KALSHI_SERIES (categories.ts) one GET /trade-api/v2/events?series_ticker=&status=open&
  *                       with_nested_markets=true&limit=6 — the series' nearest open events, each with its markets, 15 KB to 600 KB a
@@ -157,7 +158,7 @@ import { impliedUsd, PRE_IPO_NAMES, preIpoOf, type PreIpoMark } from "./preipo.t
 import { keylessExchange, PUBLIC_EXCHANGES } from "./prices.ts";
 import { STOCK_TOKEN_ISSUER, STOCK_TOKEN_TERMS, stockTokens } from "./robinhood.ts";
 import { CANDLE_INTERVALS, inDollars, type Candle, type CandleInterval, type Market, type MarketStats } from "./trade.ts";
-import { bannedUntil, edgeRefused, edgeWords, isStable, realHttp, REGION, unreachable, type Http, type HttpReply } from "./types.ts";
+import { bannedNo, bannedUntil, edgeRefused, edgeWords, isStable, notTheApi, notTheApiWords, rateLimitedNo, realHttp, redirectedNo, REGION, unreachable, type Http, type HttpReply } from "./types.ts";
 
 /** a market as a public source lists it: the shared shape, and what only a listing carries */
 export type Listing = Market & {
@@ -206,6 +207,12 @@ export interface PublicSource {
   events?(o: EventsQuery): Promise<Listing[] | Refusal>;
   /** one market's price history since `sinceMs`, oldest first: `symbol` as its listing names it */
   candles?(symbol: string, interval: CandleInterval, sinceMs: number): Promise<Candle[] | Refusal>;
+  /** its price history comes from another host than its listings (Polymarket's CLOB, beside Gamma): a refusal of the history holds back
+   * the history alone, and the listings are still asked. A source without it answers both from one host, and one refusal holds back both */
+  historyApart?: true | undefined;
+  /** let go of the refusals it holds (its place rule, its edge's page, a wait), so the next ask asks the venue: called when a forced re-check
+   * found the venue answering this network (service.ts) */
+  reset?(): void;
   /** what the owner should know about the listing asked with `q`, each a plain sentence under 160 characters, read after `listings` has
    * answered: what the list is made of, how much of the venue it shows when nothing is searched for ("40 of 194 shown · search for the
    * rest"). The service may answer a listing from what it kept without asking the source again, so the sentences never depend on which
@@ -321,50 +328,80 @@ function saidOf(text: string): string {
   return folded.slice(0, Math.min(600, Math.max(220, sentence ? sentence.index + sentence[0].length : 0)));
 }
 
-/** a public answer that is not a yes, as a refusal with the venue's own words; there is no key, so a 403 is not "the key may not" */
+/** the words around a place rule in a page that is not JSON (an edge's HTML, a plain-text answer): the markup taken out, and the 240
+ * characters around the sentence that names the place — a page's first characters are its doctype and title, not the venue's words */
+function regionSaid(text: string): string {
+  const plain = text.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+  const at = Math.max(0, plain.search(REGION));
+  return plain.slice(Math.max(0, at - 120), at + 120).trim();
+}
+
+/** a venue that has banned this machine's address for too many requests without giving a time: Bybit's "IP has been banned" (retCode
+ * 10009), and its 403 "access too frequent", which asks for at least ten minutes with nothing sent (exchange.ts reads the same for a key) */
+const BANNED = /\bip ha(?:s|d) been banned\b|\bretCode"?\s*:\s*"?10009\b|\baccess too frequent\b/i;
+
+/** A public answer that is not a yes, as a refusal with the venue's own words. There is no key, so nothing here blames one: a 401 or a 403
+ * is the venue refusing the request, never "the key may not". Read as types.ts reads every answer: the wait the venue asked for (its
+ * Retry-After) is the hold, a redirect is answered and not followed, and a page where the API answers JSON is no answer at all */
 function publicNo(venue: string, name: string, r: HttpReply): Refusal {
   const native = { status: r.status, said: saidOf(r.text) };
-  if (r.status === 451 || (r.status !== 200 && REGION.test(r.text))) return no("E_VENUE_GEOBLOCKED", { venue, message: `${name} does not serve this location: that is its own rule, and the account does not look for a way around it`, native });
+  const yes = r.status >= 200 && r.status < 300;
+  // a page that is not JSON keeps the sentence that names the place, not its markup
+  if (r.status === 451 || (!yes && REGION.test(r.text))) return no("E_VENUE_GEOBLOCKED", { venue, message: `${name} does not serve this location: that is its own rule, and the account does not look for a way around it`, native: { status: r.status, said: r.body === undefined && !/^\s*[{[]/.test(r.text) ? regionSaid(r.text) : native.said } });
+  const until = bannedUntil(r.text);
+  if (r.status === 418 || until !== undefined || BANNED.test(r.text)) return bannedNo(venue, name, until ?? (r.retryAfterMs ? Date.now() + r.retryAfterMs : undefined), native);
   // the server in front of the venue refusing this network with a page of its own: held back as long as a place rule, not asked every 20 s
   if (edgeRefused(r.status, r.text)) return no("E_VENUE_GEOBLOCKED", { venue, message: edgeWords(name, r.status, r.text), native: { status: r.status, edge: true } });
-  const until = bannedUntil(r.text);
-  if (r.status === 418 || until !== undefined) return no("E_VENUE_UNREACHABLE", { venue, message: `${name} has banned this machine's address for too many requests${until ? ` until ${new Date(until).toISOString()}` : " for a while"}: nothing is asked of it before then`, native: { ...native, ...(until ? { until } : {}) } });
-  if (r.status === 429) return no("E_VENUE_UNREACHABLE", { venue, message: `${name} is rate-limiting this machine: try again in a minute`, native });
-  if (r.status >= 500 || r.status === 0) return no("E_VENUE_UNREACHABLE", { venue, message: `${name} did not answer`, native });
-  if (r.status === 200) return no("E_VENUE_REJECTED", { venue, message: `${name} answered in a way this could not read`, native: { status: 200 } });
+  if (r.status === 429) return rateLimitedNo(venue, name, r.retryAfterMs, native);
+  if (r.status >= 500 || r.status === 0) return no("E_VENUE_UNREACHABLE", { venue, message: `${name} did not answer`, native: { ...native, ...(r.retryAfterMs ? { until: Date.now() + r.retryAfterMs } : {}) } });
+  if (r.status >= 300 && r.status < 400) return redirectedNo(venue, name, r.status, r.location);
+  if (notTheApi(r)) return no("E_VENUE_UNREACHABLE", { venue, message: notTheApiWords(name), native: { status: r.status, page: true } });
+  if (yes) return no("E_VENUE_REJECTED", { venue, message: `${name} answered in a way this could not read`, native: { status: r.status } });
   return no("E_VENUE_REJECTED", { venue, message: `${name} refused the request (HTTP ${r.status})`, native });
 }
 
 /** How long a refusal is kept before the venue is asked again, when it says the venue cannot be asked just now: ten minutes for a venue
- * that does not serve this location (its rule will not change within the hour), twenty seconds for one that is rate-limiting (HTTP 429) or
- * not answering, so a page polling every few seconds does not hammer it. Zero for every other refusal: the next ask asks the venue again.
+ * that does not serve this location (its rule will not change within the hour), as long as the venue asked for one that is rate-limiting
+ * or has banned this address (a minute when a 429 gave no time), twenty seconds for one not answering, so a page polling every few seconds
+ * does not hammer it. Zero for every other refusal, and for a place rule about one pair or product: the next ask asks the venue again.
  * The one rule, for this file's keeper and for the service's read cache */
 export function holdBackMs(r: Refusal, now: number = Date.now()): number {
+  // a place rule for one pair, product or feature (detail.scope) holds back nothing else of the venue: its other markets still answer
+  if ((r.detail as { scope?: unknown } | undefined)?.scope !== undefined) return 0;
   if (r.code === "E_VENUE_GEOBLOCKED") return 600_000;
-  // a ban for too many requests, until when the venue said: nothing is asked of it before then (an hour at most is kept, then asked again)
+  // a ban for too many requests, or a wait the venue asked for, until when it said: nothing is asked of it before then (an hour at most is
+  // kept, then asked again)
   const until = (r.native as { until?: unknown } | undefined)?.until;
   if (typeof until === "number" && until > now) return Math.min(until - now, 3_600_000);
-  if ((r.native as { status?: unknown } | undefined)?.status === 418) return 600_000;
-  if (r.code === "E_VENUE_UNREACHABLE" || (r.native as { status?: unknown } | undefined)?.status === 429) return 20_000;
+  const status = (r.native as { status?: unknown } | undefined)?.status;
+  if (status === 418) return 600_000;
+  // rate-limited with no wait given: the minute the refusal's own sentence says
+  if (status === 429) return 60_000;
+  if (r.code === "E_VENUE_UNREACHABLE") return 20_000;
   return 0;
 }
 
 /** an answer kept for `ms` from when it was asked (or for what `ms` says of the answer: until it has come, it is waited for up to KEEP_MS),
  * and one asked only once while it is on its way; a refusal is kept for holdBackMs (which is nothing for most), a throw is not kept */
-function keeper<T>(clock: () => number, ms: number | ((answer: T) => number)): (key: string, run: () => Promise<T | Refusal>) => Promise<T | Refusal> {
-  const kept = new Map<string, { until: number; p: Promise<T | Refusal> }>();
-  return (key, run) => {
+/** a keeper's answers, and `clear()`: the refusals it holds let go of, so the next ask asks the venue (a forced re-check that found the
+ * venue answering this network: the place rule or edge it held was the network the user left) */
+type Kept<T> = ((key: string, run: () => Promise<T | Refusal>) => Promise<T | Refusal>) & { clear(): void };
+function keeper<T>(clock: () => number, ms: number | ((answer: T) => number)): Kept<T> {
+  const kept = new Map<string, { until: number; p: Promise<T | Refusal>; held?: boolean }>();
+  const keep = ((key: string, run: () => Promise<T | Refusal>) => {
     const now = clock();
     const hit = kept.get(key);
     if (hit && now < hit.until) return hit.p;
-    const entry = { until: now + (typeof ms === "number" ? ms : KEEP_MS), p: Promise.resolve() as unknown as Promise<T | Refusal> };
+    const entry: { until: number; p: Promise<T | Refusal>; held?: boolean } = { until: now + (typeof ms === "number" ? ms : KEEP_MS), p: Promise.resolve() as unknown as Promise<T | Refusal> };
     entry.p = run().then(
       (r) => {
         if (kept.get(key) !== entry) return r;
         if (isRefusal(r)) {
           const hold = holdBackMs(r);
-          if (hold > 0) entry.until = clock() + hold;
-          else kept.delete(key);
+          if (hold > 0) {
+            entry.until = clock() + hold;
+            entry.held = true;
+          } else kept.delete(key);
         } else if (typeof ms !== "number") entry.until = now + ms(r);
         return r;
       },
@@ -376,13 +413,17 @@ function keeper<T>(clock: () => number, ms: number | ((answer: T) => number)): (
     kept.set(key, entry);
     if (kept.size > 200) kept.delete(kept.keys().next().value!);
     return entry.p;
+  }) as Kept<T>;
+  keep.clear = () => {
+    for (const [k, e] of kept) if (e.held) kept.delete(k);
   };
+  return keep;
 }
 
 /** one JSON answer from a fixed host, kept for a while: the body, or the venue's refusal */
-function getter(get: Http, venue: string, name: string, clock: () => number, ms = KEEP_MS): (url: string) => Promise<unknown> {
+function getter(get: Http, venue: string, name: string, clock: () => number, ms = KEEP_MS): ((url: string) => Promise<unknown>) & { clear(): void } {
   const keep = keeper<unknown>(clock, ms);
-  return (url) =>
+  const got = (url: string) =>
     keep(url, async () => {
       let r: HttpReply;
       try {
@@ -392,6 +433,7 @@ function getter(get: Http, venue: string, name: string, clock: () => number, ms 
       }
       return r.status === 200 && r.body !== undefined ? r.body : publicNo(venue, name, r);
     });
+  return Object.assign(got, { clear: keep.clear });
 }
 
 /** a history's interval and start, held to what a public source takes: one of the three intervals, a start before now */
@@ -498,18 +540,31 @@ const LIBRARY_LINE = /^\S+ (?:GET|POST|PUT|DELETE) https?:\/\/\S+ \d{3}\b[^{[<]*
 
 /** What the exchange library threw, as the exchange's refusal (exchange.ts exchangeSaidNo), carrying the exchange's words without the
  * library's request line. The words decide, read whole: a refusal of this location further in than exchangeSaidNo's first 240 characters
- * (an edge's HTML page, say) is still that, whatever class the library gave it — Bybit's 403 arrives labelled RateLimitExceeded */
+ * (an edge's HTML page, say) is still that, whatever class the library gave it — Bybit's 403 arrives labelled RateLimitExceeded. A keyless
+ * read has no key to blame: what exchange.ts would tell a key ("does not accept this key", "the key lacks the permission", the key's IP
+ * list) is the exchange refusing the request, in its own words */
 export function exchangeNo(id: string, name: string, err: unknown): Refusal {
   const r = exchangeSaidNo(id, name, err, {});
   const n = (r.native ?? {}) as { error?: unknown; said?: unknown };
   const whole = String((err as { message?: unknown } | undefined)?.message ?? err ?? "").replace(/\s+/g, " ").trim();
-  if (r.code !== "E_VENUE_GEOBLOCKED" && REGION.test(whole)) {
-    const plain = whole.replace(LIBRARY_LINE, "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
-    const at = Math.max(0, plain.search(REGION));
-    return no("E_VENUE_GEOBLOCKED", { venue: id, message: `${name} does not serve this location: that is its own rule, and the account does not look for a way around it`, native: { error: n.error, said: plain.slice(Math.max(0, at - 120), at + 120).trim() } });
-  }
+  if (r.code !== "E_VENUE_GEOBLOCKED" && REGION.test(whole)) return no("E_VENUE_GEOBLOCKED", { venue: id, message: `${name} does not serve this location: that is its own rule, and the account does not look for a way around it`, native: { error: n.error, said: regionSaid(whole.replace(LIBRARY_LINE, "")) } });
   const own = typeof n.said === "string" ? n.said.replace(LIBRARY_LINE, "").trim() : "";
+  if (r.code === "E_VENUE_UNAUTHORIZED" || r.code === "E_VENUE_PERMISSION") return no("E_VENUE_REJECTED", { venue: id, message: `${name} refused the request`, native: { error: n.error, said: own || n.said } });
   return own && own !== n.said ? { ...r, native: { ...n, said: own } } : r;
+}
+
+/** the exchanges whose keyless market load also reads their derivatives by default (the library's options.fetchMarkets.types: Binance
+ * spot, linear and inverse; Bybit spot, linear, inverse and options; OKX spot, future, swap and option), each from its own host */
+const SPOT_ONLY = new Set(["binance", "bybit", "okx"]);
+/** A keyless client that loads spot markets only. This file reads nothing else from it (its pairs are spot, its bars a spot market's), and
+ * a derivatives host refusing this network — a place rule for derivatives alone, an edge, a futures outage — would otherwise be the answer
+ * for the spot tickers too, held ten minutes. A connected key's client and the pre-IPO sources ask the derivatives hosts on purpose, and a
+ * rule for derivatives is still met there. An exchange whose option is not a list of types (Coinbase's is a method's name) is left as is */
+async function keylessSpot(id: string, open: OpenExchange): Promise<ExchangeClient | undefined> {
+  const x = await keylessExchange(id, open);
+  const fm = x?.options?.fetchMarkets;
+  if (x?.options && SPOT_ONLY.has(id) && fm !== null && typeof fm === "object" && !Array.isArray(fm)) x.options.fetchMarkets = { ...fm, types: ["spot"] };
+  return x;
 }
 
 /** One exchange's public tickers, keyless, through the unified library. An exchange that does not serve this location answers with its own
@@ -524,18 +579,20 @@ export function exchangeTickers(id: string, deps: PublicDeps = {}): PublicSource
   const history = keeper<Candle[]>(clock, HISTORY_MS);
   // the library keeps a failed load of the markets and answers it again: after a failure they are loaded afresh
   let reload = false;
-  // the refusal that holds the exchange back, and until when (the service's read cache does the same by venue)
+  // the refusal that holds the exchange back, and until when (the service's read cache does the same by venue). A hold is only ever
+  // lengthened: two reads in flight at once answer in any order, and a late timeout must not cut a ban's or a place rule's hold to 20 s
   let held: { until: number; r: Refusal } | undefined;
   const heldBack = (): Refusal | undefined => (held && clock() < held.until ? held.r : undefined);
   const hold = <T>(got: T | Refusal): T | Refusal => {
-    if (isRefusal(got) && holdBackMs(got) > 0) held = { until: clock() + holdBackMs(got), r: got };
+    const ms = isRefusal(got) ? holdBackMs(got) : 0;
+    if (isRefusal(got) && ms > 0 && (!held || clock() >= held.until || clock() + ms > held.until)) held = { until: clock() + ms, r: got };
     return got;
   };
   /** the tickers asked for (or the query's), from the exchange itself */
   const fresh = async (symbols: string[] | undefined, q: string | undefined): Promise<Listing[] | Refusal> => {
     let x: ExchangeClient | undefined;
     try {
-      x = await keylessExchange(id, open);
+      x = await keylessSpot(id, open);
       if (!x) return no("E_WALLET_UNKNOWN_VENUE", { venue: id, message: `the exchange library knows no exchange called "${id}"` });
       if (!x.fetchTickers) return no("E_VENUE_REJECTED", { venue: id, message: `the exchange library reads no tickers from ${name}` });
       await x.loadMarkets?.(reload);
@@ -585,6 +642,11 @@ export function exchangeTickers(id: string, deps: PublicDeps = {}): PublicSource
   return {
     id,
     name,
+    reset: () => {
+      keep.clear();
+      history.clear();
+      held = undefined;
+    },
     kind: "exchange",
     connectTo: id,
     connector: `live:exchange:${id}`,
@@ -606,7 +668,7 @@ export function exchangeTickers(id: string, deps: PublicDeps = {}): PublicSource
         const bad = badHistory(id, interval, sinceMs, clock());
         if (bad) return bad;
         try {
-          const x = await keylessExchange(id, open);
+          const x = await keylessSpot(id, open);
           if (!x) return no("E_WALLET_UNKNOWN_VENUE", { venue: id, message: `the exchange library knows no exchange called "${id}"` });
           await x.loadMarkets?.(reload);
           reload = false;
@@ -754,6 +816,9 @@ export function kalshiPublic(deps: PublicDeps = {}): PublicSource {
   return {
     id,
     name,
+    reset: () => {
+      get.clear();
+    },
     kind: "events",
     connectTo: "kalshi",
     connector: "live:kalshi",
@@ -944,9 +1009,15 @@ export function polymarketPublic(deps: PublicDeps = {}): PublicSource {
   return {
     id,
     name,
+    reset: () => {
+      get.clear();
+      clob.clear();
+    },
     kind: "events",
     connectTo: "polymarket",
     connector: "live:polymarket-trade",
+    // the history is the CLOB's (clob.polymarket.com), the listings Gamma's: an edge refusing the one says nothing of the other
+    historyApart: true,
     listings: (o) => read(o),
     events: (o) => read(o),
     notes: () => [`Polymarket: its ${POLYMARKET_SHOWN} busiest events by 24-hour volume, without sports, esports, weather, entertainment, awards and mentions.`, `Polymarket: and its ${POLYMARKET_IPO_SHOWN} busiest IPO questions (its tag IPO).`],
@@ -1018,6 +1089,10 @@ export function polymarketUsPublic(deps: PublicDeps = {}): PublicSource {
   return {
     id,
     name,
+    reset: () => {
+      get.clear();
+      history.clear();
+    },
     kind: "events",
     connectTo: "polymarket-us",
     connector: "live:polymarket-us",
@@ -1084,9 +1159,9 @@ async function hlAsk(info: ReturnType<typeof hyperliquidInfo>, id: string, name:
 
 /** one Hyperliquid perpetual's bars, keyless: its listing's `<COIN>-PERP` (a HIP-3 market's coin carries its dex: io:ANTH-PERP), the latest
  * at most 300 since the start asked, the volume in the coin; kept a minute. `form`: the coins this source lists */
-function hyperliquidBars(info: ReturnType<typeof hyperliquidInfo>, id: string, name: string, clock: () => number, form: { test: (coin: string) => boolean; example: string }): NonNullable<PublicSource["candles"]> {
+function hyperliquidBars(info: ReturnType<typeof hyperliquidInfo>, id: string, name: string, clock: () => number, form: { test: (coin: string) => boolean; example: string }): NonNullable<PublicSource["candles"]> & { clear(): void } {
   const history = keeper<Candle[]>(clock, HISTORY_MS);
-  return (symbol, interval, sinceMs) =>
+  const ask = (symbol: string, interval: CandleInterval, sinceMs: number) =>
     history(`${symbol}|${interval}|${Math.floor(sinceMs / 60_000)}`, async () => {
       const now = clock();
       const bad = badHistory(id, interval, sinceMs, now);
@@ -1104,6 +1179,7 @@ function hyperliquidBars(info: ReturnType<typeof hyperliquidInfo>, id: string, n
       }
       return [...bars.values()].sort((a, b) => a.t - b.t);
     });
+  return Object.assign(ask, { clear: history.clear });
 }
 
 /** Hyperliquid's perpetuals (its first dex), keyless, busiest first: each `<COIN>-PERP`, placed through Hyperliquid's connection to trade
@@ -1156,9 +1232,14 @@ export function hyperliquidPublic(deps: PublicDeps = {}): PublicSource {
       });
       return out.sort((a, b) => (b.volumeUsd24h ?? -1) - (a.volumeUsd24h ?? -1));
     });
+  const bars = hyperliquidBars(info, id, name, clock, { test: (coin) => !coin.includes(":"), example: "<COIN>-PERP (BTC-PERP)" });
   return {
     id,
     name,
+    reset: () => {
+      keep.clear();
+      bars.clear();
+    },
     kind: "exchange",
     ...HL_TRADE,
     async listings(o) {
@@ -1170,7 +1251,7 @@ export function hyperliquidPublic(deps: PublicDeps = {}): PublicSource {
       if (!Q) shown = { of: pool.length, total: all.length };
       return pool;
     },
-    candles: hyperliquidBars(info, id, name, clock, { test: (coin) => !coin.includes(":"), example: "<COIN>-PERP (BTC-PERP)" }),
+    candles: bars,
     notes: (o) => (!o.q?.trim() && shown && shown.of < shown.total ? [`${name}: ${shown.of} of ${shown.total} perpetuals shown · search for the rest · traded once Hyperliquid is connected to trade`] : []),
   };
 }
@@ -1180,7 +1261,9 @@ export function hyperliquidPublic(deps: PublicDeps = {}): PublicSource {
 /** shares well enough known to be shown first, before anything is typed */
 const SHARES = ["NVDA", "AAPL", "MSFT", "AMZN", "GOOGL", "META", "TSLA", "AVGO", "SPY", "QQQ", "AMD", "NFLX", "COIN", "HOOD", "MSTR", "PLTR"];
 
-/** Robinhood's Stock Tokens, keyless: each token and its own bid and ask in dollars. Read-only */
+/** Robinhood's Stock Tokens, keyless: each token and its own bid and ask in dollars. Read-only. Robinhood refusing this network — on the
+ * list, or on every price — is the listing's answer, in keyless words (publicNo), and held back as any other source's refusal is; prices
+ * refused for a few tokens while the others answer say why on those tokens' lines */
 export function stockTokensPublic(deps: PublicDeps = {}): PublicSource {
   const id = "robinhood-stock-tokens";
   const name = "Robinhood Stock Tokens";
@@ -1188,11 +1271,22 @@ export function stockTokensPublic(deps: PublicDeps = {}): PublicSource {
   // one guarded network for the life of the source: robinhood.ts keeps the token list per network
   const http = fixedHosts(deps.http ?? realHttp, PUBLIC_HOSTS, deps.timeoutMs ?? TIMEOUT_MS);
   const quote = getter(http, id, name, clock, PRICE_MS);
+  // robinhood.ts reads a refusal of the list as a keyed connection does ("the key lacks the permission"); this source has no key, so the
+  // list's last answer is kept to read it again in keyless words. The same network for the life of the source, so its list is kept too
+  let listReply: HttpReply | undefined;
+  const listHttp: Http = async (url, init) => {
+    const r = await http(url, init);
+    if (url.endsWith("/rhj/assets")) listReply = r;
+    return r;
+  };
   // how much of the list a listing with nothing searched for shows, for the sentence under it (a search leaves it as it was)
   let shown: { of: number; total: number } | undefined;
   return {
     id,
     name,
+    reset: () => {
+      quote.clear();
+    },
     kind: "tokens",
     connectTo: "robinhood-wallet",
     connector: "live:wallet",
@@ -1200,33 +1294,44 @@ export function stockTokensPublic(deps: PublicDeps = {}): PublicSource {
     async listings(o) {
       let tokens: Array<{ symbol: string; name: string }>;
       try {
-        tokens = await stockTokens(http, clock());
+        tokens = await stockTokens(listHttp, clock());
       } catch (err) {
-        return isRefusal(err) ? err : unreachable(id, name, err);
+        if (!isRefusal(err)) return unreachable(id, name, err);
+        const status = (err.native as { status?: unknown } | undefined)?.status;
+        return publicNo(id, name, listReply && listReply.status === status ? listReply : { status: typeof status === "number" ? status : 0, body: undefined, text: String((err.native as { said?: unknown } | undefined)?.said ?? "") });
       }
       const seen = new Set<string>();
       const one = tokens.filter((t) => !seen.has(t.symbol) && seen.add(t.symbol));
       const Q = (o.q ?? "").trim().toUpperCase();
       const rank = (s: string) => (SHARES.includes(s) ? SHARES.indexOf(s) : SHARES.length);
       const pool = (Q ? one.filter((t) => has(Q, t.symbol, t.name)).sort((a, b) => Number(b.symbol === Q) - Number(a.symbol === Q) || Number(b.symbol.startsWith(Q)) - Number(a.symbol.startsWith(Q))) : one.map((t, i) => ({ t, i })).sort((a, b) => rank(a.t.symbol) - rank(b.t.symbol) || a.i - b.i).map((x) => x.t)).slice(0, Math.max(1, o.limit));
-      if (!Q) shown = { of: pool.length, total: one.length };
       // eight at a time: Robinhood allows sixty requests a second
       const quotes = new Map<string, Rec>();
+      const refusedFor = new Map<string, Refusal>();
       for (let i = 0; i < pool.length; i += 8)
         await Promise.all(
           pool.slice(i, i + 8).map(async (t) => {
-            const body = await quote(`https://api.robinhood.com/rhj/prices/${encodeURIComponent(t.symbol)}`).catch(() => undefined);
+            const body = await quote(`https://api.robinhood.com/rhj/prices/${encodeURIComponent(t.symbol)}`).catch((err: unknown) => unreachable(id, name, err));
+            if (isRefusal(body)) {
+              refusedFor.set(t.symbol, body);
+              return;
+            }
             const q = rec(list(rec(body).quotes)[0]);
             if (str(q.currency) === "USD") quotes.set(t.symbol, q);
           }),
         );
+      // every price refused (a place rule, an edge, a ban): that is Robinhood's answer, not a list of tokens with no price
+      const refused = pool.map((t) => refusedFor.get(t.symbol)).find((r) => r !== undefined);
+      if (!quotes.size && refused) return refused;
+      if (!Q) shown = { of: pool.length, total: one.length };
       return pool.map((t): Listing => {
         const q = quotes.get(t.symbol);
         const bid = pos(q?.tokenBid);
         const ask = pos(q?.tokenAsk);
         const halted = q?.isTradingHalt === true;
+        const why = refusedFor.get(t.symbol)?.message.slice(0, NOTE_MAX) ?? "Robinhood gave no price for it just now";
         // the issuer and whom it says the tokens are not for, in its own words (robinhood.ts): Markets shows them beside the price
-        return { symbol: t.symbol, name: t.name, kind: "token", base: t.symbol, quote: "USD", price: mid(bid, ask) ?? bid ?? ask, bid, ask, open: q !== undefined && !halted, ...(halted ? { note: "Robinhood has halted trading in it" } : q ? {} : { note: "Robinhood gave no price for it just now" }), types: [], issuer: STOCK_TOKEN_ISSUER, eligibility: STOCK_TOKEN_TERMS };
+        return { symbol: t.symbol, name: t.name, kind: "token", base: t.symbol, quote: "USD", price: mid(bid, ask) ?? bid ?? ask, bid, ask, open: q !== undefined && !halted, ...(halted ? { note: "Robinhood has halted trading in it" } : q ? {} : { note: why }), types: [], issuer: STOCK_TOKEN_ISSUER, eligibility: STOCK_TOKEN_TERMS };
       });
     },
     notes: (o) => (!o.q?.trim() && shown && shown.of < shown.total ? [`${name}: ${shown.of} of ${shown.total} shown · search for the rest`] : []),
@@ -1273,6 +1378,10 @@ export interface PreIpoVenue {
   name: string;
   list(fetch: Fetch): Promise<PreIpoInstrument[] | Refusal>;
   quote(fetch: Fetch, inst: PreIpoInstrument): Promise<PreIpoQuote | Refusal>;
+  /** the venue's no inside its own JSON envelope, whatever the HTTP status — OKX's `code`, Bybit's `retCode`, Deribit's `error`, often
+   * under HTTP 200 — as a refusal in its own words (`venue`: the source's id); nothing when the envelope says yes, or says a no this does not
+   * know under another status (the status then decides, publicNo) */
+  saidNo?(r: HttpReply, venue: string): Refusal | undefined;
 }
 
 /** `b`'s figures over `a`'s, where `b` has one */
@@ -1280,10 +1389,29 @@ const dayOf = (a: PreIpoQuote, b: PreIpoQuote): PreIpoQuote => Object.fromEntrie
 const bodyOf = (body: unknown): Rec[] | Refusal => (isRefusal(body) ? body : list(rec(body).data).filter(isRec));
 /** a venue that answered its list without the rows this file reads */
 const noList = (venue: string, name: string): Refusal => no("E_VENUE_REJECTED", { venue, message: `${name} answered without its contracts` });
+/** the account's sentence for a venue's place rule */
+const notServed = (name: string): string => `${name} does not serve this location: that is its own rule, and the account does not look for a way around it`;
+
+/** OKX's codes for a no it answers inside its envelope, often under HTTP 200 (its docs-v5 error table, as exchange.ts reads them for a
+ * key): 50121 "You can't access our services through the IP address" and 50051 "Due to compliance restrictions in your country or region"
+ * are its place rule; 50011 "Request too frequent" its rate limit; 50001, 50013 and 50026 its matching engine upgrading or its system busy */
+const OKX_PLACE = new Set(["50121", "50051"]);
+const OKX_BUSY = new Set(["50001", "50013", "50026"]);
+function okxSaidNo(r: HttpReply, venue: string): Refusal | undefined {
+  const b = rec(r.body);
+  const code = b.code === undefined || b.code === null ? "0" : String(b.code).slice(0, 12);
+  if (code === "0") return undefined;
+  const native = { status: r.status, said: saidOf(JSON.stringify({ code: b.code, msg: b.msg ?? null })) };
+  if (OKX_PLACE.has(code)) return no("E_VENUE_GEOBLOCKED", { venue, message: notServed("OKX"), native });
+  if (code === "50011") return rateLimitedNo(venue, "OKX", r.retryAfterMs, native);
+  if (OKX_BUSY.has(code)) return no("E_VENUE_UNREACHABLE", { venue, message: "OKX could not be reached: its system is busy or upgrading", native });
+  return r.status === 200 ? no("E_VENUE_REJECTED", { venue, message: `OKX refused the request (code ${code})`, native }) : undefined;
+}
 
 const okxPreIpo: PreIpoVenue = {
   id: "okx",
   name: "OKX",
+  saidNo: okxSaidNo,
   async list(fetch) {
     const rows = bodyOf(await fetch("https://www.okx.com/api/v5/public/instruments?instType=SWAP"));
     if (isRefusal(rows)) return rows;
@@ -1371,9 +1499,24 @@ const krakenFuturesPreIpo: PreIpoVenue = {
   },
 };
 
+/** Deribit's JSON-RPC answers a no as `error` {code, message}, under HTTP 400 or 200: 12005 "country_is_banned" is its own place rule ("The
+ * country is banned (possibly via IP check)", the library's table), 10028 "too_many_requests" its rate limit */
+function deribitSaidNo(r: HttpReply, venue: string): Refusal | undefined {
+  const e = rec(r.body).error;
+  if (e === undefined || e === null) return undefined;
+  const err = rec(e);
+  const code = String(err.code ?? "").slice(0, 12);
+  const words = str(err.message)?.slice(0, 120);
+  const native = { status: r.status, said: saidOf(JSON.stringify({ error: { code: err.code ?? null, message: err.message ?? null } })) };
+  if (code === "12005" || words === "country_is_banned") return no("E_VENUE_GEOBLOCKED", { venue, message: notServed("Deribit"), native });
+  if (code === "10028") return rateLimitedNo(venue, "Deribit", r.retryAfterMs, native);
+  return r.status === 200 ? no("E_VENUE_REJECTED", { venue, message: `Deribit refused the request (${words ?? `code ${code || "none"}`})`, native }) : undefined;
+}
+
 const deribitPreIpo: PreIpoVenue = {
   id: "deribit",
   name: "Deribit",
+  saidNo: deribitSaidNo,
   async list(fetch) {
     const body = await fetch("https://www.deribit.com/api/v2/public/get_instruments?currency=any&kind=future");
     if (isRefusal(body)) return body;
@@ -1484,16 +1627,32 @@ const binancePreIpo: PreIpoVenue = {
 const BYBIT_MARKET = "https://api.bybit.com/v5/market";
 /** how many pages of Bybit's linear list are read at most, a thousand to a page (its own most) */
 const BYBIT_PAGES = 3;
+/** Bybit's no inside its envelope: a retCode other than 0, read by its retMsg and its code — a place rule in its words, an IP ban (10009
+ * "IP has been banned", or a time it gives), its rate limits (10006 "too many requests", 10018 "exceed ip rate limit"); anything else a
+ * refusal in its own retMsg */
+function bybitSaidNo(r: HttpReply, venue: string): Refusal | undefined {
+  const b = rec(r.body);
+  if (b.retCode === undefined || b.retCode === 0 || b.retCode === "0") return undefined;
+  const code = String(b.retCode).slice(0, 12);
+  const words = String(b.retMsg ?? "");
+  const native = { status: r.status, said: saidOf(JSON.stringify({ retCode: b.retCode ?? null, retMsg: b.retMsg ?? null })) };
+  if (REGION.test(words)) return no("E_VENUE_GEOBLOCKED", { venue, message: notServed("Bybit"), native });
+  const until = bannedUntil(words);
+  if (until !== undefined || code === "10009" || BANNED.test(words)) return bannedNo(venue, "Bybit", until ?? (r.retryAfterMs ? Date.now() + r.retryAfterMs : undefined), native);
+  if (code === "10006" || code === "10018") return rateLimitedNo(venue, "Bybit", r.retryAfterMs, native);
+  return r.status === 200 ? no("E_VENUE_REJECTED", { venue, message: `Bybit refused the request (retCode ${code})`, native }) : undefined;
+}
 /** what Bybit answered inside its envelope, or its no: a retCode other than 0 is a refusal in its own retMsg, whatever the HTTP status */
 function bybitResult(body: unknown): Rec | Refusal {
   if (isRefusal(body)) return body;
   const b = rec(body);
   if (b.retCode === 0 || b.retCode === "0") return rec(b.result);
-  return no("E_VENUE_REJECTED", { venue: "bybit-preipo", message: `Bybit refused the request (retCode ${String(b.retCode ?? "none").slice(0, 12)})`, native: { status: 200, said: saidOf(JSON.stringify({ retCode: b.retCode ?? null, retMsg: b.retMsg ?? null })) } });
+  return bybitSaidNo({ status: 200, body: b, text: "" }, "bybit-preipo") ?? no("E_VENUE_REJECTED", { venue: "bybit-preipo", message: "Bybit refused the request (retCode none)", native: { status: 200, said: saidOf(JSON.stringify({ retCode: null, retMsg: b.retMsg ?? null })) } });
 }
 const bybitPreIpo: PreIpoVenue = {
   id: "bybit",
   name: "Bybit",
+  saidNo: bybitSaidNo,
   async list(fetch) {
     const rows: Rec[] = [];
     let cursor = "";
@@ -1579,6 +1738,9 @@ export function preIpoPublic(v: PreIpoVenue, deps: PublicDeps = {}): PublicSourc
     } catch (err) {
       return unreachable(id, name, err);
     }
+    // the venue's own no inside its envelope decides first, under HTTP 200 as under 403: OKX's place rule comes with a 200
+    const own = isRec(r.body) ? v.saidNo?.(r, id) : undefined;
+    if (own) return own;
     return r.status === 200 && r.body !== undefined ? r.body : publicNo(id, name, r);
   };
   type Flagged = PreIpoInstrument & { mark: PreIpoMark };
@@ -1598,6 +1760,10 @@ export function preIpoPublic(v: PreIpoVenue, deps: PublicDeps = {}): PublicSourc
   return {
     id,
     name,
+    reset: () => {
+      lists.clear();
+      quotes.clear();
+    },
     kind: "exchange",
     connectTo: v.id,
     connector: `live:exchange:${v.id}`,
@@ -1698,9 +1864,15 @@ export function hyperliquidPreIpoPublic(deps: PublicDeps = {}): PublicSource {
     });
   // the dexes the last listing with nothing searched for showed, for the sentence under it
   let shown: string[] | undefined;
+  const bars = hyperliquidBars(info, id, name, clock, { test: (coin) => coin.includes(":"), example: "<dex>:<COIN>-PERP (io:ANTH-PERP)" });
   return {
     id,
     name,
+    reset: () => {
+      dexAnswers.clear();
+      finds.clear();
+      bars.clear();
+    },
     kind: "exchange",
     ...HL_TRADE,
     async listings(o) {
@@ -1738,7 +1910,7 @@ export function hyperliquidPreIpoPublic(deps: PublicDeps = {}): PublicSource {
       if (!Q) shown = [...new Set(pool.map((l) => l.venueName!.slice(name.length + 3)))];
       return pool;
     },
-    candles: hyperliquidBars(info, id, name, clock, { test: (coin) => coin.includes(":"), example: "<dex>:<COIN>-PERP (io:ANTH-PERP)" }),
+    candles: bars,
     notes: (o) => (!o.q?.trim() && shown?.length ? [`${name} · ${shown.join(", ")}: pre-IPO perpetuals on Hyperliquid's HIP-3 markets, which anyone may deploy; shown while someone holds or trades one.`] : []),
   };
 }

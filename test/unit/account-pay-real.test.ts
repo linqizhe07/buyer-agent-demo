@@ -303,6 +303,7 @@ describe("the account asks only public https hosts", () => {
     expect((await guardedHttp({ method: "GET", url: "http://example.com/" })).error).toBe("a payee is asked over https, at a plain host");
     expect((await guardedHttp({ method: "GET", url: "https://127.0.0.1:4820/api/account" })).error).toBe("127.0.0.1 is not a public address");
     expect((await guardedHttp({ method: "GET", url: "https://user:pw@example.com/" })).error).toBe("a payee is asked over https, at a plain host");
-    expect((await guardedHttp({ method: "GET", url: "https://localhost:4820/" })).error).toMatch(/is not a public address/);
+    // a name that resolves to this machine: said by its kind, never by the address (on a filtering network it is the filter's sinkhole)
+    expect((await guardedHttp({ method: "GET", url: "https://localhost:4820/" }))).toMatchObject({ status: 0, kind: "filtered-address", error: "on this network the name resolves to a local or reserved address, so the payee was not asked" });
   });
 });

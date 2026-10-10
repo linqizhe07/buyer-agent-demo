@@ -745,7 +745,11 @@ export class SimPayer implements Payer {
   private async ask(c: Ctx): Promise<Outcome> {
     const first = await this.fetch({ method: "GET", url: c.url.href }, c);
     if (first.status === 0) return no("E_PAYEE_REJECTED", { venue: c.host, message: `${c.host} did not answer` });
-    if (first.status >= 300 && first.status < 400) return no("E_PAYEE_REDIRECT", { venue: c.host, message: `${c.host} sent the request on to ${first.headers.location ?? "another address"}: a payment does not follow a redirect`, detail: { location: first.headers.location } });
+    // told as the real payer tells it (pay-real.ts): where it pointed is not named, only whether it stayed on the payee's own host
+    if (first.status >= 300 && first.status < 400) {
+      const host = redirectHost(first.headers.location, c.url.href);
+      return no("E_PAYEE_REDIRECT", { venue: c.host, message: `${c.host} sent the request on to ${host === c.host ? "another page of its own" : "another address"}: a payment does not follow a redirect`, detail: { ownHost: host === c.host } });
+    }
     if (first.status === 402 && first.headers["payment-required"]) return this.x402(c, first);
     if (first.status === 402 && first.headers["www-authenticate"]) return this.mpp(c, first);
     const page = first.body as Partial<ShopPage> | undefined;
@@ -1218,4 +1222,14 @@ export function mountPayees(engine: AccountEngine): PayeeWorld {
   const world = new PayeeWorld(floats);
   engine.usePayer(new SimPayer(engine, world));
   return world;
+}
+
+/** the host a redirect points at (a relative one is the payee's own) */
+function redirectHost(location: string | undefined, from: string): string | undefined {
+  if (!location) return undefined;
+  try {
+    return new URL(location, from).host;
+  } catch {
+    return undefined;
+  }
 }

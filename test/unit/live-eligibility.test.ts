@@ -147,6 +147,10 @@ describe("the venues' own pages", () => {
     expect(terms("coinbase").unread).toMatch(/browser check/);
   });
 
+  it("says nothing about 'this machine' or 'this network': how a page was read when the table was made is never a fact about the user's machine", () => {
+    for (const t of Object.values(VENUE_TERMS)) for (const s of [t.unread, t.via, t.note, t.says]) if (s) expect(s, t.venue).not.toMatch(/this machine|this network/i);
+  });
+
   it("names places only as ISO 3166-1 alpha-2 countries and ISO 3166-2 subdivisions, each once", () => {
     for (const t of Object.values(VENUE_TERMS)) {
       const list = [...(t.excludes ?? []), ...(t.serves ?? [])];

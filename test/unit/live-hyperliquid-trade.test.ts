@@ -344,7 +344,9 @@ describe("Hyperliquid's own line (its Terms of Use §1.6), held to where this us
     expect(await verdict(geo("IE", "L", true))).toBe("served");
     for (const unknown of [{ status: 200, body: { blocked: false }, text: '{"blocked":false}' }, { status: 502, body: undefined, text: "bad gateway" }, new Error("ETIMEDOUT"), { status: 200, body: { country: "USA" }, text: "" }]) expect(await verdict(unknown)).toBe("unknown");
     // the lists are one rule, shared with the mm perps path (metamask.ts)
-    expect([...HL_CLOSED.countries]).toEqual(["US", "CU", "IR", "KP", "SY"]);
+    expect([...HL_CLOSED.countries]).toEqual(["US", "AS", "GU", "MP", "PR", "UM", "VI", "CU", "IR", "KP", "SY"]);
+    // a US territory is the United States here however a source spells it
+    expect([await verdict(geo("PR", "")), await verdict(geo("US", "PR")), await verdict(geo("US", "US-GU"))]).toEqual(["closed", "closed", "closed"]);
     expect(HL_TERMS).toContain("Terms of Use §1.6");
   });
 
@@ -364,10 +366,10 @@ describe("Hyperliquid's own line (its Terms of Use §1.6), held to where this us
     expect(types(net.seen)).toEqual(["geo"]);
   });
 
-  it("every order and leverage change asks first; taking an order off does not; the place is kept ten minutes, then asked again", async () => {
+  it("every order and leverage change asks first; taking an order off does not; a write asks the place again (one asked in the last few seconds is used — ip-audit-c covers a move inside the ten minutes)", async () => {
     let now = NOW;
     const { t, net } = await connected({ exchange: [RESTING, RESTING, CANCELED, DEFAULT, RESTING] }, { clock: () => now });
-    // the connection asked a moment ago: the place is kept
+    // the connection asked a moment ago: the place is used
     ok(await t.place(order()));
     expect(types(net.seen).filter((x) => x === "geo")).toEqual([]);
     now += PLACE_MS + 1;

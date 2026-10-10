@@ -28,7 +28,7 @@ import { no } from "../refuse.ts";
 import { CHAIN_BY_ID, type ChainName, type ChainReader, type TokenRef } from "./chain.ts";
 import type { KeyFile, KeyShape } from "./credentials.ts";
 import { badOrder, ceilTo, floorTo, inDollars, onStep, ORDER_TYPES, pick as pickMarkets, plain, type LiveTrader, type Market, type OrderRequest, type OrderState, type OrderStatus, type Position, type TimeInForce } from "./trade.ts";
-import { asRefusal, isStable, num, redact, REGION, unreachable, venueSaidNo, type Http, type HttpReply, type LiveBalance, type LiveSource } from "./types.ts";
+import { asRefusal, isStable, networkNo, notTheApi, notTheApiWords, num, redact, REGION, transportCode, unreachable, venueSaidNo, type Http, type HttpReply, type LiveBalance, type LiveSource } from "./types.ts";
 
 // ---- Robinhood Crypto ----------------------------------------------------------------------
 
@@ -75,6 +75,7 @@ const isOrder = (b: unknown): b is Record<string, unknown> => !!b && typeof b ==
  * of it is likely to use (Robinhood publishes none of its sentences) */
 const STATE_RULE = /(not|isn't) (available|supported|offered|permitted) (in|for|from) (your|this) (state|jurisdiction|region|country|location)|(ineligible|restricted|unsupported) (state|jurisdiction)|eligible jurisdiction/i;
 
+
 /** What Robinhood said, as one of the account's refusals. Robinhood publishes the shape of its errors and none of their sentences, so its words
  * are read in this order, and anything else is a plain refusal that carries them. */
 function rhNo(venue: string, name: string, s: { status?: number | undefined; said: string }, o: { order?: string | undefined; permission: string; unauthorized: string }): Refusal {
@@ -92,7 +93,7 @@ function rhNo(venue: string, name: string, s: { status?: number | undefined; sai
   if (o.order !== undefined && (code === 404 || /not found|does not exist|no such order|unknown order/i.test(t))) return no("E_ACCOUNT_ORDER_UNKNOWN", { venue, message: `${name} has no order ${o.order}`, native, detail: { order: o.order } });
   if (/not (currently )?tradable|untradable|halt|sell.?only|position_closing_only|market (is )?closed|outside (of )?(regular|market|trading) hours/i.test(t)) return no("E_VENUE_MARKET_CLOSED", { venue, message: `${name} takes no such order now: ${t}`, native });
   // a 400 to an order being placed is Robinhood's validation of it; a 400 to a cancel (an order already done) is a plain refusal
-  if ((o.order === undefined && code === 400) || /increment|minimum|maximum|precision|decimal|too (small|large)|at (least|most)|fraction|tick|quantity|price|size|amount/i.test(t)) return { ...badOrder(venue, name, t || "the order was not taken as written"), native };
+  if ((o.order === undefined && code === 400) || /increment|minimum|maximum|precision|decimal|too (small|large)|at (least|most)|fraction|tick|quantity|price|size|amount/i.test(t)) return no("E_VENUE_ORDER_INVALID", { venue, message: `${name}: ${t || "the order was not taken as written"}`, native });
   return no("E_VENUE_REJECTED", { venue, message: `${name} refused${code ? ` (HTTP ${code})` : ""}: ${t}`.slice(0, 300), native });
 }
 
@@ -172,7 +173,7 @@ export async function robinhoodCryptoSource(req: { venue: string; label: string;
   };
   const get = async (pathWithQuery: string): Promise<Record<string, unknown>> => {
     const r = await send("GET", pathWithQuery);
-    if (r.status !== 200 || !r.body || typeof r.body !== "object") throw venueSaidNo(req.venue, name, r.status, r.text, secrets);
+    if (r.status !== 200 || !r.body || typeof r.body !== "object") throw venueSaidNo(req.venue, name, r.status, r.text, secrets, r);
     return r.body as Record<string, unknown>;
   };
   /** a list Robinhood pages: `next` is the whole URL of the next page; five pages and no more */
@@ -227,8 +228,10 @@ export async function robinhoodCryptoSource(req: { venue: string; label: string;
   };
 
   // ---- orders: GET trading_pairs and best_bid_ask, POST orders, GET orders/{id}, POST orders/{id}/cancel ---------------------------------
-  const refused = (r: HttpReply, order?: string) =>
-    rhNo(req.venue, name, saidBy(r, secrets), { order, permission: `${name} refused: this API key was made without the action "Place crypto orders with fee tiers" (or "Read crypto orders"). A key's actions are chosen when it is made, in Robinhood's crypto account settings`, unauthorized: `${name} does not accept this key` });
+  const refused = (r: HttpReply, order?: string) => {
+    const said = saidBy(r, secrets);
+    return networkNo(req.venue, name, r, { status: said.status, said: said.said }) ?? rhNo(req.venue, name, said, { order, permission: `${name} refused: this API key was made without the action "Place crypto orders with fee tiers" (or "Read crypto orders"). A key's actions are chosen when it is made, in Robinhood's crypto account settings`, unauthorized: `${name} does not accept this key` });
+  };
   const unknownOrder = (ref: string) => no("E_ACCOUNT_ORDER_UNKNOWN", { venue: req.venue, message: `${name} has no order ${ref}`, detail: { order: ref } });
   const unpriced = (symbol: string) => no("E_ACCOUNT_UNPRICED", { venue: req.venue, message: `${symbol} is not priced in dollars: the account trades markets priced in dollars, so that every limit means dollars` });
   const account = async (): Promise<{ number: string; status: string } | Refusal> => {
@@ -333,7 +336,7 @@ export async function robinhoodCryptoSource(req: { venue: string; label: string;
       return undefined;
     }
   };
-  const lost = (id: string, said: unknown) => no("E_VENUE_UNREACHABLE", { venue: req.venue, message: `${name} did not answer the order, and it is not among Robinhood's orders yet: look in Robinhood before placing it again`, native: { client_order_id: id, said } });
+  const lost = (id: string, said: unknown) => no("E_VENUE_UNREACHABLE", { venue: req.venue, message: `${name} did not answer the order, and it is not among Robinhood's orders yet: look in Robinhood before placing it again`, native: { client_order_id: id, said }, detail: { clientOrderId: id, placed: "unknown", unsure: true } });
   const place = async (o: OrderRequest): Promise<OrderState | Refusal> => {
     try {
       const sym = pairSymbol(o.symbol);
@@ -507,9 +510,13 @@ export async function stockTokens(http: Http, now: number): Promise<StockToken[]
   const kept = lists.get(http);
   if (kept && now - kept.at < 10 * 60_000) return kept.tokens;
   const r = await http(`${RHJ}/assets`, { headers: { accept: "application/json" } });
-  if (r.status !== 200 || !r.body || typeof r.body !== "object") throw venueSaidNo("robinhood", "Robinhood's Stock Token list", r.status, r.text);
+  if (r.status !== 200) throw venueSaidNo("robinhood", "Robinhood's Stock Token list", r.status, r.text, [], r);
+  // a 200 that is not the list (a page in its place, an empty body, no `assets`): no answer, and nothing kept — an empty list kept for ten
+  // minutes would say the wallet holds no Stock Tokens
+  const assets = r.body && typeof r.body === "object" ? (r.body as { assets?: unknown }).assets : undefined;
+  if (!Array.isArray(assets)) throw no("E_VENUE_UNREACHABLE", { venue: "robinhood", message: notTheApi(r) ? notTheApiWords("Robinhood's Stock Token list") : "Robinhood's Stock Token list answered without its list: try again shortly", native: { status: r.status } });
   const tokens: StockToken[] = [];
-  for (const a of ((r.body as { assets?: unknown }).assets ?? []) as Array<Record<string, unknown>>) {
+  for (const a of assets as Array<Record<string, unknown>>) {
     if (a.status !== "ASSET_STATUS_ACTIVE" || typeof a.tokenSymbol !== "string") continue;
     for (const d of (Array.isArray(a.deployments) ? a.deployments : []) as Array<Record<string, unknown>>) {
       const chain = CHAIN_BY_ID.get(Number(d.chainId));
@@ -554,7 +561,8 @@ export async function stockTokenBids(http: Http, symbols: string[], now: number)
 /** the Stock Tokens an address holds, priced; a list or a chain that does not answer is said, not thrown. A Stock Token is held as an RWA:
  * it is Robinhood's debt security that tracks a share, not the share, and it is sold from the wallet as `<SYMBOL>/USDG@Robinhood Chain`
  * (dex.ts), the market the holding's row finds by its symbol and its chain */
-export async function stockTokenHoldings(holder: Hex, chain: ChainReader, http: Http, now: number): Promise<{ rows: LiveBalance[]; unread?: string }> {
+/** `failed`: the chains that did not answer (their rows are not in `rows`); `unread` without `failed`: the list itself was not read */
+export async function stockTokenHoldings(holder: Hex, chain: ChainReader, http: Http, now: number): Promise<{ rows: LiveBalance[]; unread?: string; failed?: ChainName[] }> {
   let tokens: StockToken[];
   try {
     tokens = await stockTokens(http, now);
@@ -568,7 +576,7 @@ export async function stockTokenHoldings(holder: Hex, chain: ChainReader, http: 
   const bid = await stockTokenBids(http, [...new Set(held.map((b) => b.asset))], now);
   return {
     rows: held.map((b) => ({ asset: b.asset, amount: b.amount, ...(bid.has(b.asset) ? { usd: b.amount * bid.get(b.asset)! } : {}), where: `${b.chain} · Stock Token`, class: "rwa" })),
-    ...(read.failed.length ? { unread: `${read.failed.join(", ")} did not answer` } : {}),
+    ...(read.failed.length ? { unread: `${read.failed.join(", ")} did not answer`, failed: read.failed } : {}),
   };
 }
 
@@ -780,6 +788,27 @@ export async function robinhoodStocksSource(req: { venue: string; label: string;
   /** the Agentic account, as the last read of get_accounts found it */
   let agentic: { number: string; type: string } | undefined;
   let agenticSeen = false;
+  const words = { permission: `${name} refused: through its MCP server an agent trades only in the Robinhood Agentic account, which Robinhood opens during the sign-in that first connects an agent`, unauthorized: `${name} no longer accepts this sign-in: sign in again from the account page` };
+  /** What Robinhood's MCP server answered over HTTP when it did not take a request at all — the SDK's StreamableHTTPError carries the status
+   * in `code` and the body after "Error POSTing to endpoint: " — as the account's refusal: its place rule (451, its words), the server in
+   * front of it refusing this network, a ban or a rate limit, a sign-in it no longer takes, no answer (5xx). Nothing when no HTTP answer
+   * came (no route, a reset, a timeout: the SDK's -1, or no status), which is a call that did not come back */
+  const mcpRefusal = (err: unknown, token: string | undefined): Refusal | undefined => {
+    const e = err as { code?: unknown; message?: unknown } | undefined;
+    const message = String(e?.message ?? "");
+    if (typeof e?.code !== "number" || e.code < 100 || e.code > 599 || /^MCP error /.test(message)) return undefined;
+    const body = message.replace(/^Streamable HTTP error: (?:Error POSTing to endpoint|Failed to open SSE stream|Failed to terminate session): /, "");
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      parsed = undefined;
+    }
+    const said = redact(body, [token]).replace(/\s+/g, " ").trim().slice(0, 220);
+    return networkNo(req.venue, name, { status: e.code, body: parsed, text: body }, { status: e.code, said }) ?? rhNo(req.venue, name, { status: e.code, said }, words);
+  };
+  /** a failure of the call itself: Robinhood's HTTP answer when there was one, or no answer */
+  const failed = (err: unknown, token: string): Refusal => mcpRefusal(err, token) ?? unreachable(req.venue, name, err, [token]);
   const read = async (): Promise<LiveBalance[]> => {
     const token = await req.token();
     if (isRefusal(token)) throw token;
@@ -788,7 +817,7 @@ export async function robinhoodStocksSource(req: { venue: string; label: string;
     try {
       session = await req.open(ROBINHOOD_MCP, token);
     } catch (err) {
-      throw unreachable(req.venue, name, err, [token]);
+      throw failed(err, token);
     }
     try {
       const tools = new Map((await session.tools()).map((t) => [t.name, t]));
@@ -821,8 +850,13 @@ export async function robinhoodStocksSource(req: { venue: string; label: string;
       if (!out.length && !accounts.length) throw no("E_VENUE_REJECTED", { venue: req.venue, message: `${name} answered, but not in a shape this connection reads yet: nothing in it looks like an account, cash or a position`, native: { answered: answers.map((a) => ({ tool: a.tool, keys: shapeOf(a.data) })) } });
       return out;
     } catch (err) {
-      // a later read's error is shown on the page as it is: the token comes out of it first, then it is cut short
-      throw isRefusal(err) ? err : new Error(redact(String((err as Error)?.message ?? err), [token]).slice(0, 200));
+      // a later read's error is shown on the page as it is: the token comes out of it first, then it is cut short. Robinhood's HTTP answer,
+      // or a connection that failed, is said as what it is
+      if (isRefusal(err)) throw err;
+      const http = mcpRefusal(err, token);
+      if (http) throw http;
+      if (transportCode(err) !== undefined || (err as Error)?.name === "TimeoutError") throw unreachable(req.venue, name, err, [token]);
+      throw new Error(redact(String((err as Error)?.message ?? err), [token]).slice(0, 200));
     } finally {
       await session.close().catch(() => undefined);
     }
@@ -831,8 +865,7 @@ export async function robinhoodStocksSource(req: { venue: string; label: string;
   // ---- orders, in the Agentic account: get_equity_quotes, get_equity_tradability, place_equity_order, get_equity_orders, cancel_equity_order
   /** refusals made when a call did not come back at all, as opposed to the tool answering with an error */
   const lostCalls = new WeakSet<Refusal>();
-  const refusedBy = (text: string, order?: string) =>
-    rhNo(req.venue, name, { said: redact(text, [tokenSeen]).replace(/\s+/g, " ").trim().slice(0, 220) }, { order, permission: `${name} refused: through its MCP server an agent trades only in the Robinhood Agentic account, which Robinhood opens during the sign-in that first connects an agent`, unauthorized: `${name} no longer accepts this sign-in: sign in again from the account page` });
+  const refusedBy = (text: string, order?: string) => rhNo(req.venue, name, { said: redact(text, [tokenSeen]).replace(/\s+/g, " ").trim().slice(0, 220) }, { order, ...words });
   const unknownOrder = (ref: string) => no("E_ACCOUNT_ORDER_UNKNOWN", { venue: req.venue, message: `${name} has no order ${ref} in the Agentic account`, detail: { order: ref } });
   const noAgentic = () => no("E_VENUE_PERMISSION", { venue: req.venue, message: `${name}: ${NO_AGENTIC}` });
   interface Tools {
@@ -849,7 +882,7 @@ export async function robinhoodStocksSource(req: { venue: string; label: string;
     try {
       session = await req.open(ROBINHOOD_MCP, token);
     } catch (err) {
-      return unreachable(req.venue, name, err, [token]);
+      return failed(err, token);
     }
     try {
       const listed = new Map((await session.tools()).map((t) => [t.name, t]));
@@ -863,7 +896,12 @@ export async function robinhoodStocksSource(req: { venue: string; label: string;
           try {
             result = await session.call(tool, args);
           } catch (err) {
-            const r = unreachable(req.venue, name, err, [token]);
+            // Robinhood's own answer (its place rule, an edge's page, a ban, a rate limit) is its answer: sent once, never again. Only a call
+            // that did not come back, or a 5xx that may have reached Robinhood, is a lost call, which an order may send once more under its ref_id
+            const said = mcpRefusal(err, token);
+            const status = (err as { code?: unknown })?.code;
+            if (said && !(typeof status === "number" && status >= 500)) throw said;
+            const r = said ?? unreachable(req.venue, name, err, [token]);
             lostCalls.add(r);
             throw r;
           }
@@ -879,7 +917,7 @@ export async function robinhoodStocksSource(req: { venue: string; label: string;
         },
       });
     } catch (err) {
-      return asRefusal(req.venue, name, isRefusal(err) ? err : new Error(redact(String((err as Error)?.message ?? err), [token])), [token]);
+      return asRefusal(req.venue, name, isRefusal(err) ? err : (mcpRefusal(err, token) ?? new Error(redact(String((err as Error)?.message ?? err), [token]))), [token]);
     } finally {
       await session.close().catch(() => undefined);
     }

@@ -110,7 +110,7 @@ describe("reach: each venue's first, keyless question, before a key is made", ()
   });
 
   it("Hyperliquid's trading connection: its own terms (§1.6) held to where this user is now — the place from Polymarket's location check, said never; Polymarket's own verdict is not Hyperliquid's", async () => {
-    const at = (country: string, region: string, blocked = false) => deps({ answers: { "https://polymarket.com/api/geoblock": reply(200, { blocked, ip: "203.0.113.7", country, region }) } });
+    const at = (country: string, region: string, blocked = false) => deps({ answers: { "https://polymarket.com/api/geoblock": reply(200, { blocked, ip: "203.0.113.7", country, region }), "https://api.hyperliquid.xyz/info": reply(200, { universe: [] }) } });
     const us = await reachOf("live:hyperliquid-trade", at("US", "NY", true).d);
     expect(us.state).toBe("location");
     expect(us.said).toBe("Hyperliquid does not serve this location: its Terms of Use (§1.6) make its Interface unavailable to persons located in the United States of America or Ontario, Canada, or in a territory under economic sanctions. That is its own rule, and the account does not look for a way around it");
@@ -120,7 +120,8 @@ describe("reach: each venue's first, keyless question, before a key is made", ()
     // blocked by Polymarket in Ireland: that is Polymarket's rule, and Hyperliquid serves there
     const ie = at("IE", "L", true);
     expect(await reachOf("live:hyperliquid-trade", ie.d)).toEqual({ connector: "live:hyperliquid-trade", state: "ok", at: "2026-10-07T19:00:00.000Z" });
-    expect(ie.asked.map((a) => a.url)).toEqual(["https://polymarket.com/api/geoblock"]);
+    // Hyperliquid itself is asked too (its public market list), with no key, and nothing about the user
+    expect(ie.asked.map((a) => a.url).sort()).toEqual(["https://api.hyperliquid.xyz/info", "https://polymarket.com/api/geoblock"]);
     for (const a of ie.asked) expect(Object.keys(a.headers).map((h) => h.toLowerCase()).filter((h) => /auth|key|sign|token|cookie/.test(h))).toEqual([]);
     // a place not learned is not a yes
     const quiet = await reachOf("live:hyperliquid-trade", deps({ answers: { "https://polymarket.com/api/geoblock": new Error("ETIMEDOUT") } }).d);
@@ -161,10 +162,15 @@ describe("reach: each venue's first, keyless question, before a key is made", ()
     expect(runs.every((a) => a.join(" ") === "auth status")).toBe(true);
   });
 
-  it("the connections read by address ask nothing (a public read is the same everywhere); a name that is no connection has no way in", async () => {
+  it("the connections read by address ask their host one keyless question about nobody (a network may refuse or filter it); a name that is no connection has no way in", async () => {
     const { d, asked, keys } = deps();
     for (const c of ["live:wallet", "live:hyperliquid", "live:polymarket", "live:ondo", "live:exchange"]) expect((await reachOf(c, d)).state).toBe("ok");
-    expect(asked).toEqual([]);
+    const hosts = [...new Set(asked.map((a) => new URL(a.url).host))];
+    expect(hosts).toEqual(expect.arrayContaining(["data-api.polymarket.com", "api.hyperliquid.xyz"]));
+    expect(asked.find((a) => a.url.includes("data-api.polymarket.com"))!.url).toBe("https://data-api.polymarket.com/v2/positions?user=0x0000000000000000000000000000000000000000&limit=1");
+    // the chains: one eth_chainId each, which names no address; seven for a wallet, Ethereum's for Ondo
+    expect(asked.length).toBe(1 + 1 + 7 + 1);
+    for (const a of asked) expect(Object.keys(a.headers).map((h) => h.toLowerCase()).filter((h) => /auth|key|sign|token|cookie/.test(h))).toEqual([]);
     expect(keys).toEqual([]);
     expect((await reachOf("exchange:okx", d)).state).toBe("closed");
   });
@@ -194,7 +200,8 @@ describe("GET /api/account/connect/reach", () => {
       };
       const [a, b] = await Promise.all([ask("connector=live:exchange:binance,live:exchange:okx,live:hyperliquid"), ask("connector=live:exchange:binance")]);
       expect(a.status).toBe(200);
-      expect(a.body.reach!.map((r) => [r.connector, r.state])).toEqual([["live:exchange:binance", "location"], ["live:exchange:okx", "ok"], ["live:hyperliquid", "ok"]]);
+      // Hyperliquid by address asks its host too: this network's stand-in answers nothing but 599
+      expect(a.body.reach!.map((r) => [r.connector, r.state])).toEqual([["live:exchange:binance", "location"], ["live:exchange:okx", "ok"], ["live:hyperliquid", "unreachable"]]);
       expect(b.body.reach![0]!.said).toContain("Service unavailable from a restricted location");
       // two asked at once: the venue was asked once each
       expect(clocks).toBe(2);

@@ -387,7 +387,9 @@ describe("a swap through mm", () => {
       return refusal(await x.t.market("ETH/USDC@Base"));
     };
     expect((await quoteSays({ kind: "unavailable", reason: "AMOUNT_TOO_LOW", message: "Amount below the provider minimum.", hint: "Increase --amount" })).code).toBe("E_VENUE_ORDER_INVALID");
-    expect((await quoteSays({ kind: "unavailable", reason: "RWA_GEO_RESTRICTED", message: "This asset is restricted in your region." })).code).toBe("E_VENUE_GEOBLOCKED");
+    // one asset's rule, in MetaMask's words: not the venue's place, so nothing else mm reaches is held back for it
+    const rwa = await quoteSays({ kind: "unavailable", reason: "RWA_GEO_RESTRICTED", message: "This asset is restricted in your region." });
+    expect([rwa.code, rwa.message]).toEqual(["E_VENUE_REJECTED", `MetaMask's swaps will not trade this asset from here: MetaMask says "This asset is restricted in your region." — its own rule for this one asset, and the account does not look for a way around it`]);
     expect((await quoteSays({ kind: "unavailable", reason: "RWA_MARKET_UNAVAILABLE", message: "This RWA market is currently unavailable." })).code).toBe("E_VENUE_MARKET_CLOSED");
     expect((await quoteSays({ kind: "unavailable", reason: "NO_QUOTES", message: "No routes found for this request." })).code).toBe("E_VENUE_REJECTED");
     expect((await quoteSays(fail("TOKEN_NOT_FOUND", "Token PEPE was not found on Base."))).code).toBe("E_VENUE_ORDER_INVALID");
@@ -562,7 +564,9 @@ describe("a Polymarket order through mm", () => {
     expect([setup.code, setup.message]).toEqual(["E_VENUE_PERMISSION", "the wallet is not set up to trade on Polymarket: run mm predict setup --wait in a terminal first"]);
     expect((await says(fail("PREDICT_AUTH_INVALID", "Unauthorized/Invalid api key"), "e4")).code).toBe("E_VENUE_UNAUTHORIZED");
     expect((await says(fail("PREDICT_UNAVAILABLE_FOR_LEGAL_REASONS", "Unavailable for legal reasons"), "e5")).code).toBe("E_VENUE_GEOBLOCKED");
-    expect((await says(fail("PREDICT_ERROR", "'0x00000000000000000000000000000000000000Dd' address in closed only mode"), "e6")).code).toBe("E_VENUE_GEOBLOCKED");
+    // a state of the wallet, as the CLOB connection reads it: never "does not serve this location", and sells still go
+    const closeOnly = await says(fail("PREDICT_ERROR", "'0x00000000000000000000000000000000000000Dd' address in closed only mode"), "e6");
+    expect([closeOnly.code, closeOnly.message, (closeOnly.native as { closeOnly?: boolean }).closeOnly]).toEqual(["E_VENUE_PERMISSION", "Polymarket holds this wallet to closing positions (its words: '0x00000000000000000000000000000000000000Dd' address in closed only mode): a buy opens one, so nothing was placed; a sell of shares the wallet holds still goes", true]);
     expect((await says(fail("PREDICT_ERROR", "the market is not yet ready to process new orders"), "e7")).code).toBe("E_VENUE_MARKET_CLOSED");
     expect((await says(fail("PREDICT_ERROR", "Trading is currently cancel-only. Try again later."), "e8")).code).toBe("E_VENUE_MARKET_CLOSED");
     expect((await says(fail("RATE_LIMITED", "Too many requests"), "e9")).code).toBe("E_VENUE_UNREACHABLE");
@@ -582,7 +586,7 @@ describe("a Polymarket order through mm", () => {
     x.answers["predict geoblock"] = fail("PREDICT_GEOBLOCKED", "Polymarket is not available in your region.");
     expect(refusal(await x.t.place({ symbol: `${SLUG}:Yes`, side: "sell", type: "limit", qty: 10, limitPrice: 0.2, clientId: "g2" })).code).toBe("E_VENUE_GEOBLOCKED");
     x.answers["predict geoblock"] = { command: "geoblock", result: {} };
-    expect(refusal(await x.t.place({ symbol: `${SLUG}:Yes`, side: "sell", type: "limit", qty: 10, limitPrice: 0.2, clientId: "g3" })).code).toBe("E_VENUE_REJECTED");
+    expect(refusal(await x.t.place({ symbol: `${SLUG}:Yes`, side: "sell", type: "limit", qty: 10, limitPrice: 0.2, clientId: "g3" })).code).toBe("E_VENUE_UNREACHABLE");
     expect(x.calls.some((c) => c.args[1] === "place")).toBe(false);
   });
 
@@ -823,7 +827,8 @@ describe("positions(): what the Predict deposit wallet holds at Polymarket", () 
     expect((await says(fail("RATE_LIMITED", "Too many requests"))).code).toBe("E_VENUE_UNREACHABLE");
     expect((await says(fail("NETWORK_UNREACHABLE", "fetch failed"))).code).toBe("E_VENUE_UNREACHABLE");
     const down = await says(fail("PREDICT_ERROR", "Polymarket fetch positions failed: Bad Gateway"));
-    expect([down.code, down.message, (down.native as { command: string }).command]).toEqual(["E_VENUE_REJECTED", "Polymarket refused to list what the Predict deposit wallet holds: Polymarket fetch positions failed: Bad Gateway", "mm predict positions --json"]);
+    // a gateway's 502 is an outage, not Polymarket's no
+    expect([down.code, down.message, (down.native as { command: string }).command]).toEqual(["E_VENUE_UNREACHABLE", "Polymarket did not answer in time, or is limiting requests: try again in a minute", "mm predict positions --json"]);
     const unread = await says({ command: "positions", params: {}, result: { chainId: 137, ownerAddress: WALLET } });
     expect([unread.code, unread.message]).toEqual(["E_VENUE_REJECTED", "Polymarket answered in a way this connection could not read"]);
     const leaked = await says(fail("WALLET_ERROR", `could not unlock with --password ${PASSWORD}`));
@@ -1035,9 +1040,10 @@ describe("perpetuals at Hyperliquid, through mm perps", () => {
     expect(JSON.stringify(said)).not.toMatch(/"US"|"PA"|\(PA, US\)/);
     // a place mm cannot say is no place: nothing is sent
     x.answers["predict geoblock"] = fail("NETWORK_UNREACHABLE", "fetch failed");
-    expect(refusal(await x.t.place(buy({ clientId: "4".repeat(32) })))).toMatchObject({ code: "E_VENUE_REJECTED", message: expect.stringContaining("mm could not say where this machine is") });
+    // not known now is asked again, as the direct connection says it (location.ts heldTo): never read as Hyperliquid's no
+    expect(refusal(await x.t.place(buy({ clientId: "4".repeat(32) })))).toMatchObject({ code: "E_VENUE_UNREACHABLE", message: expect.stringContaining("mm could not say where this machine is") });
     x.answers["predict geoblock"] = { command: "geoblock", result: { blocked: false } };
-    expect(refusal(await x.t.place(buy({ clientId: "5".repeat(32) })))).toMatchObject({ code: "E_VENUE_REJECTED", message: expect.stringContaining("mm did not say where this machine is") });
+    expect(refusal(await x.t.place(buy({ clientId: "5".repeat(32) })))).toMatchObject({ code: "E_VENUE_UNREACHABLE", message: expect.stringContaining("mm did not say where this machine is") });
     expect(argvs(x.calls).some((a) => a[1] === "open")).toBe(false);
   });
 
@@ -1050,11 +1056,14 @@ describe("perpetuals at Hyperliquid, through mm perps", () => {
     const closed = await boot({ ...PERPS, "predict geoblock": unreachable, "perps open": opened({}) }, ON, where("closed"));
     expect(refusal(await closed.t.place(buy())).code).toBe("E_VENUE_GEOBLOCKED");
     const unknown = await boot({ ...PERPS, "predict geoblock": unreachable, "perps open": opened({}) }, ON, where("unknown"));
-    expect(refusal(await unknown.t.place(buy())).message).toContain("mm could not say where this machine is");
+    expect(refusal(await unknown.t.place(buy()))).toMatchObject({ code: "E_VENUE_UNREACHABLE", message: expect.stringContaining("mm could not say where this machine is") });
     for (const x of [closed, unknown]) expect(argvs(x.calls).some((a) => a[1] === "open")).toBe(false);
     // mm names a country Hyperliquid closes in part (Canada: Ontario) without the part: the account's sources are asked for it
     const ca = { command: "geoblock", result: { blocked: false, country: "CA", region: "" } };
-    expect(refusal(await (await boot({ ...PERPS, "predict geoblock": ca, "perps open": opened({}) })).t.place(buy())).message).toContain("mm said the country but not the part of it this machine is in");
+    // said as the direct connection says it: nothing in it tells that the country is one the line closes in part
+    const split = refusal(await (await boot({ ...PERPS, "predict geoblock": ca, "perps open": opened({}) })).t.place(buy()));
+    expect([split.code, split.message]).toEqual(["E_VENUE_UNREACHABLE", "where this machine is could not be learned just now, so Hyperliquid's own line (its Terms of Use §1.6) could not be held to it: nothing was sent (buy 0.001 BTC). Try again in a moment"]);
+    expect(JSON.stringify(split)).not.toMatch(/part of it|Canada|Ontario|Ukraine|"CA"/);
     ok(await (await boot({ ...PERPS, "predict geoblock": ca, "perps open": opened({}) }, ON, where("served"))).t.place(buy()));
     expect(refusal(await (await boot({ ...PERPS, "predict geoblock": ca, "perps open": opened({}) }, ON, where("closed"))).t.place(buy())).code).toBe("E_VENUE_GEOBLOCKED");
   });

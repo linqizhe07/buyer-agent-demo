@@ -79,8 +79,9 @@ const isOn = (kind, extra) => (kind === "wallet" ? false : A.venues.some((v) => 
    /api/account/connect/reach, live/reach.ts). A venue that does not serve this location says so on its tile and in its form, in its own
    words, before a key is made that it would refuse; nothing here looks for a way around it */
 const REACH = new Map();
-/* the connection a tile asks about: an exchange by its id; the ones read by address ask nothing (a public read is the same everywhere) */
-const tileConnector = (kind, extra) => (kind === "exchange" ? (extra ? `live:exchange:${extra}` : "") : BY_ADDRESS.has(kind) ? "" : `live:${kind}`);
+/* the connection a tile asks about: an exchange by its id; the ones read by address ask their host one keyless question about nobody
+   (Polymarket's data API, Hyperliquid's info endpoint, each chain's public endpoint): a network may refuse or filter it too */
+const tileConnector = (kind, extra) => (kind === "exchange" ? (extra ? `live:exchange:${extra}` : "") : `live:${kind}`);
 /* the tile a connection is: [kind, extra] (`live:exchange:binanceus` → exchange, binanceus) */
 const tileOf = (connector) => { const m = /^live:(exchange:)?([a-z0-9-]+)$/.exec(connector || ""); return m ? (m[1] ? ["exchange", m[2]] : [m[2], ""]) : null; };
 /* a venue that cannot be used from here and its edition for where the user is (the account's detection: a separate company that answers

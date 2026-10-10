@@ -70,10 +70,11 @@ import { privateKeyToAccount } from "viem/accounts";
 import { isRefusal, type Refusal } from "../../core/errors.ts";
 import { no } from "../refuse.ts";
 import type { KeyFile, KeyShape } from "./credentials.ts";
+import { thrownHttp } from "./exchange.ts";
 import { heldTo, HYPERLIQUID_RULE, type Locator } from "./location.ts";
 import { impliedUsd, PRE_IPO_CATEGORY, preIpoOf } from "./preipo.ts";
 import { badOrder, CANDLE_INTERVALS, ceilTo, DONE, floorTo, inDollars, onStep, pick, plain, type Candle, type CandleInterval, type LiveTrader, type Market, type MarketStats, type OrderRequest, type OrderState, type OrderStatus, type Position, type TimeInForce } from "./trade.ts";
-import { isStable, redact, REGION, type LiveBalance, type LiveSource, type MarginMode } from "./types.ts";
+import { bannedNo, bannedUntil, edgeRefused, edgeTitle, edgeWords, isStable, notTheApiWords, redact, REGION, type LiveBalance, type LiveSource, type MarginMode } from "./types.ts";
 
 type Dict = Record<string, unknown>;
 
@@ -104,6 +105,9 @@ export interface HyperliquidClient {
   priceToPrecision(symbol: string, price: number): string;
   /** what the library does unasked the first time it signs; replaced by disarm() */
   initializeClient?: (() => Promise<boolean>) | undefined;
+  /** the library's reading of each answer (base/Exchange.js handleRestResponse: the body, and its parse when it is a JSON object or list);
+   * guarded by disarm() */
+  handleErrors?(code: number, reason: string, url: string, method: string, headers: unknown, body: string, response: unknown, requestHeaders: unknown, requestBody: unknown): unknown;
 }
 
 /** the library's client for one key file; a stand-in's network in tests */
@@ -113,14 +117,32 @@ type Ccxt = { hyperliquid: new (config: Dict) => HyperliquidClient };
 let library: Promise<Ccxt> | undefined;
 const ccxt = (): Promise<Ccxt> => (library ??= import("ccxt").then((m) => (m as unknown as { default: Ccxt }).default));
 
+/** a bare JSON value, which the library hands back as its text: Hyperliquid's own (userAbstraction answers "default"), never a page */
+const BARE = /^\s*(?:"[^"<>]*"|null|true|false|-?\d[\d.eE+-]*)\s*$/;
+
 /** The library's client with nothing done unasked: its initializeClient (an approveBuilderFee for the library's own builder, a setReferrer
  * "CCXT1", the account's abstraction looked up) is replaced by a no-op, and with no approved builder fee no order carries a `builder`. Every
- * signed action this account sends is then one the owner or an agent asked for */
+ * signed action this account sends is then one the owner or an agent asked for.
+ *
+ * And nothing taken for Hyperliquid's answer that is not one: a 2xx answer the library cannot parse — a filtering network's page, an empty
+ * body — is handed back by the library as text, and would read as a cancel taken, a leverage changed, holdings of nothing. It is thrown
+ * instead (BadResponse: no answer), carrying the page's title alone, never the page */
 export function disarm(client: HyperliquidClient): HyperliquidClient {
   client.initializeClient = async () => true;
   client.options.builderFee = false;
   client.options.approvedBuilderFee = false;
   client.options.refSet = true;
+  const own = client.handleErrors?.bind(client);
+  if (own) {
+    client.handleErrors = (code, reason, url, method, headers, body, response, requestHeaders, requestBody) => {
+      const text = String(body ?? "");
+      if ((response === undefined || response === null) && code >= 200 && code < 300 && !BARE.test(text)) {
+        const title = edgeTitle(text);
+        throw Object.assign(new Error(`hyperliquid ${method} ${url} ${code} ${text.trim() ? `a page, not the API's answer${title ? ` (“${title}”)` : ""}` : "an empty answer"}`), { name: "BadResponse" });
+      }
+      return own(code, reason, url, method, headers, body, response, requestHeaders, requestBody);
+    };
+  }
   return client;
 }
 
@@ -222,23 +244,43 @@ const AS_WRITTEN = /minimum value of \$10|divisible by tick size|invalid size|ze
 const RATE = /too many (cumulative )?requests|rate limit/i;
 const NONCE = /\bnonce\b/i;
 const DOWN = new Set(["NetworkError", "RequestTimeout", "ExchangeNotAvailable", "OnMaintenance", "TimeoutError", "AbortError"]);
-/** an order call that failed this way may still have reached Hyperliquid */
-const UNSURE = new Set(["RequestTimeout", "NetworkError", "ExchangeNotAvailable", "TimeoutError", "AbortError"]);
+/** an order call that failed this way may still have reached Hyperliquid: no answer, or a page in place of its answer (disarm) */
+const UNSURE = new Set(["RequestTimeout", "NetworkError", "ExchangeNotAvailable", "TimeoutError", "AbortError", "BadResponse"]);
 
-/** Hyperliquid's no as the account's refusal: its own sentence, with " asset=N" (its internal index) left to `native` */
+/** Hyperliquid's no as the account's refusal: its own sentence, with " asset=N" (its internal index) left to `native`. What the server in
+ * front of it answered is read from the whole answer, not the sentence cut from it: an edge's page says where it is from further in */
 export function hyperliquidNo(venue: string, name: string, err: unknown, secrets: string[] = [], ref?: string): Refusal {
   if (isRefusal(err)) return err;
   const { kind, said } = hlSaid(err, secrets);
   const words = said.replace(/\s*asset=\d+\s*$/, "").trim();
   const native = { error: kind, said };
   const theirs = `${name}: ${words}`;
+  const whole = redact(String((err as { message?: unknown } | undefined)?.message ?? err), secrets).replace(/\s+/g, " ");
+  const http = thrownHttp(whole);
+  // something on this network answered in Hyperliquid's place with a page (disarm): no answer — never its yes, nor its no
+  if (kind === "BadResponse") return no("E_VENUE_UNREACHABLE", { venue, message: notTheApiWords(name), native: { error: kind, ...(http ? { status: http.status } : {}), page: true } });
   if (REGION.test(said)) return no("E_VENUE_GEOBLOCKED", { venue, message: `${name} does not serve this location: that is its own rule, and the account does not look for a way around it. It answered: “${words}”`, native });
+  if (REGION.test(whole)) {
+    // a page that names the place past the sentence kept (CloudFront's "configured to block access from your country"): the words around it
+    const plain = (http ? http.body : whole).replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+    const at = Math.max(0, plain.search(REGION));
+    const around = plain.slice(Math.max(0, at - 120), at + 120).trim();
+    return no("E_VENUE_GEOBLOCKED", { venue, message: `${name} does not serve this location: that is its own rule, and the account does not look for a way around it. It answered: “${around}”`, native: { error: kind, said: around } });
+  }
+  // the server in front of Hyperliquid refusing this network with a page of its own (the library calls it "not available"): its answer,
+  // not a moment without one — and an order it refused was never placed
+  if (http && edgeRefused(http.status, http.body)) return no("E_VENUE_GEOBLOCKED", { venue, message: edgeWords(name, http.status, http.body), native: { error: kind, status: http.status, edge: true } });
+  // banned for too many requests: until when it says, or ten minutes
+  const until = bannedUntil(whole);
+  if (until !== undefined || http?.status === 418) return bannedNo(venue, name, until, native);
   if (NO_AGENT.test(said)) return no("E_VENUE_UNAUTHORIZED", { venue, message: `${theirs} — the API wallet is not, or is no longer, approved for this account. ${HOW}`, native });
   if (INSUFFICIENT.test(said) || kind === "InsufficientFunds") return no("E_VENUE_INSUFFICIENT", { venue, message: theirs, native });
   if (UNKNOWN_ORDER.test(said) || kind === "OrderNotFound") return no("E_ACCOUNT_ORDER_UNKNOWN", { venue, message: ref ? `${name} has no open order ${ref} for this account (${words})` : theirs, ...(ref ? { detail: { order: ref } } : {}), native });
   if (NO_MATCH.test(said)) return no("E_VENUE_REJECTED", { venue, message: `${theirs.replace(/\.$/, "")}. Nothing was filled`, native });
-  if (AS_WRITTEN.test(said) || kind === "InvalidOrder" || kind === "BadSymbol") return { ...badOrder(venue, name, words), native };
-  if (RATE.test(said) || kind === "RateLimitExceeded" || kind === "DDoSProtection") return no("E_VENUE_UNREACHABLE", { venue, message: `${theirs}: try again in a minute`, native });
+  // badOrder's refusal, with Hyperliquid's own answer passed through no() so that the address scrub is not undone
+  if (AS_WRITTEN.test(said) || kind === "InvalidOrder" || kind === "BadSymbol") return no("E_VENUE_ORDER_INVALID", { venue, message: `${name}: ${words}`, native });
+  // held the minute the sentence says (holdBackMs reads the status)
+  if (RATE.test(said) || kind === "RateLimitExceeded" || kind === "DDoSProtection") return no("E_VENUE_UNREACHABLE", { venue, message: `${theirs}: try again in a minute`, native: { ...native, status: 429 } });
   // Hyperliquid keeps each signer's highest nonces ("Use a API wallet per trading process"): one shared with another program can collide
   if (NONCE.test(said)) return no("E_VENUE_REJECTED", { venue, message: `${theirs} — Hyperliquid asks for one API wallet per trading process: give this account an API wallet of its own, then try again`, native });
   if (kind === "AuthenticationError" || kind === "PermissionDenied") return no("E_VENUE_UNAUTHORIZED", { venue, message: theirs, native });
@@ -328,6 +370,7 @@ export interface HyperliquidTradeRequest {
 function book(c: { venue: string; name: string; user: Hex; client: HyperliquidClient; clock: () => number; secrets: string[] }) {
   const user = c.user.toLowerCase();
   let loadedAt = 0;
+  let loadFailed = false;
   let entries: Entry[] = [];
   const bySymbol = new Map<string, Entry>();
   const byCoin = new Map<string, Entry>();
@@ -337,13 +380,19 @@ function book(c: { venue: string; name: string; user: Hex; client: HyperliquidCl
   const kept = new Map<string, { at: number; value: unknown }>();
 
   const fail = (err: unknown, ref?: string): Refusal => hyperliquidNo(c.venue, c.name, err, c.secrets, ref);
+  /** an answer that is not Hyperliquid's (nothing, or text that is not a bare JSON value): no answer */
+  const page = (call: string): Refusal => no("E_VENUE_UNREACHABLE", { venue: c.venue, message: notTheApiWords(c.name), native: { call, page: true } });
   /** one info read; a refusal is thrown as the account's */
   const info = async (body: Dict): Promise<unknown> => {
+    let answer: unknown;
     try {
-      return await c.client.publicPostInfo(body);
+      answer = await c.client.publicPostInfo(body);
     } catch (err) {
       throw fail(err);
     }
+    // disarm() throws for a page; this is the last look, so that nothing is ever read as an answer of nothing
+    if (answer === undefined || answer === null || (typeof answer === "string" && !BARE.test(answer))) throw page(`POST /info ${String(body.type)}`);
+    return answer;
   };
   /** an answer kept `ms`; a failed one is not kept */
   const keep = async <T>(key: string, ms: number, ask: () => Promise<T>): Promise<T> => {
@@ -388,16 +437,25 @@ function book(c: { venue: string; name: string; user: Hex; client: HyperliquidCl
   };
 
   /** the library's market list, kept five minutes (a list that cannot be reloaded is used as it was), the HIP-3 DEXs' full names (perpDexs)
-   * and Hyperliquid's category for each of their markets (perpCategories: [[coin, category], …], read live 2026-10-08), each kept ten minutes */
+   * and Hyperliquid's category for each of their markets (perpCategories: [[coin, category], …], read live 2026-10-08), each kept ten minutes.
+   * After a load that failed the library is asked afresh: it otherwise hands the same failed load to every later call, and one blip on the
+   * first load would leave the connection without markets until it is made again */
   const load = async (): Promise<Refusal | undefined> => {
     if (loadedAt && c.clock() - loadedAt < LIST_MS) return undefined;
     try {
-      await c.client.loadMarkets(loadedAt > 0);
+      await c.client.loadMarkets(loadedAt > 0 || loadFailed);
+      loadFailed = false;
     } catch (err) {
+      loadFailed = true;
       if (loadedAt) return undefined;
       return fail(err);
     }
     const next = Object.values(c.client.markets ?? {}).map((m) => toEntry(obj(m))).filter((e): e is Entry => e !== undefined);
+    // a load that came back with no markets is not a list (Hyperliquid always lists some): one held stays, and the next look loads again
+    if (!next.length) {
+      loadFailed = true;
+      return entries.length ? undefined : page("the market list");
+    }
     next.sort((a, b) => b.volume - a.volume || a.symbol.localeCompare(b.symbol));
     entries = next;
     bySymbol.clear();
@@ -468,7 +526,10 @@ function book(c: { venue: string; name: string; user: Hex; client: HyperliquidCl
     user,
     info,
     keep,
+    /** the last answer kept under `key`, however old: what was learned before, for a read that is refused now */
+    lastKept: (key: string): unknown => kept.get(key)?.value,
     fail,
+    page,
     load,
     find,
     ctxOf,
@@ -530,8 +591,20 @@ async function approval(b: Book, c: { venue: string; name: string; user: Hex; ag
  * marked) with what can be withdrawn, each HIP-3 DEX's account value, and the spot balances priced at Hyperliquid's own mids — or, under a
  * unified account or portfolio margin, the spot balances alone, which are the whole account there */
 async function balances(b: Book, name: string): Promise<LiveBalance[]> {
-  // Hyperliquid answers a bare JSON string ("default"), which the library hands back as its text, quotes and all
-  const mode = await b.keep("abstraction", KEEP_MS, async () => String((await b.info({ type: "userAbstraction", user: b.user })) ?? "default").replace(/"/g, "").trim()).catch(() => "default");
+  // Hyperliquid answers a bare JSON string ("default"), which the library hands back as its text, quotes and all: a word, or it is not its
+  // answer. A refused read takes the kind learned before, never a guess — a unified account taken for an ordinary one has its perps value
+  // counted on top of the spot balances that are the same money; never learned, the read is refused as the other reads are
+  const mode = await b
+    .keep("abstraction", KEEP_MS, async () => {
+      const m = String(await b.info({ type: "userAbstraction", user: b.user })).replace(/"/g, "").trim();
+      if (!/^[A-Za-z]+$/.test(m)) throw b.page("POST /info userAbstraction");
+      return m;
+    })
+    .catch((err: unknown) => {
+      const last = b.lastKept("abstraction");
+      if (typeof last === "string") return last;
+      throw err;
+    });
   const unified = mode === "unifiedAccount" || mode === "portfolioMargin";
   const [perps, spot] = await Promise.all([b.info({ type: "clearinghouseState", user: b.user }), b.info({ type: "spotClearinghouseState", user: b.user })]);
   const out: LiveBalance[] = [];
@@ -539,13 +612,19 @@ async function balances(b: Book, name: string): Promise<LiveBalance[]> {
     const v = fin(obj(obj(perps).marginSummary).accountValue) ?? 0;
     if (v > 0) out.push({ asset: "USDC", amount: v, usd: v, where: `perps · ${(fin(obj(perps).withdrawable) ?? 0).toFixed(2)} withdrawable`, class: "stable" });
   }
-  // the markets name a spot token as the rest of the account does (UBTC is BTC, as the library maps it) and give its USDC pair for a price
-  const listed = b.loaded() || !isRefusal(await b.load());
+  // the markets name a spot token as the rest of the account does (UBTC is BTC, as the library maps it) and give its USDC pair for a price;
+  // each HIP-3 DEX's perps account is found from them too. A list that cannot be loaded makes a read that is not whole — the DEXs' accounts
+  // missing, the tokens unpriced — and it is refused rather than kept as complete (under a unified account holding only dollars, nothing
+  // here needs the list)
+  const failed = b.loaded() ? undefined : await b.load();
   const rows = arr(obj(spot).balances).map(obj).filter((x) => (fin(x.total) ?? 0) > 0);
+  if (failed && (!unified || rows.some((x) => !isStable(String(x.coin ?? ""))))) throw failed;
+  const listed = !failed;
   const pairs = new Map<string, Entry>();
   if (listed) for (const e of b.entries()) if (e.kind === "spot" && e.quote === "USDC" && !e.delisted) pairs.set((e.token ?? e.base).toUpperCase(), e);
   const needMids = rows.some((x) => !isStable(String(x.coin ?? "")) && pairs.has(String(x.coin ?? "").toUpperCase()));
-  const mids = needMids ? obj(await b.info({ type: "allMids" }).catch(() => ({}))) : {};
+  // the mids refused: the read is refused, not kept with the tokens counted as nothing
+  const mids = needMids ? obj(await b.info({ type: "allMids" })) : {};
   for (const x of rows) {
     const coin = String(x.coin ?? "?");
     const amount = fin(x.total) ?? 0;
@@ -555,11 +634,12 @@ async function balances(b: Book, name: string): Promise<LiveBalance[]> {
     const usd = isStable(coin) ? amount : mid !== undefined ? round(amount * mid, 8) : undefined;
     out.push({ asset, amount, ...(usd !== undefined ? { usd } : {}), where: `${unified ? "spot and perps · unified account" : "spot"}${asset !== coin ? ` · ${coin} on ${name}` : ""}`, ...(isStable(coin) ? { class: "stable" as const } : {}) });
   }
-  // each HIP-3 DEX keeps its own perps account; under a unified account its margin is in the spot balances already
+  // each HIP-3 DEX keeps its own perps account; under a unified account its margin is in the spot balances already. One refused (a rate
+  // limit, an edge's page) refuses the read: the account keeps the last whole one, rather than one with that DEX's money gone
   if (!unified && listed) {
     const dexes = new Map<string, string>();
     for (const e of b.entries()) if (e.kind === "perp" && e.dex && !dexes.has(e.dex)) dexes.set(e.dex, e.quote);
-    const states = await Promise.all([...dexes.keys()].map((dex) => b.info({ type: "clearinghouseState", user: b.user, dex }).catch(() => undefined)));
+    const states = await Promise.all([...dexes.keys()].map((dex) => b.info({ type: "clearinghouseState", user: b.user, dex })));
     [...dexes.entries()].forEach(([dex, collateral], i) => {
       const s = obj(states[i]);
       const v = fin(obj(s.marginSummary).accountValue) ?? 0;
@@ -621,6 +701,14 @@ export async function hyperliquidTradeSource(req: HyperliquidTradeRequest): Prom
 function hyperliquidTrader(c: { venue: string; name: string; b: Book; client: HyperliquidClient; where: Locator; clock: () => number; secrets: string[]; validUntil?: number | undefined }): LiveTrader {
   const { venue, name, b, client } = c;
   const live = () => c.validUntil === undefined || c.clock() < c.validUntil;
+  /** what Hyperliquid last said had filled of each order (fills only grow): a cancel whose order could not be read back says that, never
+   * that nothing filled */
+  const fills = new Map<string, { qty: number; avg?: number | undefined }>();
+  const heard = (s: OrderState): OrderState => {
+    if (s.filledQty > (fills.get(s.ref)?.qty ?? 0)) fills.set(s.ref, { qty: s.filledQty, avg: s.avgPrice });
+    if (fills.size > 500) fills.delete(fills.keys().next().value!);
+    return s;
+  };
 
   /** a market as the account sees it, before any fresh price */
   const marketOf = (e: Entry): Market => {
@@ -727,7 +815,7 @@ function hyperliquidTrader(c: { venue: string; name: string; b: Book; client: Hy
         // the fills could not be read now: the next look reads them
       }
     }
-    return { ref: oid, status, filledQty: filled, ...(avg !== undefined ? { avgPrice: avg } : {}), ...(feeUsd !== undefined ? { feeUsd } : {}), native };
+    return heard({ ref: oid, status, filledQty: filled, ...(avg !== undefined ? { avgPrice: avg } : {}), ...(feeUsd !== undefined ? { feeUsd } : {}), native });
   };
 
   /** orderStatus by the oid, or by the account's cloid; `null`: Hyperliquid has no such order for this account */
@@ -753,7 +841,10 @@ function hyperliquidTrader(c: { venue: string; name: string; b: Book; client: Hy
     }
   };
 
-  const trader: LiveTrader = {
+  const trader: LiveTrader & { held(o: { side: "buy" | "sell"; reduceOnly?: boolean | undefined }): Promise<Refusal | undefined> } = {
+    /** Hyperliquid's own line for where the user is now, asked before the owner is quoted or an agent's card is raised (account/live-orders.ts):
+     * nothing is signed or sent for it */
+    held: (o) => heldTo(HYPERLIQUID_RULE, c.where, venue, `${o.side}${o.reduceOnly ? " to close" : ""}`, { fresh: true }),
     get can() {
       return live();
     },
@@ -860,9 +951,10 @@ function hyperliquidTrader(c: { venue: string; name: string; b: Book; client: Hy
       // Hyperliquid's smallest order; a reduce-only order closing what is held is Hyperliquid's to judge
       if (!o.reduceOnly && o.qty * px < MIN_USD - 1e-9) return badOrder(venue, name, `the smallest order ${name} takes is worth $${MIN_USD} (“Order must have minimum value of $10”): ${plain(o.qty)} at ${plain(px)} is $${(o.qty * px).toFixed(2)}`, { minNotional: MIN_USD });
 
-      // Hyperliquid's own line for this user, where they are now: before anything is signed
+      // Hyperliquid's own line for this user, where they are now — asked again for a write, not taken from minutes ago on another network:
+      // before anything is signed
       const doing = `${o.side} ${plain(o.qty)} ${e.symbol}`;
-      const line = await heldTo(HYPERLIQUID_RULE, c.where, venue, doing);
+      const line = await heldTo(HYPERLIQUID_RULE, c.where, venue, doing, { fresh: true });
       if (line) return line;
 
       const cloid = cloidOf(o.clientId);
@@ -905,7 +997,7 @@ function hyperliquidTrader(c: { venue: string; name: string; b: Book; client: Hy
         } catch {
           // the fee is read on the next look
         }
-        return s;
+        return heard(s);
       }
       // resting: what became of it on its way to the book (a limit order may have filled in part)
       try {
@@ -924,23 +1016,30 @@ function hyperliquidTrader(c: { venue: string; name: string; b: Book; client: Hy
       if (!/^\d{1,20}$/.test(ref)) return no("E_ACCOUNT_ORDER_UNKNOWN", { venue, message: `${ref} is not an order id ${name} gave`, detail: { order: ref } });
       const e = await b.find(symbol);
       if (isRefusal(e)) return e;
-      try {
-        await client.cancelOrder(ref, e.symbol);
-      } catch (err) {
-        const r = b.fail(err, ref);
-        if (r.code !== "E_ACCOUNT_ORDER_UNKNOWN") return r;
-        // filled already, canceled already, or never placed: what Hyperliquid shows now is the answer
+      /** what Hyperliquid shows of the order now, when it is done (filled, canceled): the answer, whatever the cancel's was */
+      const done = async (): Promise<OrderState | undefined> => {
         try {
           const found = await lookup(Number(ref));
-          if (found) {
-            const s = await stateOf(found, e);
-            if (DONE.has(s.status)) return s;
-          }
+          const s = found ? await stateOf(found, e) : undefined;
+          return s && DONE.has(s.status) ? s : undefined;
         } catch {
-          // its refusal stands
+          return undefined;
         }
-        return r;
+      };
+      // the cancel's answer lost (no answer, or a page in its place): it may have reached Hyperliquid, and is never told as refused
+      const unconfirmed = (native: unknown): Refusal => no("E_VENUE_UNREACHABLE", { venue, message: `${name} did not answer whether it took the cancel of order ${ref}: it may have. Look at its open orders before asking again`, detail: { order: ref, unsure: true }, native });
+      let answer: unknown;
+      try {
+        answer = await client.cancelOrder(ref, e.symbol);
+      } catch (err) {
+        const r = b.fail(err, ref);
+        if (r.code === "E_VENUE_UNREACHABLE" && UNSURE.has(String((err as { name?: unknown })?.name ?? ""))) return (await done()) ?? unconfirmed(r.native);
+        if (r.code !== "E_ACCOUNT_ORDER_UNKNOWN") return r;
+        // filled already, canceled already, or never placed: what Hyperliquid shows now is the answer
+        return (await done()) ?? r;
       }
+      // Hyperliquid's own "success" for it, or the cancel is not confirmed
+      if (obj(answer).info !== "success") return (await done()) ?? unconfirmed({ cancel: str(obj(answer).info) ?? null });
       // canceled: the order as it stands now, with whatever had filled
       try {
         const found = await lookup(Number(ref));
@@ -948,7 +1047,9 @@ function hyperliquidTrader(c: { venue: string; name: string; b: Book; client: Hy
       } catch {
         // read on the next look
       }
-      return { ref, status: "pending", filledQty: 0, native: { cancel: "success" } };
+      // taken, and not read back (a rate limit, a network change between the two): what was last heard to have filled, said as not read now
+      const had = fills.get(ref);
+      return { ref, status: had ? "partial" : "pending", filledQty: had?.qty ?? 0, ...(had?.avg !== undefined ? { avgPrice: had.avg } : {}), native: { cancel: "success", unread: true } };
     },
 
     status,
@@ -1014,15 +1115,22 @@ function hyperliquidTrader(c: { venue: string; name: string; b: Book; client: Hy
         mode ??= e.isolatedOnly ? "isolated" : "cross";
         if (mode === "cross" && e.isolatedOnly) mode = "isolated";
       }
-      // Hyperliquid's own line for this user, where they are now: before anything is signed
-      const line = await heldTo(HYPERLIQUID_RULE, c.where, venue, `set ${e.symbol} to ${leverage}x ${mode}`);
+      // Hyperliquid's own line for this user, where they are now — asked again for a write: before anything is signed
+      const doing = `set ${e.symbol} to ${leverage}x ${mode}`;
+      const line = await heldTo(HYPERLIQUID_RULE, c.where, venue, doing, { fresh: true });
       if (line) return line;
+      const unconfirmed = (native: unknown): Refusal => no("E_VENUE_UNREACHABLE", { venue, message: `${name} did not answer whether it took the leverage change (${doing}): it may have. Look at it there before asking again`, detail: { unsure: true }, native });
+      let answer: Dict;
       try {
-        const answer = await client.setLeverage(leverage, e.symbol, { marginMode: mode });
-        return { leverage, marginMode: mode, native: { action: { type: "updateLeverage", asset: e.asset, isCross: mode === "cross", leverage }, answer } };
+        answer = obj(await client.setLeverage(leverage, e.symbol, { marginMode: mode }));
       } catch (err) {
-        return b.fail(err);
+        const r = b.fail(err);
+        return r.code === "E_VENUE_UNREACHABLE" && UNSURE.has(String((err as { name?: unknown })?.name ?? "")) ? unconfirmed(r.native) : r;
       }
+      // Hyperliquid's own fields only (never a page's body, which may name this machine's address): its "ok", or the change is not confirmed
+      const said = { status: str(answer.status) ?? null, type: str(obj(answer.response).type) ?? null };
+      if (answer.status !== "ok") return unconfirmed({ answer: said });
+      return { leverage, marginMode: mode, native: { action: { type: "updateLeverage", asset: e.asset, isCross: mode === "cross", leverage }, answer: said } };
     },
 
     async stats(symbols) {
