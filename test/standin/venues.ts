@@ -1460,7 +1460,8 @@ export function publicSources(): PublicSource[] {
 export function standinChain(): ChainReader {
   const amount = (holder: string, chain: ChainName, asset: string): number => w().chain.get(`${holder.toLowerCase()}|${chain}|${asset}`) ?? 0;
   return {
-    tokens: async (holder, refs) => ({ rows: refs.map((r) => ({ chain: r.chain, asset: r.asset, amount: amount(holder, r.chain, r.asset) })).filter((r) => r.amount > 0), failed: [] }),
+    // a row for every token asked about, a zero balance too, as the real chain reader answers: a missing row means the chain did not answer
+    tokens: async (holder, refs) => ({ rows: refs.map((r) => ({ chain: r.chain, asset: r.asset, amount: amount(holder, r.chain, r.asset) })), failed: [] }),
     native: async (holder, chains) => ({ rows: chains.map((c) => ({ chain: c, asset: CHAINS[c].coin, amount: amount(holder, c, CHAINS[c].coin) })), failed: [] }),
     uint: async () => undefined,
     decimals: async () => 6,

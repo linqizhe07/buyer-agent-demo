@@ -62,6 +62,7 @@ import { isRefusal, type Refusal } from "../../core/errors.ts";
 import { no } from "../refuse.ts";
 import type { KeyFile } from "./credentials.ts";
 import { exchangeSaidNo, isOkx, type ExchangeClient } from "./exchange.ts";
+import { lostAnswer } from "./exchange-trade.ts";
 import { plain } from "./trade.ts";
 import type { Price } from "./prices.ts";
 import { isStable, num } from "./types.ts";
@@ -142,8 +143,9 @@ export interface LiveEarner {
   supply(p: EarnProduct, amount: number, clientId: string): Promise<EarnState | Refusal>;
   /** money out, back to the same venue: `amount` of the product's asset, or all of it */
   withdraw(p: EarnProduct, amount: number, clientId: string, all: boolean): Promise<EarnState | Refusal>;
-  /** how a request that was pending stands now */
-  status?(ref: string, p: EarnProduct, kind: "supply" | "withdraw"): Promise<EarnState | Refusal>;
+  /** how a request that was pending stands now. `asked`: what the request was — its amount, whether it was all of it, and what the venue's
+   * answer left (`native`) — for one whose answer was lost, which only the venue's own reads can settle (unsureMove) */
+  status?(ref: string, p: EarnProduct, kind: "supply" | "withdraw", asked?: { amount: number; all?: boolean | undefined; native?: unknown }): Promise<EarnState | Refusal>;
 }
 
 /** a live source that can also earn: the field a source sets for it (live/types.ts LiveSource does not name it yet) */
@@ -175,6 +177,33 @@ export function once<T>(): (id: string, run: () => Promise<T | Refusal>) => Prom
     return p;
   };
 }
+
+/** Money in or out whose answer was lost (a timeout — OKX's 50004 "does not indicate success or failure" arrives as one —, a connection
+ * cut or reset, a gateway's 5xx, a page answered in the venue's place): not refused, since the venue may have moved it and asking again
+ * would move it twice. A request under way instead, known by the account's id (once() keeps the id: it is not a refusal), that the venue's
+ * own reads settle: the product's holding against `before`, what it was when the request was sent (settleUnsure) */
+function unsureMove(side: string, p: EarnProduct, clientId: string, name: string, r: Refusal, before: number | undefined, more: Record<string, unknown> = {}): EarnState {
+  return { ref: `${side}:${p.id}:client-${clientId}`, status: "pending", native: { unsure: true, waiting: `${name} did not confirm it: it may or may not have moved. Look at ${name} before asking again`, refusal: { code: r.code, message: r.message }, ...(before !== undefined ? { before } : {}), ...more } };
+}
+
+/** an earn call's failure, through the venue's own reading (`say`) — or, when the call may have reached the venue, the request under way it
+ * may be (unsureMove) */
+function movedOrNot(err: unknown, said: Refusal, lost: () => EarnState): EarnState | Refusal {
+  return lostAnswer(err, said) ? lost() : said;
+}
+
+/** A request whose answer was lost, settled by the product's holding now against what it was before: `done` when it moved by (nearly) the
+ * amount, the right way — in by it, out by it, or all of it out. Anything else is still under way: a request is never turned into "nothing
+ * moved" on a guess, and one with nothing to compare stays under way for the owner to look at */
+function settleUnsure(ref: string, kind: "supply" | "withdraw", asked: { amount: number; all?: boolean | undefined; native?: unknown }, now: number | Refusal): EarnState | Refusal {
+  if (isRefusal(now)) return now;
+  const before = (asked.native as { before?: unknown } | undefined)?.before;
+  const was = typeof before === "number" ? before : undefined;
+  const slack = Math.max(asked.amount * 0.01, 1e-9);
+  const moved = was !== undefined && (kind === "supply" ? now >= was + asked.amount - slack : asked.all ? now <= slack : now <= was - asked.amount + slack);
+  return { ref, status: moved ? "done" : "pending", native: { ...(asked.native as Record<string, unknown>), held: now, ...(moved ? { settled: `the holding moved from ${was} to ${now}` } : {}) } };
+}
+const isUnsure = (asked: { native?: unknown } | undefined): boolean => (asked?.native as { unsure?: unknown } | undefined)?.unsure === true;
 
 /** a dollar price for the asset: 1 for a dollar stablecoin, the public one otherwise, or nothing */
 async function priceOf(price: Price | undefined, asset: string): Promise<number | undefined> {
@@ -228,6 +257,8 @@ export function okxEarner(d: ExchangeEarnDeps): LiveEarner {
   const NOTE = `OKX Simple Earn Flexible: lent each hour to margin borrowers at the market's lending rate; out at any time. Only what is in your ${name} funding account goes in, and what comes out lands there`;
   const say = (err: unknown, doing: string): Refusal => {
     const r = exchangeSaidNo(venue, name, err, d.key);
+    // a key bound to other addresses (50110) is not a missing permission: its own words, and what the owner does about it, stand
+    if ((r.detail as { ipList?: unknown } | undefined)?.ipList) return r;
     // the venue's own words stay in `native`; what the owner can do about a permission is said here
     if (r.code === "E_VENUE_PERMISSION") return no("E_VENUE_PERMISSION", { venue, message: `${name} refused to ${doing}: Simple Earn's purchase and redemption need the key's Trade permission, and reading it needs Read (set on the key at OKX)`, native: r.native });
     return r;
@@ -261,10 +292,17 @@ export function okxEarner(d: ExchangeEarnDeps): LiveEarner {
   };
   const can = d.can.length === 0 ? "unknown" : d.can.includes("trade");
   const submit = once<EarnState>();
+  /** what is lent in one currency now, or a refusal; nothing when the call is not there (a request whose answer is lost is settled by it) */
+  const lent = async (ccy: string): Promise<number | Refusal> => {
+    const rows = await balances();
+    return isRefusal(rows) ? rows : num(rows.find((b) => str(b.ccy).toUpperCase() === ccy.toUpperCase())?.amt);
+  };
   const move = (side: "purchase" | "redempt", p: EarnProduct, amount: number, clientId: string): Promise<EarnState | Refusal> =>
     submit(clientId, async () => {
       const call = method(client, "privatePostFinanceSavingsPurchaseRedempt");
       if (!call) return no("E_VENUE_RAIL_CLOSED", { venue, message: `the exchange library does not reach ${name}'s Simple Earn` });
+      // what is lent before: what settles the request if its answer is lost (a read that fails leaves nothing to compare, and moves nothing)
+      const before = method(client, "privateGetFinanceSavingsBalance") ? await lent(p.asset) : undefined;
       // no `rate`: OKX keeps the minimum lending rate set before (its own default otherwise); no destination: it lands in the funding account
       const body = { ccy: p.asset, amt: plain(amount), side };
       try {
@@ -272,7 +310,8 @@ export function okxEarner(d: ExchangeEarnDeps): LiveEarner {
         const row = rec(list(rec(r).data)[0]);
         return { ref: `${side}:${p.asset}:${clientId}`, status: "done", native: { request: body, answer: { ccy: str(row.ccy), amt: str(row.amt), side: str(row.side), rate: str(row.rate) } } };
       } catch (err) {
-        return say(err, side === "purchase" ? `put ${plain(amount)} ${p.asset} into Simple Earn` : `take ${plain(amount)} ${p.asset} out of Simple Earn`);
+        const said = say(err, side === "purchase" ? `put ${plain(amount)} ${p.asset} into Simple Earn` : `take ${plain(amount)} ${p.asset} out of Simple Earn`);
+        return movedOrNot(err, said, () => unsureMove(side, p, clientId, name, said, typeof before === "number" ? before : undefined));
       }
     });
   const DEFAULTS = ["USDT", "USDC", "BTC", "ETH"];
@@ -325,6 +364,11 @@ export function okxEarner(d: ExchangeEarnDeps): LiveEarner {
     },
     supply: (p, amount, clientId) => move("purchase", p, amount, clientId),
     withdraw: (p, amount, clientId) => move("redempt", p, amount, clientId),
+    // a purchase or redemption OKX answered is done at once; one whose answer was lost is settled by what is lent now against before
+    async status(ref, p, kind, asked) {
+      if (!asked || !isUnsure(asked)) return { ref, status: "done", native: { said: `${name} answers a purchase or redemption when it is done` } };
+      return settleUnsure(ref, kind, asked, await lent(p.asset));
+    },
   };
 }
 
@@ -336,6 +380,7 @@ export function krakenEarner(d: ExchangeEarnDeps): LiveEarner {
   const LANDS = `your ${name} spot balance`;
   const say = (err: unknown, doing: string): Refusal => {
     const r = exchangeSaidNo(venue, name, err, d.key);
+    if ((r.detail as { ipList?: unknown } | undefined)?.ipList) return r;
     const said = str(rec(r.native).said);
     if (/tier is not high enough/i.test(said)) return no("E_VENUE_PERMISSION", { venue, message: `${name} refused to ${doing}: Kraken offers Earn from its Intermediate verification tier. That is verified at Kraken`, native: r.native });
     if (r.code === "E_VENUE_PERMISSION" || /permission denied/i.test(said)) return no("E_VENUE_PERMISSION", { venue, message: `${name} refused to ${doing}: allocating and deallocating need the key's "Earn Funds" permission, and reading what is allocated needs "Query Funds" (set on the key at Kraken)`, native: r.native });
@@ -390,6 +435,24 @@ export function krakenEarner(d: ExchangeEarnDeps): LiveEarner {
   };
   const submit = once<EarnState>();
   const can = "unknown" as const;
+  /** what is allocated to one strategy now, pending allocations included (Allocations: amount_allocated.total and .pending, in the asset),
+   * or a refusal: what settles a request whose answer was lost */
+  const allocated = async (strategy: string): Promise<number | Refusal> => {
+    const call = method(client, "privatePostEarnAllocations");
+    if (!call) return no("E_VENUE_RAIL_CLOSED", { venue, message: `the exchange library does not reach ${name}'s Earn` });
+    try {
+      const items = list(rec(rec(await call({ converted_asset: "USD", hide_zero_allocations: true })).result).items).map(rec);
+      const it = items.find((x) => str(x.strategy_id) === strategy);
+      return it ? num(rec(rec(it.amount_allocated).total).native) + num(rec(rec(it.amount_allocated).pending).native) : 0;
+    } catch (err) {
+      return say(err, "list what is allocated to Earn");
+    }
+  };
+  const before = async (strategy: string): Promise<number | undefined> => {
+    if (!method(client, "privatePostEarnAllocations")) return undefined;
+    const x = await allocated(strategy);
+    return isRefusal(x) ? undefined : x;
+  };
   return {
     can,
     what: "Kraken Earn strategies: flexible and bonded",
@@ -440,11 +503,13 @@ export function krakenEarner(d: ExchangeEarnDeps): LiveEarner {
         const call = method(client, "privatePostEarnAllocate");
         if (!call) return no("E_VENUE_RAIL_CLOSED", { venue, message: `the exchange library does not reach ${name}'s Earn` });
         const body = { strategy_id: p.id, amount: plain(amount) };
+        const was = await before(p.id);
         try {
           const r = await call(body);
           return { ref: `allocate:${p.id}:${clientId}`, status: "pending", native: { request: body, answer: rec(r).result ?? null } };
         } catch (err) {
-          return say(err, `allocate ${plain(amount)} ${p.asset}`);
+          const said = say(err, `allocate ${plain(amount)} ${p.asset}`);
+          return movedOrNot(err, said, () => unsureMove("allocate", p, clientId, name, said, was));
         }
       }),
     withdraw: (p, amount, clientId) =>
@@ -452,14 +517,19 @@ export function krakenEarner(d: ExchangeEarnDeps): LiveEarner {
         const call = method(client, "privatePostEarnDeallocate");
         if (!call) return no("E_VENUE_RAIL_CLOSED", { venue, message: `the exchange library does not reach ${name}'s Earn` });
         const body = { strategy_id: p.id, amount: plain(amount) };
+        const was = await before(p.id);
         try {
           const r = await call(body);
           return { ref: `deallocate:${p.id}:${clientId}`, status: "pending", native: { request: body, answer: rec(r).result ?? null } };
         } catch (err) {
-          return say(err, `deallocate ${plain(amount)} ${p.asset}`);
+          const said = say(err, `deallocate ${plain(amount)} ${p.asset}`);
+          return movedOrNot(err, said, () => unsureMove("deallocate", p, clientId, name, said, was));
         }
       }),
-    async status(ref, p, kind) {
+    async status(ref, p, kind, asked) {
+      // a request whose answer was lost: AllocateStatus says only whether one is under way for the strategy, never whether this one was
+      // made, so what is allocated settles it
+      if (asked && isUnsure(asked)) return settleUnsure(ref, kind, asked, await allocated(p.id));
       const call = method(client, kind === "supply" ? "privatePostEarnAllocateStatus" : "privatePostEarnDeallocateStatus");
       if (!call) return no("E_VENUE_RAIL_CLOSED", { venue, message: `the exchange library does not reach ${name}'s Earn` });
       try {
@@ -490,6 +560,8 @@ export function kucoinEarner(d: ExchangeEarnDeps): LiveEarner {
   const PAGE = 100;
   const say = (err: unknown, doing: string): Refusal => {
     const r = exchangeSaidNo(venue, name, err, d.key);
+    // a key bound to other addresses (400006) is not a missing permission: its own words, and what the owner does about it, stand
+    if ((r.detail as { ipList?: unknown } | undefined)?.ipList) return r;
     const said = str(rec(r.native).said);
     // a key without the Earn permission: KuCoin's 400007 "Access denied, require more permission", which the library files as a bad key
     if (r.code === "E_VENUE_PERMISSION" || /400007|require more permission|access denied/i.test(said)) return no("E_VENUE_PERMISSION", { venue, message: `${name} refused to ${doing}: purchase and redemption need the key's Earn permission (set on the key at KuCoin)`, native: r.native });
@@ -588,6 +660,13 @@ export function kucoinEarner(d: ExchangeEarnDeps): LiveEarner {
   };
   const can = d.can.length === 0 ? "unknown" : d.can.includes("earn");
   const submit = once<EarnState>();
+  /** what is held in one product and not on its way out (hold-assets, holding by holding), or a refusal: what settles a request whose
+   * answer was lost */
+  const inProduct = (held: Hold[]): number => held.reduce((sum, h) => sum + Math.max(0, h.holdAmount - h.redeemingAmount), 0);
+  const holding = async (productId: string): Promise<number | Refusal> => {
+    const held = await holds(productId);
+    return isRefusal(held) ? held : inProduct(held);
+  };
   return {
     can,
     ...(can === false ? { whyNot: `this ${name} key lacks the Earn permission: purchase and redemption need it (set on the key at KuCoin)` } : {}),
@@ -616,11 +695,13 @@ export function kucoinEarner(d: ExchangeEarnDeps): LiveEarner {
         const call = method(client, "earnPostEarnOrders");
         if (!call) return no("E_VENUE_RAIL_CLOSED", { venue, message: `the exchange library does not reach ${name}'s Earn` });
         const body = { productId: p.id, amount: plain(amount), accountType: ACCOUNT };
+        const was = method(client, "earnGetEarnHoldAssets") ? await holding(p.id) : undefined;
         try {
           const r = rec(rec(await call(body)).data);
           return { ref: `purchase:${p.id}:${clientId}`, status: "done", native: { request: body, answer: { orderId: str(r.orderId), orderTxId: str(r.orderTxId) } } };
         } catch (err) {
-          return say(err, `put ${plain(amount)} ${p.asset} into ${p.name}`);
+          const said = say(err, `put ${plain(amount)} ${p.asset} into ${p.name}`);
+          return movedOrNot(err, said, () => unsureMove("purchase", p, clientId, name, said, typeof was === "number" ? was : undefined));
         }
       }),
     // out: holding by holding, each previewed first. KuCoin asks for an early redemption's penalty to be confirmed (confirmPunishRedeem), and
@@ -669,13 +750,16 @@ export function kucoinEarner(d: ExchangeEarnDeps): LiveEarner {
             const refused = say(err, `redeem ${plain(take)} ${p.asset} from ${p.name}`);
             // a holding redeemed before this one failed is money on its way: the request stands as pending, and what stopped it is said
             if (answers.length) return { ref: `redeem:${p.id}:${clientId}`, status: "pending", native: { requests, answers, stopped: { code: refused.code, message: refused.message } } };
-            return refused;
+            // the first one's answer lost: it may be on its way, settled by what is held against what was
+            return movedOrNot(err, refused, () => unsureMove("redeem", p, clientId, name, refused, inProduct(held)));
           }
         }
         return { ref: `redeem:${p.id}:${clientId}`, status: answers.every((a) => a.status === "SUCCESS") ? "done" : "pending", native: { requests, answers } };
       }),
-    // a purchase is credited at once; a redemption is PENDING until KuCoin delivers it, and hold-assets shows the amount still redeeming
-    async status(ref, p, kind) {
+    // a purchase is credited at once; a redemption is PENDING until KuCoin delivers it, and hold-assets shows the amount still redeeming. One
+    // whose answer was lost is settled by what is held against what was
+    async status(ref, p, kind, asked) {
+      if (asked && isUnsure(asked)) return settleUnsure(ref, kind, asked, await holding(p.id));
       if (kind === "supply") return { ref, status: "done", native: { said: `${name} credits a purchase at once` } };
       const held = await holds(p.id);
       if (isRefusal(held)) return held;
@@ -841,8 +925,32 @@ export function binanceEarner(d: ExchangeEarnDeps): LiveEarner {
     const s = str(row.status).toUpperCase();
     return { status: s === "PAID" ? "done" : /FAIL/.test(s) ? "rejected" : "pending", native: { redeemId, record: { status: s, amount: str(row.amount), asset: str(row.asset), destAccount: str(row.destAccount), time: known(row.time) ?? null } } };
   };
+  /** a redemption whose answer was lost, found in Binance's redemption record by its product, when it was asked (a minute either side) and
+   * how much: PAID there is done. Not found, or not paid yet, it is still under way — never "nothing moved" on a guess */
+  const unsureRedemption = async (ref: string, p: EarnProduct, asked: { amount: number; all?: boolean | undefined; native?: unknown }): Promise<EarnState | Refusal> => {
+    const native = (asked.native ?? {}) as Record<string, unknown>;
+    const sentAt = typeof native.sentAt === "number" ? native.sentAt : undefined;
+    const f = method(client, "sapiGetSimpleEarnFlexibleHistoryRedemptionRecord");
+    if (!f || sentAt === undefined || !BINANCE_ID.test(p.id)) return { ref, status: "pending", native };
+    let rows: Array<Record<string, unknown>>;
+    try {
+      rows = list(rec(await f({ productId: p.id, startTime: sentAt - 60_000 })).rows).map(rec);
+    } catch (err) {
+      return say(err, "say how a redemption stands");
+    }
+    const row = rows.find((x) => (known(x.time) ?? 0) >= sentAt - 60_000 && (asked.all || Math.abs(num(x.amount) - asked.amount) <= Math.max(asked.amount * 0.001, 1e-9)));
+    if (!row) return { ref, status: "pending", native };
+    const st = str(row.status).toUpperCase();
+    return { ref, status: st === "PAID" ? "done" : "pending", native: { ...native, record: { redeemId: str(row.redeemId), status: st, amount: str(row.amount), time: known(row.time) ?? null } } };
+  };
   const can = d.can.length === 0 ? "unknown" : d.can.includes("trade spot and margin");
   const submit = once<EarnState>();
+  /** what is held in one product (GET flexible/position totalAmount): what settles a request whose answer was lost */
+  const inProduct = (rows: Array<Record<string, unknown>>, pid: string): number => rows.filter((r) => str(r.productId) === pid).reduce((sum, r) => sum + num(r.totalAmount), 0);
+  const holding = async (pid: string): Promise<number | Refusal> => {
+    const rows = await heldRows(pid);
+    return isRefusal(rows) ? rows : inProduct(rows, pid);
+  };
   return {
     can,
     ...(can === false ? { whyNot: `this ${name} key may not trade: Simple Earn's subscription and redemption need its "Enable Spot & Margin Trading" permission (set on the key at Binance)` } : {}),
@@ -907,7 +1015,8 @@ export function binanceEarner(d: ExchangeEarnDeps): LiveEarner {
         try {
           r = rec(await call(body));
         } catch (err) {
-          return say(err, doing, "supply");
+          const said = say(err, doing, "supply");
+          return movedOrNot(err, said, () => unsureMove("subscribe", p, clientId, name, said, inProduct(held, p.id)));
         }
         if (r.success === false) return unsuccessful(doing, r, body);
         return { ref: `subscribe:${p.id}:${str(r.purchaseId) || `client-${clientId}`}`, status: "done", native: { request: body, answer: { purchaseId: str(r.purchaseId), success: r.success ?? null } } };
@@ -921,11 +1030,14 @@ export function binanceEarner(d: ExchangeEarnDeps): LiveEarner {
         const doing = all ? `take all of it out of ${p.name}` : `take ${plain(amount)} ${p.asset} out of ${p.name}`;
         // redeemAll is always sent: Binance's docs give its default as false, its own Ruby connector as true — a part must never go as all
         const body = { productId: p.id, redeemAll: all, ...(all ? {} : { amount: plain(amount) }), destAccount: ACCOUNT };
+        const sent = now();
         let r: Record<string, unknown>;
         try {
           r = rec(await call(body));
         } catch (err) {
-          return say(err, doing, "withdraw");
+          // its answer lost, it is looked for in the redemption record by when it was asked and how much (status)
+          const said = say(err, doing, "withdraw");
+          return movedOrNot(err, said, () => unsureMove("redeem", p, clientId, name, said, undefined, { sentAt: sent }));
         }
         if (r.success === false) return unsuccessful(doing, r, body);
         const redeemId = str(r.redeemId);
@@ -936,8 +1048,11 @@ export function binanceEarner(d: ExchangeEarnDeps): LiveEarner {
         // a record that could not be read leaves it under way: it is asked again
         return { ref: `redeem:${p.id}:${redeemId}`, status: isRefusal(st) ? "pending" : st.status, native: { request: body, answer, ...(isRefusal(st) ? {} : { record: st.native }) } };
       }),
-    // a subscription is credited at once; a redemption is followed in Binance's redemption record until it says PAID
-    async status(ref, _p, kind) {
+    // a subscription is credited at once; a redemption is followed in Binance's redemption record until it says PAID. One whose answer was
+    // lost is settled by what is held against what was (a subscription), or found in that record by when and how much (a redemption)
+    async status(ref, p, kind, asked) {
+      if (asked && isUnsure(asked) && kind === "supply") return settleUnsure(ref, kind, asked, await holding(p.id));
+      if (asked && isUnsure(asked)) return unsureRedemption(ref, p, asked);
       if (kind === "supply") return { ref, status: "done", native: { said: `${name} credits a subscription at once` } };
       const id = /^redeem:[^:]+:(\d{1,30})$/.exec(ref)?.[1];
       if (!id) return { ref, status: "done", native: { said: `no redemption id to follow: ${name} returns a flexible redemption at once` } };

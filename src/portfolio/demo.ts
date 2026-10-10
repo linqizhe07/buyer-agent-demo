@@ -259,14 +259,18 @@ async function main(): Promise<number> {
     // ---- 7 ------------------------------------------------------------------------
     heading("Beat 7: The edge of open · the credential and the venue each say no");
     const refusals7: string[] = [];
-    const tryEdge = async (acct: string, intent: Intent, expect: string, what: string, bypassToo = false) => {
+    let bypassed = 0;
+    // `expect`: the outcome, or the outcomes when it is the venue's own answer to wherever this machine is; `bypassToo`: whether the agent then
+    // goes round the wallet, or when (for an outcome that depends on the place)
+    const tryEdge = async (acct: string, intent: Intent, expect: string | string[], what: string, bypassToo: boolean | ((r: ExecuteOutcome | Refusal) => boolean) = false) => {
       tick();
       note(`agent → ${acct}: ${describeIntent(intent)}`);
       const r = await svc.execute(acct, intent);
       show(r);
       if (isRefusal(r)) refusals7.push(r.code);
-      check(code(r) === expect, what, isRefusal(r) ? r.layer.toLowerCase() : "venue");
-      if (bypassToo) {
+      check(([] as string[]).concat(expect).includes(code(r)), what, isRefusal(r) ? r.layer.toLowerCase() : "venue");
+      if (typeof bypassToo === "function" ? bypassToo(r) : bypassToo) {
+        bypassed++;
         console.log(`! [bypass] agent skips the wallet and uses the credential directly at ${acct}`);
         const b = await svc.bypass(acct, intent);
         show(b);
@@ -278,7 +282,10 @@ async function main(): Promise<number> {
     await tryEdge("kalshi", { kind: "move", asset: "USD", amount: 100, to: "wallet-main" }, "E_WALLET_SCOPE", "Kalshi: the API key trades, it does not move money — payouts go by ACH from the account page (E_WALLET_SCOPE)", true);
     await tryEdge("ondo", { kind: "move", asset: "OUSG", amount: 5, to: COLD }, "E_VENUE_TRANSFER_RESTRICTED", "Ondo: a known destination, open mode, no card — the OUSG contract reverts: cold wallet not on the issuer allowlist", false);
     if (live) {
-      await tryEdge("polymarket", { kind: "trade", symbol: FED, side: "buy", qty: 10 }, "E_WALLET_SCOPE", "Polymarket LIVE: this credential has no `trade` — the wallet's pre-check says so (E_WALLET_SCOPE), and the venue's own line is the region", true);
+      // what Polymarket's own check names for this machine's place decides, asked again before the order: where it blocks completely the
+      // credential has no `trade` (E_WALLET_SCOPE); where it is close-only a buy meets the venue's line (E_VENUE_GEOBLOCKED) and a sell would
+      // pass; where it serves, the real-money switch stops the order. Nothing here assumes where this machine is
+      await tryEdge("polymarket", { kind: "trade", symbol: FED, side: "buy", qty: 10 }, ["E_WALLET_SCOPE", "E_VENUE_GEOBLOCKED", "E_WALLET_LIVE_WRITES_OFF"], "Polymarket LIVE: the venue's own check for this machine's place decides — blocked: no `trade` in the credential (E_WALLET_SCOPE); close-only: a buy meets the venue's line (E_VENUE_GEOBLOCKED); served: the real-money switch", (r) => code(r) === "E_WALLET_SCOPE");
       await tryEdge("metamask", { kind: "move", asset: "USDC", amount: 1, to: COLD, chainId: 8453 }, "E_WALLET_LIVE_WRITES_OFF", "MetaMask LIVE: known destination, no card — the adapter stops at the real-money switch and prints the exact mm command instead of running it", false);
     } else {
       await tryEdge("polymarket", { kind: "trade", symbol: "FED-SEP-HOLD:YES", side: "buy", qty: 10 }, "E_VENUE_MARKET_CLOSED", "Polymarket: trading IS in scope, so the wallet lets it through — the venue refuses: that market has settled", false);
@@ -288,7 +295,7 @@ async function main(): Promise<number> {
       check(!isRefusal(r) && !isPending(r) && r.status === "pending", "MetaMask (sim): the portfolio wallet raised no card (a known destination), MetaMask's own Guard did — the cold wallet is not on ITS allowlist → AWAITING_MFA, the card in the user's inbox", "metamask");
     }
     note(`refusals in this beat: ${refusals7.join(", ")}`);
-    check(refusals7.filter((c) => c.startsWith("E_WALLET_")).length >= 2 && refusals7.filter((c) => c.startsWith("E_VENUE_")).length >= 4, `the floor held: wallet pre-checks and venue second lines agree, with the wallet bypassed ${live ? "three times" : "twice"}`, "edge");
+    check(refusals7.filter((c) => c.startsWith("E_WALLET_")).length >= 2 && refusals7.filter((c) => c.startsWith("E_VENUE_")).length >= bypassed + 1, `the floor held: wallet pre-checks and venue second lines agree, with the wallet bypassed ${bypassed === 2 ? "twice" : bypassed === 3 ? "three times" : `${bypassed} times`}`, "edge");
 
     // ---- 8 ------------------------------------------------------------------------
     heading("Beat 8: What open mode still asks about · the dangerous ones");

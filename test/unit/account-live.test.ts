@@ -554,7 +554,7 @@ describe("venues read by address", () => {
     expect(chain.asked).toContain("tokens:0x00000000000000000000000000000000000000A1:Polygon:pUSD");
   });
 
-  it("Ondo: the fund's tokens at the address, priced by Ondo's own on-chain oracle — and unpriced when the oracle does not answer", async () => {
+  it("Ondo: the fund's tokens at the address, priced by Ondo's own on-chain oracle — and refused, not valued at nothing, when the oracle does not answer", async () => {
     const oracle = "0x9cad45a8bf0ed41ff33074449b357c7a1fab4094";
     const chain = fakeChain({ "Ethereum:OUSG": 45.5, "Ethereum:USDY": 100 }, { uint: { [oracle]: 110_420000000000000000n, "0x87b126e5518b6a1bb8465779b4607c45c643df90": 1_090000000000000000n } });
     const x = await boot({ chain });
@@ -562,8 +562,9 @@ describe("venues read by address", () => {
     expect((await x.venue("ondo"))!.holdings.map((h) => [h.asset, h.amount, h.usd, h.note])).toEqual([["OUSG", 45.5, 5024.11, "Ethereum"], ["USDY", 100, 109, "Ethereum"]]);
     expect(chain.asked.filter((a) => a.startsWith("uint"))).toEqual(["uint:Ethereum:getAssetPrice", "uint:Ethereum:getPrice"]);
 
+    // the oracle's read refused (an endpoint rate-limiting this address answers a revert's "nothing"): a fund held is not worth $0
     const silent = await boot({ chain: fakeChain({ "Ethereum:OUSG": 45.5 }) });
-    summary(await silent.connect("ondo", "live:ondo", ADDRESS));
-    expect((await silent.venue("ondo"))!.holdings.map((h) => [h.asset, h.amount, h.usd, h.note])).toEqual([["OUSG", 45.5, 0, "Ethereum · no price"]]);
+    const no = refusal(await silent.connect("ondo", "live:ondo", ADDRESS));
+    expect([no.code, no.message]).toEqual(["E_VENUE_UNREACHABLE", "Ethereum did not answer: Ondo's oracle could not be read for OUSG"]);
   });
 });

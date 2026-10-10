@@ -46,8 +46,11 @@ import { no } from "../refuse.ts";
 import type { ChainName } from "./chain.ts";
 import type { KeyFile, KeyShape } from "./credentials.ts";
 import { badOrder, ceilTo, CANDLE_INTERVALS, DONE, floorTo, inDollars, pick, plain, type Candle, type CandleInterval, type LiveTrader, type Market, type MarketSession, type MarketStats, type OrderRequest, type OrderState, type OrderStatus, type Position, type TimeInForce } from "./trade.ts";
-import { asRefusal, num, REGION, redact, unreachable, venueSaidNo, type Http, type HttpReply, type LiveBalance, type LiveSource } from "./types.ts";
+import { asRefusal, networkNo, notTheApi, num, redact, REGION, unreachable, venueSaidNo, type Http, type HttpReply, type LiveBalance, type LiveSource } from "./types.ts";
 import type { LiveWriter } from "./writes.ts";
+
+/** a place rule of Alpaca's, in its words or its status */
+const placeNo = (venue: string, name: string, native: Record<string, unknown>): Refusal => no("E_VENUE_GEOBLOCKED", { venue, message: `${name} does not serve this location: that is its own rule, and the account does not look for a way around it`, native });
 
 export const ALPACA_KEY: KeyShape = { required: ["keyId", "secret"], optional: ["paper"], example: '{"keyId": "…", "secret": "…"} (add "paper": "true" for a paper-trading account)' };
 
@@ -72,7 +75,7 @@ export async function alpacaSource(req: { venue: string; label: string; referenc
     } catch (err) {
       throw unreachable(req.venue, name, err, secrets);
     }
-    if (r.status !== 200 || r.body === undefined) throw venueSaidNo(req.venue, name, r.status, r.text, secrets);
+    if (r.status !== 200 || r.body === undefined) throw venueSaidNo(req.venue, name, r.status, r.text, secrets, r);
     return r.body;
   };
   /** A position as a balance. A coin is named by its base, as positions() names its market (BTCUSD is BTC), so that it is one row with the
@@ -104,7 +107,8 @@ export async function alpacaSource(req: { venue: string; label: string; referenc
     const said = redact(String(typeof b.message === "string" ? b.message : r.text), secrets).replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 160);
     return `HTTP ${r.status}${said ? `, "${said}"` : ""}`;
   };
-  /** whether Alpaca has crypto wallets for this account: asked once, softly — a no is Alpaca's own answer, and the connection goes on */
+  /** whether Alpaca has crypto wallets for this account: asked once, softly — a no is Alpaca's own answer, and the connection goes on. What
+   * the answer says of this network (a place rule, an edge's page, the key's IP list, a ban) is said as that, never as the account's setting */
   const wallets = async (): Promise<{ on: true } | { on: false; why: string }> => {
     let r: HttpReply;
     try {
@@ -112,7 +116,9 @@ export async function alpacaSource(req: { venue: string; label: string; referenc
     } catch (err) {
       return { on: false, why: `Alpaca did not answer whether this account has crypto wallets (${unreachable(req.venue, name, err, secrets).message}): nothing is sent to it from here until it is connected again. Cash moves by ACH at Alpaca` };
     }
-    if (r.status === 200) return { on: true };
+    if (r.status === 200 && !notTheApi(r)) return { on: true };
+    const net = networkNo(req.venue, name, r, { status: r.status }) ?? (r.status === 451 || REGION.test(r.text) ? placeNo(req.venue, name, { status: r.status }) : undefined);
+    if (net) return { on: false, why: `${net.message} (GET /v2/wallets): nothing is sent to it from here until it is connected again. Cash moves by ACH at Alpaca` };
     if (r.status === 403 || r.status === 404) return { on: false, why: `Alpaca has not enabled the Crypto Wallets API for this account (GET /v2/wallets: ${walletWords(r)}): cash moves by ACH at Alpaca, and crypto wallets are enabled by Alpaca on request` };
     return { on: false, why: `Alpaca did not say whether this account has crypto wallets (GET /v2/wallets: ${walletWords(r)}): nothing is sent to it from here until it is connected again. Cash moves by ACH at Alpaca` };
   };
@@ -155,12 +161,14 @@ function alpacaWriter(c: { venue: string; name: string; base: string; keyId: str
       } catch (err) {
         return unreachable(c.venue, c.name, err, secrets);
       }
-      if (r.status !== 200) {
+      if (r.status !== 200 || notTheApi(r)) {
         const { said: words, native } = said(r);
+        // what the answer says of this network first: an edge's page, a place rule, the key's IP list, a ban, a rate limit as long as asked
+        const net = networkNo(c.venue, c.name, r, native) ?? (r.status === 451 || REGION.test(words) ? placeNo(c.venue, c.name, native) : undefined);
+        if (net) return net;
         if (r.status === 401) return no("E_VENUE_UNAUTHORIZED", { venue: c.venue, message: `${c.name} does not accept this key`, native });
         if (r.status === 403) return no("E_VENUE_PERMISSION", { venue: c.venue, message: `${c.name} refused the wallet: ${words || "the Crypto Wallets API is not enabled for this account"}`, native });
         if (r.status === 404) return no("E_VENUE_RAIL_CLOSED", { venue: c.venue, message: `${c.name} has no ${a} wallet on ${chain} for this account${words ? ` (it says: ${words})` : ""}`, native });
-        if (r.status === 429) return no("E_VENUE_UNREACHABLE", { venue: c.venue, message: `${c.name} is rate-limiting this machine: try again in a minute`, native });
         if (r.status >= 500) return no("E_VENUE_UNREACHABLE", { venue: c.venue, message: `${c.name} did not answer`, native });
         return no("E_VENUE_RAIL_CLOSED", { venue: c.venue, message: `${c.name} gives no ${a} wallet on ${chain}${words ? `: ${words}` : ` (HTTP ${r.status})`}`, native });
       }
@@ -294,10 +302,13 @@ function alpacaTrader(c: { venue: string; name: string; base: string; keyId: str
     const extra = Object.fromEntries(REFUSAL_FIELDS.filter((k) => b[k] !== undefined && b[k] !== null).map((k) => [k, typeof b[k] === "string" ? redact(b[k], secrets) : b[k]]));
     const native = { status: r.status, ...(code ? { code } : {}), said, ...extra };
     const words = said ? `${c.name}: ${said}` : `${c.name} refused (HTTP ${r.status})`;
-    const withNative = (x: Refusal): Refusal => ({ ...x, native });
-    if (r.status === 451 || REGION.test(said)) return no("E_VENUE_GEOBLOCKED", { venue: c.venue, message: `${c.name} does not serve this location: that is its own rule, and the account does not look for a way around it`, native });
+    // the order as written, in Alpaca's words: native goes into no(), where a refusal's words are made safe to keep
+    const asWritten = (message: string): Refusal => no("E_VENUE_ORDER_INVALID", { venue: c.venue, message: `${c.name}: ${message}`, native, ...(code ? { detail: { code } } : {}) });
+    // what the answer says of this network first, read on the answer as it came: an edge's page is not the account's permission
+    const net = networkNo(c.venue, c.name, r, native);
+    if (net) return net;
+    if (r.status === 451 || REGION.test(said)) return placeNo(c.venue, c.name, native);
     if (r.status === 401) return no("E_VENUE_UNAUTHORIZED", { venue: c.venue, message: `${c.name} does not accept this key`, native });
-    if (r.status === 429) return no("E_VENUE_UNREACHABLE", { venue: c.venue, message: `${c.name} is rate-limiting this machine: try again in a minute`, native });
     if (r.status >= 500 || r.status === 0) return no("E_VENUE_UNREACHABLE", { venue: c.venue, message: `${c.name} did not answer`, native });
     if (r.status === 404 || code === 40410000) return order !== undefined ? no("E_ACCOUNT_ORDER_UNKNOWN", { venue: c.venue, message: `${c.name} has no order ${order} for this key`, detail: { order }, native }) : no("E_VENUE_REJECTED", { venue: c.venue, message: words, native });
     if (INSUFFICIENT.test(said)) return no("E_VENUE_INSUFFICIENT", { venue: c.venue, message: words, native });
@@ -305,12 +316,12 @@ function alpacaTrader(c: { venue: string; name: string; base: string; keyId: str
     if (code === 40310100 || PDT.test(said)) return no("E_VENUE_PERMISSION", { venue: c.venue, message: words, native });
     if (CLOSED.test(said)) return no("E_VENUE_MARKET_CLOSED", { venue: c.venue, message: words, native });
     if (r.status === 403 && /wash trade/i.test(said)) return no("E_VENUE_REJECTED", { venue: c.venue, message: words, native });
-    if (r.status === 403 && SIZE_403.test(said)) return withNative(badOrder(c.venue, c.name, said, code ? { code } : undefined));
+    if (r.status === 403 && SIZE_403.test(said)) return asWritten(said);
     // 403 otherwise: the account may not do this — "account is not authorized to trade", "restricted to liquidation only", "not allowed to
     // short", crypto not enabled on the account
     if (r.status === 403) return no("E_VENUE_PERMISSION", { venue: c.venue, message: words, native });
     // 400 and 422 (40010000, 40010001, 42210000): the order as written — its size, its price's tick, its type or time in force
-    if (r.status === 400 || r.status === 422) return withNative(badOrder(c.venue, c.name, said || `the order was refused as written (HTTP ${r.status})`, code ? { code } : undefined));
+    if (r.status === 400 || r.status === 422) return asWritten(said || `the order was refused as written (HTTP ${r.status})`);
     return no("E_VENUE_REJECTED", { venue: c.venue, message: words, native });
   };
 

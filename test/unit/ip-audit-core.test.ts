@@ -267,3 +267,24 @@ describe("this machine's address, wherever a venue's words put it", () => {
     expect(venueSaidNo("v", "V", 400, long).native).toMatchObject({ said: expect.not.stringMatching(/203\.0\.1/) });
   });
 });
+
+describe("a public source's own hold, let go when a forced re-check finds the venue answering", () => {
+  it("a place rule from the network the user left is not kept for ten minutes after the venue answers this one", async () => {
+    const { kalshiPublic } = await import("../../src/portfolio/live/public-markets.ts");
+    let blocked = true;
+    let sent = 0;
+    const http = async (): Promise<import("../../src/portfolio/live/types.ts").HttpReply> => {
+      sent++;
+      return blocked ? { status: 451, body: undefined, text: "unavailable" } : { status: 200, body: { events: [], cursor: "" }, text: "{}" };
+    };
+    const k = kalshiPublic({ http, clock: () => 1_000_000 });
+    expect(await k.listings({ limit: 5 })).toMatchObject({ code: "E_VENUE_GEOBLOCKED" });
+    const first = sent;
+    blocked = false;
+    await k.listings({ limit: 5 });
+    expect(sent).toBe(first);
+    k.reset?.();
+    expect(isRefusal(await k.listings({ limit: 5 }))).toBe(false);
+    expect(sent).toBeGreaterThan(first);
+  });
+});

@@ -103,7 +103,7 @@ export function unaddressed(text: string): string {
   if (typeof text !== "string" || !/[.:]/.test(text)) return text;
   return text.replace(IPV4, (ip) => (PRIVATE_V4.test(ip) ? ip : "(this machine's address)")).replace(V6_RUN, scrub6);
 }
-const unaddressedDeep = (v: unknown, depth = 0): unknown => {
+export const unaddressedDeep = (v: unknown, depth = 0): unknown => {
   if (typeof v === "string") return unaddressed(v);
   if (depth > 6 || v === null || typeof v !== "object") return v;
   if (Array.isArray(v)) return v.map((x) => unaddressedDeep(x, depth + 1));

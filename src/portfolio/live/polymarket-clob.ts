@@ -60,7 +60,7 @@ import { polymarketSource } from "./address.ts";
 import { CHAINS, type ChainName, type ChainReader } from "./chain.ts";
 import type { KeyFile, KeyShape } from "./credentials.ts";
 import { badOrder, ceilTo, floorTo, inDollars, pick, plain, type Candle, type CandleInterval, type LiveTrader, type Market, type OrderRequest, type OrderState, type OrderStatus, type Position, type TimeInForce } from "./trade.ts";
-import { asRefusal, num, REGION, redact, unreachable, type Http, type HttpReply, type LiveBalance, type LiveSource } from "./types.ts";
+import { asRefusal, edgeRefused, edgeWords, notTheApi, notTheApiWords, num, REGION, redact, unreachable, type Http, type HttpReply, type LiveBalance, type LiveSource } from "./types.ts";
 import { tokenOn, type LiveWriter } from "./writes.ts";
 
 export const POLYMARKET_TRADE_KEY: KeyShape = {
@@ -415,6 +415,10 @@ export const PM_SITE_ONLY = new Set(["IE", "JP", "MT", "NL", "KR"]);
  * orders cancelled, none opened) · blocked completely */
 export type PolymarketScope = "open" | "close-only" | "blocked";
 
+/** A country code that names a place: two letters, and not one of the codes Cloudflare (in front of Polymarket's check) gives where it
+ * cannot say — "XX", an address it cannot place, and "T1", Tor. Such a code is no place, as an empty one is */
+export const readablePlace = (country: string): boolean => /^[A-Z]{2}$/.test(country) && country !== "XX" && country !== "T1";
+
 /** Polymarket's answer (or the one `mm predict geoblock` relays) read with its lists: undefined when it says neither yes nor no. The place
  * it names is matched here, in memory, and goes nowhere. Blocked without a place this can read is blocked completely — not knowing how far
  * is not a yes — and so is a country whose only blocked parts are named (Ukraine's) when the part is not given */
@@ -423,7 +427,7 @@ export function polymarketScope(answer: unknown): PolymarketScope | undefined {
   if (!answer.blocked) return "open";
   const country = typeof answer.country === "string" ? answer.country.trim().toUpperCase() : "";
   const region = typeof answer.region === "string" ? answer.region.trim().toUpperCase() : "";
-  if (!/^[A-Z]{2}$/.test(country) || PM_BLOCKED.has(country)) return "blocked";
+  if (!readablePlace(country) || PM_BLOCKED.has(country)) return "blocked";
   const parts = [...PM_BLOCKED].filter((r) => r.startsWith(`${country}-`));
   if (parts.length && (!region || parts.includes(region.startsWith(`${country}-`) ? region : `${country}-${region}`))) return "blocked";
   return PM_SITE_ONLY.has(country) ? "open" : "close-only";
@@ -433,7 +437,12 @@ export function polymarketScope(answer: unknown): PolymarketScope | undefined {
  * caller, which sends a sell and refuses a buy); no answer is not taken for a yes. The IP it reports is left out of everything, and so is
  * the place */
 export function polymarketLocation(r: HttpReply, venue: string, name: string): "open" | "close-only" | Refusal {
-  if (r.status === 451 || (r.status !== 200 && (REGION.test(r.text) || PM_REGION.test(r.text)))) return no("E_VENUE_GEOBLOCKED", { venue, message: GEO_WORDS, native: { status: r.status } });
+  // the server in front of the check refusing this network (a CDN's or a firewall's page, Cloudflare's "error code: 1009") is an answer, not
+  // silence: its refusal, in its words and none of the page's. It comes first, since such a page repeats the check's own address
+  if (edgeRefused(r.status, r.text)) return no("E_VENUE_GEOBLOCKED", { venue, message: edgeWords(name, r.status, r.text), native: { status: r.status, edge: true } });
+  // the check's own address, wherever a page repeats it ("/api/geoblock", "\/api\/geoblock?…"), is not a word about a place
+  const said = String(r.text ?? "").replace(/[^\s"'<>]*\/geoblock\b[^\s"'<>]*/gi, " ");
+  if (r.status === 451 || (r.status !== 200 && (REGION.test(said) || PM_REGION.test(said)))) return no("E_VENUE_GEOBLOCKED", { venue, message: GEO_WORDS, native: { status: r.status } });
   const scope = r.status === 200 ? polymarketScope(r.body) : undefined;
   if (scope === undefined) return no("E_VENUE_UNREACHABLE", { venue, message: `${name}'s location check did not answer: nothing goes to Polymarket without it`, native: { status: r.status } });
   // blocked, and nothing else: the place and the IP it names are never carried — a refusal is logged and lands in the ledger
@@ -522,11 +531,15 @@ function polymarketWriter(c: { venue: string; name: string; maker: Hex; http: Ht
       throw unreachable(c.venue, `${c.name}'s bridge`, err);
     }
   };
-  /** the bridge's no, in its words: its errors are `{"error": "…"}` */
+  /** the bridge's no, in its words: its errors are `{"error": "…"}`. A place is Polymarket's rule, as at the CLOB; the server in front of the
+   * bridge refusing this network is that, with none of its page's words; a page answered in the bridge's place is no answer */
   const bridgeNo = (r: HttpReply, doing: string): Refusal => {
     const b = isObj(r.body) ? r.body : {};
     const said = String(typeof b.error === "string" ? b.error : r.text).replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 220);
     const native = { status: r.status, said };
+    if (notTheApi(r)) return no("E_VENUE_UNREACHABLE", { venue: c.venue, message: notTheApiWords(`${c.name}'s bridge`), native: { status: r.status, page: true } });
+    if (edgeRefused(r.status, r.text)) return no("E_VENUE_GEOBLOCKED", { venue: c.venue, message: edgeWords(`${c.name}'s bridge`, r.status, r.text), native: { status: r.status, edge: true } });
+    if (r.status === 451 || REGION.test(said) || PM_REGION.test(said)) return no("E_VENUE_GEOBLOCKED", { venue: c.venue, message: GEO_WORDS, native: { status: r.status } });
     if (r.status === 429) return no("E_VENUE_UNREACHABLE", { venue: c.venue, message: `${c.name}'s bridge is rate-limiting this machine: try again in a minute`, native });
     if (r.status >= 500 || r.status === 0) return no("E_VENUE_UNREACHABLE", { venue: c.venue, message: `${c.name}'s bridge did not answer`, native });
     return no("E_VENUE_REJECTED", { venue: c.venue, message: `${c.name}'s bridge refused to ${doing}${said ? `: ${said}` : ` (HTTP ${r.status})`}`, native });
@@ -618,21 +631,25 @@ function polymarketTrader(c: { venue: string; name: string; wallet: Wallet; http
 
   /** Polymarket's no, in the account's words. Its errors are `{"error": "…"}`, and an order it takes in but will not place comes back as
    * `{"success": false, "errorMsg": "…"}`, sometimes with HTTP 200. The words decide first, the status after: the CLOB turns any message
-   * with "not found" into a 404 and "unauthorized" into a 401, and some order refusals arrive as 500 */
+   * with "not found" into a 404 and "unauthorized" into a 401, and some order refusals arrive as 500. A page answered with a 2xx in its place
+   * is not Polymarket speaking, and none of its words decide; one from the server in front of it refusing this network is that refusal */
   const refusal = (r: HttpReply, order?: string): Refusal => {
+    if (notTheApi(r)) return no("E_VENUE_UNREACHABLE", { venue: c.venue, message: notTheApiWords(c.name), native: { status: r.status, page: true } });
     const b = isObj(r.body) ? r.body : {};
     const text = typeof b.errorMsg === "string" && b.errorMsg ? b.errorMsg : typeof b.error === "string" ? b.error : typeof b.error_msg === "string" ? b.error_msg : r.text;
     // redacted before it is cut, so that no part of a secret survives at the cut
     const said = redact(String(text), secrets()).replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 220);
     const native = { status: r.status, said, ...(typeof b.code === "string" ? { code: b.code } : {}), ...(b.retry_after_seconds !== undefined ? { retryAfterSeconds: num(b.retry_after_seconds) } : {}) };
     const words = said ? `${c.name}: ${said}` : `${c.name} refused (HTTP ${r.status})`;
+    // not the key's permission: the same page for every key — first, so that none of its words decide or travel (they may name the country)
+    if (edgeRefused(r.status, r.text)) return no("E_VENUE_GEOBLOCKED", { venue: c.venue, message: edgeWords(c.name, r.status, r.text), native: { status: r.status, edge: true } });
     if (r.status === 451 || REGION.test(said) || PM_REGION.test(said)) return no("E_VENUE_GEOBLOCKED", { venue: c.venue, message: GEO_WORDS, native });
     if (INSUFFICIENT.test(said)) return no("E_VENUE_INSUFFICIENT", { venue: c.venue, message: words, native });
     if (NO_TRADE.test(said)) return no("E_VENUE_PERMISSION", { venue: c.venue, message: words, native });
     if (KEY_OWNER.test(said)) return no("E_VENUE_BAD_SIGNER", { venue: c.venue, message: `${words} · the key file's "funderAddress" and "signatureType" say who makes the order and who signs it`, native });
     if (CLOSED.test(said)) return no("E_VENUE_MARKET_CLOSED", { venue: c.venue, message: words, native });
     if (LATER.test(said) || r.status === 425 || r.status === 429) return no("E_VENUE_UNREACHABLE", { venue: c.venue, message: r.status === 429 ? `${c.name} is rate-limiting this machine: try again in a minute` : `${words}: try again shortly`, native });
-    if (AS_WRITTEN.test(said)) return { ...badOrder(c.venue, c.name, said), native };
+    if (AS_WRITTEN.test(said)) return no("E_VENUE_ORDER_INVALID", { venue: c.venue, message: words, native });
     if (/order_version_mismatch/i.test(said)) return no("E_VENUE_REJECTED", { venue: c.venue, message: `${words} · this connection signs CLOB V2 orders, and Polymarket now asks for another version`, native });
     if (NO_MATCH.test(said)) return no("E_VENUE_REJECTED", { venue: c.venue, message: words, native });
     if (r.status === 401 || UNAUTH.test(said)) {
@@ -679,7 +696,7 @@ function polymarketTrader(c: { venue: string; name: string; wallet: Wallet; http
           return creds;
         }
         // an answer of 200 without the three fields is not shown: it may hold part of them
-        return r.status === 200 ? no("E_VENUE_REJECTED", { venue: c.venue, message: `${c.name} answered the credentials request in a way this connection could not read`, native: { status: 200 } }) : refusal(r);
+        return r.status === 200 && !notTheApi(r) ? no("E_VENUE_REJECTED", { venue: c.venue, message: `${c.name} answered the credentials request in a way this connection could not read`, native: { status: 200 } }) : refusal(r);
       } catch (err) {
         return asRefusal(c.venue, c.name, err, secrets());
       } finally {
@@ -998,7 +1015,14 @@ function polymarketTrader(c: { venue: string; name: string; wallet: Wallet; http
     return { body, hash, orderType, creds: k2 };
   };
 
-  const trader: LiveTrader = {
+  const trader: LiveTrader & { held(o: { side: "buy" | "sell"; reduceOnly?: boolean | undefined }): Promise<Refusal | undefined> } = {
+    /** Polymarket's location check for where the user is now, asked before the owner is quoted or an agent's card is raised
+     * (account/live-orders.ts): blocked, or a buy where it is close-only, is refused with nothing signed or sent */
+    async held(o) {
+      const geo = await geoblock();
+      if (isRefusal(geo)) return geo;
+      return geo === "close-only" && o.side === "buy" && !o.reduceOnly ? closeOnlyBuy(c.venue, "a buy") : undefined;
+    },
     // the credentials were issued when the connection was made: Polymarket will take signed orders from this key
     can: true,
     what: "event contracts",
@@ -1063,8 +1087,9 @@ function polymarketTrader(c: { venue: string; name: string; wallet: Wallet; http
           return { ref, status: "pending", filledQty: 0, native };
         }
         // a gateway's error or an outage, not one of the CLOB's own answers: the order may have been taken all the same
-        // "context canceled" (which the CLOB turns into a 400) is the request cut off mid-way: the order may stand, so it is looked up too
-        if ((r.status >= 500 && r.status !== 503 && !/order timed out|no matching orders|filled or killed|rounding|discrepancy/i.test(r.text)) || /context canceled/i.test(r.text)) return await silent(built.hash, mine, refusal(r));
+        // "context canceled" (which the CLOB turns into a 400) is the request cut off mid-way: the order may stand, so it is looked up too;
+        // and so is a page answered in Polymarket's place with a 2xx, which says nothing of where the order got to
+        if (notTheApi(r) || (r.status >= 500 && r.status !== 503 && !/order timed out|no matching orders|filled or killed|rounding|discrepancy/i.test(r.text)) || /context canceled/i.test(r.text)) return await silent(built.hash, mine, refusal(r));
         return refusal(r);
       } catch (err) {
         return asRefusal(c.venue, c.name, err, secrets());
@@ -1225,7 +1250,9 @@ function polymarketTrader(c: { venue: string; name: string; wallet: Wallet; http
 
   /** Polymarket did not answer an order. The order's id is its EIP-712 hash, known before it is sent, so Polymarket is asked for that
    * order: there (returned as placed), or not there, or no answer — it is never sent twice from here. That the CLOB's id is exactly this
-   * hash is what its clients compute; Polymarket's docs call it "the order hash" */
+   * hash is what its clients compute; Polymarket's docs call it "the order hash". "Not there" is only Polymarket's own word for it: its empty
+   * answer (null) or its JSON "not found". A page in its place (a filtering network's 200, a proxy's own 404), an edge's refusal or a 5xx
+   * says nothing of the order, and is no answer */
   async function silent(hash: Hex, mine: Record<string, unknown>, why: Refusal): Promise<OrderState | Refusal> {
     try {
       const r = await priv("GET", `/data/order/${hash}`);
@@ -1233,7 +1260,10 @@ function polymarketTrader(c: { venue: string; name: string; wallet: Wallet; http
         const st = await stateOf(r.body);
         return { ...st, native: { ...mine, order: st.native, noAnswer: why.message } };
       }
-      if (r.status === 404 || (r.status === 200 && !isObj(r.body)) || /not found/i.test(r.text)) return { ...why, message: `${why.message}, and a moment later it held no order under this order's hash: most likely nothing was placed. Look at ${c.name}'s open orders before placing it again`, detail: { ...mine, placed: "unknown" } };
+      const t = r.text.trim();
+      const none = r.status === 200 && (t === "null" || t === "");
+      const notFound = (r.status === 404 || r.status === 400) && isObj(r.body) && /not found|invalid orderid/i.test(String(r.body.error ?? r.body.errorMsg ?? ""));
+      if (none || notFound) return { ...why, message: `${why.message}, and a moment later it held no order under this order's hash: most likely nothing was placed. Look at ${c.name}'s open orders before placing it again`, detail: { ...mine, placed: "unknown" } };
     } catch {
       // no answer to the question either
     }

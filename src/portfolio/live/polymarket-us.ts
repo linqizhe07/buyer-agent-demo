@@ -70,7 +70,7 @@ import { no } from "../refuse.ts";
 import { categoryOf } from "./categories.ts";
 import type { KeyFile, KeyShape } from "./credentials.ts";
 import { badOrder, onStep, plain, type Candle, type CandleInterval, type LiveTrader, type Market, type OrderRequest, type OrderState, type OrderStatus, type Position, type TimeInForce } from "./trade.ts";
-import { asRefusal, num, redact, REGION, unreachable, type Http, type HttpReply, type LiveBalance, type LiveSource } from "./types.ts";
+import { asRefusal, edgeRefused, edgeWords, notTheApi, notTheApiWords, num, redact, REGION, unreachable, type Http, type HttpReply, type LiveBalance, type LiveSource } from "./types.ts";
 
 export const POLYMARKET_US_KEY: KeyShape = {
   required: ["keyId", "secretKey"],
@@ -153,8 +153,12 @@ export function polymarketUsSign(key: KeyObject, timestampMs: number, method: st
 
 // ---- Polymarket US's no, in its own words -------------------------------------------------------------------
 
-/** how Polymarket US might say "not from where you are", beyond the shared REGION words: a state, a location or a geofence */
-const PMUS_REGION = /not (available|permitted|allowed|supported|offered) (in|from|to) (your|this) (state|region|location|area|jurisdiction|country)|restricted (state|location|jurisdiction|region|area)|geo-?(fenc|locat|block|restrict)/i;
+/** how Polymarket US might say "not from where you are", beyond the shared REGION words: a state, a location or a geofence. Phrases about
+ * the user's place only: a bare "state" is as often an account's or an order's ("account state is not ACTIVE") */
+const PMUS_REGION = /(?:not|isn't) (available|permitted|allowed|supported|offered) (in|from|to|for) (your|this) (state|region|location|area|jurisdiction|country)|restricted (state|location|jurisdiction|region|area)|(?:ineligible|unsupported) (?:jurisdiction|location|region)|geo-?(fenc|locat|block|restrict)/i;
+/** the venue's words with any market slug it repeats taken out ("market 'geo-blocked-countries-2026' is closed" names a market, not where
+ * the account is), for the place words to be read in */
+const unslugged = (s: string): string => s.replace(/\b[a-z0-9]+(?:-[a-z0-9]+){2,}\b/gi, " ");
 /** the latency stopgap: "These rejects carry the message Global Rate Limit Exceeded, but they are not an actual rate limit" (rate-limits.md) */
 const STOPGAP = /global rate limit exceeded/i;
 const INSUFFICIENT = /insufficient|buying power|not enough (funds|balance|cash|collateral)/i;
@@ -172,12 +176,18 @@ function saidOf(r: HttpReply, secrets: string[]): { said: string; grpc?: number 
 /** Polymarket US's answer that is not a yes, as the account's refusal, with its words in `native`. Its documented statuses: 400 a bad
  * request, 401 a key it does not accept, 404 nothing there, 429 its edge's rate limit, 5xx (503 for every request during its weekly
  * maintenance, "Every Thursday, 6am–8am ET"); the gateway's bodies carry a gRPC code (5 not found, 7 permission denied, 16 unauthenticated).
- * The words decide where they say more than the status: a place, the latency stopgap, buying power, a closed market */
+ * The words decide where they say more than the status: a place, the latency stopgap, buying power, a closed market. A page answered with a
+ * 2xx in its place is not Polymarket US speaking (no answer, and none of its words decide); a page from the server in front of it refusing
+ * this network is that refusal, the same for every key — not this key's permission */
 export function polymarketUsNo(venue: string, name: string, r: HttpReply, secrets: string[], order = false): Refusal {
+  if (notTheApi(r)) return no("E_VENUE_UNREACHABLE", { venue, message: notTheApiWords(name), native: { status: r.status, page: true } });
   const { said, grpc } = saidOf(r, secrets);
   const native = { status: r.status, ...(grpc !== undefined ? { code: grpc } : {}), said };
   const quoted = said ? `: “${said}”` : "";
-  if (r.status === 451 || REGION.test(said) || PMUS_REGION.test(said) || (r.status === 403 && /\b(location|state|jurisdiction|region|country)\b/i.test(said))) return no("E_VENUE_GEOBLOCKED", { venue, message: `${name} does not take this from where this account is: that is its own rule, and the account does not look for a way around it`, native });
+  // first, so that none of the page's words decide or travel: they may name the country
+  if (edgeRefused(r.status, r.text)) return no("E_VENUE_GEOBLOCKED", { venue, message: edgeWords(name, r.status, r.text), native: { status: r.status, edge: true } });
+  const place = unslugged(said);
+  if (r.status === 451 || REGION.test(place) || PMUS_REGION.test(place)) return no("E_VENUE_GEOBLOCKED", { venue, message: `${name} does not take this from where this account is: that is its own rule, and the account does not look for a way around it`, native });
   if (STOPGAP.test(said)) return no("E_VENUE_REJECTED", { venue, message: `${name} turned the order away with its latency stopgap (“Global Rate Limit Exceeded”: not processed within five seconds, so not placed). Polymarket US says it is not a rate limit: it may be sent again`, native });
   if (r.status === 429) return no("E_VENUE_UNREACHABLE", { venue, message: `${name} is rate-limiting this machine: try again in a minute`, native });
   if (r.status === 401 || grpc === 16) return no("E_VENUE_UNAUTHORIZED", { venue, message: `${name} does not accept this key: its Key ID, its Secret Key, or this machine's clock (a timestamp more than 30 seconds from Polymarket US's is refused)${quoted}`, native });
@@ -186,7 +196,7 @@ export function polymarketUsNo(venue: string, name: string, r: HttpReply, secret
   if (r.status === 403 || grpc === 7) return no("E_VENUE_PERMISSION", { venue, message: `${name} refused: this key may not do this${quoted}`, native });
   if (INSUFFICIENT.test(said)) return no("E_VENUE_INSUFFICIENT", { venue, message: `${name}: not enough buying power for this order${quoted}`, native });
   if (CLOSED.test(said)) return no("E_VENUE_MARKET_CLOSED", { venue, message: `${name}: the market takes no orders now${quoted}`, native });
-  if (order && (r.status === 400 || r.status === 422 || grpc === 3 || grpc === 9)) return { ...badOrder(venue, name, said ? `it does not take this order as written: “${said}”` : "it does not take this order as written"), native };
+  if (order && (r.status === 400 || r.status === 422 || grpc === 3 || grpc === 9)) return no("E_VENUE_ORDER_INVALID", { venue, message: `${name}: it does not take this order as written${quoted}`, native });
   return no("E_VENUE_REJECTED", { venue, message: `${name} refused the request (HTTP ${r.status})${quoted}`, native });
 }
 
@@ -196,7 +206,7 @@ function rejectedNo(venue: string, name: string, e: Rec, id: string, secrets: st
   const text = redact(String(e.text ?? ""), secrets).replace(/\s+/g, " ").trim().slice(0, 220);
   const native = { orderId: id, orderRejectReason: reason || undefined, text: text || undefined };
   const words = text ? ` (“${text}”)` : "";
-  if (REGION.test(text) || PMUS_REGION.test(text)) return no("E_VENUE_GEOBLOCKED", { venue, message: `${name} does not take this order from where this account is: that is its own rule, and the account does not look for a way around it`, native });
+  if (REGION.test(unslugged(text)) || PMUS_REGION.test(unslugged(text))) return no("E_VENUE_GEOBLOCKED", { venue, message: `${name} does not take this order from where this account is: that is its own rule, and the account does not look for a way around it`, native });
   if (STOPGAP.test(text)) return no("E_VENUE_REJECTED", { venue, message: `${name} turned the order away with its latency stopgap (“Global Rate Limit Exceeded”: not processed within five seconds, so not placed). Polymarket US says it is not a rate limit: it may be sent again`, native });
   if (reason === "ORD_REJECT_REASON_EXCHANGE_CLOSED" || CLOSED.test(text)) return no("E_VENUE_MARKET_CLOSED", { venue, message: `${name} rejected the order: “Exchange/market is closed”${words}`, native });
   if (INSUFFICIENT.test(text)) return no("E_VENUE_INSUFFICIENT", { venue, message: `${name} rejected the order: not enough buying power${words}`, native });
@@ -206,7 +216,7 @@ function rejectedNo(venue: string, name: string, e: Rec, id: string, secrets: st
     ORD_REJECT_REASON_INCORRECT_ORDER_TYPE: "“Invalid order type for market”",
     ORD_REJECT_REASON_PRICE_OUT_OF_BOUNDS: "“Price outside valid range”",
   };
-  if (asWritten[reason]) return { ...badOrder(venue, name, `it rejected the order: ${asWritten[reason]}${words}`), native };
+  if (asWritten[reason]) return no("E_VENUE_ORDER_INVALID", { venue, message: `${name}: it rejected the order: ${asWritten[reason]}${words}`, native });
   if (reason === "ORD_REJECT_REASON_UNKNOWN_MARKET") return no("E_VENUE_REJECTED", { venue, message: `${name} rejected the order: “Unknown or invalid market”${words}`, native });
   if (reason === "ORD_REJECT_REASON_NO_LIQUIDITY") return no("E_VENUE_REJECTED", { venue, message: `${name} rejected the order: “No liquidity for market order”${words}`, native });
   return no("E_VENUE_REJECTED", { venue, message: `${name} rejected the order${words}`, native });
@@ -859,7 +869,9 @@ function polymarketUsTrader(o: {
         if (r.status >= 500 || r.status === 0) return await unknown(`answered the order with HTTP ${r.status}`, fail(r).native);
         if (r.status !== 200) {
           const refused = fail(r, true);
-          if (refused.code === "E_VENUE_PERMISSION") {
+          // only Polymarket US's own answer about this key ({code: 7, message}) says what the key may do: a page, an empty 403 or another
+          // server's JSON says nothing of the key, and does not mark it unable to trade for the rest of the session
+          if (refused.code === "E_VENUE_PERMISSION" && typeof rec(r.body).code === "number") {
             can = false;
             whyNot = refused.message;
           }
@@ -895,7 +907,10 @@ function polymarketUsTrader(o: {
         if (!okRef(ref)) return badRef(ref);
         const r = await call("POST", `/v1/order/${enc(ref)}/cancel`, { marketSlug: s.slug });
         if (r.status !== 200) {
-          if (r.status >= 500 || r.status === 0 || r.status === 429 || r.status === 401) return fail(r);
+          // no answer, a key it does not accept, a place (its 451, its words) or the server in front of it refusing this network: that is
+          // the answer, in its words — reading the order back would not make it Polymarket US's word about this order
+          const refused = fail(r);
+          if (refused.code === "E_VENUE_UNREACHABLE" || refused.code === "E_VENUE_UNAUTHORIZED" || refused.code === "E_VENUE_GEOBLOCKED") return refused;
           // already filled or canceled, or not this key's: the order as it stands — and if it is still on the book, Polymarket US did not
           // take the cancel, which is said as that rather than handed back as a cancel on its way
           const now = await status(ref, symbol);

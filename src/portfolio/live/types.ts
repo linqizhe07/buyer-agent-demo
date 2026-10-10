@@ -51,6 +51,9 @@ export interface LiveSource {
   address?: string | undefined;
   probe: LiveProbe;
   read(): Promise<LiveBalance[]>;
+  /** what the last read could not read this time (a chain or a part that did not answer, its last good rows kept), when anything: the read
+   * is then shown as stale, and asked again soon */
+  unread?(): string | undefined;
   /** how real money is moved here, when it can be; absent: no money is moved here from the account */
   writer?: LiveWriter | undefined;
   /** why no money is moved here, when none is */
@@ -125,7 +128,7 @@ export function redact(text: string, secrets: Array<string | undefined>): string
 /** how venues say "not from where you are": Binance answers 451 with "restricted location", Bybit's edge answers 403 with "block access from
  * your country". Only words about a place: a product's or a tier's "eligibility", or "not permitted in your account", is not one, and
  * reading it as one would tell a user a venue does not serve them when it does */
-export const REGION = /restricted (location|jurisdiction|region|countr)|unavailable from a restricted|(block(ed|s)?|den(y|ied)) access from your (country|region)|not (available|permitted|supported|eligible|offered) (in|for|from) your (country|region|jurisdiction|location|state|area)|geo-?block|\b451 Unavailable|\bHTTP 451\b|\bdoes not support (?:user participation in )?your (?:ip )?region\b|\bcountry (?:and region )?restrictions\b|\bblacklist(?:ed)? country\b/i;
+export const REGION = /restricted (location|jurisdiction|region|countr)|unavailable from a restricted|(block(ed|s)?|den(y|ied)) access from your (country|region)|not (available|permitted|supported|eligible|offered) (in|for|from) your (country|region|jurisdiction|location|state|area)|geo-?block|\b451 Unavailable|\bHTTP 451\b|\bdoes not support (?:user participation in )?your (?:ip )?region\b|\bcountry (?:and region )?restrictions\b|\bblacklist(?:ed)? country\b|\bcountry_is_banned\b/i;
 
 /** A venue saying the address this machine reaches it from is not on the key's IP list — each in its own code or words: OKX 50110, Bybit
  * 10010 ("Unmatched IP"), Bitget 40018 ("Invalid IP"), KuCoin 400006, Crypto.com 40103, MEXC 406 and 700006, Gate IP_FORBIDDEN, Bitstamp
@@ -191,6 +194,21 @@ export function venueSaidNo(venue: string, name: string, status: number, text: s
   if (status >= 300 && status < 400) return redirectedNo(venue, name, status, reply.location);
   if (notTheApi({ status, body: undefined, text })) return no("E_VENUE_UNREACHABLE", { venue, message: notTheApiWords(name), native: { status, page: true } });
   return no("E_VENUE_REJECTED", { venue, message: `${name} refused the request (HTTP ${status})`, native });
+}
+
+/** What an HTTP answer says of this network rather than of the key or the order, read on the answer as it came — before anything reads its
+ * words as the venue's: the server in front of the venue refusing this network (its page: by place or by the address's standing, held as a
+ * place rule, and none of the page kept — a page's "permission" or "location" is not the venue's own rule), a page in the API's place (no
+ * answer), a key bound to other addresses, a ban or a rate limit for as long as the venue asked, a redirect (answered, not followed).
+ * Nothing when it is none of these */
+export function networkNo(venue: string, name: string, r: HttpReply, native: Record<string, unknown>): Refusal | undefined {
+  if (edgeRefused(r.status, r.text)) return no("E_VENUE_GEOBLOCKED", { venue, message: edgeWords(name, r.status, r.text), native: { status: r.status, edge: true } });
+  if (notTheApi(r)) return no("E_VENUE_UNREACHABLE", { venue, message: notTheApiWords(name), native: { status: r.status, page: true } });
+  if (IP_LIST.test(r.text)) return no("E_VENUE_PERMISSION", { venue, message: ipListWords(name), native, detail: { ipList: true } });
+  if (r.status === 418 || bannedUntil(r.text) !== undefined) return bannedNo(venue, name, bannedUntil(r.text) ?? (r.retryAfterMs ? Date.now() + r.retryAfterMs : undefined), native);
+  if (r.status === 429) return rateLimitedNo(venue, name, r.retryAfterMs, native);
+  if (r.status >= 300 && r.status < 400) return redirectedNo(venue, name, r.status, r.location);
+  return undefined;
 }
 
 /** a venue that has banned this machine's address for too many requests, until when it said (or for ten minutes, when it gave no time):

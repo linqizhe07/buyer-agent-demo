@@ -132,7 +132,7 @@ export const VENUE_TERMS: Record<string, VenueTerms> = {
     url: "https://www.coinbase.com/legal/user_agreement",
     read: READ,
     says: "",
-    unread: "coinbase.com and help.coinbase.com answer this machine with a browser check (HTTP 403), and web.archive.org’s copies of Coinbase’s list of places (coinbase.com/places) hold only its home page since mid-2026: no list of the places Coinbase serves could be read",
+    unread: "when this table was made (2026-10-08), coinbase.com and help.coinbase.com answered its reader with a browser check (HTTP 403), and web.archive.org’s copies of Coinbase’s list of places (coinbase.com/places) hold only its home page since mid-2026: no list of the places Coinbase serves could be read",
     note: "Coinbase keeps a user agreement per region (this link opens the visitor’s own); the US one, with Coinbase, Inc. (read from a web.archive.org copy of 2026-10-05), asks that its users reside in the United States.",
   },
   // "Service Restricted Countries", last updated on 2026-09-01 (Bybit Platform Terms & Conditions §11.3)
@@ -332,7 +332,9 @@ interface Codes {
  * outlying area is the same place whether it comes as the country PR or as the US region PR */
 function codesOf(place: Place): Codes | undefined {
   const country = typeof place.country === "string" ? place.country.trim().toUpperCase() : "";
-  if (!/^[A-Z]{2}$/.test(country)) return undefined;
+  // "XX" (a country not known) and "T1" (Tor) are a lookup's placeholders, not places: nothing is judged by them (polymarket-clob.ts
+  // readablePlace)
+  if (!/^[A-Z]{2}$/.test(country) || country === "XX" || country === "T1") return undefined;
   const given = typeof place.region === "string" ? place.region.trim().toUpperCase() : "";
   const part = given.startsWith(`${country}-`) ? given.slice(country.length + 1) : given;
   const region = /^[A-Z0-9]{1,3}$/.test(part) ? part : "";

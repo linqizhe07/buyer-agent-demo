@@ -85,6 +85,21 @@ export interface ExchangeClient {
   fetchFundingRate?(symbol: string, params?: Record<string, unknown>): Promise<unknown>;
 }
 
+/** The exchange's market list, loaded through the library — and a load that failed let go of: the library keeps a failed load's promise and
+ * hands it to every later call, so one blip (a network change, a filtering page) would refuse every read and write until a restart */
+export async function loadList(client: ExchangeClient, reload?: boolean): Promise<void> {
+  try {
+    await client.loadMarkets?.(reload);
+  } catch (err) {
+    const kept = client as { marketsLoading?: unknown; reloadingMarkets?: boolean };
+    if ("marketsLoading" in kept) {
+      kept.marketsLoading = undefined;
+      kept.reloadingMarkets = false;
+    }
+    throw err;
+  }
+}
+
 /** the library's ids for one exchange on several hosts (ccxt.md §0): OKX is also okxus and myokx (EEA) */
 export function isOkx(id: string): boolean {
   return id.startsWith("okx") || id === "myokx";
@@ -380,7 +395,7 @@ async function balances(client: ExchangeClient, who: { venue: string; name: stri
   const assets = [...new Set(out.filter((b) => !isStable(b.asset)).map((b) => b.asset))];
   if (assets.length && client.fetchTickers) {
     try {
-      await client.loadMarkets?.();
+      await loadList(client);
       const quotes = ["USDT", "USDC", "USD"];
       const symbols = assets.flatMap((a) => quotes.map((q) => `${a}/${q}`)).filter((s) => client.markets === undefined || client.markets[s] !== undefined);
       const tickers = symbols.length ? await client.fetchTickers(symbols) : {};
@@ -440,7 +455,7 @@ async function firstQuestion(client: ExchangeClient): Promise<void> {
     return;
   }
   const before = client.lastRestRequestTimestamp;
-  await client.loadMarkets?.();
+  await loadList(client);
   // a market list built into the library sends nothing: the exchange has not been asked. Its cheapest public question is, or nothing is said
   if (typeof before === "number" && client.lastRestRequestTimestamp === before) {
     const symbol = Object.keys(client.markets ?? {})[0];

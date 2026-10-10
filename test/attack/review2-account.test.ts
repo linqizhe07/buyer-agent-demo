@@ -369,7 +369,7 @@ describe("A10 · the table of answers", () => {
 });
 
 describe("A11 · an order whose venue is not connected, asked to cancel", () => {
-  it("is no longer followed: what it held of the limit is free, its line says so, the venue can be connected again, and a later run does not follow it", async () => {
+  it("an agent's cancel waits while the venue is being connected again; the owner's lets it go: what it held of the limit is free, its line says so, the venue can be connected again, and a later run does not follow it", async () => {
     const home = fresh();
     const r1 = await run(home, 0);
     ok(await r1.connect());
@@ -381,7 +381,12 @@ describe("A11 · an order whose venue is not connected, asked to cancel", () => 
     ex.down = true;
     const r2 = await run(home, HOUR);
     expect([r2.engine.orders.map((o) => [o.id, o.status]), r2.trade().spentMicro]).toEqual([[["ord-0001", "open"]], 59_000_000]);
-    const gone = await r2.ag({ type: "agentLiveCancel", venue: "ex", order: "ord-0001" });
+    // the agent's cancel waits for the venue the account is connecting again: the order may still be live there, so its share of the limit
+    // stays held
+    const wait = await r2.ag({ type: "agentLiveCancel", venue: "ex", order: "ord-0001" });
+    expect([isRefusal(wait) && wait.code, r2.trade().spentMicro]).toEqual(["E_VENUE_UNREACHABLE", 59_000_000]);
+    // the owner lets it go
+    const gone = await r2.own({ type: "liveCancel", venue: "ex", order: "ord-0001" });
     if (isRefusal(gone) || gone.kind !== "order") throw new Error(`expected an order, got ${words(gone)}`);
     expect([gone.order.unfollowed, gone.order.status, r2.trade().spentMicro]).toEqual([true, "open", 0]);
     expect(gone.order.note).toBe("not followed since a restart: Ex is not connected, so the account can neither cancel it nor see it fill. Cancel it at the venue");

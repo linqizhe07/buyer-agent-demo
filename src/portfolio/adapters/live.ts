@@ -4,14 +4,18 @@
  * owner's signature or inside a limit the owner signed — never through the simulated door this adapter wraps: `execute` refuses, in the
  * venue's words, and there is no `credit`, `debit`, `convert` or `shift`; the simulated doors compiled for it are shut (account/doors.ts
  * reads `watchOnly`). Reads are cached, because a real venue counts requests: the page asks for the account every few seconds, the venue is
- * asked at most once per `ttlMs`. When a refresh fails the last good numbers stay, with the time they were read and what went wrong.
+ * asked at most once per `ttlMs`. When a refresh fails the last good numbers stay, with the time they were read and what went wrong — and
+ * a venue that said it cannot be asked just now (it banned this machine's address until a time, its edge refused this network, it is
+ * rate-limiting) is not asked again before the hold its refusal carries runs out (public-markets.ts holdBackMs, the one rule), nor while
+ * the service holds the same venue's market reads back (`held`).
  *
  * Prices: a dollar stablecoin counts one for one; anything else is worth what the source or the injected price says, and nothing when
  * neither does. The simulation's fixed price table is never applied to a real balance.
  */
-import type { Refusal } from "../../core/errors.ts";
-import { no } from "../refuse.ts";
+import { isRefusal, type Refusal } from "../../core/errors.ts";
+import { no, unaddressed } from "../refuse.ts";
 import { r2, type Account, type AccountAdapter, type Holding, type Intent } from "../accounts.ts";
+import { holdBackMs } from "../live/public-markets.ts";
 import { isStable, type LiveBalance, type LiveSource } from "../live/types.ts";
 
 export interface LiveAccountOptions {
@@ -25,6 +29,10 @@ export interface LiveAccountOptions {
   price?: ((asset: string) => Promise<number | undefined>) | undefined;
   /** the balances read while connecting, so the venue is not asked twice */
   first?: LiveBalance[] | undefined;
+  /** the one hold the service keeps for this venue (its market reads' read cache): what holds it back now, and a refusal this read met,
+   * for the market reads to wait out too. Absent: this adapter keeps its own */
+  held?: (() => Refusal | undefined) | undefined;
+  refused?: ((r: Refusal) => void) | undefined;
 }
 
 export const WATCH_ONLY = "Live · read-only";
@@ -74,13 +82,37 @@ export async function liveAccount(id: string, source: LiveSource, opts: LiveAcco
   };
   if (opts.first) took(await shape(opts.first));
 
+  /** the venue is not asked again for `ms` from now: what is read meanwhile is the last good numbers */
+  const waitFor = (ms: number): void => {
+    readAt = clock() - ttl + Math.max(Math.min(ttl, 15_000), ms);
+  };
   const refresh = async (): Promise<Holding[]> => {
+    // the venue's market reads are held back (a ban, its place rule, an edge page met there): its balance is not asked meanwhile either
+    const held = opts.held?.();
+    if (held) {
+      account.stale = held.message;
+      waitFor(0);
+      return cached;
+    }
     try {
       took(await shape(await source.read()));
+      // read in part (an address source whose chain or the venue's API did not answer for some of it): what was read stands, the page says
+      // what was not, and the rest is asked again soon
+      const unread = source.unread?.();
+      if (unread) {
+        account.stale = unaddressed(unread).slice(0, 200);
+        waitFor(0);
+      }
     } catch (err) {
-      // the last good numbers stay; the page says how old they are and why. The venue is not asked again for a while
-      account.stale = String((err as Partial<Refusal> & { message?: string })?.message ?? err).slice(0, 200);
-      readAt = clock() - ttl + Math.min(ttl, 15_000);
+      // the last good numbers stay; the page says how old they are and why — the words with this machine's address taken out before they
+      // are cut, as they are served on /api/account. The venue is not asked again for a while: for as long as its refusal holds it back
+      // (until a ban's time, ten minutes for a place rule or an edge page), fifteen seconds at least. A refusal's own time is on the wall
+      // clock, as the venue said it and the refusal was stamped, so its hold is measured on that clock
+      account.stale = unaddressed(String((err as Partial<Refusal> & { message?: string })?.message ?? err)).slice(0, 200);
+      if (isRefusal(err)) {
+        waitFor(holdBackMs(err));
+        opts.refused?.(err);
+      } else waitFor(0);
     }
     return cached;
   };

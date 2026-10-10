@@ -26,8 +26,9 @@
  *   · a buy is priced at the ASK and a sell at the BID, as the account values an order (account/live-orders.ts). A venue that shows no
  *     book (a DEX aggregator's reference price) is priced at its last price, says so (`priceIs: "last"`), and ranks after every venue that
  *     shows the side of the book the order would take;
- *   · ranked best first: a buy by the lowest ask, a sell by the highest bid. A market closed now, a venue whose key may not trade, or one
- *     whose smallest order is more than `usd` ranks last, after every venue an order could go to now;
+ *   · ranked best first: a buy by the lowest ask, a sell by the highest bid. A market closed now, a venue whose key may not trade, one
+ *     whose own place rule takes no such order from this network (`place`: the account's verdict from the venue's answer, its words in the
+ *     row's note), or one whose smallest order is more than `usd` ranks last, after every venue an order could go to now;
  *   · `best` is the first venue an order could go to now; `worse` is how much worse every other venue is than it, in percent (negative:
  *     it looks better, but it is closed, priced at a last price, or cannot take the order). When no venue could take an order now, no row
  *     is best;
@@ -88,11 +89,23 @@ export function normalBase(symbolOrBase: string, kind: string): string {
   return ALIAS[up] ?? up;
 }
 
+/** A trading venue's own place rule for this user's network, as the account judged it just now from the venue's answer to that network
+ * (the service's verdict for the connection; never what a builder's machine was answered): `closed`, it takes no order from here, so its
+ * row is never ready and never best; `close-only`, it takes only orders that close what is held (Polymarket's rule for some places), so a
+ * buy is not ready and a sell is. `words` are the rule's own, with no place and no address in them. It holds back nothing the venue's
+ * order door would not refuse anyway */
+export interface PlaceRule {
+  rule: "closed" | "close-only";
+  words: string;
+}
+
 export interface CompareVenue {
   /** the account's id for the venue */
   id: string;
   name: string;
   trader: LiveTrader;
+  /** the venue's place rule for this network, when it has one that bars an order from here (absent: none, or not known) */
+  place?: PlaceRule | undefined;
 }
 
 export interface CompareOptions {
@@ -260,6 +273,8 @@ async function atVenue(v: CompareVenue, w: Want, side: Side, ms: number, most: n
     } catch {
       canTrade = "unknown";
     }
+    // a venue whose own rule takes no order from this network: whatever the key may do, no order goes there from here
+    if (v.place?.rule === "closed") canTrade = false;
     const rows: CompareRow[] = [];
     let refusal: Refusal | undefined;
     let unpriced: Market | undefined;
@@ -325,7 +340,11 @@ function rowOf(v: CompareVenue, m: Market, side: Side, canTrade: boolean | "unkn
     const fits = qty > 0 && (minQty === undefined || qty >= minQty - 1e-12) && (minNotional === undefined || qty * each >= minNotional - 1e-9);
     sized = { qty, fits, ...(minUsd > 0 ? { minUsd: round4(minUsd) } : {}) };
   }
-  const note = typeof m.note === "string" && m.note ? m.note : listed.note;
+  // the venue's place rule for this network, where it bars this order — every order (closed), or one that opens (a buy, close-only): said
+  // first, before the market's own note, and the row is not ready
+  const barred = v.place && (v.place.rule === "closed" || side === "buy") ? v.place.words : undefined;
+  const own = typeof m.note === "string" && m.note ? m.note : listed.note;
+  const note = barred ? (own ? `${barred} · ${own}` : barred) : own;
   const category = typeof m.category === "string" && m.category ? m.category : listed.category;
   // the fresh answer's name for the market is what an order there names; the listed one if it gave none
   const symbol = typeof m.symbol === "string" && m.symbol ? m.symbol : listed.symbol;
@@ -344,7 +363,7 @@ function rowOf(v: CompareVenue, m: Market, side: Side, canTrade: boolean | "unkn
     ...(spreadPct !== undefined ? { spreadPct } : {}),
     open,
     canTrade,
-    ready: open && canTrade !== false && sized?.fits !== false,
+    ready: !barred && open && canTrade !== false && sized?.fits !== false,
     ...(sized ? { qty: sized.qty, fits: sized.fits, ...(sized.minUsd !== undefined ? { minUsd: sized.minUsd } : {}) } : {}),
     ...(note ? { note } : {}),
     ...(category ? { category } : {}),

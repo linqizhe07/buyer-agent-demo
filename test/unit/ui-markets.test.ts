@@ -492,13 +492,13 @@ describe("the Markets pane", () => {
     expect(cat).toContain('<div class="pick-h">More</div>');
     expect(cat).toContain('data-kind="standin-pubex" data-extra=""><b>Stand-in Public Exchange</b><span>On this machine</span>');
     // a venue that answered no before any key was made (GET /api/account/connect/reach): its tile says so, its words in the title; the ones
-    // read by address ask nothing; an answer of ok changes nothing
+    // read by address ask their host one keyless question too; an answer of ok changes nothing
     const said = "Binance does not serve this location: that is its own rule, and the account does not look for a way around it. It answered: “Service unavailable from a restricted location”";
     p.run(`REACH.set("live:exchange:binance", { connector: "live:exchange:binance", state: "location", said: ${JSON.stringify(said)}, at: "2026-10-06T05:00:00.000Z" }); REACH.set("live:exchange:okx", { connector: "live:exchange:okx", state: "ok", at: "2026-10-06T05:00:00.000Z" }); REACH.set("live:metamask", { connector: "live:metamask", state: "setup", said: "mm is not signed in on this machine: run mm login in a terminal, then check again", at: "2026-10-06T05:00:00.000Z" })`);
     const marked = p.run<string>("catalog(true)");
     expect(marked).toContain(`<button type="button" class="tile tile-off" data-kind="exchange" data-extra="binance" title="${said.replace(/'/g, "&#39;")}"><b>Binance</b><span><em class="off">Not served here</em></span></button>`);
     expect(marked).toContain('<button type="button" class="tile" data-kind="exchange" data-extra="okx"><b>OKX</b><span>API key</span></button>');
-    expect(p.run("[tileConnector('exchange', 'okx'), tileConnector('exchange', ''), tileConnector('hyperliquid', ''), tileConnector('wallet', 'watch'), tileConnector('kalshi', '')]")).toEqual(["live:exchange:okx", "", "", "", "live:kalshi"]);
+    expect(p.run("[tileConnector('exchange', 'okx'), tileConnector('exchange', ''), tileConnector('hyperliquid', ''), tileConnector('wallet', 'watch'), tileConnector('kalshi', '')]")).toEqual(["live:exchange:okx", "", "live:hyperliquid", "live:wallet", "live:kalshi"]);
     // the form's note: the venue's words, when it was asked, Check again; Polymarket's offers to watch a wallet there by its address
     const note = p.run<string>(`reachNoteHtml(REACH.get("live:exchange:binance"), "exchange")`);
     expect(note).toContain("It answered: “Service unavailable from a restricted location”");
@@ -520,7 +520,7 @@ describe("the Markets pane", () => {
     // neither is offered again under More
     expect([cat.match(/data-kind="hyperliquid-trade"/g), cat.match(/data-kind="hyperliquid"/g)].map((m) => m?.length)).toEqual([1, 1]);
     // the API-wallet connection asks its venue's rule first (live/reach.ts); the one by address asks nothing
-    expect(p.run("[tileConnector('hyperliquid-trade', ''), tileConnector('hyperliquid', '')]")).toEqual(["live:hyperliquid-trade", ""]);
+    expect(p.run("[tileConnector('hyperliquid-trade', ''), tileConnector('hyperliquid', '')]")).toEqual(["live:hyperliquid-trade", "live:hyperliquid"]);
     p.run(`REACH.set("live:hyperliquid-trade", { connector: "live:hyperliquid-trade", state: "location", said: "Hyperliquid does not serve this location: its Terms of Use (§1.6) …", at: "2026-10-06T05:00:00.000Z" })`);
     expect(p.run<string>("catalog(true)")).toContain('data-kind="hyperliquid-trade" data-extra="" title="Hyperliquid does not serve this location: its Terms of Use (§1.6) …"><b>Hyperliquid</b><span><em class="off">Not served here</em></span>');
     // its form's note offers to watch the account by its address instead

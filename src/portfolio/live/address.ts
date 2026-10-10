@@ -12,6 +12,10 @@
  *
  * An address is public: anyone can read it. Whether it is the USER's is a separate question, answered by the wallet signing a sentence
  * (proof.ts) — `proven` says which it is, and the page shows a watched address as watched.
+ *
+ * A read in part is never kept as a whole one: a chain, a ledger or a price that did not answer this time keeps what it last said, marked as
+ * not read this time (`unread()` says what was not), or the read is refused and the last good one stays — balances never vanish because
+ * this network was refused one answer.
  */
 import { getAddress, isAddress, type Hex } from "viem";
 import type { Refusal } from "../../core/errors.ts";
@@ -21,7 +25,7 @@ import { dexTrader, issuedHoldings, USDG_ROBINHOOD } from "./dex.ts";
 import { stockTokenHoldings } from "./robinhood.ts";
 import { walletWriter } from "./writes.ts";
 import { walletBridge } from "./wallet-bridge.ts";
-import { asRefusal, num, unreachable, venueSaidNo, type Http, type LiveBalance, type LiveProbe, type LiveSource } from "./types.ts";
+import { asRefusal, notTheApi, notTheApiWords, num, unreachable, venueSaidNo, type Http, type LiveBalance, type LiveProbe, type LiveSource } from "./types.ts";
 
 export interface AddressRequest {
   venue: string;
@@ -33,7 +37,13 @@ export interface AddressRequest {
   chain: ChainReader;
 }
 
+/** a source that says, after each read, what it could not read this time (kept from the read before, marked so): for the adapter to show
+ * the account as not wholly read, and ask again soon */
+type PartSource = LiveSource & { unread(): string | undefined };
 type Opened = { source: LiveSource; first: LiveBalance[] } | Refusal;
+
+/** a row kept from the last read that answered, said as not read this time */
+const notRead = (b: LiveBalance, why: string): LiveBalance => ({ ...b, where: `${b.where ?? ""}${b.where ? " · " : ""}not read this time: ${why}` });
 
 const checked = (venue: string, address: string): Hex | Refusal => (isAddress(address, { strict: false }) ? getAddress(address) : no("E_ACCOUNT_BAD_ACTION", { venue, message: "an address is 0x and forty hex digits" }));
 const whose = (proven: string | undefined): string => (proven ? `proven yours: ${proven} signed for it` : "watched, not proven yours: nobody signed for it");
@@ -49,23 +59,57 @@ export async function walletSource(req: AddressRequest): Promise<Opened> {
   if (typeof address !== "string") return address;
   const name = req.label || req.proven || "Wallet";
   let unread: string[] = [];
+  // the last rows each part of the read gave when it answered — a chain's dollars, its own coin, the Stock Tokens, a chain's issued shares —
+  // so a part that does not answer this time keeps them, said as not read this time, rather than going to nothing
+  const last = new Map<string, LiveBalance[]>();
   const read = async (): Promise<LiveBalance[]> => {
+    const refs = [...STABLECOINS, USDG_ROBINHOOD];
     const [tokens, coins, stocks, issued] = await Promise.all([
-      req.chain.tokens(address, [...STABLECOINS, USDG_ROBINHOOD]),
+      req.chain.tokens(address, refs),
       req.chain.native(address, ALL_CHAINS),
       stockTokenHoldings(address, req.chain, req.http, Date.now()),
-      issuedHoldings(address, req.chain, req.http).catch(() => ({ rows: [] as LiveBalance[], failed: ["Ethereum", "BNB Chain"] as ChainName[] })),
+      issuedHoldings(address, req.chain, req.http, { venue: req.venue }).catch(() => ({ rows: [] as LiveBalance[], failed: ["Ethereum", "BNB Chain"] as ChainName[], unpriced: undefined })),
     ]);
     const chains = [...new Set([...tokens.failed, ...coins.failed])];
     if (chains.length === ALL_CHAINS.length) throw no("E_VENUE_UNREACHABLE", { venue: req.venue, message: "none of the chains answered: the public endpoints may be rate-limiting this machine" });
-    unread = [...new Set<string>([...chains, ...issued.failed]), ...(stocks.unread ? [stocks.unread] : [])];
+    // a share held but not priced because LI.FI refused this network just now counts nothing: said, so the read is not taken as complete
+    unread = [...new Set<string>([...chains, ...issued.failed]), ...(stocks.unread ? [stocks.unread] : []), ...(issued.unpriced ? [`LI.FI did not price the Ondo Stocks and xStocks: ${issued.unpriced.message}`] : [])];
     // USDG is a dollar (Paxos's), counted one for one like every other dollar stablecoin here
     const dollar = (b: { asset: string; amount: number; chain: ChainName }): LiveBalance => (b.chain === USDG_ROBINHOOD.chain && b.asset === USDG_ROBINHOOD.asset ? { asset: b.asset, amount: b.amount, usd: b.amount, where: b.chain, class: "stable" } : { asset: b.asset, amount: b.amount, where: b.chain });
-    return [...[...tokens.rows, ...coins.rows].filter((b) => b.amount > 0).map(dollar), ...stocks.rows, ...issued.rows];
+    const out: LiveBalance[] = [];
+    /** one part: what it read now, or — not answered — what it last read, said as not read this time */
+    const part = (key: string, failed: boolean, rows: LiveBalance[], why: string): void => {
+      if (!failed) {
+        last.set(key, rows);
+        out.push(...rows);
+      } else out.push(...(last.get(key) ?? []).map((b) => notRead(b, why)));
+    };
+    for (const chain of [...new Set(refs.map((r) => r.chain))]) part(`tokens:${chain}`, tokens.failed.includes(chain), tokens.rows.filter((b) => b.chain === chain && b.amount > 0).map(dollar), `${chain} did not answer`);
+    for (const chain of ALL_CHAINS) part(`coin:${chain}`, coins.failed.includes(chain), coins.rows.filter((b) => b.chain === chain && b.amount > 0).map(dollar), `${chain} did not answer`);
+    part("stocks", stocks.unread !== undefined, stocks.rows, stocks.unread ?? "");
+    for (const chain of [...new Set<ChainName>(["Ethereum", "BNB Chain", ...issued.failed])]) part(`issued:${chain}`, issued.failed.includes(chain), issued.rows.filter((b) => (b.where ?? "").startsWith(`${chain} · `)), `${chain} did not answer`);
+    // an issued share on a chain not named above is still counted
+    out.push(...issued.rows.filter((b) => !["Ethereum", "BNB Chain", ...issued.failed].some((c) => (b.where ?? "").startsWith(`${c} · `))));
+    return out;
   };
   try {
     const first = await read();
-    const source: LiveSource = { name, kind: "agent-wallet", reference: address, via: `${req.proven ?? "an address"} · read from the chains`, address, writer: { ...walletWriter(address, req.chain), bridge: walletBridge(address, req.chain, req.http, req.venue) }, trader: dexTrader({ venue: req.venue, address, proven: req.proven, http: req.http, chain: req.chain }), probe: probeOf(req, `dollar stablecoins and each chain's own coin on ${ALL_CHAINS.join(", ")}, and Robinhood's Stock Tokens and the best-known Ondo Stocks and xStocks${unread.length ? ` (no answer this time: ${unread.join("; ")})` : ""}`, { address, chains: ALL_CHAINS, unread }), read };
+    const what = `dollar stablecoins and each chain's own coin on ${ALL_CHAINS.join(", ")}, and Robinhood's Stock Tokens and the best-known Ondo Stocks and xStocks`;
+    const source: PartSource = {
+      name,
+      kind: "agent-wallet",
+      reference: address,
+      via: `${req.proven ?? "an address"} · read from the chains`,
+      address,
+      writer: { ...walletWriter(address, req.chain), bridge: walletBridge(address, req.chain, req.http, req.venue) },
+      trader: dexTrader({ venue: req.venue, address, proven: req.proven, http: req.http, chain: req.chain }),
+      // what did not answer is the latest read's, not the connect's
+      get probe() {
+        return probeOf(req, `${what}${unread.length ? ` (no answer this time: ${unread.join("; ")})` : ""}`, { address, chains: ALL_CHAINS, unread });
+      },
+      read,
+      unread: () => (unread.length ? `not read this time (kept from the last read): ${unread.join("; ")}` : undefined),
+    };
     return { source, first };
   } catch (err) {
     return asRefusal(req.venue, name, err);
@@ -75,6 +119,8 @@ export async function walletSource(req: AddressRequest): Promise<Opened> {
 // ---- Hyperliquid --------------------------------------------------------------------------
 
 const HL_INFO = "https://api.hyperliquid.xyz/info";
+/** the account's kind is kept this long (hyperliquid-trade.ts's KEEP_MS) */
+const ABSTRACTION_MS = 10 * 60_000;
 
 export async function hyperliquidSource(req: AddressRequest): Promise<Opened> {
   const address = checked(req.venue, req.address);
@@ -87,18 +133,32 @@ export async function hyperliquidSource(req: AddressRequest): Promise<Opened> {
     } catch (err) {
       throw unreachable(req.venue, name, err);
     }
-    if (r.status !== 200 || !r.body || typeof r.body !== "object") throw venueSaidNo(req.venue, name, r.status, r.text);
+    if (r.status !== 200 || !r.body || typeof r.body !== "object") throw venueSaidNo(req.venue, name, r.status, r.text, [], r);
     return r.body as Record<string, unknown>;
   };
   // the account's kind (a bare string): under a unified account or portfolio margin the perps ledger draws on the spot balances, so its
-  // account value is the same money again (Hyperliquid's docs; live/hyperliquid-trade.ts reads it the same way). Not read: an ordinary one
+  // account value is the same money again (Hyperliquid's docs; live/hyperliquid-trade.ts reads it the same way). Kept ten minutes, as that
+  // file keeps it. Not answered (a rate limit, an edge's page, no answer), the kind it last answered is used; never answered, the read is
+  // refused in Hyperliquid's words — never a guess, which would count a unified account's money twice
+  let known: { mode: string; at: number } | undefined;
   const abstraction = async (): Promise<string> => {
+    if (known && Date.now() - known.at < ABSTRACTION_MS) return known.mode;
+    let r;
     try {
-      const r = await req.http(HL_INFO, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ type: "userAbstraction", user: address }) });
-      return r.status === 200 ? String(typeof r.body === "string" ? r.body : r.text ?? "default").replace(/"/g, "").trim() : "default";
-    } catch {
-      return "default";
+      r = await req.http(HL_INFO, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ type: "userAbstraction", user: address }) });
+    } catch (err) {
+      if (known) return known.mode;
+      throw unreachable(req.venue, name, err);
     }
+    // a 200 that is not JSON (a page, an empty body) is something on this network answering in Hyperliquid's place
+    if (r.status !== 200 || r.body === undefined) {
+      if (known) return known.mode;
+      throw r.status === 200 && !notTheApi(r) ? no("E_VENUE_UNREACHABLE", { venue: req.venue, message: notTheApiWords(name), native: { status: 200, page: true } }) : venueSaidNo(req.venue, name, r.status, r.text, [], r);
+    }
+    // Hyperliquid's answer: its word for the kind, or — one this does not know — an ordinary account, as before
+    const mode = typeof r.body === "string" ? r.body.trim() : "default";
+    known = { mode, at: Date.now() };
+    return mode;
   };
   const read = async (): Promise<LiveBalance[]> => {
     const perps = await info("clearinghouseState");
@@ -134,6 +194,8 @@ export async function polymarketSource(req: AddressRequest): Promise<Opened> {
   if (typeof address !== "string") return address;
   const name = req.label || "Polymarket";
   let cashUnread = false;
+  // the cash as Polygon last answered it: kept, said as not read this time, when Polygon does not answer
+  let cashLast: LiveBalance[] = [];
   const read = async (): Promise<LiveBalance[]> => {
     const out: LiveBalance[] = [];
     let cursor = "";
@@ -144,7 +206,7 @@ export async function polymarketSource(req: AddressRequest): Promise<Opened> {
       } catch (err) {
         throw unreachable(req.venue, name, err);
       }
-      if (r.status !== 200 || !r.body || typeof r.body !== "object") throw venueSaidNo(req.venue, name, r.status, r.text);
+      if (r.status !== 200 || !r.body || typeof r.body !== "object") throw venueSaidNo(req.venue, name, r.status, r.text, [], r);
       const body = r.body as { data?: unknown; pagination?: { next_cursor?: unknown } };
       // an outcome held is named as an order there names it, <slug>:<outcome> (polymarket-clob.ts positionOf), so that it is one holding
       // with the account's own orders in it and what they cost; its question in words goes beside it
@@ -162,14 +224,31 @@ export async function polymarketSource(req: AddressRequest): Promise<Opened> {
     // the cash is a token at the same address, on Polygon
     const cash = await req.chain.tokens(address, [PUSD]);
     cashUnread = cash.failed.length > 0;
-    for (const b of cash.rows) if (b.amount > 0) out.push({ asset: "pUSD", amount: b.amount, usd: b.amount, where: "cash · Polygon", class: "stable" });
+    if (cashUnread) out.push(...cashLast.map((b) => notRead(b, "Polygon did not answer")));
+    else {
+      cashLast = cash.rows.filter((b) => b.amount > 0).map((b): LiveBalance => ({ asset: "pUSD", amount: b.amount, usd: b.amount, where: "cash · Polygon", class: "stable" }));
+      out.push(...cashLast);
+    }
     return out;
   };
   try {
     const first = await read();
     // a pasted address is watched, not proven the user's, so the account gives no address to send money to; connected with the key that signs
     // for the wallet (polymarket-clob.ts), the same wallet receives pUSD on Polygon and the bridge's deposits
-    const source: LiveSource = { name, kind: "prediction", reference: address, via: "Polymarket Data API · by address", address, readOnlyBecause: "connected by its address it is watched, not proven yours, so the account shows no address to send money to; money leaves Polymarket at Polymarket. Connect Polymarket with the key that signs for the wallet, and it receives pUSD on Polygon and Polymarket's bridge deposits", noTradeBecause: "connected by its address, it is only read: to trade, connect Polymarket with the account wallet's key (Polymarket's own location check comes first)", probe: probeOf(req, `the address is the account wallet Polymarket shows in the profile menu, not the key that signs for it${cashUnread ? " · the cash could not be read from Polygon this time" : ""}`, { calls: ["GET /v2/positions?user=", "balanceOf pUSD on Polygon"], user: address }), read };
+    const source: PartSource = {
+      name,
+      kind: "prediction",
+      reference: address,
+      via: "Polymarket Data API · by address",
+      address,
+      readOnlyBecause: "connected by its address it is watched, not proven yours, so the account shows no address to send money to; money leaves Polymarket at Polymarket. Connect Polymarket with the key that signs for the wallet, and it receives pUSD on Polygon and Polymarket's bridge deposits",
+      noTradeBecause: "connected by its address, it is only read: to trade, connect Polymarket with the account wallet's key (Polymarket's own location check comes first)",
+      get probe() {
+        return probeOf(req, `the address is the account wallet Polymarket shows in the profile menu, not the key that signs for it${cashUnread ? " · the cash could not be read from Polygon this time" : ""}`, { calls: ["GET /v2/positions?user=", "balanceOf pUSD on Polygon"], user: address });
+      },
+      read,
+      unread: () => (cashUnread ? "not read this time (kept from the last read): the cash on Polygon, which did not answer" : undefined),
+    };
     return { source, first };
   } catch (err) {
     return asRefusal(req.venue, name, err);
@@ -196,11 +275,18 @@ export async function ondoSource(req: AddressRequest): Promise<Opened> {
     const held = await req.chain.tokens(address, ONDO_TOKENS);
     if (held.failed.length) throw no("E_VENUE_UNREACHABLE", { venue: req.venue, message: "Ethereum did not answer: the public endpoint may be rate-limiting this machine" });
     const dollars = (raw: bigint | undefined): number | undefined => (raw === undefined ? undefined : Number(raw) / 1e18);
-    const ousg = dollars(await req.chain.uint("Ethereum", ONDO_ORACLE, "function getAssetPrice(address token) view returns (uint256)", [ONDO_TOKENS[0]!.address]));
-    const usdy = dollars(await req.chain.uint("Ethereum", USDY_ORACLE, "function getPrice() view returns (uint256)"));
+    const rows = held.rows.filter((b) => b.amount > 0);
+    const holds = (asset: string): boolean => rows.some((b) => b.asset === asset);
+    // the oracle asked only for a token the address holds
+    const ousg = holds("OUSG") ? dollars(await req.chain.uint("Ethereum", ONDO_ORACLE, "function getAssetPrice(address token) view returns (uint256)", [ONDO_TOKENS[0]!.address])) : undefined;
+    const usdy = holds("USDY") ? dollars(await req.chain.uint("Ethereum", USDY_ORACLE, "function getPrice() view returns (uint256)")) : undefined;
     // rOUSG is the rebasing form: each token is a dollar of the fund, by construction
     const price: Record<string, number | undefined> = { OUSG: ousg, rOUSG: 1, USDY: usdy };
-    return held.rows.filter((b) => b.amount > 0).map((b) => ({ asset: b.asset, amount: b.amount, ...(price[b.asset] !== undefined ? { usd: b.amount * price[b.asset]! } : {}), where: "Ethereum", class: "rwa" as const }));
+    // a token held with no price read (the endpoint refused the oracle's read, as it refuses a rate-limited address) is not worth nothing: the
+    // read is refused, and the last good one stays
+    const unpriced = rows.filter((b) => price[b.asset] === undefined).map((b) => b.asset);
+    if (unpriced.length) throw no("E_VENUE_UNREACHABLE", { venue: req.venue, message: `Ethereum did not answer: Ondo's oracle could not be read for ${unpriced.join(" and ")}` });
+    return rows.map((b) => ({ asset: b.asset, amount: b.amount, usd: b.amount * price[b.asset]!, where: "Ethereum", class: "rwa" as const }));
   };
   try {
     const first = await read();

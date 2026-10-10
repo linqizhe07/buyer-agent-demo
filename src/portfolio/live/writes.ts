@@ -14,7 +14,7 @@ import { decodeEventLog, encodeFunctionData, erc20Abi, getAddress, isAddress, pa
 import type { Refusal } from "../../core/errors.ts";
 import { no } from "../refuse.ts";
 import { CHAINS, STABLECOINS, type ChainName, type ChainReader } from "./chain.ts";
-import { exchangeSaidNo, thrownHttp, type ExchangeClient } from "./exchange.ts";
+import { exchangeSaidNo, loadList, thrownHttp, type ExchangeClient } from "./exchange.ts";
 import type { MmSendVoice } from "./metamask.ts";
 import type { WalletBridge } from "./wallet-bridge.ts";
 import { redact, transportCode } from "./types.ts";
@@ -164,7 +164,7 @@ export function exchangeWriter(client: ExchangeClient, venue: string, name: stri
   const unsureNo = (what: string): Refusal => no("E_VENUE_UNREACHABLE", { venue, message: `${name} did not answer whether it took this (${what}): it may have. Look at ${name} before asking again`, detail: { unsure: true } });
   const network = async (asset: string, chain: ChainName): Promise<{ code: string; net: Net } | Refusal> => {
     try {
-      await client.loadMarkets?.();
+      await loadList(client);
     } catch (err) {
       return fail("list its currencies", err);
     }
@@ -243,7 +243,7 @@ export function exchangeWriter(client: ExchangeClient, venue: string, name: stri
     },
     async swap(r) {
       try {
-        await client.loadMarkets?.();
+        await loadList(client);
       } catch (err) {
         return fail("list its markets", err);
       }
@@ -309,7 +309,8 @@ export function walletWriter(address: Hex, chain: ChainReader): LiveWriter {
       return { chainId, chainIdHex: `0x${chainId.toString(16)}`, from: address, to: a.token, data: encodeFunctionData({ abi: erc20Abi, functionName: "transfer", args: [r.to, a.units] }), value: "0x0" };
     },
     async confirm(hash, expected) {
-      const mined = await chain.receipt(expected.network, hash);
+      // the chain's endpoint not answering (chain.ts throws its refusal) says nothing about the payment: asked again at the next poll
+      const mined = await chain.receipt(expected.network, hash).catch(() => undefined);
       if (!mined) return "pending";
       if (mined.status !== "success") return "failed";
       const a = await amountIn(expected.asset, expected.amount, expected.network);

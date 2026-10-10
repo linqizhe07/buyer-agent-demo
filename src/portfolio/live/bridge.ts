@@ -37,9 +37,9 @@
 import { decodeEventLog, decodeFunctionData, encodeFunctionData, erc20Abi, formatUnits, getAddress, isAddress, pad, parseAbi, parseUnits, toEventSelector, type Hex } from "viem";
 import { isRefusal, type Refusal } from "../../core/errors.ts";
 import { no } from "../refuse.ts";
-import { CHAIN_BY_ID, CHAINS, STABLECOINS, type ChainName, type ChainReader } from "./chain.ts";
-import { diamondOn, USDG_ROBINHOOD } from "./dex.ts";
-import { edgeRefused, edgeWords, REGION, isStable, num, redact, unreachable, venueSaidNo, type Http, type HttpReply } from "./types.ts";
+import { CHAIN_BY_ID, CHAINS, STABLECOINS, type ChainName, type ChainReader, type Mined } from "./chain.ts";
+import { byParty, diamondOn, lifiHold, lifiHolding, USDG_ROBINHOOD } from "./dex.ts";
+import { edgeRefused, edgeWords, REGION, isStable, notTheApi, notTheApiWords, num, redact, unreachable, venueSaidNo, type Http, type HttpReply } from "./types.ts";
 import { tokenOn, type WalletTx } from "./writes.ts";
 
 const LIFI = "https://li.quest/v1";
@@ -205,16 +205,18 @@ const keyOf = (tool: string | undefined): string | undefined => {
   return Object.keys(BRIDGES).find((k) => k.toLowerCase() === t || BRIDGES[k]!.name.toLowerCase() === t);
 };
 
-/** LI.FI's answer to a quote when it is not a yes, as one of the account's refusals, with LI.FI's own words */
+/** LI.FI's answer to a quote when it is not a yes, as one of the account's refusals, with LI.FI's own words (cleaned of any address before
+ * they are cut). LI.FI ANSWERING is read first — a request it did not take, no route — and only then words about a place, in LI.FI's own
+ * top-level message: a bridge LI.FI asked from its own servers may say "unavailable from a restricted jurisdiction", and that is the
+ * bridge's word, quoted with its name, never LI.FI's rule for this network */
 function lifiNo(venue: string, r: HttpReply): Refusal {
   const b = obj(r.body);
-  const said = redact(r.text.replace(/\s+/g, " ").trim().slice(0, 220), []);
-  const native = { status: r.status, said };
-  if (r.status === 451 || REGION.test(r.text)) return venueSaidNo(venue, NAME, r.status, r.text);
-  // a 403 is LI.FI's (or its edge's) no to this request: its own words when it gives some; a page with none refuses this network. It answers
-  // from a US network (checked 2026-10-08: /v1/chains and /v1/quote both 200), so nothing here says whom its terms exclude
-  if (edgeRefused(r.status, r.text)) return no("E_VENUE_GEOBLOCKED", { venue, message: edgeWords(NAME, r.status, r.text), native: { status: r.status, edge: true } });
-  if (r.status === 403) return no("E_VENUE_PERMISSION", { venue, message: `${NAME} refused this request (HTTP 403)${str(b.message) ? `: “${str(b.message)}”` : ""}. That is its own answer, and the account does not look for a way around it`, native });
+  const said = redact(r.text, []).replace(/\s+/g, " ").trim().slice(0, 220);
+  const native = { status: r.status, said, party: "lifi" };
+  // LI.FI's own words: its top-level message when it answered JSON, the page when it did not — never what a tool it asked said, nested in
+  // its answer
+  const own = r.body !== undefined && typeof r.body === "object" ? str(b.message) : r.text;
+  if (r.status === 451 || REGION.test(own)) return byParty(venueSaidNo(venue, NAME, r.status, r.text, [], r), "lifi");
   if (r.status === 400) return no("E_VENUE_ORDER_INVALID", { venue, message: `${NAME}: ${str(b.message) || "it did not take the transfer as written"}`, native });
   if (r.status === 404 && num(b.code) === 1002) {
     // no route: `errors` is { filteredOut: [{ reason }], failed: [{ subpaths: { path: [{ tool, code, message }] } }] }, or a flat list of the same
@@ -225,8 +227,12 @@ function lifiNo(venue: string, r: HttpReply): Refusal {
     if (codes.length && codes.every((c) => c === "RPC_ERROR" || c === "TOOL_TIMEOUT" || c === "RATE_LIMIT_EXCEEDED")) return no("E_VENUE_UNREACHABLE", { venue, message: `${NAME} could not reach the bridges just now: try again in a minute`, native: { ...native, codes } });
     return no("E_VENUE_ORDER_INVALID", { venue, message: `${NAME} has no route for this transfer through a bridge that pays the address itself${reasons.length ? `: ${[...new Set(reasons)].slice(0, 3).join("; ")}` : ""}`, native: { ...native, codes } });
   }
-  if (r.status === 429) return no("E_VENUE_UNREACHABLE", { venue, message: `${NAME} is rate-limiting this machine: without a key it answers 75 quotes in two hours, shared with swaps. Try again later`, native });
-  return venueSaidNo(venue, NAME, r.status, r.text);
+  // a 403 is LI.FI's (or its edge's) no to this request: its own words when it gives some; a page with none refuses this network. It answers
+  // from a US network (checked 2026-10-08: /v1/chains and /v1/quote both 200), so nothing here says whom its terms exclude
+  if (edgeRefused(r.status, r.text)) return no("E_VENUE_GEOBLOCKED", { venue, message: edgeWords(NAME, r.status, r.text), native: { status: r.status, edge: true, party: "lifi" } });
+  if (r.status === 403) return no("E_VENUE_PERMISSION", { venue, message: `${NAME} refused this request (HTTP 403)${str(b.message) ? `: “${str(b.message)}”` : ""}. That is its own answer, and the account does not look for a way around it`, native });
+  if (r.status === 429) return no("E_VENUE_UNREACHABLE", { venue, message: `${NAME} is rate-limiting this machine: without a key it answers 75 quotes in two hours, shared with swaps. Try again later`, native: { ...native, ...(r.retryAfterMs ? { until: Date.now() + r.retryAfterMs } : {}) } });
+  return byParty(venueSaidNo(venue, NAME, r.status, own || said, [], r), "lifi");
 }
 
 // ---- routes ------------------------------------------------------------------------------------------------------------------------
@@ -490,12 +496,15 @@ export async function bridgeRoutes(req: BridgeRouteRequest): Promise<BridgeRoute
   if (chain) {
     const held = await chain.tokens(from, [{ chain: req.fromChain, asset: send.asset, address: send.address }]);
     // a chain that answered without the token's row (its balance call reverted) has not said the wallet holds nothing
-    if (held.failed.length || !held.rows.length) return no("E_VENUE_UNREACHABLE", { venue, message: `${req.fromChain} did not answer: the wallet's ${send.asset} could not be read, so nothing was asked of ${NAME}` });
+    if (held.failed.length || !held.rows.length) return no("E_VENUE_UNREACHABLE", { venue, message: `${req.fromChain} did not answer${held.said?.[req.fromChain] ? ` (${held.said[req.fromChain]})` : ""}: the wallet's ${send.asset} could not be read, so nothing was asked of ${NAME}` });
     const have = held.rows[0]!.amount;
     if (have + 1e-9 < req.amount) return no("E_VENUE_INSUFFICIENT", { venue, message: `the wallet holds ${have} ${send.asset} on ${req.fromChain}; this transfer sends ${req.amount}`, native: { asset: send.asset, chain: req.fromChain, have, need: req.amount } });
   }
 
   const ask = async (order: Order): Promise<{ order: Order; quote: Obj } | Refusal> => {
+    // LI.FI held back by a refusal it gave this machine (its edge, a ban, a rate limit: dex.ts lifiHold) is not asked meanwhile
+    const held = lifiHolding(req.http, now(), venue);
+    if (held) return held;
     const q = new URLSearchParams({ fromChain: String(chainId(req.fromChain)), toChain: String(chainId(req.toChain)), fromToken: send.address, toToken: arrive.address, fromAmount: fromAmount.toString(), fromAddress: from, toAddress: to, slippage: String(SLIPPAGE), integrator, order, allowDestinationCall: "false" });
     // the bridges whose own contract pays exactly the address named, as one comma-separated list (LI.FI's own SDK sends it so; checked live)
     const url = `${LIFI}/quote?${q.toString()}&allowBridges=${Object.keys(BRIDGES).join(",")}`;
@@ -503,9 +512,15 @@ export async function bridgeRoutes(req: BridgeRouteRequest): Promise<BridgeRoute
     try {
       r = await req.http(url, { headers: { accept: "application/json" }, timeoutMs: 20_000 });
     } catch (err) {
-      return unreachable(venue, NAME, err);
+      const u = byParty(unreachable(venue, NAME, err), "lifi");
+      lifiHold(req.http, u, now());
+      return u;
     }
-    return r.status === 200 ? { order, quote: obj(r.body) } : lifiNo(venue, r);
+    // a 200 that is not LI.FI's JSON (a filtering network's page, an empty answer) is no answer: never read as a route of "an unnamed tool"
+    if (r.status === 200) return r.body !== undefined && typeof r.body === "object" ? { order, quote: obj(r.body) } : no("E_VENUE_UNREACHABLE", { venue, message: notTheApi(r) ? notTheApiWords(NAME) : `${NAME} answered something that is not a quote: try again shortly`, native: { status: 200, party: "lifi" } });
+    const x = lifiNo(venue, r);
+    lifiHold(req.http, x, now());
+    return x;
   };
   const answers = await Promise.all(ORDERS.map(ask));
   const got = answers.filter((a): a is { order: Order; quote: Obj } => !isRefusal(a));
@@ -620,41 +635,67 @@ export interface BridgeStatus {
   receivingHash?: string | undefined;
   note: string;
   native: unknown;
+  /** LI.FI's refusal of this machine, when that is why it is still shown as on its way: how long LI.FI is held back (holdBackMs) is its */
+  refusal?: Refusal | undefined;
 }
 
 /** LI.FI's word on a transfer the wallet sent, by its hash. Pending is the honest answer for as long as nothing has arrived and nothing came
  * back — an hour, or days: an estimate passing proves nothing, and LI.FI not answering proves nothing. A Refusal only for a question
- * that cannot be asked, or an answer that is about another transfer. With `chain`, a hash LI.FI has not seen is looked up on the sending
+ * that cannot be asked, or an answer that is about another transfer. With `chain`, a hash LI.FI has not seen — or one LI.FI could not be
+ * asked about (no answer, its edge, a ban: then `refusal`, and LI.FI is not asked again while it holds) — is looked up on the sending
  * chain, where a reverted transaction is the end of it (nothing left the wallet but the network fee). */
-export async function bridgeStatus(req: { http: Http; hash: Hex; fromChain: ChainName; toChain: ChainName; tool?: string | undefined; from?: Hex | undefined; to?: Hex | undefined; chain?: Pick<ChainReader, "receipt"> | undefined; venue?: string | undefined }): Promise<BridgeStatus | Refusal> {
+export async function bridgeStatus(req: { http: Http; hash: Hex; fromChain: ChainName; toChain: ChainName; tool?: string | undefined; from?: Hex | undefined; to?: Hex | undefined; chain?: Pick<ChainReader, "receipt"> | undefined; venue?: string | undefined; now?: (() => number) | undefined }): Promise<BridgeStatus | Refusal> {
   const venue = req.venue ?? "lifi";
+  const now = req.now ?? Date.now;
   const { hash, fromChain, toChain } = req;
   if (!HASH.test(hash)) return no("E_ACCOUNT_BAD_ACTION", { venue, message: "a transaction hash is 0x and sixty-four hex digits" });
   if (fromChain === toChain || !BRIDGE_CHAINS.includes(fromChain) || !BRIDGE_CHAINS.includes(toChain)) return no("E_ACCOUNT_BAD_ACTION", { venue, message: `a bridged transfer goes between two of ${BRIDGE_CHAINS.join(", ")}` });
+
+  /** What the sending chain says, when LI.FI has not seen the transfer (404 · 1003, NOT_FOUND: normal for a minute or two) or could not say
+   * (`refusal`): reverted is the end of it; otherwise it is still on its way. `opening`: the account's sentence for what LI.FI said — never
+   * LI.FI's raw text, which on an edge's page may carry this machine's address */
+  const unseen = async (lifi: unknown, opening?: string, refusal?: Refusal): Promise<BridgeStatus> => {
+    const held = refusal ? { refusal } : {};
+    const onItsWay = "still on its way as far as anyone here knows";
+    const notSeen = opening === undefined;
+    const base = opening ?? `${NAME} has not seen ${hash.slice(0, 10)}… yet`;
+    if (!req.chain) return { status: "pending", note: notSeen ? `${base}: normal for a minute or two after it is sent` : `${base}: ${onItsWay}`, native: { lifi }, ...held };
+    let rc: Mined | undefined;
+    try {
+      rc = await req.chain.receipt(fromChain, hash);
+    } catch (err) {
+      // the chain's endpoint not answering, or refusing this network, is said in its words: it is not "not mined yet"
+      return { status: "pending", note: `${base}, and ${isRefusal(err) ? err.message : `${fromChain} did not answer`}: ${onItsWay}`, native: { lifi, chain: "unanswered" }, ...held };
+    }
+    if (!rc) return { status: "pending", note: `${base}, and ${fromChain} does not show it mined yet`, native: { lifi, chain: "not mined yet" }, ...held };
+    const ours = same(rc.to, diamondOn(fromChain)) && (req.from === undefined || same(rc.from, req.from));
+    if (rc.status === "reverted" && ours) return { status: "failed", note: `the transaction reverted on ${fromChain}: nothing left the wallet but the network fee`, native: { lifi, receipt: "reverted" } };
+    return { status: "pending", note: notSeen ? `${base}; it is mined on ${fromChain}, and LI.FI usually indexes it within a minute or two` : `${base}; it is mined on ${fromChain}, ${onItsWay}`, native: { lifi, receipt: rc.status }, ...held };
+  };
+
+  // LI.FI held back by a refusal it gave this machine (dex.ts lifiHold: its edge ten minutes, a ban its own time): not asked, the chain is
+  const back = lifiHolding(req.http, now(), venue);
+  if (back) return unseen({ held: true }, back.message, back);
   const bridge = keyOf(req.tool);
   const url = `${LIFI}/status?txHash=${hash}&fromChain=${chainId(fromChain)}&toChain=${chainId(toChain)}${bridge ? `&bridge=${bridge}` : ""}`;
   let r: HttpReply;
   try {
     r = await req.http(url, { headers: { accept: "application/json" }, timeoutMs: 10_000 });
   } catch (err) {
-    const u = unreachable(venue, NAME, err);
-    return { status: "pending", note: `${NAME} could not be asked just now: still on its way as far as anyone here knows`, native: { lifi: u.native } };
+    const u = byParty(unreachable(venue, NAME, err), "lifi");
+    lifiHold(req.http, u, now());
+    return unseen({ lifi: u.native }, `${NAME} could not be asked just now`, u);
   }
-  const said = { status: r.status, said: redact(r.text.replace(/\s+/g, " ").trim().slice(0, 220), []) };
-
-  /** LI.FI has not seen it (404 · 1003, or NOT_FOUND): normal for a minute or two. The sending chain says whether it is mined at all */
-  const unseen = async (lifi: unknown): Promise<BridgeStatus> => {
-    const base = `${NAME} has not seen ${hash.slice(0, 10)}… yet`;
-    if (!req.chain) return { status: "pending", note: `${base}: normal for a minute or two after it is sent`, native: { lifi } };
-    const rc = await req.chain.receipt(fromChain, hash).catch(() => undefined);
-    if (!rc) return { status: "pending", note: `${base}, and ${fromChain} does not show it mined yet`, native: { lifi, chain: "not mined yet" } };
-    const ours = same(rc.to, diamondOn(fromChain)) && (req.from === undefined || same(rc.from, req.from));
-    if (rc.status === "reverted" && ours) return { status: "failed", note: `the transaction reverted on ${fromChain}: nothing left the wallet but the network fee`, native: { lifi, receipt: "reverted" } };
-    return { status: "pending", note: `${base}; it is mined on ${fromChain}, and LI.FI usually indexes it within a minute or two`, native: { lifi, receipt: rc.status } };
-  };
+  const said = { status: r.status, said: redact(r.text, []).replace(/\s+/g, " ").trim().slice(0, 220) };
 
   if (r.status === 404) return unseen(said);
-  if (r.status !== 200) return { status: "pending", note: `${NAME} did not answer about it (HTTP ${r.status}): still on its way as far as anyone here knows`, native: { lifi: said } };
+  if (r.status !== 200) {
+    // LI.FI's no (its edge's page, a 451, a ban, a rate limit, an outage): held back as long as it says, and the chain asked meanwhile —
+    // a transfer that reverted is not left pending for as long as LI.FI refuses this network
+    const refusal = lifiNo(venue, r);
+    lifiHold(req.http, refusal, now());
+    return unseen({ status: r.status, ...((refusal.native as { edge?: unknown } | undefined)?.edge ? { edge: true } : {}) }, refusal.message, refusal);
+  }
   const b = obj(r.body);
   const sending = obj(b.sending);
   const receiving = obj(b.receiving);
@@ -714,8 +755,9 @@ export async function bridgeStatus(req: { http: Http; hash: Hex; fromChain: Chai
   }
   if (st === "NOT_FOUND") return unseen(lifi);
   if (st === "PENDING") return { status: "pending", note: `on its way${sub ? ` (${sub})` : ""}${words ? `: "${words}"` : ""}`, native: lifi };
-  // DONE with a word this account does not read, INVALID, or anything new: neither arrived nor lost, on a guess
-  return { status: "pending", note: `${NAME} says ${st || "nothing readable"}${sub ? `/${sub}` : ""}${words ? `: "${words}"` : ""}: not read here as arrived or as lost, so still shown as on its way`, native: lifi };
+  // DONE with a word this account does not read, INVALID, anything new, or a 200 that is not LI.FI's answer at all: neither arrived nor lost,
+  // on a guess — the sending chain still says whether it reverted
+  return unseen(lifi, `${NAME} says ${st || "nothing readable"}${sub ? `/${sub}` : ""}${words ? `: "${words}"` : ""}: not read here as arrived or as lost`);
 }
 
 // ---- the hash the wallet sent ------------------------------------------------------------------------------------------------------

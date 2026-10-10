@@ -139,7 +139,7 @@ describe("x402: the account answers the payee, the agent only asks", () => {
     const x = await boot();
     x.world.data.redirect = "https://evil.sim/pay";
     const r = refusal(await x.pay(QUOTE, "0.05"));
-    expect([r.code, r.message]).toEqual(["E_PAYEE_REDIRECT", "data.sim sent the request on to https://evil.sim/pay: a payment does not follow a redirect"]);
+    expect([r.code, r.message]).toEqual(["E_PAYEE_REDIRECT", "data.sim sent the request on to evil.sim: a payment does not follow a redirect"]);
     expect(x.world.sent.map((s) => s.host)).toEqual(["data.sim"]);
     x.world.data.redirect = undefined;
     x.world.data.resourceHost = "evil.sim";

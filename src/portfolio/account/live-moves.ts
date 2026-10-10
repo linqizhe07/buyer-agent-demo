@@ -61,6 +61,14 @@ export interface LiveMoney {
   venue(id: string): LiveVenue | undefined;
   /** the real clock: a live venue does not follow the simulation's */
   realNow(): number;
+  /** the hold a venue is under, shared with the reads and the other doors (service.ts): the refusal that holds it back now (its place rule,
+   * its edge, a ban or a wait it asked for), when one does — nothing is asked of it until then */
+  held?(venue: string): Refusal | undefined;
+  /** a venue's answer that holds it back, given to that shared hold */
+  hold?(venue: string, r: Refusal): void;
+  /** a venue that did not come back after a restart and is being connected again (service.ts restore), in the words that say why: what is
+   * followed there waits for it rather than being let go */
+  waiting?(venue: string): string | undefined;
 }
 
 /** what this door uses of the engine */
@@ -418,7 +426,7 @@ export class LiveMoves {
       if (isRefusal(seen)) return seen;
       if (seen !== "ok") {
         p.live = { ...p.live, reported: hash as Hex };
-        return no("E_VENUE_UNREACHABLE", { venue: p.from, message: `${p.live.network} does not show ${hash.slice(0, 10)}… yet, so it is not followed: report it again in a moment (“Report again” sends nothing new)`, detail: { reported: hash } });
+        return no("E_VENUE_UNREACHABLE", { venue: p.from, message: `${p.live.network} does not show ${hash.slice(0, 10)}… yet (or its endpoint did not answer just now): it is asked again here, and followed once it shows it — or report it again in a moment (“Report again” sends nothing new)`, detail: { reported: hash } });
       }
     }
     p.live = { ...p.live, txHash: hash as Hex, reported: hash as Hex, expired: undefined };
@@ -445,6 +453,13 @@ export class LiveMoves {
     const now = m.realNow();
     const due: Payment[] = [];
     for (const p of this.e.payments) {
+      // a bridge transaction the wallet reported, which its chain did not show then: asked again here, and followed once the chain shows it
+      if (p.live?.kind === "bridge" && p.status === "authorized" && p.live.reported && !p.live.txHash) {
+        if (now - (this.polled.get(p.id) ?? 0) < POLL_MS) continue;
+        this.polled.set(p.id, now);
+        due.push(p);
+        continue;
+      }
       // a transaction handed to a wallet and never reported is good for ten minutes, as the signature was: after that it is not sent from here
       if (p.live && p.status === "authorized" && !p.live.reported && p.live.sendBy && now > Date.parse(p.live.sendBy)) {
         Object.assign(p, { status: "failed", note: "not sent in time: the wallet was not asked to send it within ten minutes. Prepare it again" });
@@ -456,15 +471,36 @@ export class LiveMoves {
       }
       if (!p.live || p.status !== "pending") continue;
       if (now - (this.polled.get(p.id) ?? 0) < POLL_MS) continue;
+      // a venue under a hold (a ban until a time, its edge refusing this network) is not asked; its payment stays on its way
+      if (p.live.kind !== "bridge" && !p.live.txHash && m.held?.(p.from)) continue;
       this.polled.set(p.id, now);
       due.push(p);
     }
     await Promise.allSettled(due.map((p) => this.ask(m, p, now)));
   }
 
+  /** a reported bridge transaction its chain did not show: the chain is asked again (held to the transfer that was built), and once it shows
+   * it the payment is followed as any sent one */
+  private async seen(m: LiveMoney, p: Payment): Promise<void> {
+    const src = m.venue(p.from);
+    const expected = (p.legs[0]!.native as { walletTx?: WalletTx } | undefined)?.walletTx;
+    const hash = p.live?.reported;
+    if (!p.live || !hash || !src?.writer?.bridge || !expected) return;
+    const shown = await src.writer.bridge.confirm(hash, expected as never).catch(() => "pending" as const);
+    if (shown !== "ok") return;
+    p.live = { ...p.live, txHash: hash, expired: undefined };
+    p.status = "pending";
+    p.legs[0]!.ref = hash;
+    p.legs[0]!.status = "pending";
+    p.note = `sent from the wallet: ${hash.slice(0, 10)}…, waiting for ${p.live.network}`;
+    this.e.host.log({ kind: "payment", venue: p.from, tool: "live send", outcome: "pending", payment: p.id, reason: `${p.id} · ${p.live.network} shows ${hash}`, native: { txHash: hash } });
+    this.line(p);
+  }
+
   /** one payment: asked of its venue or its chain, and its line written when it has landed or failed */
   private async ask(m: LiveMoney, p: Payment, now: number): Promise<void> {
     if (!p.live) return;
+    if (p.status === "authorized") return this.seen(m, p);
     const src = m.venue(p.from);
     const leg = p.legs[0]!;
     let landed: Landed | Refusal = "pending";
@@ -475,6 +511,11 @@ export class LiveMoves {
       // answer, keeps it on its way — it is never counted as failed on a guess
       if (!p.live.txHash || !src?.writer?.bridge) return;
       const st = await src.writer.bridge.status({ hash: p.live.txHash, fromChain: p.live.network as ChainName, toChain: p.live.toNetwork as ChainName, tool: p.live.tool, to: p.live.toAddress }).catch(() => undefined);
+      // still on its way; when that is because LI.FI refuses this network just now, its words say so on the payment (once)
+      if (st && !isRefusal(st) && st.status === "pending" && st.refusal && p.note !== st.refusal.message) {
+        p.note = st.refusal.message;
+        this.line(p);
+      }
       if (!st || isRefusal(st) || st.status === "pending") return;
       if (st.status === "settled") {
         received = st.received;

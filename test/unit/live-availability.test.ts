@@ -50,9 +50,11 @@ describe("where this user can connect", () => {
     expect(v[0]!.said).toContain("its terms exclude where you are (https://www.okx.com/help/terms-of-service, read 2026-10-08): “Restricted Persons… the United States…”");
     expect(v[0]!.said).toContain("the venue checks residency when an account is opened; the account does not");
     expect(v[1]!.said).toBe("Binance does not serve this location: that is its own rule");
-    // the address-based one is read only and asks no question of its own
+    // the address-based one is read only, and asked like the rest: nothing answered for it here, so it carries no time it was asked
     expect(v[3]).toMatchObject({ readOnly: true, verdict: "connectable" });
-    expect(d.asked).toEqual([["live:exchange:okx", "live:exchange:binance", "live:metamask"]]);
+    expect(v[3]!.asked).toBeUndefined();
+    expect(v[0]!.asked).toBe(AT);
+    expect(d.asked).toEqual([["live:exchange:okx", "live:exchange:binance", "live:metamask", "live:hyperliquid"]]);
     // the place itself is never in the answer
     expect(JSON.stringify(v)).not.toMatch(/"US"|\bNY\b|country|region/);
   });

@@ -26,6 +26,7 @@ import { canonical } from "../../core/hash.ts";
 import { no } from "../refuse.ts";
 import { isExpired } from "../openness.ts";
 import type { EarnPosition, EarnProduct, EarnState, LiveEarner } from "../live/earn.ts";
+import { holdBackMs } from "../live/public-markets.ts";
 import { plain } from "../live/trade.ts";
 import { isStable } from "../live/types.ts";
 import type { CardLike, Outcome } from "./exchange.ts";
@@ -167,6 +168,9 @@ export function earnLine(e: LiveEarn, agentName: (address: string) => string): O
 
 export class LiveEarns {
   private readonly polled = new Map<string, number>();
+  /** the venues this door's poll holds back, and why (live-orders.ts holds its own by the same rule): a ban until the venue's time, its
+   * place rule or edge for ten minutes */
+  private readonly holds = new Map<string, { until: number; r: Refusal }>();
   /** what each waiting card showed the owner: its yes runs exactly this */
   private readonly shown = new Map<string, { product: string; amount: number; all: boolean; usd: number; target: string }>();
   /** this run of the account: part of every client id it sends */
@@ -354,13 +358,16 @@ export class LiveEarns {
     return this.send(p, { signer: who.signer, authority: "agent", agent: who.agent.address, card: card.id, action: card.actionHash });
   }
 
-  /** counted against the earn limit first, uncounted if the venue says no */
+  /** counted against the earn limit first — and the target's turn in the limit's window taken (`last`: one supply per window there) — both
+   * undone if the venue says no: a supply the venue refused (for this network, its place, the key's IP list, a ban) moved nothing, and is
+   * not the window's one supply. A request the venue may have taken (its answer lost) is not a refusal: it stays counted */
   private async charged(approval: string, target: string, p: Plan, who: Who): Promise<Outcome> {
     const amount = micro(p.usd.toFixed(6));
     const now = Date.parse(this.e.host.now());
+    const was = this.e.state.spends.find((x) => x.id === approval)?.last[target];
     this.e.patchSpend(approval, (x) => ({ ...x, spentMicro: x.spentMicro + amount, last: { ...x.last, [target]: now } }));
     const out = await this.send(p, who);
-    if (isRefusal(out)) this.e.patchSpend(approval, (x) => ({ ...x, spentMicro: Math.max(0, x.spentMicro - amount) }));
+    if (isRefusal(out)) this.e.patchSpend(approval, (x) => ({ ...x, spentMicro: Math.max(0, x.spentMicro - amount), last: was === undefined ? Object.fromEntries(Object.entries(x.last).filter(([k]) => k !== target)) : { ...x.last, [target]: was } }));
     return out;
   }
 
@@ -453,17 +460,42 @@ export class LiveEarns {
   }
   private sweep: Promise<void> | undefined;
 
+  /** the refusal that holds a venue back now: the host's shared hold where it offers one, or this door's own */
+  private heldAt(venue: string): Refusal | undefined {
+    const shared = (this.money() as { held?(venue: string): Refusal | undefined } | undefined)?.held?.(venue);
+    if (shared) return shared;
+    const own = this.holds.get(venue);
+    if (own && Date.now() < own.until) return own.r;
+    if (own) this.holds.delete(venue);
+    return undefined;
+  }
+
+  /** a status answer that asks to be left alone — the venue's place rule or edge, a ban of this address or a wait it named — holds the venue
+   * back for as long as the one rule says (live/public-markets.ts holdBackMs); a venue that only did not answer is asked again next time */
+  private holdOn(venue: string, r: Refusal): void {
+    const now = Date.now();
+    const ms = r.code === "E_VENUE_GEOBLOCKED" || typeof (r.native as { until?: unknown } | undefined)?.until === "number" ? holdBackMs(r, now) : 0;
+    if (!(ms > 0)) return;
+    const was = this.holds.get(venue);
+    if (!was || was.until < now + ms) this.holds.set(venue, { until: now + ms, r });
+    (this.money() as { hold?(venue: string, r: Refusal): void } | undefined)?.hold?.(venue, r);
+  }
+
   private async sweepOnce(): Promise<void> {
     const m = this.money();
     if (!m) return;
     const now = m.realNow();
-    const due = this.e.earns.filter((x) => x.status === "pending" && now - (this.polled.get(x.id) ?? 0) >= POLL_MS);
+    // a venue held back is not asked about any of its requests until the hold runs out
+    const due = this.e.earns.filter((x) => x.status === "pending" && !this.heldAt(x.venue) && now - (this.polled.get(x.id) ?? 0) >= POLL_MS);
     await Promise.all(due.map(async (x) => {
+      if (this.heldAt(x.venue)) return;
       this.polled.set(x.id, now);
       const earner = this.e.host.liveEarn?.()?.earner(x.venue);
       if (!earner?.status) return;
       const stub: EarnProduct = { id: x.product, asset: x.asset, name: x.productName, lands: x.lands, canSupply: true, canWithdraw: true };
-      const r = await safely(() => earner.status!(x.ref, stub, x.kind), x.venue, x.venueName, READ_MS);
+      // what was asked goes with it: a request whose answer was lost is settled by the venue's reads against what it left (live/earn.ts)
+      const r = await safely(() => earner.status!(x.ref, stub, x.kind, { amount: x.amount, all: x.all, native: x.native }), x.venue, x.venueName, READ_MS);
+      if (isRefusal(r)) this.holdOn(x.venue, r);
       if (isRefusal(r) || r.status === "pending") return;
       Object.assign(x, { status: r.status, ref: r.ref || x.ref, native: r.native, updatedAt: new Date(m.realNow()).toISOString() });
       x.note = this.noteOf(x);

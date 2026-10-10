@@ -364,10 +364,10 @@ describe("Hyperliquid's own line (its Terms of Use §1.6), held to where this us
     expect(types(net.seen)).toEqual(["geo"]);
   });
 
-  it("every order and leverage change asks first; taking an order off does not; the place is kept ten minutes, then asked again", async () => {
+  it("every order and leverage change asks first; taking an order off does not; a write asks the place again (one asked in the last few seconds is used — ip-audit-c covers a move inside the ten minutes)", async () => {
     let now = NOW;
     const { t, net } = await connected({ exchange: [RESTING, RESTING, CANCELED, DEFAULT, RESTING] }, { clock: () => now });
-    // the connection asked a moment ago: the place is kept
+    // the connection asked a moment ago: the place is used
     ok(await t.place(order()));
     expect(types(net.seen).filter((x) => x === "geo")).toEqual([]);
     now += PLACE_MS + 1;
