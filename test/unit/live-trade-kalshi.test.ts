@@ -456,7 +456,7 @@ describe("Kalshi's refusals, in its own words", () => {
     expect((await said(json({ error: { code: "market_inactive", message: "market is not active" } }, 400)))[0]).toBe("E_VENUE_MARKET_CLOSED");
     expect((await said(json({ error: { code: "invalid_order", message: "invalid price", details: "INVALID_PRICE" } }, 400)))[0]).toBe("E_VENUE_ORDER_INVALID");
     expect((await said(json({ error: { code: "unauthorized", message: "invalid signature" } }, 401)))[0]).toBe("E_VENUE_UNAUTHORIZED");
-    expect(await said(json({ error: "too many requests" }, 429))).toEqual(["E_VENUE_UNREACHABLE", "Kalshi is rate-limiting this machine: try again in a minute", { status: 429, said: "too many requests" }]);
+    expect(await said(json({ error: "too many requests" }, 429))).toEqual(["E_VENUE_UNREACHABLE", "Kalshi is rate-limiting this machine: try again in a minute", { status: 429, said: "too many requests", until: expect.any(Number) }]);
     expect((await said(json({ error: { code: "something_new", message: "something new" } }, 400)))[0]).toBe("E_VENUE_REJECTED");
     // a post-only order that would cross, as a batch reported it (changelog 2025-10-24)
     expect(await said(json({ error: { code: "invalid order", message: "invalid order", details: "post only cross" } }, 400))).toEqual(["E_VENUE_ORDER_INVALID", "Kalshi: post-only: at this price the order would have taken from the book at once, so Kalshi did not rest it", { status: 400, said: "invalid order · post only cross · invalid order" }]);

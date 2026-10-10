@@ -200,7 +200,7 @@ export async function metamaskSource(req: { venue: string; label: string; run: R
     const first = await read();
     const trader = mmTrader({ venue: req.venue, name, address: show.address, run: req.run, env, now: req.now ?? Date.now, where: req.where });
     const earner = mmEarner({ venue: req.venue, name, address: show.address, run: req.run, env, now: req.now ?? Date.now, price: req.price });
-    const source: LiveSource & EarnSource = { name, kind: "agent-wallet", reference: "the mm command line's session on this machine", via: "MetaMask · mm command line", address: show.address, probe: { can: ["read", "transfer", "swap"], note: `MetaMask's Guard decides what goes out without asking (${rolling !== undefined ? `$${rolling} a rolling day` : "its policy"}); above that it asks you by email`, native: { address: show.address, tradingMode: show.tradingMode, rolling24h: rolling ?? null } }, read, writer: mmWriter(show.address as `0x${string}`, req.run, req.env), trader, earner };
+    const source: LiveSource & EarnSource = { name, kind: "agent-wallet", reference: "the mm command line's session on this machine", via: "MetaMask · mm command line", address: show.address, probe: { can: ["read", "transfer", "swap"], note: `MetaMask's Guard decides what goes out without asking (${rolling !== undefined ? `$${rolling} a rolling day` : "its policy"}); above that it asks you by email`, native: { address: show.address, tradingMode: show.tradingMode, rolling24h: rolling ?? null } }, read, writer: mmWriter(show.address as `0x${string}`, req.run, req.env, mmSendVoice("metamask", req.run, env)), trader, earner };
     return { source, first };
   } catch (err) {
     return err as Refusal;
@@ -462,6 +462,40 @@ function mmVoice(venue: string, run: RunMm, env: Record<string, string | undefin
   };
 
   return { said, cmd, writesOn, off, failureOf, saidNo, call, unread, jobOf, mayLand };
+}
+
+/** What a transfer mm was asked to send needs of mm's language (live/writes.ts mmWriter): whether a failure is a job that may still land (mm
+ * stopped waiting, Guard is asking the owner) — then it is followed, never told as "not sent" — and, for one that may, how its wallet job
+ * stands now (`mm wallet requests list`) */
+export function mmSendVoice(venue: string, run: RunMm, env: Record<string, string | undefined>): MmSendVoice {
+  const { failureOf, saidNo, call, jobOf, mayLand, said } = mmVoice(venue, run, env);
+  return {
+    mayLand(err) {
+      const f = failureOf(err);
+      const m = mayLand(f);
+      return m ? { job: jobOf(f), code: f.code, said: said(f.message), mfa: m.mfa } : undefined;
+    },
+    refusal: (err, args) => saidNo(failureOf(err), "MetaMask", "send it", args, "order"),
+    async landed(job) {
+      let data: unknown;
+      try {
+        data = await call(["wallet", "requests", "list", "--json"], "MetaMask", `read wallet request ${job}`, "track");
+      } catch {
+        return "pending";
+      }
+      const j = arr(obj(data)?.requests)
+        .map(obj)
+        .find((x) => str(x?.pollingId) === job);
+      const st = str(j?.status).toUpperCase();
+      if (st === "DENIED" || st === "EXPIRED" || st === "FAILED" || st === "BROADCAST_FAILED") return "failed";
+      return st === "COMPLETE" || st === "CONFIRMED" || (st !== "" && str(j?.txHash) !== "" && st !== "PENDING") ? "settled" : "pending";
+    },
+  };
+}
+export interface MmSendVoice {
+  mayLand(err: unknown): { job?: string | undefined; code: string; said: string; mfa: boolean } | undefined;
+  refusal(err: unknown, args: string[]): Refusal;
+  landed(job: string): Promise<"pending" | "settled" | "failed">;
 }
 
 export function mmTrader(d: MmTraderDeps): LiveTrader & { kinds: MarketKind[] } {

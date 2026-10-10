@@ -404,7 +404,7 @@ describe("real money at venues connected live", () => {
     // OKX takes USDC on Arbitrum and Ethereum here: Base is not one of its networks, and the account says so before anything else
     expect(refusal(await x.move({ kind: "send", from: "metamask", to: "okx", asset: "USDC", network: "Base", amount: "10" })).message).toBe("OKX does not carry USDC on Base: it lists ARBITRUM, ERC20");
     const off = refusal(await x.move({ kind: "send", from: "metamask", to: "okx", asset: "USDC", network: "Arbitrum", amount: "10" }));
-    expect([off.code, off.message]).toEqual(["E_WALLET_LIVE_WRITES_OFF", `MetaMask's own switch is off (PORTFOLIO_MM_WRITES is not 1). The command that would run: mm transfer --to ${OKX_DEPOSIT} --amount 10 --chain-id 42161 --token USDC`]);
+    expect([off.code, off.message]).toEqual(["E_WALLET_LIVE_WRITES_OFF", `MetaMask's own switch is off (PORTFOLIO_MM_WRITES is not 1). The command that would run: mm transfer --to ${OKX_DEPOSIT} --amount 10 --chain-id 42161 --token USDC --wallet-timeout 600`]);
     expect(x.mmCalls.some((c) => c[0] === "transfer")).toBe(false);
   });
 

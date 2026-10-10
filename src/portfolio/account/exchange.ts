@@ -1156,16 +1156,15 @@ export class AccountEngine {
     this.payer?.tick(this.nowMs());
     if (quick) return;
     // asking venues how things stand never takes the account down: a venue that throws is asked again next time
-    try {
-      await this.live.poll();
-    } catch (err) {
+    const payments = this.live.poll().catch((err) => {
       this.host.log({ kind: "note", venue: "*", tool: "live poll", reason: `asking how payments stand failed: ${String((err as Error)?.message ?? err).slice(0, 160)}` });
-    }
-    // a page read waits for the venues a few seconds at most: what arrives later is shown on the next read. The timer is cleared whichever
-    // side wins, so a read does not keep the process alive after it is done
+    });
+    // a page read waits for the venues a few seconds at most — payments, orders and earn alike: what arrives later is shown on the next read,
+    // and a venue this network leaves unanswered never holds up every read and signed action behind it. The timer is cleared whichever side
+    // wins, so a read does not keep the process alive after it is done
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      await Promise.race([Promise.all([this.trade.poll(), this.earn.poll()]), new Promise((resolve) => (timer = setTimeout(resolve, 3_000)))]);
+      await Promise.race([Promise.all([payments, this.trade.poll(), this.earn.poll()]), new Promise((resolve) => (timer = setTimeout(resolve, 3_000)))]);
     } catch (err) {
       this.host.log({ kind: "note", venue: "*", tool: "order poll", reason: `asking how orders stand failed: ${String((err as Error)?.message ?? err).slice(0, 160)}` });
     } finally {

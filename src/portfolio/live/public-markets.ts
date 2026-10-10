@@ -336,16 +336,23 @@ function publicNo(venue: string, name: string, r: HttpReply): Refusal {
 }
 
 /** How long a refusal is kept before the venue is asked again, when it says the venue cannot be asked just now: ten minutes for a venue
- * that does not serve this location (its rule will not change within the hour), twenty seconds for one that is rate-limiting (HTTP 429) or
- * not answering, so a page polling every few seconds does not hammer it. Zero for every other refusal: the next ask asks the venue again.
+ * that does not serve this location (its rule will not change within the hour), as long as the venue asked for one that is rate-limiting
+ * or has banned this address (a minute when a 429 gave no time), twenty seconds for one not answering, so a page polling every few seconds
+ * does not hammer it. Zero for every other refusal, and for a place rule about one pair or product: the next ask asks the venue again.
  * The one rule, for this file's keeper and for the service's read cache */
 export function holdBackMs(r: Refusal, now: number = Date.now()): number {
+  // a place rule for one pair, product or feature (detail.scope) holds back nothing else of the venue: its other markets still answer
+  if ((r.detail as { scope?: unknown } | undefined)?.scope !== undefined) return 0;
   if (r.code === "E_VENUE_GEOBLOCKED") return 600_000;
-  // a ban for too many requests, until when the venue said: nothing is asked of it before then (an hour at most is kept, then asked again)
+  // a ban for too many requests, or a wait the venue asked for, until when it said: nothing is asked of it before then (an hour at most is
+  // kept, then asked again)
   const until = (r.native as { until?: unknown } | undefined)?.until;
   if (typeof until === "number" && until > now) return Math.min(until - now, 3_600_000);
-  if ((r.native as { status?: unknown } | undefined)?.status === 418) return 600_000;
-  if (r.code === "E_VENUE_UNREACHABLE" || (r.native as { status?: unknown } | undefined)?.status === 429) return 20_000;
+  const status = (r.native as { status?: unknown } | undefined)?.status;
+  if (status === 418) return 600_000;
+  // rate-limited with no wait given: the minute the refusal's own sentence says
+  if (status === 429) return 60_000;
+  if (r.code === "E_VENUE_UNREACHABLE") return 20_000;
   return 0;
 }
 

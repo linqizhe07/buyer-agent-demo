@@ -14,9 +14,10 @@ import { decodeEventLog, encodeFunctionData, erc20Abi, getAddress, isAddress, pa
 import type { Refusal } from "../../core/errors.ts";
 import { no } from "../refuse.ts";
 import { CHAINS, STABLECOINS, type ChainName, type ChainReader } from "./chain.ts";
-import type { ExchangeClient } from "./exchange.ts";
+import { exchangeSaidNo, thrownHttp, type ExchangeClient } from "./exchange.ts";
+import type { MmSendVoice } from "./metamask.ts";
 import type { WalletBridge } from "./wallet-bridge.ts";
-import { redact } from "./types.ts";
+import { redact, transportCode } from "./types.ts";
 
 export interface LiveReceipt {
   /** the venue's own id for what it started */
@@ -74,8 +75,9 @@ export interface LiveWriter {
   walletTx?(r: { asset: string; amount: number; to: Hex; network: ChainName }): Promise<WalletTx | Refusal>;
   /** the MetaMask Agent Wallet: mm sends it · an agent wallet: the account signs and sends it */
   send?(r: { asset: string; amount: number; to: Hex; network: ChainName }): Promise<LiveReceipt | Refusal>;
-  /** has something this venue started landed? */
-  landed?(ref: string, asset: string, sinceMs: number): Promise<Landed>;
+  /** has something this venue started landed? `hint`: where it went and how much, for a move whose answer was lost and that is known only by
+   * the account's own id for it */
+  landed?(ref: string, asset: string, sinceMs: number, hint?: { address?: string | undefined; amount?: number | undefined }): Promise<Landed>;
   /** a browser wallet's transaction: on chain, and the payment that was asked for? */
   confirm?(hash: Hex, expected: { asset: string; amount: number; to: Hex; network: ChainName }): Promise<Landed | Refusal>;
   /** a proven wallet's dollars moved to another chain, routed by LI.FI and sent by the wallet (wallet-bridge.ts) */
@@ -133,16 +135,33 @@ const NO_ADDRESS_YET = /returned no addresses|empty response|createDepositAddres
  * none until one is made (Kraken, KuCoin, Coinbase) */
 type Depositing = ExchangeClient & { createDepositAddress?(code: string, params?: Record<string, unknown>): Promise<unknown> };
 
+/** what the library throws when it cannot say whether the exchange took a request: the call may have reached it */
+const UNSURE = new Set(["RequestTimeout", "NetworkError", "ExchangeNotAvailable", "TimeoutError", "AbortError", "SocketError", "BodyTimeoutError", "RequestAbortedError"]);
+/** an exchange refusing a withdrawal's destination, in its own code or words — never a key's IP list, which is read before this */
+const ADDRESS_NOT_ALLOWED = /58207|-4035|-4026|\bInvalidAddress\b|withdraw(?:al)? address[^.]{0,40}(?:not|un)(?:verified|allowed|trusted|whitelisted)|address[^.]{0,30}not (?:in|on) (?:the |your )?(?:withdraw(?:al)? )?(?:white ?list|allow ?list|address book)/i;
+
 export function exchangeWriter(client: ExchangeClient, venue: string, name: string, secrets: string[], probe: { can: string[] }, ledgers: string[]): LiveWriter {
-  const said = (err: unknown) => redact(String((err as { message?: string })?.message ?? err).replace(/\s+/g, " ").slice(0, 240), secrets);
-  const fail = (what: string, err: unknown): Refusal => {
+  const said = (err: unknown) => redact(String((err as { message?: string })?.message ?? err).replace(/\s+/g, " "), secrets).slice(0, 240);
+  const key = Object.fromEntries(secrets.map((s, i) => [String(i), s]));
+  /** The exchange's no, read as the connection reads it first (exchange.ts exchangeSaidNo): a place rule, an edge's page, a key bound to other
+   * addresses, a ban, a bad key — the same answer gets the same refusal here as it does there. Then what only a move meets: not enough, a
+   * destination not on the exchange's list, a key without the permission. `move`: a call that sends something, whose answer may be lost on
+   * the way back — that is never told as refused */
+  const fail = (what: string, err: unknown, move?: { unsure?: boolean }): Refusal => {
     const kind = String((err as { name?: string })?.name ?? "");
     const text = said(err);
+    const base = exchangeSaidNo(venue, name, err, key);
+    if (base.code === "E_VENUE_GEOBLOCKED" || base.code === "E_VENUE_UNAUTHORIZED" || (base.code === "E_VENUE_PERMISSION" && (base.detail as { ipList?: unknown } | undefined)?.ipList) || (base.code === "E_VENUE_UNREACHABLE" && (base.native as { until?: unknown } | undefined)?.until !== undefined)) return base;
+    const status = thrownHttp(String((err as { message?: string })?.message ?? err))?.status;
+    if (move && (UNSURE.has(kind) || transportCode(err) !== undefined || (status !== undefined && status >= 500))) return unsureNo(what);
+    if (base.code === "E_VENUE_UNREACHABLE") return base;
     if (kind === "InsufficientFunds" || /insufficient|not enough/i.test(text)) return no("E_VENUE_INSUFFICIENT", { venue, message: `${name}: not enough to ${what}`, native: { error: kind, said: text } });
-    if (kind === "InvalidAddress" || /whitelist|address.*(not|un)(verified|allowed|trusted)|58207|-4035/i.test(text)) return no("E_VENUE_WITHDRAW_WHITELIST", { venue, message: `${name} refused the address: an exchange sends only to addresses verified there first, in its own withdrawal settings`, native: { error: kind, said: text } });
+    if (kind === "InvalidAddress" || ADDRESS_NOT_ALLOWED.test(text)) return no("E_VENUE_WITHDRAW_WHITELIST", { venue, message: `${name} refused the address: an exchange sends only to addresses verified there first, in its own withdrawal settings`, native: { error: kind, said: text } });
     if (kind === "PermissionDenied" || /permission|50120|-2015/i.test(text)) return no("E_VENUE_PERMISSION", { venue, message: `${name}: this key may not ${what}. That is set on the key at the exchange`, native: { error: kind, said: text } });
     return no("E_VENUE_REJECTED", { venue, message: `${name} refused to ${what}`, native: { error: kind, said: text } });
   };
+  /** a move whose answer never came back: it may have been taken. Said as that — not "refused" — so nobody asks again before looking */
+  const unsureNo = (what: string): Refusal => no("E_VENUE_UNREACHABLE", { venue, message: `${name} did not answer whether it took this (${what}): it may have. Look at ${name} before asking again`, detail: { unsure: true } });
   const network = async (asset: string, chain: ChainName): Promise<{ code: string; net: Net } | Refusal> => {
     try {
       await client.loadMarkets?.();
@@ -207,7 +226,11 @@ export function exchangeWriter(client: ExchangeClient, venue: string, name: stri
         const t = (await client.withdraw!(r.asset, r.amount, r.address, r.tag, { network: n.code, ...idParam })) as { id?: string; txid?: string; status?: string };
         return { ref: String(t.id ?? ""), status: t.status === "ok" ? "settled" : "pending", native: { call: "withdraw", network: n.code, id: t.id ?? null, txid: t.txid ?? null, status: t.status ?? null } };
       } catch (err) {
-        return fail(`withdraw ${r.asset}`, err);
+        const r2 = fail(`withdraw ${r.asset}`, err, { unsure: true });
+        // the request may have reached the exchange: it is a payment on its way, followed by the account's own id for it (and where it went and
+        // how much), never "refused" — asking again would be a second withdrawal
+        if ((r2.detail as { unsure?: unknown } | undefined)?.unsure) return { ref: `client:${id}`, status: "pending", native: { call: "withdraw", network: n.code, clientId: id, unsure: true, said: r2.message } };
+        return r2;
       }
     },
     async transfer(r) {
@@ -215,7 +238,7 @@ export function exchangeWriter(client: ExchangeClient, venue: string, name: stri
         const t = (await client.transfer!(r.asset, r.amount, r.from, r.to)) as { id?: string; status?: string };
         return { ref: String(t.id ?? ""), status: "settled", native: { call: "transfer", from: r.from, to: r.to, id: t.id ?? null, status: t.status ?? null } };
       } catch (err) {
-        return fail(`move ${r.asset} from ${r.from} to ${r.to}`, err);
+        return fail(`move ${r.asset} from ${r.from} to ${r.to}`, err, {});
       }
     },
     async swap(r) {
@@ -239,15 +262,21 @@ export function exchangeWriter(client: ExchangeClient, venue: string, name: stri
           return { ref: String(o.id ?? ""), status: "settled", ...(typeof o.filled === "number" ? { received: o.filled } : {}), native: { call: "createMarketBuyOrderWithCost", symbol: buyBase, cost: r.amount, id: o.id ?? null, status: o.status ?? null } };
         }
       } catch (err) {
-        return fail(`swap ${r.sell} for ${r.buy}`, err);
+        return fail(`swap ${r.sell} for ${r.buy}`, err, {});
       }
       return no("E_VENUE_RAIL_CLOSED", { venue, message: `${name} has no ${r.sell}/${r.buy} market` });
     },
-    async landed(ref, asset, sinceMs) {
+    async landed(ref, asset, sinceMs, hint) {
       if (!client.fetchWithdrawals) return "pending";
       try {
-        const list = (await client.fetchWithdrawals(asset, sinceMs - 60_000)) as Array<{ id?: string; status?: string }>;
-        const t = list.find((x) => String(x.id) === ref);
+        type Row = { id?: string; status?: string; address?: string; amount?: number; timestamp?: number; info?: Record<string, unknown> };
+        const list = (await client.fetchWithdrawals(asset, sinceMs - 60_000)) as Row[];
+        // a withdrawal whose answer was lost is known by the account's own id for it (Binance's withdrawOrderId, OKX's clientId), or else by
+        // where it went and how much, sent no earlier than it was asked for
+        const cid = /^client:(.+)$/.exec(ref)?.[1];
+        const mine = (x: Row) => [x.info?.withdrawOrderId, x.info?.clientId, x.info?.idem, x.info?.client_id].some((v) => v !== undefined && String(v) === cid);
+        const near = (x: Row) => !!hint?.address && !!x.address && x.address.toLowerCase() === hint.address.toLowerCase() && typeof x.amount === "number" && hint.amount !== undefined && Math.abs(x.amount - hint.amount) <= Math.max(0.01, hint.amount * 0.01) && (x.timestamp ?? 0) >= sinceMs - 60_000;
+        const t = cid ? (list.find(mine) ?? list.find(near)) : list.find((x) => String(x.id) === ref);
         return t?.status === "ok" ? "settled" : t?.status === "failed" || t?.status === "canceled" ? "failed" : "pending";
       } catch {
         return "pending";
@@ -284,7 +313,8 @@ export function walletWriter(address: Hex, chain: ChainReader): LiveWriter {
       if (!mined) return "pending";
       if (mined.status !== "success") return "failed";
       const a = await amountIn(expected.asset, expected.amount, expected.network);
-      if ("ok" in a) return a;
+      // the chain not answering the token's decimals just now says nothing about the payment: asked again at the next poll, never failed
+      if ("ok" in a) return a.code === "E_VENUE_UNREACHABLE" ? "pending" : a;
       // the payment is a Transfer of that token, from this wallet, to that address, of that amount: anything else is not it
       const ok = mined.logs.some((l) => {
         if (!same(l.address, a.token)) return false;
@@ -302,7 +332,11 @@ export function walletWriter(address: Hex, chain: ChainReader): LiveWriter {
 
 // ---- the MetaMask Agent Wallet -----------------------------------------------------------------------
 
-export function mmWriter(address: Hex, run: <T>(args: string[]) => Promise<T>, env: Record<string, string | undefined> = process.env): LiveWriter {
+/** how long mm waits for a wallet job, and how long its child process is given: as every other mm write (metamask.ts MM_WRITE_TIMEOUT_MS) */
+const MM_WALLET_TIMEOUT_S = 600;
+const MM_WRITE_TIMEOUT_MS = (MM_WALLET_TIMEOUT_S + 60) * 1000;
+
+export function mmWriter(address: Hex, run: <T>(args: string[], opts?: { timeoutMs?: number }) => Promise<T>, env: Record<string, string | undefined> = process.env, voice?: MmSendVoice): LiveWriter {
   return {
     can: { withdraw: false, ledgers: [], transfer: false, swap: false, receive: true, send: "mm" },
     async depositAddress() {
@@ -310,15 +344,24 @@ export function mmWriter(address: Hex, run: <T>(args: string[]) => Promise<T>, e
     },
     async send(r) {
       const t = tokenOn(r.asset, r.network);
-      const args = ["transfer", "--to", r.to, "--amount", String(r.amount), "--chain-id", String(CHAINS[r.network].chain.id), "--token", t?.asset ?? r.asset];
+      const args = ["transfer", "--to", r.to, "--amount", String(r.amount), "--chain-id", String(CHAINS[r.network].chain.id), "--token", t?.asset ?? r.asset, "--wallet-timeout", String(MM_WALLET_TIMEOUT_S)];
       // MetaMask's own switch stays MetaMask's: this server turning writes on does not turn it on
       if (env.PORTFOLIO_MM_WRITES !== "1") return no("E_WALLET_LIVE_WRITES_OFF", { venue: "metamask", message: `MetaMask's own switch is off (PORTFOLIO_MM_WRITES is not 1). The command that would run: mm ${args.join(" ")}` });
       try {
-        const out = await run<Record<string, unknown>>(args);
+        const out = await run<Record<string, unknown>>(args, { timeoutMs: MM_WRITE_TIMEOUT_MS });
         return { ref: String(out.hash ?? out.txHash ?? out.pollingId ?? "mm"), status: "settled", native: { call: `mm ${args.join(" ")}`, answer: out } };
       } catch (err) {
-        return no("E_VENUE_REJECTED", { venue: "metamask", message: "mm did not send it", native: { said: String((err as Error)?.message ?? err).slice(0, 200) } });
+        // mm stopped waiting (its timeout, a relay's, a job's) or Guard is asking the owner: MetaMask may still send it. It is followed by its
+        // wallet job, never told as "not sent" — asking again would send it twice
+        const may = voice?.mayLand(err);
+        if (may) return { ref: may.job ? `job:${may.job}` : "mm:unknown", status: "pending", native: { call: `mm ${args.join(" ")}`, waiting: may.mfa ? "MetaMask's Guard is asking you to approve it" : "mm stopped waiting before it saw the transfer sent: MetaMask may still send it (mm wallet requests list)", code: may.code, said: may.said, unsure: true } };
+        return voice ? voice.refusal(err, args) : no("E_VENUE_REJECTED", { venue: "metamask", message: "mm did not send it", native: { said: redact(String((err as Error)?.message ?? err), []).slice(0, 200) } });
       }
+    },
+    async landed(ref) {
+      const job = /^job:([\w-]+)$/.exec(ref)?.[1];
+      if (/^0x[0-9a-fA-F]{64}$/.test(ref)) return "settled";
+      return job && voice ? voice.landed(job) : "pending";
     },
   };
 }

@@ -143,10 +143,13 @@ describe("exchanges, keyless, through the unified library", () => {
 });
 
 describe("a refusal held back", () => {
-  it("is kept ten minutes when the venue does not serve this location, twenty seconds when it is rate-limiting or not answering, and not at all otherwise", () => {
+  it("is kept ten minutes when the venue does not serve this location, as long as it asked when it is rate-limiting (a minute when it did not say), twenty seconds when it is not answering, and not at all otherwise", () => {
     expect(holdBackMs(no("E_VENUE_GEOBLOCKED", { message: "not here" }))).toBe(600_000);
     expect(holdBackMs(no("E_VENUE_UNREACHABLE", { message: "no answer" }))).toBe(20_000);
-    expect(holdBackMs(no("E_VENUE_REJECTED", { message: "too many", native: { status: 429 } }))).toBe(20_000);
+    expect(holdBackMs(no("E_VENUE_REJECTED", { message: "too many", native: { status: 429 } }))).toBe(60_000);
+    expect(holdBackMs(no("E_VENUE_UNREACHABLE", { message: "too many", native: { status: 429, until: 1_000_045_000 } }), 1_000_000_000)).toBe(45_000);
+    // a place rule about one pair or product holds back nothing else of the venue
+    expect(holdBackMs(no("E_VENUE_GEOBLOCKED", { message: "not this pair here", detail: { scope: "product" } }))).toBe(0);
     expect(holdBackMs(no("E_VENUE_REJECTED", { message: "bad request", native: { status: 400 } }))).toBe(0);
     expect(holdBackMs(no("E_ACCOUNT_BAD_ACTION", { message: "no such interval" }))).toBe(0);
   });
@@ -257,7 +260,7 @@ describe("Kalshi, keyless", () => {
     expect(net.sent).toHaveLength(KALSHI_SERIES.length);
   });
 
-  it("refuses in Kalshi's terms only when every series does; a 451 is held ten minutes and a 429 twenty seconds before Kalshi is asked again", async () => {
+  it("refuses in Kalshi's terms only when every series does; a 451 is held ten minutes and a 429 a minute before Kalshi is asked again", async () => {
     let now = NOW;
     const blocked = network([["/trade-api/v2/events?", { status: 451, body: undefined, text: "unavailable" }]]);
     const k = kalshiPublic({ http: blocked.http, clock: () => now });
@@ -272,7 +275,7 @@ describe("Kalshi, keyless", () => {
     const busy = network([["/trade-api/v2/events?", { status: 429, body: undefined, text: "too many requests" }]]);
     const k2 = kalshiPublic({ http: busy.http, clock: () => t });
     expect(await k2.listings({ limit: 5 })).toMatchObject({ code: "E_VENUE_UNREACHABLE", message: "Kalshi is rate-limiting this machine: try again in a minute", native: { status: 429, said: "too many requests" } });
-    t += 19_000;
+    t += 59_000;
     await k2.listings({ limit: 5 });
     expect(busy.sent).toHaveLength(KALSHI_SERIES.length);
     t += 2_000;

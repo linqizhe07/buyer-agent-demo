@@ -111,6 +111,8 @@ interface Plan {
 
 export class LiveMoves {
   private readonly polled = new Map<string, number>();
+  /** the one sweep on its way: a second caller waits for it rather than asking every venue again */
+  private sweep: Promise<void> | undefined;
   private readonly routesSeen = new Map<string, { at: number; routes: BridgeRoute[] }>();
   /** this run of the account: a payment's line on the statement is told apart from another run's payment of the same id */
   private readonly runId = randomBytes(6).toString("hex");
@@ -388,7 +390,7 @@ export class LiveMoves {
       ...(who.action ? { action: who.action } : {}),
       ...(who.card ? { card: who.card } : {}),
       live: { kind: p.kind, ...(p.toAddress ? { toAddress: p.toAddress } : {}), ...(p.network ? { network: p.network } : {}), ...(p.src.writer.can.send === "account" && receipt ? { txHash: receipt.ref as Hex } : {}), ...(p.toNetwork ? { toNetwork: p.toNetwork } : {}), ...(p.route ? { tool: p.route.tool } : {}), ...(wallet ? { sendBy: new Date(Math.min(who.deadline ?? Infinity, this.money()!.realNow() + TTL_MS)).toISOString() } : {}) },
-      note: wallet ? `waiting for your wallet to send it: ${p.src.name} asks you to confirm` : status === "settled" ? `done at ${p.src.name}` : `${p.src.name} took it; waiting for it to land`,
+      note: wallet ? `waiting for your wallet to send it: ${p.src.name} asks you to confirm` : status === "settled" ? `done at ${p.src.name}` : (receipt?.native as { unsure?: unknown } | undefined)?.unsure ? `${p.src.name} did not answer whether it took it: it may have, so it is followed here and not sent again. Look at ${p.src.name} before asking again` : `${p.src.name} took it; waiting for it to land`,
     };
     this.e.payments.unshift(payment);
     // the venue is asked how it went no sooner than twenty seconds after it took it
@@ -431,11 +433,17 @@ export class LiveMoves {
     return { ok: true, kind: "payment", payment: p };
   }
 
-  /** what has landed: asked of the venue or the chain, at most every twenty seconds per payment */
-  async poll(): Promise<void> {
+  /** what has landed: asked of the venue or the chain, at most every twenty seconds per payment. One sweep at a time, and the payments in it
+   * asked all at once — a venue or a chain that this network leaves unanswered holds up its own payments, not every other one in turn */
+  poll(): Promise<void> {
+    return (this.sweep ??= this.sweepOnce().finally(() => (this.sweep = undefined)));
+  }
+
+  private async sweepOnce(): Promise<void> {
     const m = this.money();
     if (!m) return;
     const now = m.realNow();
+    const due: Payment[] = [];
     for (const p of this.e.payments) {
       // a transaction handed to a wallet and never reported is good for ten minutes, as the signature was: after that it is not sent from here
       if (p.live && p.status === "authorized" && !p.live.reported && p.live.sendBy && now > Date.parse(p.live.sendBy)) {
@@ -449,36 +457,45 @@ export class LiveMoves {
       if (!p.live || p.status !== "pending") continue;
       if (now - (this.polled.get(p.id) ?? 0) < POLL_MS) continue;
       this.polled.set(p.id, now);
-      const src = m.venue(p.from);
-      const leg = p.legs[0]!;
-      let landed: Landed | Refusal = "pending";
-      let received: number | undefined;
-      let said: string | undefined;
-      if (p.live.kind === "bridge") {
-        // a bridge lands on the other chain, later: LI.FI and the chain say when, and how much arrived. An answer about another transfer, or no
-        // answer, keeps it on its way — it is never counted as failed on a guess
-        if (!p.live.txHash || !src?.writer?.bridge) continue;
-        const st = await src.writer.bridge.status({ hash: p.live.txHash, fromChain: p.live.network as ChainName, toChain: p.live.toNetwork as ChainName, tool: p.live.tool, to: p.live.toAddress }).catch(() => undefined);
-        if (!st || isRefusal(st) || st.status === "pending") continue;
-        if (st.status === "settled") {
-          received = st.received;
-          landed = "settled";
-          said = st.note;
-        } else landed = no("E_VENUE_REJECTED", { venue: p.from, message: st.note });
-      } else if (p.live.txHash && src?.writer?.confirm) landed = await src.writer.confirm(p.live.txHash, { asset: p.sourceToken, amount: p.amountUsd, to: p.live.toAddress as Hex, network: p.live.network as ChainName });
-      else if (leg.ref && src?.writer?.landed) landed = await src.writer.landed(leg.ref, p.sourceToken, Date.parse(p.at));
-      if (landed === "pending") continue;
-      const at = new Date(now).toISOString();
-      if (landed === "settled") {
-        Object.assign(p, { status: "settled", settledAt: at, ...(received !== undefined ? { receiveUsd: received } : {}), note: p.live.kind === "bridge" ? (said ?? `landed on ${p.live.toNetwork}${received !== undefined ? `: ${received} arrived` : ""}`) : p.live.txHash ? `landed: the transfer is on ${p.live.network}, in transaction ${p.live.txHash.slice(0, 10)}…` : `landed: ${src?.name ?? p.from} says it is done` });
-        Object.assign(leg, { status: "settled", settlesAt: at });
-      } else {
-        Object.assign(p, { status: "failed", note: isRefusal(landed) ? landed.message : `${src?.name ?? p.from} says it failed` });
-        Object.assign(leg, { status: "failed" });
-      }
-      this.e.host.log({ kind: "payment", venue: p.from, tool: `live ${p.live.kind}`, outcome: p.status, payment: p.id, reason: `${p.id} · ${p.note}` });
-      this.line(p);
+      due.push(p);
     }
+    await Promise.allSettled(due.map((p) => this.ask(m, p, now)));
+  }
+
+  /** one payment: asked of its venue or its chain, and its line written when it has landed or failed */
+  private async ask(m: LiveMoney, p: Payment, now: number): Promise<void> {
+    if (!p.live) return;
+    const src = m.venue(p.from);
+    const leg = p.legs[0]!;
+    let landed: Landed | Refusal = "pending";
+    let received: number | undefined;
+    let said: string | undefined;
+    if (p.live.kind === "bridge") {
+      // a bridge lands on the other chain, later: LI.FI and the chain say when, and how much arrived. An answer about another transfer, or no
+      // answer, keeps it on its way — it is never counted as failed on a guess
+      if (!p.live.txHash || !src?.writer?.bridge) return;
+      const st = await src.writer.bridge.status({ hash: p.live.txHash, fromChain: p.live.network as ChainName, toChain: p.live.toNetwork as ChainName, tool: p.live.tool, to: p.live.toAddress }).catch(() => undefined);
+      if (!st || isRefusal(st) || st.status === "pending") return;
+      if (st.status === "settled") {
+        received = st.received;
+        landed = "settled";
+        said = st.note;
+      } else landed = no("E_VENUE_REJECTED", { venue: p.from, message: st.note });
+    } else if (p.live.txHash && src?.writer?.confirm) landed = await src.writer.confirm(p.live.txHash, { asset: p.sourceToken, amount: p.amountUsd, to: p.live.toAddress as Hex, network: p.live.network as ChainName });
+    else if (leg.ref && src?.writer?.landed) landed = await src.writer.landed(leg.ref, p.sourceToken, Date.parse(p.at), { address: p.live.toAddress, amount: p.amountUsd });
+    if (landed === "pending") return;
+    // answered while the sweep ran: stamped again from the answer, so a slow venue does not make every payment due at once
+    this.polled.set(p.id, Math.max(now, m.realNow()));
+    const at = new Date(now).toISOString();
+    if (landed === "settled") {
+      Object.assign(p, { status: "settled", settledAt: at, ...(received !== undefined ? { receiveUsd: received } : {}), note: p.live.kind === "bridge" ? (said ?? `landed on ${p.live.toNetwork}${received !== undefined ? `: ${received} arrived` : ""}`) : p.live.txHash ? `landed: the transfer is on ${p.live.network}, in transaction ${p.live.txHash.slice(0, 10)}…` : `landed: ${src?.name ?? p.from} says it is done` });
+      Object.assign(leg, { status: "settled", settlesAt: at });
+    } else {
+      Object.assign(p, { status: "failed", note: isRefusal(landed) ? landed.message : `${src?.name ?? p.from} says it failed` });
+      Object.assign(leg, { status: "failed" });
+    }
+    this.e.host.log({ kind: "payment", venue: p.from, tool: `live ${p.live.kind}`, outcome: p.status, payment: p.id, reason: `${p.id} · ${p.note}` });
+    this.line(p);
   }
 }
 
