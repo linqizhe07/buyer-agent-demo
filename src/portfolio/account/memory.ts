@@ -1,35 +1,38 @@
-/** WHAT THE AGENTS REMEMBER, kept by the account — so that an agent that comes back (a new session, a restart, another program holding the
- * same seat) knows the owner and its own work again, and so that the owner can read every word of it, change it and take it away.
+/** WHAT EACH AGENT REMEMBERS ABOUT YOU, kept by the account — the Demo v2 canvas's F13 ("Account › Memory: what Gravit remembers about
+ * you"). An agent that comes back (a new session, a restart, another program holding the same seat) reads it again; the owner reads every
+ * word of it on the page, changes it, forgets it, and decides with three switches what an agent may add.
  *
- * Two layers:
+ * One list a key, in three parts — Style · Rules · Venues and people — each note saying where it came from:
  *
- *   the conversation   what passed between the owner and each agent, in order, as the account saw it happen: the owner's intents (and
- *                      their withdrawal), a key let in or revoked, a limit given, a card answered, an ask declined; the agent's reports,
- *                      its asks, and every instruction it signed with what came of it (an order placed, a card raised, a refusal and its
- *                      code). Words addressed to every agent ("*") are kept once, in a stream every agent reads from the moment its key
- *                      was let in. The account writes these; no one signs a turn. MAX_TURNS a stream: the oldest are let go
- *   the notes          what an agent chose to keep — a preference, a rule, a fact, a lesson, how far a task has got — signed with its own
- *                      key (agentRemember, agentForget), at most MAX_NOTES each and NOTE_TEXT characters a note. An agent reads only its
- *                      own. Beside them, the owner's "About you": notes the owner signs (setMemory), which every agent reads
+ *   you said        the owner wrote it, or changed it (setMemory, signed)
+ *   it learned      the agent kept it, with its own key (agentRemember), and said how ("from your questions", "from the order you
+ *                   declined", "by comparing the venues"): its words, never the owner's
+ *   from your limit what the owner's signed limits and mode say, written out by the account as they stand (service.ts memoryLimits): not
+ *                   kept here, never out of date, changed only by changing the limit
  *
- * The owner reads all of it on the page (Account → Memory), signs a change to any note, and signs it away (forgetMemory: one note, one
- * turn, a conversation, everything an agent kept). Forgotten is gone from these files: the words of a note never reach the ledger, whose
- * rows say only who changed which note when (account/exchange.ts keeps them out), so nothing forgotten here is kept anywhere else. What the
- * ledger already holds for its own reasons — a signed intent, a report — stays there, as it always has.
+ * The switches, an agent each, the owner's to sign (setMemoryRules):
+ *
+ *   learn   the agent may keep new notes; off, it uses the ones it has
+ *   ask     what it learns waits for the owner first: a new note is kept `waiting`, shown in Waiting for you, read by no agent until the
+ *           owner keeps it (setMemory with its words) or forgets it
+ *   share   the other agents on the account read it too; off, only this agent does
+ *
+ * Forgotten is gone: one note from its file, Forget all the file itself — there is no bin. The words of a note never reach the ledger
+ * (account/exchange.ts keeps them out), so nothing forgotten is kept anywhere else.
  *
  * Words, not authority. No limit, door or card reads this file: a note that says "the owner allows $10,000 an order" allows nothing, and
- * the owner's own wishes reach the agents as intents and limits the owner signs. A note is what an agent wrote — the owner's About you is
- * the only part the owner signed.
+ * what an agent may do is still only its limits and the owner's cards.
  *
- * What is never kept: a private key, a recovery phrase, an API key or secret, a password, a signed token, a public IP address. A note that
- * looks like one is refused (memoryProblem) without its words being repeated anywhere; a turn the account writes has such a string taken
- * out (scrubbed). The place the user is in is not written here by the account (live/location.ts uses it in memory only).
+ * What is never kept: a private key, a recovery phrase, an API key or secret, a password, a signed token, a public IP address — refused
+ * (memoryProblem) without the words being said back. The place the user is in is not written here by the account (live/location.ts uses
+ * it in memory only).
  *
- * Files: <home>/memory/about.json · everyone.json · agent-<address>.json, written whole each time (a temporary file, then a rename), readable
- * by this system user only. The home is the trust boundary, as it is for the ledger and the key files: agents on the same system user are
- * not walled off from each other's files — the MCP seat reads only its own notes, and that is a convention of the seat, not a wall.
+ * Files: <home>/memory/agent-<address>.json (the notes) and rules.json (the switches, which Forget all leaves as they were), written whole
+ * each time (a temporary file, then a rename), readable by this system user only. The home is the trust boundary, as it is for the ledger
+ * and the key files: agents on the same system user are not walled off from each other's files — the MCP seat reads only what is its to
+ * read, and that is a convention of the seat, not a wall.
  */
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { english } from "viem/accounts";
 import type { Refusal } from "../../core/errors.ts";
@@ -37,72 +40,55 @@ import { no, unaddressed } from "../refuse.ts";
 
 /** the longest note, in characters */
 export const NOTE_TEXT = 500;
-/** notes an agent may keep */
+/** the longest "how it learned it" */
+export const HOW_TEXT = 80;
+/** notes one agent's memory holds, the ones waiting for the owner included */
 export const MAX_NOTES = 100;
-/** notes the owner keeps for every agent (About you) */
-export const MAX_ABOUT = 50;
-/** turns a conversation keeps: the oldest are let go */
-export const MAX_TURNS = 500;
-/** an agent key's writes to its notes in an hour */
+/** an agent key's changes to its memory in an hour */
 export const MEMORY_WRITES_PER_HOUR = 120;
-/** the longest a turn's words are kept */
-export const TURN_TEXT = 600;
-/** what a note is about */
-export const TOPICS = ["preference", "rule", "fact", "lesson", "progress", "other"] as const;
+/** what a note is about: F13's three parts */
+export const TOPICS = ["style", "rules", "venues"] as const;
 export type Topic = (typeof TOPICS)[number];
+export const TOPIC_WORDS: Record<Topic, string> = { style: "Style", rules: "Rules", venues: "Venues and people" };
 
 export interface MemoryNote {
-  /** `note-0003`, within its scope */
+  /** `note-0003`, in its agent's memory */
   id: string;
   topic: Topic;
   text: string;
-  /** when it was first written (ISO) */
+  /** you: the owner wrote it or changed it · agent: the agent learned it */
+  from: "you" | "agent";
+  /** how the agent learned it, in its words ("from your questions"); an agent's note only */
+  how?: string | undefined;
+  /** when it was first kept (ISO) */
   at: string;
-  /** when it was last changed, when it was */
+  /** when it was last changed */
   updatedAt?: string | undefined;
-  /** who wrote it last: the agent itself, or the owner */
-  by: "agent" | "owner";
+  /** an agent's new note while the owner asks to be asked first: no agent reads it until the owner keeps it */
+  waiting?: boolean | undefined;
 }
 
-export type TurnWho = "owner" | "agent" | "account";
-export interface MemoryTurn {
-  /** `turn-000041` in an agent's conversation, `all-000007` in the one to every agent */
-  id: string;
-  at: string;
-  who: TurnWho;
-  /** intent · withdraw · letIn · revoke · limit · wallet · card · declined · mode · venue · watch (the owner's); report · ask · did (the
-   * agent's); refusal (the account's answer to the agent) */
-  kind: string;
-  text: string;
-  /** what it is about, by its id on the account: intent-0003, card-0007, ord-0005, ask-0002, pay-0001 */
-  ref?: string | undefined;
-  /** a refusal's code */
-  code?: string | undefined;
+/** the owner's switches for one agent's memory */
+export interface MemoryRules {
+  /** it may keep new notes */
+  learn: boolean;
+  /** what it learns waits for the owner first */
+  ask: boolean;
+  /** the other agents on the account read it too */
+  share: boolean;
 }
+export const DEFAULT_RULES: MemoryRules = { learn: true, ask: false, share: false };
 
-/** one agent's conversation as it reads it: its own and the words to every agent since its key was let in, latest last */
-export interface Conversation {
-  turns: MemoryTurn[];
-  /** how many turns there are in all (the ones shown included) */
-  total: number;
-  /** whether there are older ones than the first shown */
-  more: boolean;
-  /** turns let go since the conversation began, oldest first, to keep MAX_TURNS */
-  dropped: number;
-}
-
-interface NotesFile {
-  v: 1;
+interface AgentFile {
+  v: 2;
+  address: string;
   seq: number;
   notes: MemoryNote[];
 }
-interface TurnsFile {
+interface RulesFile {
   v: 1;
-  seq: number;
-  turns: MemoryTurn[];
-  dropped: number;
+  rules: Record<string, MemoryRules>;
 }
-type AgentFile = NotesFile & TurnsFile & { address: string; turnSeq: number };
 
 const isAddress = (s: string): boolean => /^0x[0-9a-f]{40}$/.test(s);
 
@@ -149,35 +135,6 @@ function phraseRun(text: string): boolean {
   return false;
 }
 
-/** the text with every run of twelve or more such words put away */
-function withoutPhrases(text: string): string {
-  const out: string[] = [];
-  let run: string[] = [];
-  let words = 0;
-  const flush = () => {
-    if (words >= 12) {
-      const tail = run[run.length - 1] ?? "";
-      out.push("[a recovery phrase, not kept]", /^\s+$/.test(tail) ? tail : "");
-    } else out.push(...run);
-    run = [];
-    words = 0;
-  };
-  for (const part of text.split(/(\s+)/)) {
-    if (part === "" || /^\s+$/.test(part)) {
-      if (words > 0) run.push(part);
-      else out.push(part);
-    } else if (phraseWord(part)) {
-      run.push(part);
-      words++;
-    } else {
-      flush();
-      out.push(part);
-    }
-  }
-  flush();
-  return out.join("");
-}
-
 /** Why these words cannot be kept, or undefined when they can. Never says the words back */
 export function memoryProblem(text: string): string | undefined {
   if (KEY_BLOCK.test(text)) return "it holds a key block";
@@ -190,225 +147,184 @@ export function memoryProblem(text: string): string | undefined {
   return undefined;
 }
 
-/** a turn's words with anything that must not be kept taken out: the account writes turns itself, from what was already said */
-export function scrubbed(text: string): string {
-  let t = unaddressed(String(text ?? ""));
-  t = t.replace(new RegExp(KEY_BLOCK.source + "[\\s\\S]*?-----END[^-]*-----", "g"), "[a key block, not kept]");
-  t = t.replace(new RegExp(HEX64.source, "g"), "[64 hex characters, not kept]");
-  t = t.replace(new RegExp(JWT.source, "g"), "[a token, not kept]");
-  t = t.replace(new RegExp(PREFIXED.source, "g"), "[a key, not kept]");
-  t = t.replace(new RegExp(LABELLED.source, "gi"), "[a secret, not kept]");
-  t = t.replace(LONG_RUN, (run) => (!anAddress(run) && longSecret(run) ? "[a long string, not kept]" : run));
-  if (phraseRun(t)) t = withoutPhrases(t);
-  return t.length > TURN_TEXT ? `${t.slice(0, TURN_TEXT - 1)}…` : t;
-}
-
-/** a note's words as they are kept: one line of spaces between words, trimmed */
+/** words as they are kept: no control characters, one space between words, at most one empty line, trimmed */
 const tidy = (text: string): string => String(text ?? "").replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, "").replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
 
 // ---- the store -------------------------------------------------------------------------
 
-export type Scope = "about" | "everyone" | string;
-
 export class MemoryStore {
-  private readonly cache = new Map<string, NotesFile | TurnsFile | AgentFile>();
-  /** writes to its notes in the last hour, by agent key: kept in memory, a restart starts the count again */
+  private readonly cache = new Map<string, AgentFile>();
+  private rulesFile: RulesFile | undefined;
+  /** changes to its memory in the last hour, by agent key: kept in memory, a restart starts the count again */
   private readonly writes = new Map<string, number[]>();
-  /** the time of the last turn written: two turns in one millisecond are a millisecond apart, so that an agent's turns and the words to
-   * every agent, kept in two files, read back in the order they happened */
-  private lastTurnMs = 0;
 
   constructor(
     private readonly dir: string,
     private readonly nowMs: () => number,
   ) {}
 
-  private path(scope: Scope): string {
-    return join(this.dir, scope === "about" ? "about.json" : scope === "everyone" ? "everyone.json" : `agent-${scope}.json`);
+  private path(address: string): string {
+    return join(this.dir, `agent-${address}.json`);
   }
 
-  private read<T extends NotesFile | TurnsFile | AgentFile>(scope: Scope, empty: () => T): T {
-    const hit = this.cache.get(scope);
-    if (hit) return hit as T;
-    let file = empty();
-    const p = this.path(scope);
-    // nothing kept there: not held either, so asking about any number of addresses keeps nothing
-    if (!existsSync(p)) return file;
-    try {
-      const got = JSON.parse(readFileSync(p, "utf8")) as T;
-      if (got && got.v === 1) file = { ...empty(), ...got };
-    } catch {
-      // a file that does not read as one is started again; the broken one is left beside it, unread
-      try {
-        renameSync(p, `${p}.unread-${this.nowMs()}`);
-      } catch {
-        /* nothing to keep aside */
-      }
-    }
-    this.cache.set(scope, file);
-    return file;
-  }
-
-  private write(scope: Scope, file: NotesFile | TurnsFile | AgentFile): void {
+  private save(path: string, data: unknown): void {
     mkdirSync(this.dir, { recursive: true, mode: 0o700 });
-    const p = this.path(scope);
-    const tmp = `${p}.${process.pid}.tmp`;
-    writeFileSync(tmp, `${JSON.stringify(file, null, 1)}\n`, { mode: 0o600 });
-    renameSync(tmp, p);
+    const tmp = `${path}.${process.pid}.tmp`;
+    writeFileSync(tmp, `${JSON.stringify(data, null, 1)}\n`, { mode: 0o600 });
+    renameSync(tmp, path);
     try {
-      chmodSync(p, 0o600);
+      chmodSync(path, 0o600);
     } catch {
       /* a file system without modes */
     }
-    this.cache.set(scope, file);
   }
 
-  private aboutFile = (): NotesFile => this.read<NotesFile>("about", () => ({ v: 1, seq: 0, notes: [] }));
-  private everyoneFile = (): TurnsFile => this.read<TurnsFile>("everyone", () => ({ v: 1, seq: 0, turns: [], dropped: 0 }));
-  private agentFile = (address: string): AgentFile => this.read<AgentFile>(address, () => ({ v: 1, address, seq: 0, notes: [], turnSeq: 0, turns: [], dropped: 0 }));
+  /** a file that does not read as one is left beside it, unread, and memory starts again */
+  private readJson(path: string): unknown {
+    try {
+      return JSON.parse(readFileSync(path, "utf8"));
+    } catch {
+      try {
+        renameSync(path, `${path}.unread-${this.nowMs()}`);
+      } catch {
+        /* nothing to keep aside */
+      }
+      return undefined;
+    }
+  }
 
-  /** the agents with something kept — a note or a turn — by address. An address only asked about (a read of its memory) is not one: what
-   * is listed is what was written, so a read can never put an agent on the owner's page */
+  /** one agent's file; one that is not there is not held either, so asking about any number of addresses keeps nothing */
+  private file(address: string): AgentFile {
+    const hit = this.cache.get(address);
+    if (hit) return hit;
+    const empty: AgentFile = { v: 2, address, seq: 0, notes: [] };
+    const p = this.path(address);
+    if (!existsSync(p)) return empty;
+    const got = this.readJson(p) as Partial<AgentFile> | undefined;
+    const file: AgentFile = got && got.v === 2 && Array.isArray(got.notes) ? { ...empty, ...got, address } : empty;
+    this.cache.set(address, file);
+    return file;
+  }
+
+  private write(address: string, file: AgentFile): void {
+    this.save(this.path(address), file);
+    this.cache.set(address, file);
+  }
+
+  private rulesOf(): RulesFile {
+    if (this.rulesFile) return this.rulesFile;
+    const p = join(this.dir, "rules.json");
+    const got = existsSync(p) ? (this.readJson(p) as Partial<RulesFile> | undefined) : undefined;
+    this.rulesFile = got && got.v === 1 && got.rules && typeof got.rules === "object" ? { v: 1, rules: got.rules } : { v: 1, rules: {} };
+    return this.rulesFile;
+  }
+
+  /** the agents with a note kept, waiting ones included, by address. An address only asked about is not one */
   agents(): string[] {
-    const addresses = new Set<string>([...this.cache.keys()].filter(isAddress));
+    const addresses = new Set<string>(this.cache.keys());
     if (existsSync(this.dir)) for (const name of readdirSync(this.dir)) {
       const m = /^agent-(0x[0-9a-f]{40})\.json$/.exec(name);
       if (m) addresses.add(m[1]!);
     }
-    return [...addresses].filter((a) => {
-      const f = this.agentFile(a);
-      return f.notes.length > 0 || f.turns.length > 0;
-    }).sort();
+    return [...addresses].filter((a) => this.file(a).notes.length > 0).sort();
   }
 
-  /** the owner's notes for every agent */
-  about(): MemoryNote[] {
-    return [...this.aboutFile().notes];
-  }
-
-  /** an agent's own notes */
+  /** one agent's notes, the ones waiting for the owner included */
   notes(address: string): MemoryNote[] {
-    return isAddress(address) ? [...this.agentFile(address).notes] : [];
+    return isAddress(address) ? [...this.file(address).notes] : [];
   }
 
-  /** Keep a note, or change one: `id` "" is a new note. An agent (by "agent") writes only into its own notes and only so often; the owner
-   * (by "owner") writes About you, or into an agent's notes. The words are checked first: what must never be kept is refused, unrepeated */
-  keep(scope: Scope, input: { id: string; topic: string; text: string }, by: "agent" | "owner"): MemoryNote | Refusal {
-    if (scope !== "about" && !isAddress(scope)) return no("E_ACCOUNT_BAD_ACTION", { message: `notes are kept for "about" (the owner's, for every agent) or for one agent by its address, not for "${String(scope).slice(0, 44)}"` });
+  /** the agents' notes waiting for the owner, oldest first */
+  waiting(): Array<{ address: string; note: MemoryNote }> {
+    return this.agents().flatMap((address) => this.file(address).notes.filter((n) => n.waiting).map((note) => ({ address, note }))).sort((a, b) => a.note.at.localeCompare(b.note.at));
+  }
+
+  rules(address: string): MemoryRules {
+    return { ...DEFAULT_RULES, ...(this.rulesOf().rules[address] ?? {}) };
+  }
+
+  setRules(address: string, rules: MemoryRules): MemoryRules | Refusal {
+    if (!isAddress(address)) return no("E_ACCOUNT_BAD_ACTION", { message: "an agent's memory is named by the address of its key" });
+    const file = this.rulesOf();
+    this.rulesFile = { v: 1, rules: { ...file.rules, [address]: { learn: rules.learn, ask: rules.ask, share: rules.share } } };
+    this.save(join(this.dir, "rules.json"), this.rulesFile);
+    return this.rules(address);
+  }
+
+  /** Keep a note, or change one (`id` "" is a new one). The agent (by "agent") keeps what it learned — while its switch lets it, waiting for
+   * the owner when the owner asks to be asked first — and changes only its own; the owner (by "owner") writes and changes any, and keeps a
+   * waiting one by signing its words as they are. The words are checked first: what must never be kept is refused, unrepeated */
+  keep(address: string, input: { id: string; topic: string; text: string; how?: string | undefined }, by: "agent" | "owner"): MemoryNote | Refusal {
+    if (!isAddress(address)) return no("E_ACCOUNT_BAD_ACTION", { message: "an agent's memory is named by the address of its key" });
     const text = tidy(input.text);
     if (!text) return no("E_ACCOUNT_BAD_ACTION", { message: "a note has words: to take one away, forget it" });
     if (text.length > NOTE_TEXT) return no("E_ACCOUNT_LIMIT", { message: `a note is at most ${NOTE_TEXT} characters; this one is ${text.length}`, detail: { max: NOTE_TEXT, length: text.length } });
-    const topic = (input.topic.trim().toLowerCase() || "other") as Topic;
-    if (!TOPICS.includes(topic)) return no("E_ACCOUNT_BAD_ACTION", { message: `a note's topic is one of ${TOPICS.join(", ")}`, detail: { topics: [...TOPICS] } });
-    const problem = memoryProblem(text);
-    if (problem) return no("E_ACCOUNT_MEMORY_SECRET", { message: `not kept: ${problem}. The account keeps no keys, secrets, passwords or IP addresses in memory`, detail: { scope: scope === "about" ? "about" : "agent" } });
+    const topic = (input.topic.trim().toLowerCase() || "style") as Topic;
+    if (!TOPICS.includes(topic)) return no("E_ACCOUNT_BAD_ACTION", { message: `a note is about one of ${TOPICS.join(", ")} (${TOPICS.map((t) => TOPIC_WORDS[t]).join(" · ")})`, detail: { topics: [...TOPICS] } });
+    const how = by === "agent" ? tidy(input.how ?? "") : "";
+    if (how.length > HOW_TEXT) return no("E_ACCOUNT_LIMIT", { message: `how it was learned is at most ${HOW_TEXT} characters`, detail: { max: HOW_TEXT } });
+    const problem = memoryProblem(`${text}\n${how}`);
+    if (problem) return no("E_ACCOUNT_MEMORY_SECRET", { message: `not kept: ${problem}. The account keeps no keys, secrets, passwords or IP addresses in memory` });
     const now = this.nowMs();
-    if (by === "agent") {
-      const times = (this.writes.get(scope) ?? []).filter((t) => now - t < 3_600_000);
-      if (times.length >= MEMORY_WRITES_PER_HOUR) return no("E_ACCOUNT_LIMIT", { message: `at most ${MEMORY_WRITES_PER_HOUR} changes to an agent's notes an hour`, detail: { perHour: MEMORY_WRITES_PER_HOUR } });
-      this.writes.set(scope, [...times, now]);
-    }
-    const file = scope === "about" ? this.aboutFile() : this.agentFile(scope);
-    const at = new Date(now).toISOString();
+    const rules = this.rules(address);
+    const file = this.file(address);
     const id = input.id.trim();
-    if (id) {
-      const was = file.notes.find((n) => n.id === id);
-      if (!was) return no("E_ACCOUNT_MEMORY_UNKNOWN", { message: `there is no note "${id.slice(0, 20)}" ${scope === "about" ? "in About you" : "in this agent's notes"}: a new note has the id ""`, detail: { id: id.slice(0, 20) } });
-      const note: MemoryNote = { ...was, topic, text, updatedAt: at, by };
-      this.write(scope, { ...file, notes: file.notes.map((n) => (n === was ? note : n)) });
-      return note;
+    const was = id ? file.notes.find((n) => n.id === id) : undefined;
+    if (id && !was) return no("E_ACCOUNT_MEMORY_UNKNOWN", { message: `there is no note "${id.slice(0, 20)}" in this memory: a new note has the id ""`, detail: { id: id.slice(0, 20) } });
+    if (by === "agent") {
+      if (!rules.learn) return no("E_ACCOUNT_MEMORY_OFF", { message: "the owner switched off new memories for this agent: it uses the ones it has" });
+      if (was && was.from === "you") return no("E_ACCOUNT_BAD_ACTION", { message: `${was.id} is the owner's words: the owner changes them` });
+      // asked first: what it learns waits for the owner, and a note already kept is not changed behind the owner's back
+      if (was && rules.ask && !was.waiting) return no("E_ACCOUNT_BAD_ACTION", { message: `the owner asks to be asked first: a note it kept is not changed — keep a new one (it waits for the owner), or forget ${was.id}` });
+      const times = (this.writes.get(address) ?? []).filter((t) => now - t < 3_600_000);
+      if (times.length >= MEMORY_WRITES_PER_HOUR) return no("E_ACCOUNT_LIMIT", { message: `at most ${MEMORY_WRITES_PER_HOUR} changes to an agent's memory an hour`, detail: { perHour: MEMORY_WRITES_PER_HOUR } });
+      this.writes.set(address, [...times, now]);
     }
-    const max = scope === "about" ? MAX_ABOUT : MAX_NOTES;
-    if (file.notes.length >= max) return no("E_ACCOUNT_MEMORY_FULL", { message: `${scope === "about" ? "About you" : "this agent's notes"} hold${scope === "about" ? "s" : ""} ${max} notes already: forget one, or change one, first`, detail: { max } });
-    const note: MemoryNote = { id: `note-${String(file.seq + 1).padStart(4, "0")}`, topic, text, at, by };
-    this.write(scope, { ...file, seq: file.seq + 1, notes: [...file.notes, note] });
+    const at = new Date(now).toISOString();
+    if (was) {
+      // the owner keeping a waiting note signs its words as they are: it stays what the agent learned. Any other change by the owner makes
+      // the words the owner's
+      const keeps = by === "owner" && was.waiting && text === was.text && topic === was.topic;
+      const note: MemoryNote = keeps
+        ? { ...was, waiting: undefined, updatedAt: at }
+        : by === "owner"
+          ? { id: was.id, topic, text, from: "you", at: was.at, updatedAt: at }
+          : { ...was, topic, text, how: how || was.how, updatedAt: at };
+      this.write(address, { ...file, notes: file.notes.map((n) => (n === was ? clean(note) : n)) });
+      return clean(note);
+    }
+    if (file.notes.length >= MAX_NOTES) return no("E_ACCOUNT_MEMORY_FULL", { message: `this memory holds ${MAX_NOTES} notes already: forget one, or change one, first`, detail: { max: MAX_NOTES } });
+    const note: MemoryNote = clean({ id: `note-${String(file.seq + 1).padStart(4, "0")}`, topic, text, from: by === "owner" ? "you" : "agent", how: how || undefined, at, waiting: by === "agent" && rules.ask ? true : undefined });
+    this.write(address, { ...file, seq: file.seq + 1, notes: [...file.notes, note] });
     return note;
   }
 
-  /** Forget: one note (`note-0003`), one turn (`turn-000041`, `all-000007`), every note (`notes`), the conversation (`conversation`), or
-   * everything kept for the scope (`all`). Gone from the file, not hidden. How many went */
-  forget(scope: Scope, what: string): number | Refusal {
+  /** Forget one note (`note-0003`), or `all`: the agent's file itself, deleted — there is no bin. An agent forgets only notes it learned;
+   * the owner's words are the owner's to forget. How many went */
+  forget(address: string, what: string, by: "agent" | "owner"): number | Refusal {
+    if (!isAddress(address)) return no("E_ACCOUNT_BAD_ACTION", { message: "an agent's memory is named by the address of its key" });
     const w = what.trim();
-    const unknown = (where: string) => no("E_ACCOUNT_MEMORY_UNKNOWN", { message: `there is no "${w.slice(0, 20)}" ${where}: it was forgotten already, or never kept`, detail: { what: w.slice(0, 20) } });
-    if (scope === "about") {
-      const file = this.aboutFile();
-      const whole = w === "notes" || w === "all";
-      if (!whole && !file.notes.some((n) => n.id === w)) return unknown("in About you");
-      const left = whole ? [] : file.notes.filter((n) => n.id !== w);
-      const gone = file.notes.length - left.length;
-      if (gone > 0) this.write("about", { ...file, notes: left });
+    const file = this.file(address);
+    if (w === "all") {
+      if (by === "agent") return no("E_ACCOUNT_BAD_ACTION", { message: "forgetting everything is the owner's: an agent forgets one of its own notes" });
+      const gone = file.notes.length;
+      rmSync(this.path(address), { force: true });
+      this.cache.delete(address);
       return gone;
     }
-    if (scope === "everyone") {
-      const file = this.everyoneFile();
-      const whole = w === "conversation" || w === "all";
-      if (!whole && !file.turns.some((t) => t.id === w)) return unknown("in the words to every agent");
-      const left = whole ? [] : file.turns.filter((t) => t.id !== w);
-      const gone = file.turns.length - left.length;
-      if (gone > 0) this.write("everyone", { ...file, turns: left });
-      return gone;
-    }
-    if (!isAddress(scope)) return no("E_ACCOUNT_BAD_ACTION", { message: `memory is forgotten for "about", "everyone" or one agent by its address, not for "${String(scope).slice(0, 44)}"` });
-    const file = this.agentFile(scope);
-    const allNotes = w === "notes" || w === "all";
-    const allTurns = w === "conversation" || w === "all";
-    if (!allNotes && !allTurns && !file.notes.some((n) => n.id === w) && !file.turns.some((t) => t.id === w)) return unknown("kept for this agent");
-    const notes = allNotes ? [] : file.notes.filter((n) => n.id !== w);
-    const turns = allTurns ? [] : file.turns.filter((t) => t.id !== w);
-    const gone = file.notes.length - notes.length + (file.turns.length - turns.length);
-    if (gone > 0) this.write(scope, { ...file, notes, turns });
-    return gone;
+    const was = file.notes.find((n) => n.id === w);
+    if (!was) return no("E_ACCOUNT_MEMORY_UNKNOWN", { message: `there is no "${w.slice(0, 20)}" in this memory: it was forgotten already, or never kept`, detail: { what: w.slice(0, 20) } });
+    if (by === "agent" && was.from === "you") return no("E_ACCOUNT_BAD_ACTION", { message: `${was.id} is the owner's words: the owner forgets them` });
+    this.write(address, { ...file, notes: file.notes.filter((n) => n !== was) });
+    return 1;
   }
 
-  /** a turn of the conversation, as the account saw it: for one agent (its address) or for every agent ("everyone") */
-  record(scope: Scope, turn: { who: TurnWho; kind: string; text: string; ref?: string | undefined; code?: string | undefined }): MemoryTurn | undefined {
-    if (scope !== "everyone" && !isAddress(scope)) return undefined;
-    const text = scrubbed(tidy(turn.text));
-    if (!text) return undefined;
-    this.lastTurnMs = Math.max(this.nowMs(), this.lastTurnMs + 1);
-    const at = new Date(this.lastTurnMs).toISOString();
-    if (scope === "everyone") {
-      const file = this.everyoneFile();
-      const t: MemoryTurn = { id: `all-${String(file.seq + 1).padStart(6, "0")}`, at, who: turn.who, kind: turn.kind, text, ...(turn.ref ? { ref: turn.ref } : {}), ...(turn.code ? { code: turn.code } : {}) };
-      const turns = [...file.turns, t];
-      const over = Math.max(0, turns.length - MAX_TURNS);
-      this.write("everyone", { ...file, seq: file.seq + 1, turns: turns.slice(over), dropped: file.dropped + over });
-      return t;
-    }
-    const file = this.agentFile(scope);
-    const t: MemoryTurn = { id: `turn-${String(file.turnSeq + 1).padStart(6, "0")}`, at, who: turn.who, kind: turn.kind, text, ...(turn.ref ? { ref: turn.ref } : {}), ...(turn.code ? { code: turn.code } : {}) };
-    const turns = [...file.turns, t];
-    const over = Math.max(0, turns.length - MAX_TURNS);
-    this.write(scope, { ...file, turnSeq: file.turnSeq + 1, turns: turns.slice(over), dropped: file.dropped + over });
-    return t;
-  }
-
-  /** the words to every agent, latest last */
-  everyone(): { turns: MemoryTurn[]; dropped: number } {
-    const f = this.everyoneFile();
-    return { turns: [...f.turns], dropped: f.dropped };
-  }
-
-  /** One agent's conversation, as the agent reads it: its own turns and, from `sinceMs` (when its key was let in), the words to every agent;
-   * latest last, `limit` of them (50 unless said, 200 at most) before the turn `before`, or matching `q` (any case) */
-  conversation(address: string, o: { sinceMs?: number | undefined; before?: string | undefined; limit?: number | undefined; q?: string | undefined } = {}): Conversation {
-    if (!isAddress(address)) return { turns: [], total: 0, more: false, dropped: 0 };
-    const own = this.agentFile(address);
-    const all = this.everyoneFile().turns.filter((t) => o.sinceMs === undefined || Date.parse(t.at) >= o.sinceMs);
-    let merged = [...own.turns, ...all].sort((a, b) => a.at.localeCompare(b.at) || a.id.localeCompare(b.id));
-    const q = (o.q ?? "").trim().toLowerCase();
-    if (q) merged = merged.filter((t) => t.text.toLowerCase().includes(q) || t.kind === q || t.ref === q || (t.code ?? "").toLowerCase() === q);
-    const total = merged.length;
-    const cut = o.before ? merged.findIndex((t) => t.id === o.before) : -1;
-    const upto = cut >= 0 ? merged.slice(0, cut) : merged;
-    const limit = Math.max(1, Math.min(200, Math.trunc(o.limit ?? 50)));
-    const turns = upto.slice(-limit);
-    return { turns, total, more: upto.length > turns.length, dropped: own.dropped };
-  }
-
-  /** notes that match `q`, any case, by their words or topic */
+  /** notes that match `q`, any case, by their words, how, topic or id */
   static matching(notes: MemoryNote[], q: string | undefined): MemoryNote[] {
     const k = (q ?? "").trim().toLowerCase();
-    return k ? notes.filter((n) => n.text.toLowerCase().includes(k) || n.topic === k || n.id === k) : notes;
+    return k ? notes.filter((n) => n.text.toLowerCase().includes(k) || (n.how ?? "").toLowerCase().includes(k) || n.topic === k || n.id === k) : notes;
   }
 }
+
+/** a note without the fields it does not carry */
+const clean = (n: MemoryNote): MemoryNote => Object.fromEntries(Object.entries(n).filter(([, v]) => v !== undefined && v !== "")) as unknown as MemoryNote;

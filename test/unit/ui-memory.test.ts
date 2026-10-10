@@ -3,11 +3,11 @@ import { fileURLToPath } from "node:url";
 import { createContext, runInContext, Script } from "node:vm";
 import { describe, expect, it } from "vitest";
 
-/** The Account's Memory pane (ui/memory.js), run as the page runs it — plain scripts in one global scope after ui/core.js — here in a vm with a
- * stand-in document. What is checked is what the owner reads and presses: the conversation drawn as round 7 draws a channel (the owner's
- * words on the right, the agent's on the left, the account's refusals with their code, a time line when the day changes), every word an
- * agent wrote escaped, the agents picked by their own pills, About you and an agent's notes with their topic and who wrote them, every
- * signed change (setMemory, forgetMemory) wired, and nothing that signs offered to a browser that only looks */
+/** The Account's Memory pane (ui/memory.js) — the Demo v2 canvas's F13 — run as the page runs it: plain scripts in one global scope after
+ * ui/core.js, here in a vm with a stand-in document. What is checked is what the owner reads and presses: what an agent remembers in three
+ * parts (Style · Rules · Venues and people), each note saying where it came from (You said · It learned … · From your limit), a waiting note
+ * with keep and forget, every word an agent wrote escaped, Where it's used, the three switches, Export and Forget all — and nothing that
+ * signs offered to a browser that only looks */
 const UI = fileURLToPath(new URL("../../src/portfolio/public/ui/", import.meta.url));
 const FILES = ["core.js", "memory.js"];
 
@@ -40,75 +40,83 @@ function page() {
 const NOW = "2026-10-09T18:00:00.000Z";
 const CC = "0x3a087530887bd175ccc38828ee3776e5b6ea1ac6";
 const GONE = "0x9999999999999999999999999999999999999999";
-const turn = (id: string, at: string, who: string, kind: string, text: string, extra: Record<string, unknown> = {}) => ({ id, at, who, kind, text, ...extra });
+const note = (id: string, topic: string, text: string, extra: Record<string, unknown> = {}) => ({ id, topic, text, from: "you", at: "2026-10-02T15:00:00.000Z", ...extra });
 const MEMORY = {
   ok: true,
   asOf: NOW,
-  about: [{ id: "note-0001", topic: "rule", text: "Never leverage above 3x <b>without</b> asking.", at: "2026-10-08T12:00:00.000Z", by: "owner" }],
-  everyone: { turns: [], total: 0, dropped: 0 },
   agents: [
     {
       address: CC,
       name: "Claude Code",
       code: "CC",
       status: "ok",
-      notes: [{ id: "note-0001", topic: "preference", text: "Owner likes limit orders <img src=x onerror=alert(1)>", at: "2026-10-09T17:00:00.000Z", by: "agent" }],
-      conversation: {
-        total: 4,
-        more: false,
-        dropped: 0,
-        turns: [
-          turn("turn-000001", "2026-10-08T15:00:00.000Z", "owner", "intent", "Build a SOL position (buy SOL/USDT at Ex about $300) · until Mon 12 Oct", { ref: "intent-0003" }),
-          turn("all-000001", "2026-10-09T17:00:00.000Z", "owner", "watch", "Watching BTC/USDT at Ex"),
-          turn("turn-000002", "2026-10-09T17:01:00.000Z", "agent", "report", "On it: <script>alert(1)</script>", { ref: "intent-0003" }),
-          turn("turn-000003", "2026-10-09T17:02:00.000Z", "account", "refusal", "buy 1 BTC/USDT at Ex, market: refused — $60,000 is over the $150 an order the limit allows", { code: "E_MANDATE_PER_ORDER_CAP" }),
-        ],
-      },
+      rules: { learn: true, ask: true, share: false },
+      notes: [
+        note("note-0001", "style", "Value over hype <b>always</b>"),
+        note("note-0002", "style", "Watches the tech supply chain <img src=x onerror=alert(1)>", { from: "agent", how: "from your questions", at: "2026-10-06T15:00:00.000Z" }),
+        note("note-0003", "venues", "BTC is cheaper at the exchange than at the DEX", { from: "agent", how: "by comparing the venues" }),
+        note("note-0004", "rules", "Ask before adding to a position", { from: "agent", how: "from the order you declined", waiting: true }),
+      ],
+      fromLimits: [
+        { id: "spend-0001", from: "limit", topic: "rules", text: "Up to $25 an order, $100 in all, at OKX · until Thu, Oct 15", at: "2026-10-08T15:00:00.000Z" },
+        { id: "mode", from: "mode", topic: "rules", text: "Real money goes through you first: every order waits for you on a card (Guard)" },
+      ],
     },
-    { address: GONE, name: "", code: "", status: "gone", notes: [], conversation: { total: 0, more: false, dropped: 0, turns: [] } },
+    { address: GONE, name: "", code: "", status: "gone", rules: { learn: true, ask: false, share: false }, notes: [note("note-0001", "style", "x")], fromLimits: [] },
   ],
-  limits: { noteText: 500, maxNotes: 100, maxAbout: 50, maxTurns: 500, topics: ["preference", "rule", "fact", "lesson", "progress", "other"] },
+  limits: { noteText: 500, howText: 80, maxNotes: 100, topics: [] },
 };
 const ACCOUNT = { now: NOW, mode: "guard", liveUsd: 1000, venues: [], keys: [{ address: CC, name: "Claude Code", code: "CC", status: "ok" }], spend: [], cards: [], asks: [], orders: [], payments: [], intents: [], watch: [], requests: [], subAccounts: [], connectLive: { writes: { on: true, capUsd: 250 }, options: [] } };
 
-describe("the Memory pane", () => {
-  it("draws the conversation as round 7 draws a channel, escaping every word an agent wrote", () => {
+describe("the Memory pane (F13)", () => {
+  it("shows what the agent remembers in three parts, each note saying where it came from; a waiting note offers keep and forget", () => {
     const p = page();
     p.set("A", ACCOUNT);
     p.set("MEM.page", MEMORY);
-    const html = p.run<string>(`memChatHtml(MEM.page.agents[0], true)`);
-    // your words on the right, the agent's on the left with its letter, the account's refusal with its code
-    expect(html).toContain('class="mem-turn from-you" data-k="turn-000001"');
-    expect(html).toContain('class="mem-turn from-agent" data-k="turn-000002"');
-    expect(html).toMatch(/class="mem-turn from-account" data-k="turn-000003"><div class="bub"><span class="mem-code">✗ E_MANDATE_PER_ORDER_CAP<\/span>/);
+    const html = p.run<string>("memNotesHtml(MEM.page.agents[0], true)");
+    expect(html).toContain("What Claude Code remembers about you");
+    expect(html).toContain("6 notes · only on this machine");
+    // the parts in order, the limit's lines first under Rules
+    const parts = [...html.matchAll(/<h3 class="mem-part-h">([^<]+)<\/h3>/g)].map((m) => m[1]);
+    expect(parts).toEqual(["Style", "Rules", "Venues and people"]);
+    expect(html.indexOf("Up to $25 an order")).toBeLessThan(html.indexOf("Ask before adding"));
+    // where each came from
+    expect(html).toContain("You said · 2 Oct");
+    expect(html).toContain("It learned from your questions · 6 Oct");
+    expect(html).toContain("It learned by comparing the venues");
+    expect(html).toContain("From your limit · 8 Oct");
+    expect(html).toContain("From your mode: Guard | Beast, at the top");
     // what an agent wrote is text, never markup
-    expect(html).not.toContain("<script>");
-    expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
-    // a time line when the day changes: one for the 8th, one for the 9th
-    expect(html.match(/class="mem-time"/g)).toHaveLength(2);
-    // the words to every agent say so, and forgetting one says it is every agent's
-    expect(html).toMatch(/Watching · to every agent/);
-    expect(html).toMatch(/data-mem-act="forget-turn" data-agent="0x3a08[0-9a-f]+" data-id="all-000001"[^>]*title="Forget this turn \(every agent&#39;s\)"/);
-    expect(html).toContain('data-mem-act="forget-chat"');
+    expect(html).not.toContain("<img");
+    expect(html).toContain("&lt;img src=x onerror=alert(1)&gt;");
+    expect(html).toContain("&lt;b&gt;always&lt;/b&gt;");
+    // the waiting note: Waits for you, keep and forget; the others edit and forget; a limit's line is changed in the limit form
+    expect(html).toMatch(/data-k="note-0004"[\s\S]*?Waits for you[\s\S]*?data-mem-act="keep"[\s\S]*?data-mem-act="forget-note"/);
+    expect(html.match(/data-mem-act="edit"/g)).toHaveLength(3);
+    expect(html.match(/data-mem-act="limit"/g)).toHaveLength(1);
+    expect(html).toContain('data-mem-form="add"');
+    expect(html).toContain('placeholder="Add one thing it should remember…"');
   });
 
-  it("shows About you and an agent's notes with their topic and who wrote them; an agent the account no longer lists is named by its key", () => {
+  it("says where it is used, and draws the three switches as they stand with Export and Forget all", () => {
     const p = page();
     p.set("A", ACCOUNT);
     p.set("MEM.page", MEMORY);
-    const about = p.run<string>("memAboutHtml(true)");
-    expect(about).toContain("Every agent on the account reads these");
-    expect(about).toContain("&lt;b&gt;without&lt;/b&gt;");
-    expect(about).toContain('data-mem-form="about-add" data-scope="about"');
-    const notes = p.run<string>("memNotesHtml(MEM.page.agents[0], true)");
-    expect(notes).toContain("What Claude Code keeps");
-    expect(notes).toContain("1 note of 100");
-    expect(notes).toContain('<span class="chip">Preference</span>');
-    expect(notes).toContain("its own");
-    expect(notes).not.toContain("<img");
-    for (const act of ["edit", "to-about", "forget-note", "forget-notes", "add"]) expect(notes, act).toContain(`data-mem-act="${act}"`);
+    const uses = p.run<string>("memUsesHtml(MEM.page.agents[0])");
+    expect(uses).toContain("Where it's used");
+    expect(uses).toContain("Claude Code reads it when a session starts (portfolio_memory)");
+    expect(uses).toContain("Do not read it: only Claude Code does");
+    expect(uses).toContain("Words, not permission");
+    const sw = p.run<string>("memSwitchesHtml(MEM.page.agents[0], true)");
+    expect([...sw.matchAll(/role="switch" class="pf-switch" aria-checked="(true|false)" aria-label="([^"]+)"/g)].map((m) => [m[2], m[1]])).toEqual([
+      ["Let Claude Code remember new things", "true"],
+      ["Ask me before keeping what it learns", "true"],
+      ["Other agents can read it", "false"],
+    ]);
+    expect(sw).toContain('data-mem-act="export"');
+    expect(sw).toContain('data-mem-act="forget-all"');
+    expect(sw).toContain("Forget all deletes the file: there is no bin.");
     const who = p.run<string>("memWhoHtml(memAgents(), memAgents()[0])");
-    expect(who).toContain('data-mem-agent="0x3a087530887bd175ccc38828ee3776e5b6ea1ac6"');
     expect(who).toContain("An earlier key 0x999999…9999");
   });
 
@@ -116,9 +124,9 @@ describe("the Memory pane", () => {
     const p = page();
     p.set("A", ACCOUNT);
     p.set("MEM.page", MEMORY);
-    const all = p.run<string>("memChatHtml(MEM.page.agents[0], false) + memNotesHtml(MEM.page.agents[0], false) + memAboutHtml(false)");
-    const buttons = [...all.matchAll(/<button\b[^>]*data-mem-act="(forget-[a-z]+|edit|to-about|add)"[^>]*>/g)];
-    expect(buttons.length).toBeGreaterThan(5);
+    const all = p.run<string>("memNotesHtml(MEM.page.agents[0], false) + memSwitchesHtml(MEM.page.agents[0], false)");
+    const buttons = [...all.matchAll(/<button\b[^>]*data-mem-act="(edit|keep|forget-note|forget-all|limit|switch)"[^>]*>/g)];
+    expect(buttons.length).toBeGreaterThan(8);
     for (const b of buttons) expect(b[0], b[1]).toContain(" disabled");
   });
 });

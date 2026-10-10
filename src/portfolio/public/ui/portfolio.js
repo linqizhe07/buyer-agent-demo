@@ -123,15 +123,17 @@ function pfCurve(points, w = 600, h = 140) {
 }
 
 /** what waits for the owner, agent by agent: each agent's cards and its asks */
-function pfGroups(cards, asks) {
+function pfGroups(cards, asks, mems) {
   const g = new Map();
   const add = (agent, name) => {
     const k = String(agent || "").toLowerCase();
-    if (!g.has(k)) g.set(k, { agent: k, name: name || (k ? short(k) : "An agent"), cards: [], asks: [] });
+    if (!g.has(k)) g.set(k, { agent: k, name: name || (k ? short(k) : "An agent"), cards: [], asks: [], mems: [] });
     return g.get(k);
   };
   for (const c of cards || []) add(c.agent, c.agentName).cards.push(c);
   for (const a of asks || []) add(a.agent, a.agentName).asks.push(a);
+  // what an agent learned while the owner asks to be asked first (Account › Memory): kept only on the owner's yes
+  for (const m of mems || []) add(m.agent, m.agentName).mems.push(m);
   return [...g.values()];
 }
 
@@ -372,8 +374,9 @@ function pfQuickHtml(l, venueIn, owner) {
 function pfWaitingHtml(l, owner) {
   const cards = A.cards.filter((c) => pfAboutIn(c.agent, pfCardVenue(c), l));
   const asks = (A.asks || []).filter((a) => pfAboutIn(a.agent, a.venue, l));
+  const mems = (A.memoryAsks || []).filter((m) => pfAboutIn(m.agent, "", l));
   const knocks = l.kind === "all" ? A.requests : [];
-  const n = cards.length + asks.length + knocks.length;
+  const n = cards.length + asks.length + mems.length + knocks.length;
   if (!n) return "";
   const off = !owner;
   const card = (c) => `<div class="pf-item" data-pf-card="${esc(c.id)}"><div class="pf-item-t"><b>${esc(c.reason)}</b><span class="dim small">${fine(c.usd)}${c.expiresAt ? ` · answer by ${esc(pfWhen(c.expiresAt))}` : ""}</span><details class="more"><summary>What it asks</summary><pre>${esc((c.shown || []).filter((f) => f.value !== "" && f.name !== "nonce").map((f) => `${f.name}: ${f.value}`).join("\n"))}</pre></details></div><div class="pf-btns pf-keys">${pfBtn("reject", `${icon("x")}<span class="sr">Reject</span>`, { cls: "rkey", data: { card: c.id }, off, title: "Reject" })}${pfBtn("approve", `${icon("check")}<span class="sr">Approve</span>`, { cls: "rkey yes-k", data: { card: c.id }, off, title: "Approve: one signature" })}</div></div>`;
@@ -381,8 +384,10 @@ function pfWaitingHtml(l, owner) {
   // round 7's keys (F3): a round icon for each answer, its word for the screen reader and on hover; Grant and Connect open the form signed
   const grant = (a) => (a.kind === "venue" ? pfBtn("grant", `${icon("plug")}<span class="sr">Connect</span>`, { cls: "rkey yes-k", data: { ask: a.id }, off, title: "Connect it: opens the form you sign" }) : pfBtn("grant", `${icon("check")}<span class="sr">Grant</span>`, { cls: "rkey yes-k", data: { ask: a.id }, off, title: "Grant: opens the form you sign" }));
   const ask = (a) => `<div class="pf-item pf-ask"><div class="pf-item-t"><b>${esc(a.text || PF_ASK_WORDS[a.kind] || a.kind)}</b><span class="dim small">${esc([`Asks for ${PF_ASK_WORDS[a.kind] || a.kind}`, a.usd && (a.kind === "limit" || a.kind === "topup") ? money(Number(a.usd)) : "", a.venue ? `at ${pfVenueName(a.venue)}` : "", a.at ? `asked ${pfWhen(a.at)}` : ""].filter(Boolean).join(" · "))}</span>${pfGrantable(a) ? "" : `<span class="dim small">${esc(pfWhyNot(a))}</span>`}</div><div class="pf-btns pf-keys">${pfBtn("decline", `${icon("x")}<span class="sr">Decline</span>`, { cls: "rkey", data: { ask: a.id }, off, title: "Decline" })}${pfGrantable(a) ? grant(a) : ""}</div></div>`;
+  // a memory it learned, waiting: its words, its part and how it learned them; ✓ keeps it (its words signed as they are), ✗ forgets it
+  const mem = (m) => `<div class="pf-item pf-ask"><div class="pf-item-t"><b>Wants to remember: “${esc(m.text)}”</b><span class="dim small">${esc([{ style: "Style", rules: "Rules", venues: "Venues and people" }[m.topic] || m.topic, m.how ? `it learned ${m.how}` : "it learned this", m.at ? pfWhen(m.at) : ""].filter(Boolean).join(" · "))}</span></div><div class="pf-btns pf-keys">${pfBtn("mem-forget", `${icon("x")}<span class="sr">Forget</span>`, { cls: "rkey", data: { agent: m.agent, note: m.id }, off, title: "Forget it" })}${pfBtn("mem-keep", `${icon("check")}<span class="sr">Keep</span>`, { cls: "rkey yes-k", data: { agent: m.agent, note: m.id }, off, title: "Keep it: a signature" })}</div></div>`;
   const knock = (r) => `<div class="pf-item pf-ask"><div class="pf-item-t"><b>${esc(r.name || "An agent")} asks to be let in</b><span class="dim small"><span class="mono">${esc(short(r.address))}</span> · ${esc(nyDay(r.at))} ${esc(nyTime(r.at))}</span></div><div class="pf-btns pf-keys">${pfBtn("letin", `${icon("check")}<span class="sr">Let in</span>`, { cls: "rkey yes-k", data: { agent: r.address }, off, title: "Let it in: opens the form you sign" })}</div></div>`;
-  const groups = pfGroups(cards, asks).map((g) => `<div class="pf-grp"><div class="pf-grp-h"><div class="who">${avatar((A.keys.find((k) => k.address === g.agent) || {}).code || g.name, "sm")}<div><b>${esc(g.name)}</b></div></div>${g.cards.length > 1 ? pfBtn("approve-all", `Approve all ${g.cards.length}`, { cls: "btn btn-sm", data: { agent: g.agent }, off }) : ""}</div>${g.cards.map(card).join("")}${g.asks.map(ask).join("")}</div>`).join("");
+  const groups = pfGroups(cards, asks, mems).map((g) => `<div class="pf-grp"><div class="pf-grp-h"><div class="who">${avatar((A.keys.find((k) => k.address === g.agent) || {}).code || g.name, "sm")}<div><b>${esc(g.name)}</b></div></div>${g.cards.length > 1 ? pfBtn("approve-all", `Approve all ${g.cards.length}`, { cls: "btn btn-sm", data: { agent: g.agent }, off }) : ""}</div>${g.cards.map(card).join("")}${g.asks.map(ask).join("")}${g.mems.map(mem).join("")}</div>`).join("");
   return `<section class="callout pf-wait" aria-labelledby="pf-wait-h"><div class="pf-wait-h"><h2 class="label warn-t" id="pf-wait-h">Waiting for you · ${n}</h2></div>${groups}${knocks.map(knock).join("")}</section>`;
 }
 /* a venue by its name: a connected one's, or the name of the connection that would connect it */
@@ -671,6 +676,13 @@ async function pfAct(act, d) {
       return;
     }
     case "approve-all": return void pfApproveAll(d.agent);
+    case "mem-keep": {
+      // its words signed as they are: kept, and still what the agent learned
+      const m = (A.memoryAsks || []).find((x) => x.agent === d.agent && x.id === d.note);
+      if (m) await own({ type: "setMemory", scope: m.agent, id: m.id, topic: m.topic, text: m.text }, () => forget("/api/account/memory"));
+      return;
+    }
+    case "mem-forget": return void (await own({ type: "forgetMemory", scope: d.agent, what: d.note }, () => forget("/api/account/memory")));
     case "grant": return void pfGrant((A.asks || []).find((a) => a.id === d.ask));
     case "decline": return void declineAsk((A.asks || []).find((a) => a.id === d.ask));
     case "asset": return void (typeof openAsset === "function" && openAsset(d.key));

@@ -242,38 +242,40 @@ button.en-at:hover:not(:disabled) { border-color: var(--dim); }
 .mem { display: flex; flex-direction: column; gap: 20px; }
 .mem .card-head > div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .mem-pick { align-self: flex-start; }
-/* the conversation as round 7 draws a channel: your words on the right in the accent, the agent's on the left on the second surface with
-   its letter, the account's answer to it (a refusal and its code) on the left on the down fill; a time line when the day changes */
-.mem-turns-box { position: relative; max-height: min(64vh, 640px); overflow-y: auto; overscroll-behavior: contain; margin: 0 -8px; padding: 0 8px; }
-.mem-turns { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
-.mem-time { text-align: center; font-size: 11px; font-weight: 600; color: var(--dim); padding: 10px 0 4px; }
-.mem-earlier { display: flex; justify-content: center; padding-bottom: 4px; }
-.mem-turn { display: grid; grid-template-columns: 28px minmax(0, 1fr) 28px; column-gap: 8px; align-items: end; }
-.mem-turn .av { grid-column: 1; grid-row: 1; width: 28px; height: 28px; font-size: 12px; }
-.mem-turn .bub { grid-column: 2; grid-row: 1; justify-self: start; max-width: min(100%, 560px); padding: 10px 14px; border-radius: 18px 18px 18px 4px; background: var(--surface-2); color: var(--text); font-size: 14px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
-.mem-turn .mem-meta { grid-column: 2; grid-row: 2; justify-self: start; font-size: 11px; color: var(--dim); padding: 2px 4px 0; }
-.mem-turn.from-you .bub { justify-self: end; border-radius: 18px 18px 4px 18px; background: var(--accent); color: var(--on-accent); }
-.mem-turn.from-you .mem-meta { justify-self: end; }
-.mem-turn.from-account .bub { border-radius: 12px; background: var(--down-fill); }
-.mem-code { font-family: var(--font-mono); font-size: 12px; font-weight: 500; color: var(--down); }
-/* forgetting a turn: a small round key beside it, seen when the turn is pointed at or holds the focus (always, on a screen without a pointer) */
-.mem-rm { grid-column: 3; grid-row: 1; align-self: center; width: 28px; height: 28px; border: 0; padding: 0; border-radius: var(--radius-pill); background: transparent; color: var(--dim); display: inline-flex; align-items: center; justify-content: center; opacity: 0; transition: opacity 120ms ease-out, background-color 120ms ease-out; }
-.mem-rm .ico { width: 14px; height: 14px; }
-.mem-rm:hover:not(:disabled) { background: var(--hover); color: var(--text); }
-.mem-turn:hover .mem-rm, .mem-turn:focus-within .mem-rm { opacity: 1; }
-@media (hover: none) { .mem-rm { opacity: 1; } }
-/* notes: a topic chip, the words, who wrote them and when, and what can be done with them */
-.mem-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
-.mem-note { display: flex; flex-direction: column; gap: 6px; padding: 12px 0; border-top: 1px solid var(--border); }
-.mem-note:first-child { border-top: 0; padding-top: 0; }
-.mem-note-h { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.mem-text { margin: 0; font-size: 14px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
-.mem-acts { display: flex; gap: 14px; flex-wrap: wrap; font-size: 13px; }
-.mem-form { display: flex; flex-direction: column; gap: 8px; }
-.mem-form textarea { width: 100%; min-height: 76px; resize: vertical; box-sizing: border-box; padding: 10px 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); color: var(--text); font: inherit; font-size: 14px; line-height: 1.45; }
-.mem-form textarea:focus { outline: 2px solid var(--text); outline-offset: 1px; }
-.mem-form-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.mem-form-row select { min-height: 36px; padding: 0 12px; border: 1px solid var(--border); border-radius: var(--radius-pill); background: var(--surface); color: var(--text); font: inherit; font-size: 13px; }
-.mem-form-row .grow { flex: 1; }
-.mem-how-l { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--dim); line-height: 1.45; }
-@media (prefers-reduced-motion: reduce) { .mem-rm { transition: none; } }
+/* F13: what it remembers, in three parts, on the left; where it is used and the switches on the right */
+.mem-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(380px, 100%), 1fr)); gap: 16px; align-items: start; }
+.mem-side { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.mem-part-h { margin: 0; padding: 12px 0 4px; font-size: 12px; font-weight: 700; color: var(--dim); }
+.mem-rows { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.mem-row { display: flex; align-items: center; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--border); }
+.mem-row-t { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.mem-text { font-size: 14px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
+.mem-from { font-size: 12px; color: var(--dim); }
+.mem-from .pill { padding: 1px 8px; font-size: 11px; }
+/* a note's keys: 28 round, a hairline of their own; forgetting in the down colour, keeping in the up */
+.mem-key { width: 28px; height: 28px; flex: none; border: 1px solid var(--border); border-radius: var(--radius-pill); padding: 0; display: inline-flex; align-items: center; justify-content: center; background: var(--surface); color: var(--dim); transition: background-color 120ms ease-out, color 120ms ease-out; }
+.mem-key .ico { width: 14px; height: 14px; }
+.mem-key:hover:not(:disabled) { background: var(--hover); color: var(--text); }
+.mem-key.bad { color: var(--down); }
+.mem-key.keep { color: var(--up); }
+.mem-key.bad:hover:not(:disabled) { color: var(--down); }
+.mem-key.keep:hover:not(:disabled) { color: var(--up); }
+.mem-form { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.mem-form.add { margin-top: 6px; }
+.mem-form input, .mem-form select, .mem-form textarea { font: inherit; font-size: 14px; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-s); }
+.mem-form input { flex: 1 1 200px; min-width: 0; height: 40px; padding: 0 12px; }
+.mem-form select { height: 40px; padding: 0 10px; font-size: 13px; }
+.mem-form textarea { flex: 1 1 100%; min-height: 64px; resize: vertical; box-sizing: border-box; padding: 8px 12px; line-height: 1.45; }
+.mem-form input:focus, .mem-form textarea:focus, .mem-form select:focus { outline: 2px solid var(--text); outline-offset: 1px; }
+.mem-form .msg { flex-basis: 100%; }
+.mem-form .msg:empty { display: none; }
+.mem-row.editing { display: block; }
+.mem-uses { display: flex; flex-direction: column; gap: 8px; font-size: 14px; }
+/* a use: its chip, and its words beside it (F13), the words wrapping under themselves rather than under the chip */
+.mem-uses > div { display: grid; grid-template-columns: max-content minmax(0, 1fr); align-items: baseline; gap: 10px; }
+.mem-uses .chip { justify-self: start; }
+.mem-sw { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 12px 0; border-top: 1px solid var(--border); }
+.mem-sw-t { font-size: 14px; font-weight: 600; }
+.mem-sw .pf-switch { min-height: 32px; }
+.mem-end { display: flex; gap: 8px; padding-top: 4px; flex-wrap: wrap; }
+@media (prefers-reduced-motion: reduce) { .mem-key { transition: none; } }

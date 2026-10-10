@@ -252,12 +252,12 @@ Robinhood 的三条线都是它自己发布的接口（2026-10-05 读）：股�
 
 - 一张卡 "Venues"：几个账户、一共多少；右上 "CSV"（每个账户的持有）和黑底的 "Connect an account"。表是原来 Portfolio 的 Accounts 段：Account · Value · Status（第一枚是健康，✓ Answers / ✗ Not answering（悬停看场所最近一次的原话）/ Not read yet，后面是 Trades、Moves money、Receives、Earns、Watched，钥匙不能交易的那枚写场所自己的话）· **Open to agents** 开关（关掉免签，`POST /api/revoke`，agent 在那里只剩读；重新打开放宽了它能做的，是签名的 `setPolicy restore`）· "Details"（Account 抽屉）。
 
-**Memory：agent 记得什么**（`ui/memory.js`；读 `/api/account/memory?turns=200`，更早的经 `/api/account/memory/agent?before=`；`account/memory.ts`）
+**Memory：agent 记得的你**（`ui/memory.js`；读 `/api/account/memory`；`account/memory.ts`；照 Demo v2 画布的 F13）
 
-- **对话**（一个 agent 一段，照第七轮画 channel 的样子）：你的话在右边、强调色（`--accent`）气泡里，它的话在左边、第二层底色气泡里带它的字母，账户给它的拒绝是一条落在 down 底色上的、带拒绝码（等宽字）；日子变了或者隔了半小时有一行时间；每条气泡下面一行小字：是什么（Your words · Report · Asks · Did · Refused · Watching…）、它说的是哪个 id、给所有 agent 的写 "to every agent"、时间。气泡旁一个 28 的圆 ×（指着它或焦点在它上面才出来，没有指针的屏上一直在）："Forget" 先确认，再签 `forgetMemory`。框里最多显示 200 条，第一次打开滚到最新，"Earlier turns" 往前读。右上 "Forget the conversation"。
-- **What <它> keeps**：它的笔记，每条一个话题标签、它的字、"its own" 或 "written by you" 和时间，"Edit"（就地变成一张表，"Sign and save" 签 `setMemory`）· "Copy to About you" · "Forget"；"Write a note for <它>"；右上 "Forget every note"。
-- **About you**（右栏）：你的笔记，每个 agent 都读；下面一直开着一张表（字、话题、"Sign and keep"）。被拒时账户的原话留在表下面，打的字留在表里。下面一张 "How memory works"：账户怎么记、agent 怎么读、忘了就是没了、不是权限、从不收什么。
-- 不止一个 agent 时最上面一排药丸挑看谁的（撤销了的写 "revoked"，账户不再列的写 "key gone"）；Lens 是一个 agent 时就是它。一个 agent 都没放进来时只有一句话和 "Agents…"。
+- 左边一张卡 "What <agent> remembers about you"，右上 "n notes · only on this machine"；三段 **Style · Rules · Venues and people**，每一行它的字、下面一行小字写从哪来和哪天："You said · 2 Oct"（你写的或你改过的）· "It learned from your questions · 6 Oct"（agent 用自己钥匙记的，"from your questions" 是它的话）· "From your limit · 8 Oct" / "From your mode"（账户照你签的额度和模式此刻的样子写的，不存）；等你答的那条多一枚 "Waits for you"。右边两个 28 的圆键：笔（就地改，"Sign and save" 签 `setMemory`）和红的垃圾桶（先确认，签 `forgetMemory`）；等你答的换成 ✓ 记下（原样签一遍 `setMemory`，它还是它学的）和垃圾桶；来自额度的那行只有笔，打开额度表；模式那行没有键，模式在 Account 的头上。卡底下一栏 "Add one thing it should remember…"、选一段、"Add"。
+- 右边 **Where it's used**（三行，一枚小签加一句：它在会话开始时读 `portfolio_memory`；别的 agent 读不读；额度那几句照实写，改它是一次新签名）和一句"每条都写着从哪来……记忆是话不是权限"；**Switches** 三个开关（`pf-switch` 的轨道，拨一次是一次 `setMemoryRules` 签名）：Let <agent> remember new things · Ask me before keeping what it learns · Other agents can read it；下面 **Export**（一份 JSON）和 **Forget all**（先确认，删文件，没有回收站，开关留着）。
+- 等你答的记忆也进 Portfolio 的 **Waiting for you**（`A.memoryAsks`，按 agent 和卡、请求放一组："Wants to remember: “…”"，一行段名和它怎么学到的，✗ 忘掉 / ✓ 记下），rail 上 Account 旁边的数和标签页标题都算它们。
+- 不止一个 agent 时最上面一排药丸挑看谁的（撤销了的写 "revoked"，账户不再列的写 "key gone"）；Lens 是一个 agent 时就是它；一个 agent 都没放进来时只有一句话和 "Agents…"。
 
 **Markets：有什么可以交易**（`ui/markets.js`、`ui/asset.js`；读 `/explore`、`/quotes`、`/candles`、`/compare`、`/asset`）
 
@@ -316,8 +316,8 @@ Robinhood 的三条线都是它自己发布的接口（2026-10-05 读）：股�
 | `GET /api/account/quotes?pairs=venue\|symbol,…` | 最多 12 个市场的新价格；多了是 409，账户自己的拒绝 |
 | `GET /api/account/sellable` | 不是美元的持有，各自卖掉要签什么 |
 | `GET /api/account/agents` | 一个 agent 一项：钥匙、额度（用了、占着、剩下）、卡、单、付款、earn、钱包、意图、请求、航班、记了多少（`memory: {notes, turns}`） |
-| `GET /api/account/memory?turns=100` | 记忆，owner 读的全部（`account/memory.ts`）：About you、给所有 agent 的话、每个 agent 的笔记和对话（最新的 `turns` 条，最多 500） |
-| `GET /api/account/memory/agent?address=&before=&limit=&q=` | 一个 agent 读到的记忆（`portfolio_memory`）：About you、它自己的笔记、它的对话（它自己的和它的钥匙放进来以后给所有 agent 的），最新的在最后 |
+| `GET /api/account/memory` | 记忆，owner 读的全部（`account/memory.ts`）：每个 agent 记得的你（等你答的也在）、你的开关、它的额度写成的几句 |
+| `GET /api/account/memory/agent?address=&q=` | 一个 agent 读到的记忆（`portfolio_memory`）：它记下的、等你答的、来自额度的、别的 agent 分享给它的、开关 |
 | `GET /api/account/candles?venue=&symbol=&interval=` | 一个市场的 K 线（5m · 1h · 1d）：接上的用它自己的，没接的不带钥匙读公开数据；venue 只能是账户认识的 id，symbol 只是文字，碰不到固定以外的 host；留一分钟 |
 | `GET /api/account/earn?venue=&asset=` | Earn：各场所的产品、里面有什么、读不到的场所 |
 | `GET /api/account/positions?venue=` | 一个场所的持仓；不带 venue：所有能列持仓的场所，读不到的在 missing |
@@ -349,8 +349,8 @@ Robinhood 的三条线都是它自己发布的接口（2026-10-05 读）：股�
 | `portfolio_live_earn` | 放进或取出 earn 产品（在 `earn` 额度里） |
 | `portfolio_pay` | 从 agent 钱包付钱（x402 / MPP charge） |
 | `portfolio_report` · `portfolio_ask` | 给 owner 的话：回报一个意图、请求只有 owner 能签的东西；什么都不授予 |
-| `portfolio_memory` | 账户替这个席位记着的：owner 的 About you、它自己的笔记、它和 owner 的对话（`limit`、`before` 翻更早的、`q` 找字）；会话开始时读。什么都不授予 |
-| `portfolio_remember` · `portfolio_forget` | 记一条它自己的笔记（或改它自己的一条）、忘掉它自己的一条；用席位的钥匙签（`agentRemember` / `agentForget`）。钥匙、密码、密钥、助记词、IP 一律被拒 |
+| `portfolio_memory` | 这个席位记得的 owner（每条 `from` you / agent 和它的 `how`）、等 owner 答的（`waiting`）、来自额度的、别的 agent 分享的、owner 的开关；`q` 找字。会话开始时读。什么都不授予 |
+| `portfolio_remember` · `portfolio_forget` | 记一条它学到的（`topic` style · rules · venues，`how` 它怎么学到的；或改它学的一条）、忘掉它学的一条；用席位的钥匙签（`agentRemember` / `agentForget`）。开关关着被拒，开着"先问"就等 owner；钥匙、密码、密钥、助记词、IP 一律被拒 |
 | `portfolio_approval` · `portfolio_wait` · `portfolio_statement` | 卡的结果、等一张卡 / 一单 / 一笔钱变化（最多 55 秒；到了终态——卡答了、单完了、钱到了 / 失败 / 搁浅 `stranded`——直接回 `done`）、流水（`mine: true` 按这把钥匙认；账本行还没记钥匙的那段老记录退回按席位自己的名字认） |
 
 真实账户上席位只注册上面这些。模拟对账单（`--classic`）和测试里的分层模拟上另有 `portfolio_read`、`portfolio_markets`、`portfolio_quote`、`portfolio_openness`、`portfolio_execute`、`portfolio_order`——样例场所、目录和路由器；分层模拟还多一个 `portfolio_transfer`（在门口签一笔模拟场所之间的划转）。它们只在账户**不是**真实账户时注册：席位启动时读一次 `/api/account` 来判断（读不到的当作真实账户），所以真实账户上的 agent 看不到这些工具，而不是看到了再被拒。原来的 `portfolio_execute` / `portfolio_order` 也改成签名后从同一个入口进；挂了这一层之后，HTTP 上未签名的写一律被拒绝。真钱走 `portfolio_live_move`：Guard 下它回一张卡，Beast 下额度内直接回付款单。
@@ -393,7 +393,7 @@ Robinhood 的三条线都是它自己发布的接口（2026-10-05 读）：股�
 
 ## 这一层的诚实边界
 
-- **记忆（`account/memory.ts`）是话，不是墙也不是权限**：同一个系统用户下的 agent 席位互相读得到 `<home>/memory/` 的文件，MCP 席位只读它自己的笔记是席位的约定；门不读记忆，所以一条笔记骗不到任何权限，但它能骗读它的 agent——一个 agent 的笔记别的 agent 读不到，About you 只有 owner 签。挡钥匙、密钥、助记词、IP 的是一组模式（`memoryProblem`），不是保证：换个写法写进来的秘密它认不出。用户所在的地方账户自己从不写进去，agent 自己写的话账户不审。
+- **记忆（`account/memory.ts`）是话，不是墙也不是权限**：同一个系统用户下的 agent 席位互相读得到 `<home>/memory/` 的文件，MCP 席位只读它该读的是席位的约定；门不读记忆，所以一条记忆骗不到任何权限，但它能骗读它的 agent——"别的 agent 也能读"关着时一个 agent 记的别的 agent 读不到，开着"先问我"时它学的在你记下之前谁都不读。挡钥匙、密钥、助记词、IP 的是一组模式（`memoryProblem`），不是保证：换个写法写进来的秘密它认不出。用户所在的地方账户自己从不写进去，agent 自己写的话账户不审。来自额度的那几句是照实写的，不是额度本身：额度只在你签的那份里。
 
 - **两处场所自己的话互相矛盾，照记不裁决**：Polymarket 的 API 文档说美国"只能平仓"（网页和 API 都是），它的帮助中心（2026-08-14）把美国列在"完全限制"里。账户照 API 文档让美国用户卖出、撤单，每一笔卖出最终由它的订单簿答复。LI.FI 的通用条款（2025-09-04 §2.6）排除美国人，但写明管的是网站、SDK 和 Widget；它的商业 API 条款（2026-05-13）只排除受全面制裁的地方，而且不管不带钥匙的公开调用。账户换币、跨链用的正是不带钥匙的 li.quest，哪份条款管它，LI.FI 没说。
 - Polymarket US 的连接只对着替身测过：余额、持仓、下单、撤单的答复形状按它 2026-10-08 的文档和 OpenAPI 写；不带钥匙读过的只有它的公开 gateway。查询字符串算不算进签名的路径文档没说：这里不算，带查询的签名请求只有持仓的第二页起。

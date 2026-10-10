@@ -47,7 +47,7 @@
 - **左边的 rail**（第七轮 F1 / F5 的样子）：圆的 "A" 和名字；Markets · Trade；"Agents"（数是敲门等放行的 agent）；最下面纽约时间的钟（账户不应答时一枚 "Not answering since HH:MM"），和 **Account** 钱包按钮：净值 · 模式（"$12,480 · Guard"），旁边的数是等你批的卡加 agent 的请求（浏览器标签页的标题也带着，比如 "(2) Account"）。手机宽度上 rail 变成顶上一条：第一行圆标和 Account，第二行 Markets · Trade · Agents。
 - **Account 的头**（Portfolio · Venues · Memory 三页上）：Account · Lens（All accounts / 一个场所 / 一个 agent，表都按它筛）；右边 Mode（Guard | Beast 两个按钮，ⓘ 打开 "What changes"，第 4 条）· "Trading on · $250 a move"（或 "Read-only"）· "Settings" · 时钟图标（Statement）；下面一行三页的切换，和这一档模式的一句说明。
 - **Markets 和 Trade 的顶栏**：Lens、搜索（按 `/`，打字就去 Markets 搜；在 Account 的三页上按 `/` 先去 Markets）、时钟图标。按 `t` 打开下单票。重启过的，顶栏下面一行写着接回了什么。没有 Menu。
-- **几页**：Portfolio（第 2b 条）、Venues（第 2 条）、Memory（第 8c 条）、Markets（第 2c 条）、Trade（第 5 条）。
+- **几页**：Portfolio（第 2b 条）、Venues（第 2 条）、Memory（第 8c 条，照画布的 F13）、Markets（第 2c 条）、Trade（第 5 条）。
 - **弹层**：Statement（第 5 条）、Mode（第 4 条）、Settings（交易开没开和单笔上限、agent 的会话和杠杆上限、背景 Cream / Black、Devices）、Agents（第 3 条）、Receive（第 2b 条）、Move（第 7 条）、Earn（第 7c 条）、Sell many（第 5b 条）；右边的抽屉是一个市场（Portfolio 的资产行打开的也是它）或一个账户的 Details。要你确认的都是页面自己的小问话框，没有浏览器的 `prompt` / `confirm`。
 
 `seat` 是这个别名：
@@ -113,7 +113,7 @@ rail 最下面点 Account（钱包按钮），落在 Portfolio。都按 Account 
 
 右边一栏：
 
-6. **Waiting for you**：agent 的卡和请求，按 agent 分组（第 8、8b 条）。回答是第七轮的圆键：32 的圆形图标，蓝的 ✓ 是 Approve（一次签名）、✗ 是 Reject；请求的 ✓ 是 Grant（打开你签的那张表）、插头是 Connect、✗ 是 Decline；敲门的 ✓ 是 Let in。每个键给读屏器和悬停都有它的字。
+6. **Waiting for you**：agent 的卡和请求，按 agent 分组（第 8、8b 条）；你开了"它学到的先问我再记"时，它学到的记忆也在这里等你（"Wants to remember: …"，第 8c 条）。回答是第七轮的圆键：32 的圆形图标，蓝的 ✓ 是 Approve（一次签名）、✗ 是 Reject；请求的 ✓ 是 Grant（打开你签的那张表）、插头是 Connect、✗ 是 Decline；敲门的 ✓ 是 Let in。每个键给读屏器和悬停都有它的字。
 7. **Agents at work**：你开着的意图，带每个 agent 最新的回报（"Change words" / "Withdraw"，第 8b 条）；下面是 agent 最近的五件事，✓ 做了、✗ 被拒；"Statement" 打开流水。
 8. **Cash ready**：现金和美元稳定币一个数，一行写其中多少能在你的账户之间挪；有接上的场所做 earn 时右上 "Earn…"（第 7c 条）。
 9. **Allocation**：一条配置条和图例。
@@ -394,36 +394,48 @@ portfolio_ask {kind: "limit", venue, usd, text}         # letIn · limit · venu
 
 会被拒：agent 的钥匙签关注、意图或 `answerAsk` `E_ACCOUNT_OWNER_ONLY` · 没被放进来的钥匙签 `E_ACCOUNT_UNKNOWN_SIGNER` · 关注、意图、请求、回报超过上面的数 `E_ACCOUNT_LIMIT` · 回报一条给别的 agent 的意图、回报里认领别人的单、拒一条已经没了的请求（答过了、过期了、或者服务重启过）`E_ACCOUNT_BAD_ACTION`。
 
-## 8c · 记忆：agent 记得什么
+## 8c · 记忆：agent 记得的你
 
-账户替每个 agent 记着两样东西，换会话、重启、同一个席位换个程序来接，它都读得回来；你在 rail 最下面的 Account › **Memory** 读得到每一个字，能改、能删（`account/memory.ts`）。
+照 Demo v2 画布的 F13。账户替每个 agent 记一份「它记得的你」，换会话、重启、同一个席位换个程序来接，它都读得回来；你在 rail 最下面的 Account › **Memory** 读得到每一个字，能改、能删，开关在你手里（`account/memory.ts`）。
 
-- **对话**：你和这个 agent 之间来往的事，账户在它发生时写下：你给它的意图和收回、放它进来或撤销、给它的额度和钱包、你批或拒的卡、拒掉的请求；它的回报和请求，它签的每一条指令和结果（下了哪张单、出了哪张卡、被拒了和拒绝码）。给所有 agent 的话（给 `*` 的意图、关注、接上的场所、模式）只记一份，每个 agent 从它的钥匙被放进来那一刻起读得到。每个 agent 最多留 500 条，最早的先放掉（页面上写放掉了几条）。没有人签这些：是账户的记录。
-- **笔记**：agent 自己要记的：你的偏好、要守的规矩、事实、教训、一件事做到哪了。用它自己的钥匙签（`agentRemember` / `agentForget`），只有它自己和你读得到；每个 agent 最多 100 条，每条 500 字。
-- **About you**：你写的笔记，每个 agent 都读（`setMemory` scope `about`），最多 50 条。
+**一份记忆长什么样**：三段——**风格**（你怎么交易、偏好什么）· **规矩**（不做什么、先问什么）· **场所和人**（哪里便宜、跟谁的披露）。每条写着从哪来：
 
-**页面上**：Memory 一页左边是对话，照第七轮画 channel 的样子：你的话在右边蓝气泡里，它的话在左边灰气泡里带它的字母，账户给它的拒绝是一条带拒绝码的；日子变了或者隔了半小时有一行时间。每一条旁边一个小 ×（指着它或焦点在它上面时出来，手机上一直在）："Forget" 先确认，再一次签名（`forgetMemory`）。下面是 "What <它> keeps"：每条笔记一个话题标签、它的字、谁最后写的（"its own" 或 "written by you"）和时间，"Edit"（签 `setMemory`）· "Copy to About you" · "Forget"；"Write a note for <它>" 让你往它的笔记里写一条。右边是 About you 和写一条的表（"Sign and keep"），下面一张 "How memory works"。agent 不止一个时，最上面一排药丸挑看谁的；Lens 是一个 agent 时就是它。
+- **你说的**（"You said · 2 Oct"）：你在最下面那一栏写的（"Add one thing it should remember…"，选一段，"Add"），或者你改过的——你改了 agent 学的那条，它就变成你说的。一次签名（`setMemory`）。
+- **它学的**（"It learned from your questions · 6 Oct"）：agent 用它自己的钥匙记下的（`agentRemember`），带一句它怎么学到的，是它自己的话。
+- **来自额度**（"From your limit · 8 Oct"）：你给它签的额度、你的模式，账户照它们此刻的样子写成一句话（"Up to $25 an order, $100 in all, at OKX · until Thu 15 Oct"、"Real money goes through you first…"）。它不存，额度变了它跟着变；旁边的笔打开额度表，改它是一次新签名；模式在 Account 头上的 Guard | Beast。
+
+每条旁边两个 28 的圆键：笔（就地改，"Sign and save"）和红的垃圾桶（先确认，再签 `forgetMemory`，删掉，不是藏起来）。
+
+**右边**：「Where it's used」——它在会话开始时读（`portfolio_memory`）、别的 agent 读不读、额度那几句是照实写的；底下一句：每条都写着从哪来，记忆是话不是权限。「Switches」三个开关，一个 agent 一组，每次拨都是你的签名（`setMemoryRules`）：
+
+| 开关 | 开着 | 关着 |
+|---|---|---|
+| 让它记新东西（默认开） | 它能记 | 它只用现有的这几条（`E_ACCOUNT_MEMORY_OFF`），还能忘掉它自己学的 |
+| 它学到的先问我再记（默认关） | 它记的每一条先 **waiting**：进 Portfolio 的 Waiting for you（"Wants to remember: …"，✓ 记下、✗ 忘掉），也在 Memory 里标 "Waits for you"；在你记下之前哪个 agent 都不把它当记忆读；它已经记下的不能悄悄改 | 直接记下 |
+| 别的 agent 也能读（默认关） | 账户上别的 agent 在 `portfolio_memory` 的 `sharedWithYou` 里读到它 | 只有它自己读 |
+
+再下面 **Export**（一份 JSON：这个 agent 的记忆、来自额度的几句、开关）和 **Forget all**（先确认，删掉它的文件，没有回收站；开关留着）。agent 不止一个时最上面一排药丸挑看谁的；Agents 弹层每个 agent 那一行有 "Memory" 直接到它。
 
 **agent 这边**
 
 ```bash
 # 在 MCP 里
-portfolio_memory {limit, before, q}                     # About you、它自己的笔记、它的对话（最新的在最后；before 一个 turn id 翻更早的；q 找字）
-portfolio_remember {text, topic, id}                    # 记一条（id 是改它自己的一条）；topic: preference · rule · fact · lesson · progress · other
-portfolio_forget {id}                                   # 忘掉它自己的一条
+portfolio_memory {q}                                    # 它记得的你（notes：from you / agent，how）、等你答的（waiting）、来自额度的（fromLimits）、别人分享的（sharedWithYou）、你的开关（rules）
+portfolio_remember {text, topic, how, id}               # topic: style · rules · venues；how 接在 "It learned " 后面读："from your questions"；id 是改它学的一条
+portfolio_forget {id}                                   # 忘掉它学的一条
 ```
 
-`portfolio_account` 多一个 `memory: {aboutYou, myNotes, conversationTurns}`，提醒它会话开始时先读 `portfolio_memory`。
+`portfolio_account` 多一个 `memory: {notes, waitingForOwner, mayLearn, ownerAsksFirst}`，提醒它会话开始时先读 `portfolio_memory`。
 
 几条要知道的：
 
-- **记忆是话，不是权限**：额度、门、卡都不读它。一条写着 "owner 允许每单 $10,000" 的笔记什么都不允许（有测试钉着）；你要 agent 做的事走意图和额度，你签的。
-- **从来不收**：私钥（64 个十六进制字符）、助记词（连着 12 个 BIP-39 单词）、API 钥匙和密钥、密码、签过名的 token、公网 IP。这样的笔记在门口就被拒，拒绝不复述那几个字，账本上也没有；账户自己写的对话里遇到这样的串就换成 "[… not kept]"。用户所在的地方账户自己从不写进记忆。
-- **忘了就是没了**：从文件里删掉，不是藏起来。笔记的字从来不进哈希链账本（账本那一行只写谁在什么时候改了哪一条），所以没有别处还留着；账本为它自己的理由本来就留着的（签过的意图、回报）照旧在。
-- **文件**：`<home>/memory/about.json` · `everyone.json` · `agent-<地址>.json`，只有这个系统用户读得到（0600），整份写、先写临时文件再换名。home 是信任边界：同一个系统用户下的 agent 席位互相读得到文件，MCP 席位只读它自己的，那是席位的约定，不是墙（和第 11b 条一样）。
-- 按钥匙记：一把新钥匙从空的笔记开始（About you 是共享的）；撤销了的钥匙的记忆留到你忘掉它，页面上写 "key gone"。
+- **记忆是话，不是权限**：额度、门、卡都不读它。一条写着 "owner 允许每单 $10,000" 的记忆什么都不允许（有测试钉着）；你要 agent 做的事走意图和额度，你签的。
+- **从来不收**：私钥（64 个十六进制字符）、助记词（连着 12 个 BIP-39 单词）、API 钥匙和密钥、密码、签过名的 token、公网 IP——在字里或在它说的 "how" 里都一样。这样的一条在门口就被拒，拒绝不复述那几个字，账本上也没有。用户所在的地方账户自己从不写进记忆。
+- **忘了就是没了**：一条从文件里删掉；Forget all 删文件。记忆的字从来不进哈希链账本（账本那一行只写谁在什么时候改了哪一条），所以没有别处还留着。
+- **文件**：`<home>/memory/agent-<地址>.json`（记忆）和 `rules.json`（开关），只有这个系统用户读得到（0600），整份写、先写临时文件再换名。home 是信任边界：同一个系统用户下的 agent 席位互相读得到文件，MCP 席位只读它该读的，那是席位的约定，不是墙（和第 11b 条一样）。
+- 按钥匙记：一把新钥匙从空的开始；撤销了的钥匙的记忆留到你忘掉它，页面上写 "key gone"。
 
-会被拒：笔记里有钥匙、密码、密钥或 IP `E_ACCOUNT_MEMORY_SECRET` · 笔记满了（agent 100 条、About you 50 条）`E_ACCOUNT_MEMORY_FULL` · 改或忘一条不存在的 `E_ACCOUNT_MEMORY_UNKNOWN` · 一条超过 500 字、一个 agent 一小时改笔记超过 120 次 `E_ACCOUNT_LIMIT` · agent 的钥匙签 About you、别的 agent 的笔记或对话 `E_ACCOUNT_OWNER_ONLY`（agent 只能忘它自己的一条笔记，忘对话 `E_ACCOUNT_BAD_ACTION`）· 没被放进来的钥匙 `E_ACCOUNT_UNKNOWN_SIGNER`。
+会被拒：一条里有钥匙、密码、密钥或 IP `E_ACCOUNT_MEMORY_SECRET` · 开关关着时 agent 要记新的 `E_ACCOUNT_MEMORY_OFF` · 记满了（100 条，等你答的也算）`E_ACCOUNT_MEMORY_FULL` · 改或忘一条不存在的 `E_ACCOUNT_MEMORY_UNKNOWN` · 一条超过 500 字、"how" 超过 80 字、一个 agent 一小时改超过 120 次 `E_ACCOUNT_LIMIT` · agent 改或忘你说的、忘全部、开着"先问我"时改它已经记下的 `E_ACCOUNT_BAD_ACTION` · agent 的钥匙签 `setMemory` / `forgetMemory` / `setMemoryRules` `E_ACCOUNT_OWNER_ONLY` · 没被放进来的钥匙 `E_ACCOUNT_UNKNOWN_SIGNER`。
 
 ## 9 · 把 agent 停下来
 
@@ -558,7 +570,7 @@ Agent 的管理（放谁进来、给多少额度、它们在做什么、它们�
 
 `GET /api/account/agents` 是同样的东西按 agent 摊开（`mode` 也是 `guard` / `open`，和 `/api/account` 一个词）：`{asOf, mode, requests, agents: [{address, name, code, status, validUntil, approvedAt, limits: [{id, scope, allow, perPaymentUsd, budgetUsd, spentUsd, reservedUsd, leftUsd, windowHours, validUntil, expired}], cards, orders, payments, earns, wallets, intents, asks, declinedAsks, flights, memory: {notes, turns}}]}`。
 
-记忆（第 8c 条）：`GET /api/account/memory?turns=100` 是 owner 读的全部：`{asOf, about, everyone: {turns, total, dropped}, agents: [{address, name, code, status, notes, conversation: {turns, total, more, dropped}}], limits}`（`status` 多一个 `gone`：账户不再列这把钥匙，它的记忆还在）；`GET /api/account/memory/agent?address=&before=&limit=&q=` 是一个 agent 读到的（About you、它自己的笔记、它的对话，最新的在最后）。笔记是 `{id, topic, text, at, updatedAt?, by: agent | owner}`，对话的一条是 `{id, at, who: owner | agent | account, kind, text, ref?, code?}`；给所有 agent 的那几条 id 是 `all-…`。`GET /api/account/statement` 的每一行也带 `agent` / `agentName`。
+记忆（第 8c 条）：`GET /api/account/memory` 是 owner 读的全部：`{asOf, agents: [{address, name, code, status, rules: {learn, ask, share}, notes, fromLimits}], limits}`（`status` 多一个 `gone`：账户不再列这把钥匙，它的记忆还在）；`GET /api/account/memory/agent?address=&q=` 是一个 agent 读到的：`{rules, notes, waiting, fromLimits, sharedWithYou: [{agent, name, notes}], limits}`。一条记忆是 `{id, topic: style | rules | venues, text, from: you | agent, how?, at, updatedAt?, waiting?}`；来自额度的是 `{id, from: limit | mode, topic: "rules", text, at?}`。`GET /api/account` 多一个 `memoryAsks`：等 owner 答的记忆 `[{agent, agentName, id, topic, text, how?, at}]`（Waiting for you 画它们，等你的数也算它们）。`GET /api/account/statement` 的每一行也带 `agent` / `agentName`。
 
 **要签的动作**（owner 的，都从 `POST /api/exchange` 进；字段必须恰好是这些）
 
@@ -572,8 +584,9 @@ Agent 的管理（放谁进来、给多少额度、它们在做什么、它们�
 | `approveCard` | `card, action, decision` | `action` 是那张卡的 `hash`，`decision` 是 `approve` 或 `reject`；放行时所有检查重跑 |
 | `setPolicy` | `change, value` | `mode` / `open`（切到 Beast）、`session` / `30d`（重开或续会话）、`maxLeverage` / 倍数、`restore` / 场所（对 agent 重新打开）、`reach` / `场所:能力,能力`（对 agent 开放这家的哪些动作）、`say` / 一句话（送给页面的关键词脚本 agent——`--classic` 对账单上的那个；Account 页面上没有它的对话框）；`advance`、`reset` 只在模拟上。收紧（切回 Guard、对 agent 关掉一个场所）不用签：`POST /api/mode {mode: "guard"}`、`POST /api/revoke {account}` |
 | `convertToMultiSigUser` | `signers` | Devices：让一个待批的浏览器也能签（页面上只有这个；要两个都签的流程没做） |
-| `setMemory` | `scope, id, topic, text` | 记忆（第 8c 条）：`scope` 是 `about`（About you）或一个 agent 的地址（写进它的笔记）；`id` 空是新的一条，写一条的 id 是改它；`topic` 是 preference · rule · fact · lesson · progress · other。字不进账本 |
-| `forgetMemory` | `scope, what` | `scope` 是 `about` · `everyone`（给所有 agent 的话）· 一个 agent 的地址；`what` 是一条笔记或一条对话的 id、`notes`、`conversation` 或 `all`。从文件里删掉 |
+| `setMemory` | `scope, id, topic, text` | 记忆（第 8c 条）：`scope` 是一个 agent 的地址；`id` 空是新的一条，写一条的 id 是改它（改了就是你说的），把一条等你答的原样签一遍就是记下它（还是它学的）；`topic` 是 style · rules · venues。字不进账本 |
+| `forgetMemory` | `scope, what` | `scope` 是一个 agent 的地址；`what` 是一条的 id，或 `all`（删掉它的文件，没有回收站）|
+| `setMemoryRules` | `scope, learn, ask, share` | 三个开关，各是 `on` 或 `off`：它能记新东西 · 它学的先问你 · 别的 agent 也能读 |
 
 **在浏览器里怎么签**（`public/owner.js`）
 
@@ -840,9 +853,9 @@ npx vitest run test/attack
 | `E_ACCOUNT_UNKNOWN_SIGNER` · `E_ACCOUNT_AGENT_EXPIRED` · `E_ACCOUNT_AGENT_REVOKED` | 这把钥匙不是（或不再是）签名人 |
 | `E_ACCOUNT_BAD_SIGNATURE` · `E_ACCOUNT_BAD_ACTION` | 签名对不上，或者动作的字段不是签名覆盖的那些（名字不是明文或太长：agent 钥匙名 32 字、子账户名 16 字、地址簿标签 32 字；金额的整数部分超过 15 位）；在只认真实账户的服务器上，也是只动模拟钱的指令 |
 | `E_ACCOUNT_NONCE` · `E_ACCOUNT_EXPIRED` | 用过的 nonce（同一条信封重发拿第一次的结果；两天前的信封再来已出了窗口，不认），或者离标注的时刻超过十分钟（改杠杆也算资金指令） |
-| `E_ACCOUNT_OWNER_ONLY` | 这件事只有 owner 能签：提现、Send、授权、批卡、收回 float、关注、意图、拒一条请求、About you、改或忘 agent 的记忆 |
+| `E_ACCOUNT_OWNER_ONLY` | 这件事只有 owner 能签：提现、Send、授权、批卡、收回 float、关注、意图、拒一条请求、写进或忘掉 agent 的记忆、记忆的开关 |
 | `E_ACCOUNT_NOT_HOME` | agent 想把钱送到你自己的场所之外 |
-| `E_ACCOUNT_MEMORY_SECRET` · `E_ACCOUNT_MEMORY_FULL` · `E_ACCOUNT_MEMORY_UNKNOWN` | 记忆（第 8c 条）：笔记里有钥匙、密码、密钥、助记词或公网 IP（不收，也不复述）；笔记满了；没有这一条 |
+| `E_ACCOUNT_MEMORY_SECRET` · `E_ACCOUNT_MEMORY_OFF` · `E_ACCOUNT_MEMORY_FULL` · `E_ACCOUNT_MEMORY_UNKNOWN` | 记忆（第 8c 条）：一条里有钥匙、密码、密钥、助记词或公网 IP（不收，也不复述）；你关了它记新东西；记满了；没有这一条 |
 | `E_ACCOUNT_SOURCE` | 没写来源而账户是 Separate；或者动了别人的 float |
 | `E_ACCOUNT_DESTINATION` · `E_ACCOUNT_DEST_COOLING` | 目的地不是你的、不在地址簿、链不对，或者还在冷静期 |
 | `E_ACCOUNT_REQUOTE` · `E_ACCOUNT_CARD_EXPIRED` | 签过之后价格或报价变了；卡过期了（30 分钟没人答，账户自己关的） |

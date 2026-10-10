@@ -27,7 +27,7 @@ function render() {
 /* the rail and the top bar: the tab's title with what waits, the clock, trading on or off, the mode, the counts, the lens, pairing, a restart */
 function renderChrome(L, owner) {
   // what waits for the owner: the cards to approve, and what the agents asked for (both answered under Portfolio's Waiting for you)
-  const waiting = A.cards.length + (A.asks || []).length;
+  const waiting = A.cards.length + (A.asks || []).length + (A.memoryAsks || []).length;
   document.title = `${waiting ? `(${waiting}) ` : ""}Account`;
   $("stamp").textContent = `${ny(A.now, { weekday: "short", day: "numeric", month: "short" }).replace(",", "")} · ${nyTime(A.now)} New York`;
   // trading on or off, and the most one order or move may be worth (round 7's "Trading on · $100 a move"; the sentence is in Settings)

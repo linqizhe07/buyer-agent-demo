@@ -100,6 +100,7 @@ export const CODES = {
   E_ACCOUNT_MEMORY_SECRET: { layer: "ACCOUNT", zh: "记忆里不收钥匙、密码、密钥和 IP 地址" },
   E_ACCOUNT_MEMORY_FULL: { layer: "ACCOUNT", zh: "记忆已满：先忘掉一条，或者改一条" },
   E_ACCOUNT_MEMORY_UNKNOWN: { layer: "ACCOUNT", zh: "记忆里没有这一条" },
+  E_ACCOUNT_MEMORY_OFF: { layer: "ACCOUNT", zh: "owner 关了这个 agent 记新东西：它只用现有的这几条" },
   // the payee — the other side of a payment the agent makes
   E_PAYEE_CHANGED: { layer: "PAYEE", zh: "收款地址和这个 host 钉住的不一样" },
   E_PAYEE_OVERCHARGE: { layer: "PAYEE", zh: "收款方要的比授权的多" },

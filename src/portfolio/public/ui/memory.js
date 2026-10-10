@@ -1,20 +1,19 @@
-/* The Account's Memory: what the agents remember (account/memory.ts on the server), every word of it the owner's to read, change and
-   forget. Three things, as GET /api/account/memory gives them:
-     About you       the owner's notes, signed, which every agent on the account reads
-     its notes       what one agent chose to keep (portfolio_remember), signed with its own key
-     conversation    what passed between the owner and that agent, as the account wrote it when it happened — drawn the way round 7 draws a
-                     channel: the owner's words on the right in the accent, the agent's on the left, the account's answer to the agent (a
-                     refusal and its code) a line of its own
-   A change to a note, and every forgetting, is the owner's signed action (setMemory, forgetMemory: own()). Forgotten is gone from the
-   account; the ledger never held the words. Words, never a permission: no limit reads any of it. */
+/* The Account's Memory — the Demo v2 canvas's F13: what an agent remembers about you (account/memory.ts on the server), every word of it
+   yours to read, change and forget, and three switches for what it may add. GET /api/account/memory gives it agent by agent:
+     its notes       in three parts, Style · Rules · Venues and people, each saying where it came from — You said (yours), It learned … (the
+                     agent's, in its words), and the waiting ones it learned while you asked to be asked first
+     its limits      what the limits you signed for it and your mode say, as they stand ("From your limit"): changed only by changing them
+     its switches    remember new things · ask me first · other agents can read it
+   A change is your signed action (setMemory, forgetMemory, setMemoryRules: own()). Export writes the memory out as a JSON file; Forget all
+   deletes its file, and there is no bin. Words, never a permission: no limit reads any of it. */
 
-const MEM = { page: null, err: "", agent: "", edit: "", adding: false, older: new Map(), olderAsked: "", soon: false, stuck: "" };
-const MEM_TOPICS = [["preference", "Preference"], ["rule", "Rule"], ["fact", "Fact"], ["lesson", "Lesson"], ["progress", "Progress"], ["other", "Other"]];
+const MEM = { page: null, err: "", agent: "", edit: "", soon: false };
+const MEM_PARTS = [["style", "Style"], ["rules", "Rules"], ["venues", "Venues and people"]];
 const MEM_LOOK_ONLY = "This browser can look but not sign";
-/* an agent's name as the account knows it, or the key it was: a key the account no longer lists keeps its memory until the owner forgets it */
+/* an agent's name as the account knows it, or the key it was: a key the account no longer lists keeps its memory until you forget it */
 const memName = (a) => a.name || `An earlier key ${short(a.address)}`;
-/* a note's or a turn's time, as the page says times */
-const memWhen = (iso) => (nyDay(iso) === nyDay(A.now) ? `Today ${nyTime(iso)}` : `${nyDay(iso)} ${nyTime(iso)}`);
+/* the day a note was kept, as F13 writes it: Oct 2 */
+const memDay = (iso) => (iso ? ny(iso, { month: "short", day: "numeric" }) : "");
 
 /** the Memory pane (the shell calls it on every read, on the route and on the lens) */
 function renderMemory({ el, owner, params = {} }) {
@@ -22,8 +21,8 @@ function renderMemory({ el, owner, params = {} }) {
   // an agent in the lens is the one shown
   const l = lensNow();
   if (l.kind === "agent") MEM.agent = l.id.toLowerCase();
-  if (!el.firstElementChild || el.firstElementChild.dataset.mem !== "1") {
-    el.innerHTML = '<div class="mem" data-mem="1"><div class="mem-who" data-mem-part="who"></div><div class="cols"><div class="col-main"><section class="sec mem-chat" data-mem-part="chat" aria-labelledby="mem-chat-h"></section><section class="sec mem-notes" data-mem-part="notes" aria-labelledby="mem-notes-h"></section></div><div class="col-side"><section class="sec mem-about" data-mem-part="about" aria-labelledby="mem-about-h"></section><section class="sec mem-how" data-mem-part="how" aria-label="How memory works"></section></div></div></div>';
+  if (!el.firstElementChild || el.firstElementChild.dataset.mem !== "2") {
+    el.innerHTML = '<div class="mem" data-mem="2"><div class="mem-who" data-mem-part="who"></div><div class="mem-grid"><section class="sec mem-card" data-mem-part="notes" aria-labelledby="mem-h"></section><div class="mem-side"><section class="sec" data-mem-part="uses" aria-labelledby="mem-uses-h"></section><section class="sec" data-mem-part="switches" aria-labelledby="mem-sw-h"></section></div></div></div>';
     memWire(el);
   }
   memDraw(el, owner);
@@ -32,7 +31,7 @@ function renderMemory({ el, owner, params = {} }) {
 
 /* the read behind the pane, kept a few seconds (the page reads again every 20 seconds) */
 function memRead() {
-  api("/api/account/memory?turns=200", { ttl: 4_000 }).then((b) => {
+  api("/api/account/memory", { ttl: 4_000 }).then((b) => {
     if (b && b.ok) [MEM.page, MEM.err] = [b, ""];
     else MEM.err = refusalOf(b) || "The account did not answer.";
     memAgain();
@@ -62,43 +61,37 @@ function memPut(el, part, html) {
   return paint(node, html);
 }
 
-/* the agents with memory, the ones standing first */
+/* the agents with a memory, the ones standing first; an agent in the lens alone */
 function memAgents() {
   const rank = { ok: 0, expired: 1, revoked: 2, gone: 3 };
-  return ((MEM.page && MEM.page.agents) || []).slice().sort((a, b) => (rank[a.status] ?? 4) - (rank[b.status] ?? 4) || memName(a).localeCompare(memName(b)));
+  const l = lensNow();
+  return ((MEM.page && MEM.page.agents) || [])
+    .filter((a) => l.kind !== "agent" || a.address === l.id.toLowerCase())
+    .slice()
+    .sort((a, b) => (rank[a.status] ?? 4) - (rank[b.status] ?? 4) || memName(a).localeCompare(memName(b)));
 }
 
 function memDraw(el, owner) {
   if (!MEM.page) {
-    const wait = MEM.err ? `<div class="msg no">${esc(MEM.err)}</div>` : '<div class="skel-rows" aria-hidden="true"><span class="skel"></span><span class="skel"></span><span class="skel" style="width:60%"></span></div>';
     memPut(el, "who", "");
-    memPut(el, "chat", wait);
-    memPut(el, "notes", "");
-    memPut(el, "about", "");
-    memPut(el, "how", "");
+    memPut(el, "notes", MEM.err ? `<div class="msg no">${esc(MEM.err)}</div>` : '<div class="skel-rows" aria-hidden="true"><span class="skel"></span><span class="skel"></span><span class="skel" style="width:60%"></span></div>');
+    memPut(el, "uses", "");
+    memPut(el, "switches", "");
     return;
   }
-  // an agent in the lens is the only one shown
-  const l = lensNow();
-  const agents = memAgents().filter((a) => l.kind !== "agent" || a.address === l.id.toLowerCase());
-  const shown = agents.find((a) => a.address === MEM.agent) || agents[0];
-  if (shown) MEM.agent = shown.address;
-  memPut(el, "who", memWhoHtml(agents, shown));
-  if (shown) {
-    const drew = memPut(el, "chat", memChatHtml(shown, owner));
-    if (drew && MEM.stuck !== shown.address) {
-      // a conversation shown for the first time opens at its latest turn
-      MEM.stuck = shown.address;
-      const box = el.querySelector(".mem-turns-box");
-      if (box) box.scrollTop = box.scrollHeight;
-    }
-    memPut(el, "notes", memNotesHtml(shown, owner));
-  } else {
-    memPut(el, "chat", `<div class="card-head"><h2 class="h2" id="mem-chat-h">Conversation</h2></div><div class="empty"><p>No agent has been let in yet. Once one is, the account keeps what passes between you here — your words, its reports and asks, every instruction it signs and what came of it — and the notes it keeps for itself.</p><div class="acts">${memBtn("agents", "Agents…", { cls: "btn btn-sm" })}</div></div>`);
-    memPut(el, "notes", "");
+  const agents = memAgents();
+  const a = agents.find((x) => x.address === MEM.agent) || agents[0];
+  if (a) MEM.agent = a.address;
+  memPut(el, "who", memWhoHtml(agents, a));
+  if (!a) {
+    memPut(el, "notes", `<div class="card-head"><h2 class="h2" id="mem-h">Memory</h2></div><p class="dim">No agent has been let in yet. Once one is, what it remembers about you is kept here — what you tell it, and what it learns — and every word of it is yours to change or forget.</p><div>${memBtn("agents", "Agents…", { cls: "btn btn-sm" })}</div>`);
+    memPut(el, "uses", "");
+    memPut(el, "switches", "");
+    return;
   }
-  memPut(el, "about", memAboutHtml(owner));
-  memPut(el, "how", memHowHtml());
+  memPut(el, "notes", memNotesHtml(a, owner));
+  memPut(el, "uses", memUsesHtml(a));
+  memPut(el, "switches", memSwitchesHtml(a, owner));
 }
 
 /* a button of the pane's: what it does and about what (data-fk names it, so a redraw gives it its focus back) */
@@ -113,88 +106,70 @@ function memWhoHtml(agents, shown) {
     .join("")}</div>`;
 }
 
-// ---- the conversation, as round 7 draws a channel ----------------------------------------------------------------------------------
+// ---- what it remembers about you (F13's card) --------------------------------------------------------------------------------------
 
-/* what a turn is, in a word or two, under its bubble */
-const MEM_KIND = { intent: "Your words", withdraw: "Withdrawn", letIn: "Let in", revoke: "Revoked", limit: "A limit", wallet: "A wallet", card: "A card", declined: "Declined", policy: "The mode", venue: "An account", watch: "Watching", report: "Report", ask: "Asks", did: "Did", refusal: "Refused" };
+/* where a note came from, as F13 says it */
+const memFrom = (n) => (n.from === "you" ? "You said" : n.how ? `It learned ${n.how}` : "It learned this");
 
-function memTurns(a) {
-  const seen = new Set();
-  return [...(MEM.older.get(a.address) || []), ...a.conversation.turns].filter((t) => !seen.has(t.id) && seen.add(t.id));
+/* one note: its words, where it came from and when; edit and forget — or, waiting for you, keep and forget */
+function memNoteHtml(a, n, owner) {
+  if (MEM.edit === `${a.address}:${n.id}`) return `<li class="mem-row editing" data-k="${esc(n.id)}">${memFormHtml({ form: "edit", agent: a.address, id: n.id, topic: n.topic, text: n.text, yes: "Sign and save" })}</li>`;
+  const off = !owner;
+  const t = off ? MEM_LOOK_ONLY : "";
+  const keys = n.waiting
+    ? `${memBtn("keep", icon("check"), { cls: "mem-key keep", data: { agent: a.address, id: n.id }, off, title: t || "Keep it: what it learned, now read", aria: `Keep: ${n.text.slice(0, 60)}` })}${memBtn("forget-note", icon("trash"), { cls: "mem-key bad", data: { agent: a.address, id: n.id }, off, title: t || "Forget", aria: `Forget: ${n.text.slice(0, 60)}` })}`
+    : `${memBtn("edit", icon("pencil"), { cls: "mem-key", data: { agent: a.address, id: n.id }, off, title: t || "Edit", aria: `Edit: ${n.text.slice(0, 60)}` })}${memBtn("forget-note", icon("trash"), { cls: "mem-key bad", data: { agent: a.address, id: n.id }, off, title: t || "Forget", aria: `Forget: ${n.text.slice(0, 60)}` })}`;
+  return `<li class="mem-row${n.waiting ? " waiting" : ""}" data-k="${esc(n.id)}"><div class="mem-row-t"><div class="mem-text">${esc(n.text)}</div><div class="mem-from">${esc(memFrom(n))} · ${esc(memDay(n.updatedAt || n.at))}${n.waiting ? ' · <span class="pill warm">Waits for you</span>' : ""}</div></div>${keys}</li>`;
 }
 
-function memChatHtml(a, owner) {
-  const turns = memTurns(a);
-  const c = a.conversation;
-  const more = c.total > turns.length || (c.more && !MEM.older.has(a.address));
-  const sub = c.total ? `${plural(c.total, "turn")}${c.dropped ? ` · the ${plural(c.dropped, "oldest turn")} let go` : ""}` : "Nothing yet";
-  const head = `<div class="card-head"><div><h2 class="h2" id="mem-chat-h">Conversation with ${esc(memName(a))}</h2><span class="dim small">${esc(sub)} · it reads this back in every session</span></div><span class="tools">${c.total ? memBtn("forget-chat", "Forget the conversation", { cls: "btn btn-sm btn-ghost", data: { agent: a.address }, off: !owner, title: owner ? "" : MEM_LOOK_ONLY }) : ""}</span></div>`;
-  if (!turns.length) return `${head}<div class="empty"><p>Nothing has passed between you and ${esc(memName(a))} yet. Your words to it (Hand to agent), its reports and asks, and every instruction it signs will be kept here, for it to read back.</p></div>`;
-  let lastAt = 0;
-  const rows = [];
-  for (const t of turns) {
-    const at = Date.parse(t.at);
-    // a line with the time when the day changes, or after half an hour of nothing
-    if (!lastAt || nyDay(t.at) !== nyDay(new Date(lastAt).toISOString()) || at - lastAt > 30 * 60_000) rows.push(`<li class="mem-time"><span>${esc(memWhen(t.at))}</span></li>`);
-    lastAt = at;
-    rows.push(memTurnHtml(a, t, owner));
-  }
-  const earlier = more ? `<li class="mem-earlier">${memBtn("earlier", MEM.olderAsked === a.address ? "Reading…" : "Earlier turns", { cls: "btn btn-sm btn-ghost", data: { agent: a.address }, off: MEM.olderAsked === a.address })}</li>` : "";
-  return `${head}<div class="mem-turns-box"><ol class="mem-turns">${earlier}${rows.join("")}</ol></div>`;
+/* a line of From your limit: what a signed limit (or the mode) says, as it stands; changed only where it is changed — a limit in its form,
+   the mode with Guard | Beast at the top of the Account */
+function memLimitHtml(a, x, owner) {
+  const change = x.from === "mode" ? "" : memBtn("limit", icon("pencil"), { cls: "mem-key", data: { agent: a.address }, off: !owner, title: owner ? "Change the limit: a new signature" : MEM_LOOK_ONLY, aria: "Change the limit" });
+  return `<li class="mem-row from-limit" data-k="${esc(x.id)}"><div class="mem-row-t"><div class="mem-text">${esc(x.text)}</div><div class="mem-from">${x.from === "mode" ? "From your mode: Guard | Beast, at the top" : `From your limit${x.at ? ` · ${esc(memDay(x.at))}` : ""}`}</div></div>${change}</li>`;
 }
 
-function memTurnHtml(a, t, owner) {
-  const all = t.id.startsWith("all-");
-  const mark = [MEM_KIND[t.kind] || t.kind, t.ref || "", all ? "to every agent" : "", nyTime(t.at)].filter(Boolean).join(" · ");
-  const rm = memBtn("forget-turn", icon("x", "sm"), { cls: "mem-rm", data: { agent: a.address, id: t.id }, off: !owner, title: owner ? (all ? "Forget this turn (every agent's)" : "Forget this turn") : MEM_LOOK_ONLY, aria: `Forget: ${t.text.slice(0, 60)}` });
-  if (t.who === "account")
-    return `<li class="mem-turn from-account" data-k="${esc(t.id)}"><div class="bub"><span class="mem-code">✗ ${esc(t.code || "refused")}</span> ${esc(t.text)}</div><span class="mem-meta">${esc(mark)}</span>${rm}</li>`;
-  if (t.who === "owner")
-    return `<li class="mem-turn from-you" data-k="${esc(t.id)}"><span class="sr">You: </span><div class="bub">${esc(t.text)}</div><span class="mem-meta">${esc(mark)}</span>${rm}</li>`;
-  return `<li class="mem-turn from-agent" data-k="${esc(t.id)}">${avatar(memName(a).slice(0, 1), "sm")}<span class="sr">${esc(memName(a))}: </span><div class="bub">${esc(t.text)}</div><span class="mem-meta">${esc(mark)}</span>${rm}</li>`;
-}
-
-// ---- notes -----------------------------------------------------------------------------------------------------------------------
-
-/* one note: its topic, its words, who wrote it last and when; edit, forget, and (an agent's) copy to About you */
-function memNoteHtml(scope, n, owner) {
-  const key = `${scope}:${n.id}`;
-  if (MEM.edit === key) return `<li class="mem-note editing" data-k="${esc(n.id)}">${memFormHtml({ form: "edit", scope, id: n.id, topic: n.topic, text: n.text, yes: "Sign and save" })}</li>`;
-  const by = n.by === "owner" ? "written by you" : scope === "about" ? "" : "its own";
-  const when = memWhen(n.updatedAt || n.at);
-  const acts = [
-    memBtn("edit", "Edit", { data: { scope, id: n.id }, off: !owner, title: owner ? "" : MEM_LOOK_ONLY }),
-    scope !== "about" ? memBtn("to-about", "Copy to About you", { data: { scope, id: n.id }, off: !owner, title: owner ? "Copy to About you, which every agent reads" : MEM_LOOK_ONLY }) : "",
-    memBtn("forget-note", "Forget", { data: { scope, id: n.id }, off: !owner, title: owner ? "" : MEM_LOOK_ONLY }),
-  ].filter(Boolean);
-  return `<li class="mem-note" data-k="${esc(n.id)}"><div class="mem-note-h"><span class="chip">${esc((MEM_TOPICS.find(([v]) => v === n.topic) || [n.topic, n.topic])[1])}</span><span class="dim small">${esc([by, when].filter(Boolean).join(" · "))}</span></div><p class="mem-text">${esc(n.text)}</p><div class="mem-acts">${acts.join("")}</div></li>`;
-}
-
-/* the form a note is written in: its words and its topic, then signed (setMemory) */
-function memFormHtml({ form, scope, id = "", topic = "preference", text = "", yes }) {
+/* the form a note is written in (F13's add row, and an edit in place): its words and its part, then signed (setMemory) */
+function memFormHtml({ form, agent, id = "", topic = "style", text = "", yes }) {
   const max = (MEM.page && MEM.page.limits && MEM.page.limits.noteText) || 500;
-  return `<form class="mem-form" data-mem-form="${esc(form)}" data-scope="${esc(scope)}" data-id="${esc(id)}"><label class="sr" for="mem-${esc(form)}-${esc(scope)}-text">The note</label><textarea id="mem-${esc(form)}-${esc(scope)}-text" name="text" rows="3" maxlength="${max}" placeholder="${scope === "about" ? "What every agent should know about you: a preference, a rule, a fact" : "A note for this agent to read back"}" required>${esc(text)}</textarea><div class="mem-form-row"><label class="sr" for="mem-${esc(form)}-${esc(scope)}-topic">Topic</label><select id="mem-${esc(form)}-${esc(scope)}-topic" name="topic">${MEM_TOPICS.map(([v, t]) => `<option value="${v}"${v === topic ? " selected" : ""}>${t}</option>`).join("")}</select><span class="grow"></span>${form === "about-add" ? "" : memBtn("cancel", "Cancel", { cls: "btn btn-sm btn-ghost" })}<button type="submit" class="btn btn-primary btn-sm"${owns() ? "" : ` disabled title="${MEM_LOOK_ONLY}"`}>${esc(yes)}</button></div><div class="msg" data-mem-msg role="status"></div></form>`;
+  const field = form === "add"
+    ? `<input id="mem-add-text" name="text" maxlength="${max}" placeholder="Add one thing it should remember…" autocomplete="off" />`
+    : `<textarea id="mem-edit-text" name="text" rows="2" maxlength="${max}">${esc(text)}</textarea>`;
+  return `<form class="mem-form ${form}" data-mem-form="${esc(form)}" data-agent="${esc(agent)}" data-id="${esc(id)}"><label class="sr" for="mem-${esc(form)}-text">${form === "add" ? "Add one thing it should remember" : "The note"}</label>${field}<label class="sr" for="mem-${esc(form)}-topic">Which part</label><select id="mem-${esc(form)}-topic" name="topic">${MEM_PARTS.map(([v, t]) => `<option value="${v}"${v === topic ? " selected" : ""}>${t}</option>`).join("")}</select>${form === "add" ? "" : memBtn("cancel", "Cancel", { cls: "btn btn-sm btn-ghost" })}<button type="submit" class="btn btn-primary btn-sm"${owns() ? "" : ` disabled title="${MEM_LOOK_ONLY}"`}>${esc(yes)}</button><div class="msg" data-mem-msg role="status"></div></form>`;
 }
 
 function memNotesHtml(a, owner) {
   const notes = a.notes;
-  const max = (MEM.page.limits && MEM.page.limits.maxNotes) || 100;
-  const head = `<div class="card-head"><div><h2 class="h2" id="mem-notes-h">What ${esc(memName(a))} keeps</h2><span class="dim small">${notes.length ? `${plural(notes.length, "note")} of ${max}` : "No notes yet"} · read by it and by you</span></div><span class="tools">${notes.length ? memBtn("forget-notes", "Forget every note", { cls: "btn btn-sm btn-ghost", data: { agent: a.address }, off: !owner, title: owner ? "" : MEM_LOOK_ONLY }) : ""}</span></div>`;
-  const list = notes.length ? `<ul class="mem-list">${notes.map((n) => memNoteHtml(a.address, n, owner)).join("")}</ul>` : `<p class="dim small">${esc(memName(a))} keeps notes with portfolio_remember: a preference of yours it learned, a rule, a lesson, how far a task has got. You read every word here.</p>`;
-  const add = MEM.adding === a.address ? memFormHtml({ form: "agent-add", scope: a.address, yes: "Sign and keep" }) : `<div>${memBtn("add", `${icon("plus", "sm")}Write a note for ${esc(memName(a))}`, { cls: "btn btn-sm", data: { agent: a.address }, off: !owner, title: owner ? "" : MEM_LOOK_ONLY })}</div>`;
-  return `${head}${list}${add}`;
+  const lines = a.fromLimits || [];
+  const count = notes.length + lines.length;
+  const head = `<div class="card-head"><h2 class="h2" id="mem-h">What ${esc(memName(a))} remembers about you</h2><span class="dim small">${plural(count, "note")} · only on this machine</span></div>`;
+  const parts = MEM_PARTS.map(([part, words]) => {
+    const rows = [...(part === "rules" ? lines.map((x) => memLimitHtml(a, x, owner)) : []), ...notes.filter((n) => n.topic === part).map((n) => memNoteHtml(a, n, owner))];
+    return rows.length ? `<div class="mem-part"><h3 class="mem-part-h">${esc(words)}</h3><ul class="mem-rows">${rows.join("")}</ul></div>` : "";
+  }).join("");
+  const empty = parts ? "" : `<p class="dim small">Nothing yet. What you tell it, and what it learns, shows here — each saying where it came from.</p>`;
+  return `${head}${parts}${empty}${memFormHtml({ form: "add", agent: a.address, yes: "Add" })}`;
 }
 
-function memAboutHtml(owner) {
-  const notes = MEM.page.about;
-  const max = (MEM.page.limits && MEM.page.limits.maxAbout) || 50;
-  const head = `<div class="card-head"><div><h2 class="h2" id="mem-about-h">About you</h2><span class="dim small">Every agent on the account reads these${notes.length ? ` · ${plural(notes.length, "note")} of ${max}` : ""}</span></div></div>`;
-  const list = notes.length ? `<ul class="mem-list">${notes.map((n) => memNoteHtml("about", n, owner)).join("")}</ul>` : '<p class="dim small">Nothing yet. What you write here, every agent reads when it starts: how you like to trade, what never to do, what to keep in mind.</p>';
-  return `${head}${list}${memFormHtml({ form: "about-add", scope: "about", yes: "Sign and keep" })}`;
+// ---- where it is used, and the switches (F13's right column) --------------------------------------------------------------------
+
+function memUsesHtml(a) {
+  const name = memName(a);
+  const rows = [
+    ["Its sessions", `${name} reads it when a session starts (portfolio_memory)`],
+    ["Other agents", a.rules.share ? "Read it too: you switched it on" : `Do not read it: only ${name} does`],
+    ["Your limits", "Written out as they stand; changing one is still a signed limit"],
+  ];
+  return `<h2 class="h2" id="mem-uses-h">Where it's used</h2><div class="mem-uses">${rows.map(([chip, words]) => `<div><span class="chip">${esc(chip)}</span><span>${esc(words)}</span></div>`).join("")}</div><p class="dim small">Every memory says where it came from: you said, it learned, from your limit. For what it learns, the switches are below. Words, not permission: no limit reads them.</p>`;
 }
 
-function memHowHtml() {
-  return `<div class="label">How memory works</div><ul class="mem-how-l"><li>The account writes the conversation as it happens: your words to an agent, its reports and asks, every instruction it signs and what came of it.</li><li>An agent reads it back with About you and its own notes (portfolio_memory) when a session starts, and keeps notes with its own key.</li><li>Forgetting takes it away for good. The ledger never held the words: it says only who changed which note, and when.</li><li>Words, not permission: what an agent may do is still only its limits and your cards.</li><li>Never kept: keys, secrets, passwords, recovery phrases, IP addresses.</li></ul>`;
+/* a switch of F13's: the row's words, and the track (role switch); flipping it is a signature */
+const memSwitch = (a, key, title, sub, owner) =>
+  `<div class="mem-sw"><div><div class="mem-sw-t">${esc(title)}</div><div class="dim small">${esc(sub)}</div></div><button type="button" role="switch" class="pf-switch" aria-checked="${String(!!a.rules[key])}" aria-label="${esc(title)}" data-mem-act="switch" data-agent="${esc(a.address)}" data-key="${key}" data-fk="mem-switch:${key}"${owner ? "" : ` disabled title="${MEM_LOOK_ONLY}"`}><span class="track" aria-hidden="true"></span></button></div>`;
+
+function memSwitchesHtml(a, owner) {
+  const name = memName(a);
+  return `<h2 class="h2" id="mem-sw-h">Switches</h2>${memSwitch(a, "learn", `Let ${name} remember new things`, "Off: it uses only the ones it has", owner)}${memSwitch(a, "ask", "Ask me before keeping what it learns", "Each new memory waits for you, under Waiting for you", owner)}${memSwitch(a, "share", "Other agents can read it", `Off: only ${name} sees it`, owner)}<div class="mem-end">${memBtn("export", "Export", { cls: "btn btn-sm", data: { agent: a.address } })}${memBtn("forget-all", "Forget all", { cls: "btn btn-sm btn-danger", data: { agent: a.address }, off: !owner || !a.notes.length, title: owner ? "" : MEM_LOOK_ONLY })}</div><p class="dim small">Export is a JSON file. Forget all deletes the file: there is no bin.</p>`;
 }
 
 // ---- what the buttons do -----------------------------------------------------------------------------------------------------------
@@ -207,7 +182,6 @@ function memWire(el) {
       if (MEM.agent === t.dataset.memAgent) return;
       MEM.agent = t.dataset.memAgent;
       MEM.edit = "";
-      MEM.adding = false;
       // the agent picked is the route's, so a read that comes later draws the same one (#/memory?agent=0x…)
       return void go("memory", { agent: MEM.agent }, { replace: true });
     }
@@ -223,62 +197,61 @@ function memWire(el) {
 
 /* after a signed change: what the pane read is read again */
 const memChanged = () => forget("/api/account/memory");
-const memNote = (scope, id) => (scope === "about" ? MEM.page.about : ((MEM.page.agents.find((a) => a.address === scope) || {}).notes || [])).find((n) => n.id === id);
+const memAgent = (address) => ((MEM.page && MEM.page.agents) || []).find((x) => x.address === address);
+const memNote = (address, id) => ((memAgent(address) || {}).notes || []).find((n) => n.id === id);
 
 async function memAct(act, d) {
-  const a = (MEM.page && MEM.page.agents.find((x) => x.address === d.agent)) || null;
+  const a = memAgent(d.agent);
   switch (act) {
     case "agents":
       return void (typeof openAgents === "function" && openAgents());
     case "edit":
-      MEM.edit = `${d.scope}:${d.id}`;
-      return void memAgain();
-    case "add":
-      MEM.adding = d.agent;
+      MEM.edit = `${d.agent}:${d.id}`;
       return void memAgain();
     case "cancel":
       MEM.edit = "";
-      MEM.adding = false;
       return void memAgain();
-    case "to-about": {
-      const n = memNote(d.scope, d.id);
-      if (n) await own({ type: "setMemory", scope: "about", id: "", topic: n.topic, text: n.text }, memChanged);
+    case "limit":
+      // a limit is changed where limits are signed
+      return void (typeof pfLimitForm === "function" && pfLimitForm({ agent: d.agent }));
+    case "keep": {
+      // what it learned, kept: its words signed as they are, so it stays what the agent learned
+      const n = memNote(d.agent, d.id);
+      if (n) await own({ type: "setMemory", scope: d.agent, id: n.id, topic: n.topic, text: n.text }, memChanged);
       return;
     }
     case "forget-note": {
-      const n = memNote(d.scope, d.id);
+      const n = memNote(d.agent, d.id);
       if (!n) return;
-      const whose = d.scope === "about" ? "About you" : `${memName(MEM.page.agents.find((x) => x.address === d.scope) || { address: d.scope })}'s notes`;
-      if (!(await confirmSheet(`Forget this note from ${whose}? It is gone from the account, not hidden.`, { danger: true, title: "Forget a note", yes: "Forget" }))) return;
-      await own({ type: "forgetMemory", scope: d.scope, what: d.id }, memChanged);
+      if (!n.waiting && !(await confirmSheet(`Forget “${n.text.slice(0, 80)}${n.text.length > 80 ? "…" : ""}”? It is gone from the account, not hidden.`, { danger: true, title: "Forget a memory", yes: "Forget" }))) return;
+      await own({ type: "forgetMemory", scope: d.agent, what: n.id }, memChanged);
       return;
     }
-    case "forget-turn": {
-      const all = d.id.startsWith("all-");
-      if (!(await confirmSheet(all ? "Forget this turn? It was said to every agent: none of them reads it again." : "Forget this turn? The agent does not read it again.", { danger: true, title: "Forget a turn", yes: "Forget" }))) return;
-      MEM.older.delete(d.agent);
-      await own({ type: "forgetMemory", scope: all ? "everyone" : d.agent, what: d.id }, memChanged);
-      return;
-    }
-    case "forget-chat":
-    case "forget-notes": {
+    case "forget-all": {
       if (!a) return;
-      const chat = act === "forget-chat";
-      if (!(await confirmSheet(chat ? `Forget the whole conversation with ${memName(a)}? It does not read any of it again. The words said to every agent stay theirs: forget those one by one.` : `Forget every note ${memName(a)} keeps? It is gone from the account, not hidden.`, { danger: true, title: chat ? "Forget the conversation" : "Forget every note", yes: "Forget" }))) return;
-      MEM.older.delete(a.address);
-      await own({ type: "forgetMemory", scope: a.address, what: chat ? "conversation" : "notes" }, memChanged);
+      if (!(await confirmSheet(`Forget everything ${memName(a)} remembers about you? Its file is deleted: there is no bin. Your switches for it stay as they are.`, { danger: true, title: "Forget all", yes: "Forget all" }))) return;
+      await own({ type: "forgetMemory", scope: a.address, what: "all" }, memChanged);
       return;
     }
-    case "earlier": {
+    case "switch": {
+      if (!a || !["learn", "ask", "share"].includes(d.key)) return;
+      const r = { ...a.rules, [d.key]: !a.rules[d.key] };
+      const w = (b) => (b ? "on" : "off");
+      await own({ type: "setMemoryRules", scope: a.address, learn: w(r.learn), ask: w(r.ask), share: w(r.share) }, memChanged);
+      return;
+    }
+    case "export": {
       if (!a) return;
-      const first = memTurns(a)[0];
-      MEM.olderAsked = a.address;
-      memAgain();
-      const b = await api(`/api/account/memory/agent?address=${a.address}&limit=100${first ? `&before=${encodeURIComponent(first.id)}` : ""}`);
-      MEM.olderAsked = "";
-      if (b && b.ok) MEM.older.set(a.address, [...b.conversation.turns, ...(MEM.older.get(a.address) || [])]);
-      else toast(refusalOf(b) || "The account did not answer.", "no");
-      return void memAgain();
+      const data = { agent: { name: memName(a), address: a.address }, exportedAt: A.now, rules: a.rules, notes: a.notes, fromLimits: a.fromLimits || [] };
+      const url = URL.createObjectURL(new Blob([`${JSON.stringify(data, null, 2)}\n`], { type: "application/json" }));
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `memory-${slug(memName(a)) || a.address.slice(2, 10)}-${String(A.now).slice(0, 10)}.json`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      return;
     }
     default:
   }
@@ -288,16 +261,15 @@ async function memAct(act, d) {
 async function memSave(f) {
   const msg = f.querySelector("[data-mem-msg]");
   const text = String(f.elements.text.value || "").trim();
-  const topic = String(f.elements.topic.value || "other");
+  const topic = String(f.elements.topic.value || "style");
   const max = (MEM.page && MEM.page.limits && MEM.page.limits.noteText) || 500;
   const say = (t) => msg && ((msg.className = "msg no"), (msg.textContent = t));
-  if (!text) return void say("Write the note first.");
+  if (!text) return void say("Write it first.");
   if (text.length > max) return void say(`A note is at most ${max} characters; this one is ${text.length}.`);
-  const r = await own({ type: "setMemory", scope: f.dataset.scope, id: f.dataset.id || "", topic, text }, () => {
+  const r = await own({ type: "setMemory", scope: f.dataset.agent, id: f.dataset.id || "", topic, text }, () => {
     memChanged();
     MEM.edit = "";
-    MEM.adding = false;
-    if (f.dataset.memForm === "about-add") f.reset();
+    if (f.dataset.memForm === "add") f.reset();
   });
   // refused: the account's own words stay beside the form, the words typed stay in it
   if (r && refusedAt(r)) say(Owner.why(r) || "Refused");
