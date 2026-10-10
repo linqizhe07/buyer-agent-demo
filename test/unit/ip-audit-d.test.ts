@@ -386,8 +386,9 @@ describe("Kalshi's trader", () => {
     expect((slow.native as { until: number }).until).toBeGreaterThanOrEqual(Date.now() + 110_000);
     const portal = refusal(await (await connect(() => page("<html><title>Login to the network</title></html>", 200))).status("3b23c1c7-f4ef-4f0d-8b9a-9e53c61f1a0d", "KXFED-27APR-T4.00:YES"));
     expect([portal.code, (portal.native as { page?: boolean }).page]).toEqual(["E_VENUE_UNREACHABLE", true]);
-    // Kalshi's own JSON location rule stays its own
-    expect(refusal(await (await connect(() => json({ error: { code: "location_attestation_required", message: "attest your location" } }, 403))).market("KXFED-27APR-T4.00:YES")).message).toContain("does not take this order from where this account is");
+    // Kalshi's own JSON location rule stays its own: an attestation it wants is its rule for some market categories, held to them alone
+    const attest = refusal(await (await connect(() => json({ error: { code: "location_attestation_required", message: "attest your location" } }, 403))).market("KXFED-27APR-T4.00:YES"));
+    expect([attest.code, attest.message, (attest.detail as { scope?: string }).scope]).toEqual(["E_VENUE_GEOBLOCKED", "Kalshi takes no API orders in this market's category without a current location attestation: its own rule, for these markets alone", "product"]);
   });
 });
 

@@ -189,7 +189,16 @@ export class LiveEarns {
     const w = m.writes();
     if (!w.on) return no("E_WALLET_LIVE_WRITES_OFF", { message: `this server moves no money: it was started read-only. To earn, stop it and start it again with: ${w.turnOn}`, detail: { turnOn: w.turnOn } });
     const v = m.venue(f.venue);
-    if (!v) return no("E_WALLET_ACCOUNT_UNKNOWN", { venue: f.venue, message: `"${f.venue}" is not a venue connected live: money goes to earn only at venues connected live` });
+    if (!v) {
+      // connected, and waiting for its venue to answer this network: said as that, not as a venue that is not on the account
+      const waiting = m.waiting?.(f.venue);
+      if (waiting) return no("E_VENUE_UNREACHABLE", { venue: f.venue, message: `${waiting}: nothing goes in or out of earn there until it answers`, detail: { waiting: true } });
+      return no("E_WALLET_ACCOUNT_UNKNOWN", { venue: f.venue, message: `"${f.venue}" is not a venue connected live: money goes to earn only at venues connected live` });
+    }
+    // held back — its place rule or the server in front of it refusing this network, a ban, a wait it named: nothing is asked of it, by the
+    // account's one hold shared with its reads and the other doors
+    const held0 = this.heldAt(v.id);
+    if (held0) return held0;
     const earner = this.e.host.liveEarn?.()?.earner(v.id);
     if (!earner) return no("E_VENUE_RAIL_CLOSED", { venue: v.id, message: `${v.name} offers no earn products to the account: no interface for them is connected there` });
     if (v.address !== undefined && !v.proven) return no("E_VENUE_RAIL_CLOSED", { venue: v.id, message: `${v.name} is watched, not proven yours: nothing goes to earn from it here` });
@@ -201,8 +210,14 @@ export class LiveEarns {
     const allAsked = f.amount === "all";
     if (allAsked ? kind !== "withdraw" : !DEC.test(f.amount) || !(Number(f.amount) > 0)) return no("E_ACCOUNT_BAD_ACTION", { message: allAsked ? '"all" takes everything out of a product: it is for a withdrawal' : "an amount is a plain decimal, more than zero" });
 
+    // a product this venue answered it does not offer to this network (its rule for this product alone): not offered, nor sent again, for a while
+    const not = this.notHere.get(`${v.id}|${f.product}`);
+    if (not && kind === "supply" && Date.now() < not.until) return not.r;
     const p = await safely(() => earner.product(f.product), v.id, v.name, READ_MS);
-    if (isRefusal(p)) return p;
+    if (isRefusal(p)) {
+      this.holdOn(v.id, p);
+      return p;
+    }
     if (!same(p.asset, f.asset)) return no("E_ACCOUNT_BAD_ACTION", { venue: v.id, message: `${p.name} takes ${p.asset}, not ${f.asset}` });
     let amount = allAsked ? 0 : Number(f.amount);
     let all = allAsked;
@@ -213,7 +228,10 @@ export class LiveEarns {
     } else {
       if (!p.canWithdraw) return no("E_VENUE_MARKET_CLOSED", { venue: v.id, message: `${v.name} lets nothing out of ${p.name} now` });
       const list = await safely(() => earner.positions(), v.id, v.name, READ_MS);
-      if (isRefusal(list)) return list;
+      if (isRefusal(list)) {
+        this.holdOn(v.id, list);
+        return list;
+      }
       held = list.find((x) => x.product === p.id);
       if (!held) return no("E_ACCOUNT_BAD_ACTION", { venue: v.id, message: `${v.name} shows nothing of yours in ${p.name}` });
       // what is held, in the product's asset: as the venue counts it, or — a vault counted in its own shares — by its dollars at the price
@@ -379,6 +397,9 @@ export class LiveEarns {
     const r = await safely(() => (p.kind === "supply" ? p.earner.supply(p.p, p.amount, clientId) : p.earner.withdraw(p.p, p.amount, clientId, p.all)), p.v.id, p.v.name);
     if (isRefusal(r)) {
       this.e.host.log({ kind: "account-refusal", venue: p.v.id, tool: "live earn", code: r.code, reason: r.message, native: r.native, signer: who.signer, ...(who.envelope ? { envelope: who.envelope } : {}) });
+      // the venue's answer that asks to be left alone holds it for every read and door; its rule for this one product is remembered for it
+      this.holdOn(p.v.id, r);
+      if (p.kind === "supply" && r.code === "E_VENUE_GEOBLOCKED" && (r.detail as { scope?: unknown } | undefined)?.scope === "product") this.notHere.set(`${p.v.id}|${p.p.id}`, { until: Date.now() + 600_000, r });
       return r;
     }
     const e: LiveEarn = {
@@ -459,6 +480,14 @@ export class LiveEarns {
     return (this.sweep ??= this.sweepOnce().finally(() => (this.sweep = undefined)));
   }
   private sweep: Promise<void> | undefined;
+
+  /** the earn products a venue answered it does not offer to this network (`venue|product`), until when, and its answer */
+  private readonly notHere = new Map<string, { until: number; r: Refusal }>();
+  /** whether a product is offered to this network as far as this door has learned: false while the venue's own rule for it holds */
+  offeredHere(venue: string, product: string): boolean {
+    const n = this.notHere.get(`${venue}|${product}`);
+    return !(n && Date.now() < n.until);
+  }
 
   /** the refusal that holds a venue back now: the host's shared hold where it offers one (a forced re-check or a reconnect lets go of it
    * there) — only what the venue asked for, never a read that did not answer — or else this door's own */

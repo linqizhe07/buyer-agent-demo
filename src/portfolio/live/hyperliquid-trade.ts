@@ -259,13 +259,16 @@ export function hyperliquidNo(venue: string, name: string, err: unknown, secrets
   const http = thrownHttp(whole);
   // something on this network answered in Hyperliquid's place with a page (disarm): no answer — never its yes, nor its no
   if (kind === "BadResponse") return no("E_VENUE_UNREACHABLE", { venue, message: notTheApiWords(name), native: { error: kind, ...(http ? { status: http.status } : {}), page: true } });
-  if (REGION.test(said)) return no("E_VENUE_GEOBLOCKED", { venue, message: `${name} does not serve this location: that is its own rule, and the account does not look for a way around it. It answered: “${words}”`, native });
+  // its place rule: by a 451 alone, or by its words — said in the account's sentence; the venue's own words stay in `native.said`, for
+  // whoever asks for them, and out of the message every order screen shows
+  if (http?.status === 451 || REGION.test(said)) return no("E_VENUE_GEOBLOCKED", { venue, message: `${name} does not serve this location: that is its own rule, and the account does not look for a way around it`, native });
   if (REGION.test(whole)) {
-    // a page that names the place past the sentence kept (CloudFront's "configured to block access from your country"): the words around it
+    // a page that names the place past the sentence kept (CloudFront's "configured to block access from your country"): its place rule; the
+    // words around it stay in `native` only
     const plain = (http ? http.body : whole).replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
     const at = Math.max(0, plain.search(REGION));
     const around = plain.slice(Math.max(0, at - 120), at + 120).trim();
-    return no("E_VENUE_GEOBLOCKED", { venue, message: `${name} does not serve this location: that is its own rule, and the account does not look for a way around it. It answered: “${around}”`, native: { error: kind, said: around } });
+    return no("E_VENUE_GEOBLOCKED", { venue, message: `${name} does not serve this location: that is its own rule, and the account does not look for a way around it`, native: { error: kind, said: around } });
   }
   // the server in front of Hyperliquid refusing this network with a page of its own (the library calls it "not available"): its answer,
   // not a moment without one — and an order it refused was never placed

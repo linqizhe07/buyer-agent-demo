@@ -353,8 +353,9 @@ export async function rebuild(rows: readonly LedgerRow[], base: AccountState, op
     dial = { ...dial, mode: "guard" };
     skipped.push("the dial was open, and the owner's signature that opened it is not in the chain: it starts Guard");
   }
-  // an order the account stopped following (account/live-orders.ts: canceled while its venue was not connected) is not followed again
-  const unfinishedOrder = (o: LiveOrder) => !o.unfollowed && (!DONE.has(o.status) || (!!o.walletTxs && !o.ref && o.status === "pending"));
+  // an order the account stopped following (account/live-orders.ts: canceled while its venue was not connected) is not followed again —
+  // save one whose owner's cancel waits to be sent again once its venue answers this network
+  const unfinishedOrder = (o: LiveOrder) => (!o.unfollowed || o.cancelWanted === true) && (!DONE.has(o.status) || (!!o.walletTxs && !o.ref && o.status === "pending"));
   const unfinishedPayment = (p: Payment) => !!p.live && (p.status === "pending" || (p.status === "authorized" && !p.live.expired));
   return { state: s, dial, authorisations: [...kept.values()], connections: [...connections.values()], orders: [...orders.values()].filter(unfinishedOrder), payments: [...payments.values()].filter(unfinishedPayment), earns: [...earns.values()].filter((e) => e.status === "pending"), ids, skipped, owner };
 }

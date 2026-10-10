@@ -140,6 +140,8 @@ export interface ExploreAt {
   symbol: string;
   /** the owner has connected this venue */
   connected: boolean;
+  /** a connected venue that lets the network the account runs on only close what is held (its own rule): no buy is offered there */
+  closeOnly?: true | undefined;
   /** may the connected key or sign-in trade there: what the venue said (`unknown`: its first refusal will say); a public listing: false */
   canTrade: boolean | "unknown";
   /** read from the venue's public market data, without a key */
@@ -586,6 +588,8 @@ function atOf(r: Reader, m: Market, symbol = m.symbol, price = priceOf(m), open 
     connected: r.connected,
     canTrade: r.connected ? (ordersTaken ? r.canTrade : false) : false,
     public: !r.connected,
+    // a connected venue that lets this network only close what is held: sells and closes go there, a buy does not (the page offers no buy)
+    ...(r.connected && r.closeOnly !== undefined ? { closeOnly: true as const } : {}),
     ...(price !== undefined ? { price } : {}),
     ...(pos(m.bid) !== undefined ? { bid: m.bid } : {}),
     ...(pos(m.ask) !== undefined ? { ask: m.ask } : {}),

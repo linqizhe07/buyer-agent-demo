@@ -154,7 +154,9 @@ export function exchangeWriter(client: ExchangeClient, venue: string, name: stri
     if (base.code === "E_VENUE_GEOBLOCKED" || base.code === "E_VENUE_UNAUTHORIZED" || (base.code === "E_VENUE_PERMISSION" && (base.detail as { ipList?: unknown } | undefined)?.ipList) || (base.code === "E_VENUE_UNREACHABLE" && (base.native as { until?: unknown } | undefined)?.until !== undefined)) return base;
     const status = thrownHttp(String((err as { message?: string })?.message ?? err))?.status;
     // a page answered in the exchange's place (guardClient) is no answer too: whether the request reached the exchange is not known
-    if (move && (UNSURE.has(kind) || transportCode(err) !== undefined || (status !== undefined && status >= 500) || (base.native as { page?: unknown } | undefined)?.page === true)) return unsureNo(what);
+    // "not available" with a 4xx status is the exchange's answer, not a lost one
+    const unsureKind = UNSURE.has(kind) && !(kind === "ExchangeNotAvailable" && status !== undefined && status > 0 && status < 500);
+    if (move && (unsureKind || transportCode(err) !== undefined || (status !== undefined && status >= 500) || (base.native as { page?: unknown } | undefined)?.page === true)) return unsureNo(what);
     if (base.code === "E_VENUE_UNREACHABLE") return base;
     if (kind === "InsufficientFunds" || /insufficient|not enough/i.test(text)) return no("E_VENUE_INSUFFICIENT", { venue, message: `${name}: not enough to ${what}`, native: { error: kind, said: text } });
     if (kind === "InvalidAddress" || ADDRESS_NOT_ALLOWED.test(text)) return no("E_VENUE_WITHDRAW_WHITELIST", { venue, message: `${name} refused the address: an exchange sends only to addresses verified there first, in its own withdrawal settings`, native: { error: kind, said: text } });

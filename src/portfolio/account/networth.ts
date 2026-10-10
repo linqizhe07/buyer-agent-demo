@@ -228,6 +228,15 @@ export class NetWorthLog {
     this.dangling = false;
   }
 
+  /** what one venue held at the newest point that counted it, and when: a venue a restart could not bring back is shown at that */
+  lastOf(venue: string): { usd: number; at: string } | undefined {
+    this.sync();
+    // the newest point at which the venue was read (not one that carried its numbers on while it was not answering)
+    let best: PointRow | undefined;
+    for (const p of this.points) if (typeof p.byVenue[venue] === "number" && !p.stale?.includes(venue) && (!best || Date.parse(p.at) >= Date.parse(best.at))) best = p;
+    return best ? { usd: best.byVenue[venue]!, at: best.at } : undefined;
+  }
+
   /** the point written last, by its time */
   private last(): PointRow | undefined {
     let best: PointRow | undefined;

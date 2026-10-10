@@ -5,7 +5,8 @@ import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { isRefusal, type Refusal } from "../../src/core/errors.ts";
 import type { AccountPage } from "../../src/portfolio/account/exchange.ts";
 import { signOwner, simKey, type OwnerAction } from "../../src/portfolio/account/sign.ts";
-import type { ExchangeClient, OpenExchange } from "../../src/portfolio/live/exchange.ts";
+import { exchangeSaidNo, type ExchangeClient, type OpenExchange } from "../../src/portfolio/live/exchange.ts";
+import { lostAnswer } from "../../src/portfolio/live/exchange-trade.ts";
 import { register } from "../../src/portfolio/live/index.ts";
 import { heldTo, HYPERLIQUID_RULE, locator, PLACE_MS } from "../../src/portfolio/live/location.ts";
 import type { RunMm } from "../../src/portfolio/live/metamask.ts";
@@ -32,8 +33,9 @@ let seq = 0;
 const BTC: Market = { symbol: "BTC/USDT", name: "BTC/USDT", kind: "spot", base: "BTC", quote: "USDT", price: 60_000, bid: 59_990, ask: 60_010, minQty: 0.0001, qtyStep: 0.0001, priceStep: 0.1, open: true, types: ["market", "limit"] };
 const PLACE = (venue: string, name: string): Refusal => no("E_VENUE_GEOBLOCKED", { venue, message: `${name} does not serve this location: that is its own rule, and the account does not look for a way around it`, native: { status: 451, said: "Service unavailable from a restricted location (203.0.113.9)" } });
 
-/** what each stand-in venue answers this network now, and what reached it */
-const net: Record<string, "ok" | "451"> = {};
+/** what each stand-in venue answers this network now, and what reached it: `451` everything, `iplist` a key bound to another address,
+ * `orders` only its order calls refusing this network (its reads answer) */
+const net: Record<string, "ok" | "451" | "iplist" | "orders"> = {};
 const calls: string[] = [];
 afterEach(() => {
   for (const k of Object.keys(net)) delete net[k];
@@ -57,14 +59,28 @@ register({
     const venue = req.venue;
     const name = req.label || "Stand-in";
     if (net[venue] === "451") return PLACE(venue, name);
+    if (net[venue] === "iplist") return no("E_VENUE_PERMISSION", { venue, message: `${name}: this machine's current address is not on the key's IP list: add it at ${name}, or make a key without one`, detail: { ipList: true } });
+    const resting = new Map<string, { qty: number; status: "open" | "canceled" }>();
     const trader: LiveTrader = {
       can: true,
       what: "spot",
       markets: () => refusing(venue, name, "markets", () => [BTC]),
       market: (sym) => refusing(venue, name, "market", () => ({ ...BTC, symbol: sym })),
-      place: async () => no("E_VENUE_REJECTED", { venue, message: "not in this test" }),
-      cancel: async () => no("E_VENUE_REJECTED", { venue, message: "not in this test" }),
-      status: async () => no("E_VENUE_REJECTED", { venue, message: "not in this test" }),
+      place: async (o) => {
+        calls.push(`${venue} place`);
+        if (net[venue] === "451" || net[venue] === "orders") return PLACE(venue, name);
+        const ref = `r-${resting.size + 1}`;
+        resting.set(ref, { qty: o.qty, status: "open" });
+        return { ref, status: "open", filledQty: 0, native: {} };
+      },
+      cancel: async (ref) => {
+        calls.push(`${venue} cancel`);
+        if (net[venue] === "451") return PLACE(venue, name);
+        const r = resting.get(ref);
+        if (r) r.status = "canceled";
+        return { ref, status: "canceled", filledQty: 0, native: {} };
+      },
+      status: async (ref) => ({ ref, status: resting.get(ref)?.status ?? "open", filledQty: 0, native: {} }),
     };
     const writer: LiveWriter = {
       can: { withdraw: true, ledgers: ["spot"], transfer: false, swap: false, receive: true, send: false },
@@ -216,5 +232,82 @@ describe("a network whose address names no place", () => {
     const quiet = locator({ http: async () => { throw new Error("ENOTFOUND"); }, clock: () => now });
     expect(await quiet.verdict(HYPERLIQUID_RULE)).toBe("unknown");
     expect(quiet.missing?.()).toBe("place");
+  });
+});
+
+describe("orders after connect, at a venue that refuses this network", () => {
+  const order = { type: "liveOrder", venue: "ex", symbol: "BTC/USDT", side: "buy", orderType: "limit", qty: "0.001", limitPrice: "50000" };
+  const sign = async (x: Awaited<ReturnType<typeof account>>) => {
+    const p = await x.svc.account!.prepare(order as never);
+    if (isRefusal(p)) return p;
+    const { nonce: _n, ...rest } = (p as { action: Record<string, unknown> }).action;
+    return x.own(rest as never);
+  };
+
+  it("an order its order call refused for this network is remembered: the next is refused before it is quoted, nothing sent; a check that finds it answering lets go", async () => {
+    const x = await account();
+    await x.connect("ex", "Stand-in Exchange");
+    net.ex = "orders";
+    const first = await sign(x);
+    expect(isRefusal(first) && first.code).toBe("E_VENUE_GEOBLOCKED");
+    expect(calls.filter((k) => k === "ex place")).toHaveLength(1);
+    // its reads still answer: the venue is not held, only no order is offered there
+    expect(isRefusal(await x.svc.liveMarket("ex", "BTC/USDT"))).toBe(false);
+    const again = await x.svc.account!.prepare(order as never);
+    expect(isRefusal(again) && again.code).toBe("E_VENUE_GEOBLOCKED");
+    expect(calls.filter((k) => k === "ex place")).toHaveLength(1);
+    // the laptop moved; the owner's Check again finds the venue answering: orders are quoted again
+    net.ex = "ok";
+    await x.svc.connectReach(["live:geo-standin"], true);
+    expect(isRefusal(await x.svc.account!.prepare(order as never))).toBe(false);
+  });
+
+  it("the owner's cancel the venue refused is sent again by itself once a check finds the venue answering", async () => {
+    const x = await account();
+    await x.connect("ex", "Stand-in Exchange");
+    const placed = await sign(x);
+    if (isRefusal(placed)) throw new Error(placed.message);
+    const id = (placed as { order: { id: string } }).order.id;
+    net.ex = "451";
+    const c = await x.own({ type: "liveCancel", venue: "ex", order: id } as never);
+    expect((c as { order: { unfollowed?: boolean; note?: string } }).order).toMatchObject({ unfollowed: true, note: expect.stringContaining("sends your cancel again when a check of this network finds") });
+    net.ex = "ok";
+    calls.length = 0;
+    await x.svc.connectReach(["live:geo-standin"], true);
+    await x.svc.account!.trade.poll();
+    expect(calls).toContain("ex cancel");
+    const o = (await x.page()).orders.find((y) => y.id === id)!;
+    expect([o.status, o.unfollowed]).toEqual(["canceled", undefined]);
+  });
+});
+
+describe("what a venue answers, read the right way", () => {
+  it("a 451 is the place rule by its status alone, and a write it answered with one is refused, never 'may have gone'", () => {
+    const err = Object.assign(new Error("binance POST https://api.binance.com/api/v3/order 451  "), { name: "ExchangeNotAvailable" });
+    const r = exchangeSaidNo("binance", "Binance", err, {});
+    expect(r.code).toBe("E_VENUE_GEOBLOCKED");
+    expect(lostAnswer(err, r)).toBe(false);
+    // a 503 under the same name is no answer, which may have taken the write
+    const down = Object.assign(new Error("binance POST https://api.binance.com/api/v3/order 503 Service Unavailable"), { name: "ExchangeNotAvailable" });
+    expect(lostAnswer(down, exchangeSaidNo("binance", "Binance", down, {}))).toBe(true);
+  });
+
+  it("a key bound to another address keeps a restored connection waiting, not stopped, and a re-check reconnects it at home", async () => {
+    const x = await account();
+    await x.connect("ex", "Stand-in Exchange");
+    await x.svc.snapshot();
+    // a restart on a café network: the key's IP list does not hold this address
+    net.ex = "iplist";
+    const home = (x.svc as unknown as { opts: { home: string } }).opts.home;
+    const y = await PortfolioService.create({ home, venues: "frontline", real: true, publicMarkets: [], liveDeps: { http: async () => ({ status: 404, body: undefined, text: "" }), price: async () => undefined, mm: (async () => ({ authenticated: true })) as unknown as RunMm }, liveWrites: { capUsd: 100, pairingCode: "K7QX-M2PA" }, account: { owners: [{ id: owner.address, kind: "eoa", label: "owner", addedAt: new Date().toISOString() }] } } as never);
+    await y.restoring;
+    const w = ((await y.accountView()) as AccountPage).connectLive?.waiting ?? [];
+    expect(w[0]).toMatchObject({ venue: "ex", how: "restart", code: "E_VENUE_PERMISSION", lastUsd: 100 });
+    expect(w[0]!.stopped).toBeUndefined();
+    // home again: the half-hourly check (or Check again) finds it answering, and the key works
+    net.ex = "ok";
+    await y.connectReach(["live:geo-standin"], true);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(y.adapter("ex")?.account.watchOnly).toBeTruthy();
   });
 });

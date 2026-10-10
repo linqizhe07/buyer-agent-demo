@@ -369,6 +369,7 @@ function liveTrading(v: AccountLite["venues"][number], writes: boolean): string 
   if (!v.trade) return `no orders: ${v.noTradeBecause ?? `${v.via ?? "this connection"} gives no interface for orders here`}`;
   if (v.trade.can === false) return "no orders: this key may not trade (that is set on the key at the venue)";
   if (v.address && !v.proven) return "no orders: a watched address, not proven the user's";
+  if (v.closeOnly) return `sells and closes only: ${v.name} lets the network the account runs on close what is held and open nothing (its own rule) — a buy there is refused`;
   return `trades ${v.trade.what}: portfolio_live_markets to find a market, portfolio_live_order to place one (inside your trading limit)`;
 }
 
@@ -384,7 +385,7 @@ interface AccountLite {
   totalUsd: number;
   inFlightUsd: number;
   /** a venue: on the real account the simulation's runway rows, doors, swap table and ledgers do not travel with it (server.ts realPage) */
-  venues: Array<{ id: string; name: string; frontLine: string; usd: number; cashUsd: number; restricted?: string; via?: string; in?: { text: string; access: string; why?: string }; out?: { text: string; access: string; why?: string }; ledgers?: string[]; live?: true; liveCan?: { withdraw: boolean | "unknown"; ledgers: string[]; transfer: boolean | "unknown"; swap: boolean | "unknown"; receive: boolean; send: "wallet" | "mm" | "account" | false; why?: Partial<Record<"withdraw" | "transfer" | "swap" | "send", string>> }; trade?: { can: boolean | "unknown"; what: string; kinds?: string[] }; noTradeBecause?: string; readOnlyBecause?: string; proven?: string; address?: string; stale?: string; asOf?: string; notServed?: { said: string; edition?: { connector: string; name: string; said: string } }; holdings?: Array<{ asset: string; amount: number; usd: number; class: string; note?: string; inTransit?: boolean }> }>;
+  venues: Array<{ id: string; name: string; frontLine: string; usd: number; cashUsd: number; restricted?: string; via?: string; in?: { text: string; access: string; why?: string }; out?: { text: string; access: string; why?: string }; ledgers?: string[]; live?: true; liveCan?: { withdraw: boolean | "unknown"; ledgers: string[]; transfer: boolean | "unknown"; swap: boolean | "unknown"; receive: boolean; send: "wallet" | "mm" | "account" | false; why?: Partial<Record<"withdraw" | "transfer" | "swap" | "send", string>> }; trade?: { can: boolean | "unknown"; what: string; kinds?: string[] }; noTradeBecause?: string; readOnlyBecause?: string; proven?: string; address?: string; stale?: string; asOf?: string; notServed?: { said: string; edition?: { connector: string; name: string; said: string } }; closeOnly?: { said: string }; holdings?: Array<{ asset: string; amount: number; usd: number; class: string; note?: string; inTransit?: boolean }> }>;
   orders?: Array<Record<string, unknown>>;
   connectLive?: { options?: Array<{ connector: string; label: string; needs: string; example?: string; venues?: unknown }>; writes?: { on: boolean; capUsd: number } };
   payments: PaymentLite[];
@@ -543,7 +544,7 @@ server.registerTool(
   "portfolio_live_compare",
   {
     description:
-      "Where is it cheapest to buy, or best to sell? The same coin or stock (`base`: BTC, ETH, SOL, AAPL …) at every venue the owner connected live that trades it, ranked by the price an order would take there: the ask for a buy, the bid for a sell. Each row has the venue, its own symbol for it (send that to portfolio_live_order), the price, bid/ask and spread, whether it is open and whether this account can trade there now, and how much worse than the best it is. `usd` checks the size fits each venue's smallest order. Fees are not guessed: a venue's own note says so when it knows. A venue that does not answer in four seconds is listed under `missing`. A price far from the others is marked not ready: it may be another token under the same name. `asset` (stock | crypto) says which is meant where a name is both a coin and a stock. A read.",
+      "Where is it cheapest to buy, or best to sell? The same coin or stock (`base`: BTC, ETH, SOL, AAPL …) at every venue the owner connected live that trades it, ranked by the price an order would take there: the ask for a buy, the bid for a sell. Each row has the venue, its own symbol for it (send that to portfolio_live_order), the price, bid/ask and spread, whether it is open and whether this account can trade there now, and how much worse than the best it is. `usd` checks the size fits each venue's smallest order. Fees are not guessed: a venue's own note says so when it knows. A venue that does not answer in four seconds is listed under `missing`; a venue that does not serve the network the Account runs on is not compared, and one that said so during this read is named in `notServedHere` (a state, not an error: do not retry it). A price far from the others is marked not ready: it may be another token under the same name. `asset` (stock | crypto) says which is meant where a name is both a coin and a stock. A read.",
     inputSchema: { base: z.string().describe("what to compare: BTC, ETH, AAPL"), side: z.enum(["buy", "sell"]), usd: z.number().positive().optional().describe("the size in dollars, to check it fits each venue's smallest order"), asset: z.enum(["stock", "crypto"]).optional().describe("which is meant where a name is both a coin and a stock") },
     annotations: { readOnlyHint: true },
   },
@@ -551,7 +552,7 @@ server.registerTool(
     const r = await call("GET", `/api/account/compare?${new URLSearchParams({ base, side, ...(usd !== undefined ? { usd: String(usd) } : {}), ...(asset ? { asset } : {}) })}`);
     const b = r.body as { refusal?: { code: string; message: string } } & Record<string, unknown>;
     if (b.refusal) return text({ ok: false, code: b.refusal.code, message: b.refusal.message }, true);
-    return text(b);
+    return text(served(b));
   },
 );
 
@@ -620,7 +621,7 @@ server.registerTool(
     const r = await call("GET", `/api/account/positions${venue ? `?${new URLSearchParams({ venue })}` : ""}`);
     const b = r.body as { refusal?: { code: string; message: string }; positions?: unknown; missing?: unknown };
     if (b.refusal) return text({ ok: false, code: b.refusal.code, message: b.refusal.message }, true);
-    return text({ ok: true, positions: b.positions, ...(venue ? {} : { missing: b.missing ?? [] }) });
+    return text(served({ ok: true, positions: b.positions, ...(venue ? {} : { missing: b.missing ?? [] }) }));
   },
 );
 
@@ -772,7 +773,21 @@ async function read(path: string, pick?: (b: Record<string, unknown>) => unknown
   if (r.status === 404) return text({ ok: false, error: "this service runs without the account layer (--classic)" }, true);
   if (b.refusal) return text({ ok: false, code: b.refusal.code, message: b.refusal.message, ...(b.refusal.detail !== undefined ? { detail: b.refusal.detail } : {}) }, true);
   if (r.status >= 400) return text({ ok: false, error: b.error ?? `HTTP ${r.status}` }, true);
-  return text(pick ? pick(b) : b);
+  return text(served(pick ? pick(b) : b));
+}
+
+/** A read's `missing` list, split: a venue whose own rule does not serve the network the account runs on is a state, not a read that failed —
+ * named once in `notServedHere` (its words are in portfolio_venues), so an agent neither retries it nor relays its refusal as an error; what
+ * did not answer stays in `missing` */
+function served<T>(b: T): T {
+  const x = b as { missing?: unknown };
+  if (!x || typeof x !== "object" || !Array.isArray(x.missing)) return b;
+  const list = x.missing as Array<{ venue?: string; venueName?: string; code?: string; connected?: boolean }>;
+  const geo = list.filter((m) => m.code === "E_VENUE_GEOBLOCKED");
+  if (!geo.length) return b;
+  const names = new Map<string, { venue: string; venueName: string; connected?: boolean }>();
+  for (const m of geo) if (m.venueName && !names.has(m.venueName)) names.set(m.venueName, { venue: m.venue ?? "", venueName: m.venueName, ...(m.connected !== undefined ? { connected: m.connected } : {}) });
+  return { ...(b as object), missing: list.filter((m) => m.code !== "E_VENUE_GEOBLOCKED"), notServedHere: [...names.values()] } as T;
 }
 
 server.registerTool(

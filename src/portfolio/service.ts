@@ -495,10 +495,10 @@ export class PortfolioService {
           writes: () => this.liveWritesView(),
           venue: (id: string) => (this.adapters.get(id)?.account.watchOnly ? this.liveVenues.get(id) : undefined),
           realNow: () => this.liveDeps().clock(),
-          held: (venue: string): Refusal | undefined => this.marketReads.heldOf(venue),
+          held: (venue: string): Refusal | undefined => this.shutNow(venue),
           // mm reaches several venues (its swaps, Polymarket, Hyperliquid): a door's refusal at one of them holds the connection only when it
           // is mm's own (not installed, signed out) — one place rule must not freeze the others
-          hold: (venue: string, r: Refusal): void => void ((this.adapters.get(venue)?.account.connector !== "live:metamask" || connectionWide(r)) && this.marketReads.hold(venue, r)),
+          hold: (venue: string, r: Refusal): void => void ((this.adapters.get(venue)?.account.connector !== "live:metamask" || connectionWide(r)) && this.marketReads.hold(venue, r) && this.sawRule(venue, r)),
           // a venue on the account whose venue has not answered this network yet (connected by the owner so, or not back after the
           // restart): why (waitingWords) — its open orders are not "unfollowed" meanwhile
           waiting: (venue: string): string | undefined => this.waitingWords(venue),
@@ -605,7 +605,7 @@ export class PortfolioService {
     // each venue's reads go through the same short-lived cache as the order ticket's: a new amount or the other side asks no venue again.
     // A venue whose own place rule bars an order from this network says so on its row (placeRuleOf)
     // a venue that does not serve the network the account runs on now (its place rule, its edge) is not compared: it is not asked
-    const venues = this.tradingVenues().filter((v) => notServedBy(this.marketReads.heldOf(v.id)) === undefined).map((v) => ({ id: v.id, name: v.name, trader: this.kept(v), connector: this.adapters.get(v.id)?.account.connector }));
+    const venues = this.tradingVenues().filter((v) => notServedBy(this.shutNow(v.id)) === undefined).map((v) => ({ id: v.id, name: v.name, trader: this.kept(v), connector: this.adapters.get(v.id)?.account.connector }));
     return this.marketReads.get(`compare|${b.toUpperCase()}|${side}|${usd ?? ""}|${asset ?? ""}`, 15_000, async () => {
       // nor is one whose trading line closes this place (Hyperliquid's): the comparison is of where an order could go from here
       const placed = (await Promise.all(venues.map(async ({ connector, ...v }) => ({ ...v, ...(await this.placed(connector)) })))).filter((v) => v.place?.rule !== "closed");
@@ -703,6 +703,43 @@ export class PortfolioService {
 
   // ---- the wallet: what you own (Portfolio), what there is to trade (Markets), what can be sold (Trade) --------------------------------
 
+  /** the connected venues that answered a read or a door with their own rule for the whole of this network, and when: once the hold
+   * that answer set runs out, the venue's KEYLESS question decides whether its key is used again (stillShut), so a venue that still does not
+   * serve the network is not asked with the account's key every ten minutes */
+  private readonly ruleSeen = new Map<string, number>();
+  /** a refusal that is the venue's rule for the whole network, taken on the shared hold: remembered (always answers true, for chaining) */
+  private sawRule(venue: string, r: Refusal): true {
+    if (notServedBy(r) !== undefined) this.ruleSeen.set(venue, Date.now());
+    return true;
+  }
+  /** what holds a connected venue back now: the shared hold; else, for one whose rule refused this network before, its keyless question's
+   * answer — kept as the list of where the user can connect keeps it, asked again (without the key) when it has run out. Its key is used
+   * again only once that question finds it answering this network */
+  private shutNow(venue: string): Refusal | undefined {
+    const held = this.marketReads.heldOf(venue);
+    if (held || !this.ruleSeen.has(venue)) return held;
+    const connector = this.adapters.get(venue)?.account.connector;
+    if (!connector || connector === "live:metamask") return undefined;
+    const kept = this.reaches.get(connector);
+    const now = this.liveDeps().clock();
+    if (kept && "r" in kept && kept.until > now) {
+      if (kept.r.state === "location") return no("E_VENUE_GEOBLOCKED", { venue, message: kept.r.said ?? `${this.nameOf(venue)} does not serve this location: that is its own rule, and the account does not look for a way around it`, native: { keyless: true } });
+      // it answers this network again: its key is used again
+      this.ruleSeen.delete(venue);
+      return undefined;
+    }
+    // asked again without the key; until it answers, the venue stands as it last said
+    if (!kept || ("r" in kept && kept.until <= now)) void this.connectReach([connector]).catch(() => undefined);
+    return no("E_VENUE_GEOBLOCKED", { venue, message: `${this.nameOf(venue)} does not serve this location: that is its own rule, and the account does not look for a way around it`, native: { keyless: true, asking: true } });
+  }
+
+  /** where an earn read is held: the mm connection's earn vaults are LI.FI's, one of the several venues mm reaches, so their own refusal of
+   * this network holds them alone (`mm#earn`) — not the connection's swaps, Polymarket, perpetuals and balance. What is mm's own (signed out,
+   * not installed) still holds the whole connection, as the base is checked too */
+  private earnAt(id: string): string {
+    return this.adapters.get(id)?.account.connector === "live:metamask" ? `${id}#earn` : id;
+  }
+
   /** how each venue connected live has answered the account's reads lately: when it last answered, when it last failed and in its own
    * words, how long its last read took. A venue not read since it was connected has no entry yet */
   venueHealth(): Record<string, VenueHealth> {
@@ -756,8 +793,9 @@ export class PortfolioService {
       // what is listed is what serves the network the account runs on: a connected venue that does not now (its place rule, its edge, or
       // its trading line closed here), and a public source whose venue the list of where the user can connect judged not served or with
       // no way in, are left out — named in a note, without their words
-      const away = new Set(placed.filter((v) => notServedBy(this.marketReads.heldOf(v.id)) !== undefined || v.place?.rule === "closed").map((v) => v.id));
-      const refusing = new Set((this.venuesKept?.v ?? []).filter((x) => x.verdict === "not-served" || x.verdict === "closed").map((x) => x.connector));
+      const away = new Set(placed.filter((v) => notServedBy(this.shutNow(v.id)) !== undefined || v.place?.rule === "closed").map((v) => v.id));
+      // close-only too, for a venue not connected: nothing held there to sell, and nothing it would take from here
+      const refusing = new Set((this.venuesKept?.v ?? []).filter((x) => x.verdict === "not-served" || x.verdict === "closed" || x.verdict === "close-only").map((x) => x.connector));
       const serves = (r: { id: string; connected: boolean; connector?: string | undefined }): boolean => (r.connected ? !away.has(r.id) : !(r.connector !== undefined && refusing.has(r.connector)));
       return exploreAcross({ connected: placed, public: this.publicMarkets() }, { q, limit, clock: () => this.realNow(), serves, ...(tab ? { tab: tab as TabId } : {}), ...(sort ? { sort: sort as ExploreSort } : {}) });
     });
@@ -868,7 +906,11 @@ export class PortfolioService {
     const asset = o.asset?.trim().toUpperCase() ?? "";
     if (asset !== "" && !/^[A-Z0-9.]{1,20}$/.test(asset)) return no("E_ACCOUNT_BAD_ACTION", { message: "an asset is its symbol: USDC, BTC" });
     const ids = [...this.earners.keys()].filter((id) => this.adapters.get(id)?.account.watchOnly && (!o.venue || id === o.venue));
-    if (o.venue && !ids.length) return no("E_VENUE_RAIL_CLOSED", { venue: o.venue, message: this.adapters.get(o.venue)?.account.watchOnly ? `${this.nameOf(o.venue)} offers no earn products to the account` : `"${o.venue}" is not a venue connected live` });
+    if (o.venue && !ids.length) {
+      const waiting = this.waitingWords(o.venue);
+      if (waiting) return no("E_VENUE_UNREACHABLE", { venue: o.venue, message: `${waiting}: its earn is read once it answers`, detail: { waiting: true } });
+      return no("E_VENUE_RAIL_CLOSED", { venue: o.venue, message: this.adapters.get(o.venue)?.account.watchOnly ? `${this.nameOf(o.venue)} offers no earn products to the account` : `"${o.venue}" is not a venue connected live` });
+    }
     const products: EarnView["products"] = [];
     const positions: EarnView["positions"] = [];
     const missing: ReadMissing[] = [];
@@ -876,14 +918,18 @@ export class PortfolioService {
       const x = this.earners.get(id)!;
       const name = this.nameOf(id);
       const c = this.marketReads;
+      const at = this.earnAt(id);
       const [ps, held] = await Promise.all([
-        within(STATS_MS * 2, c.get(`earn-products|${id}|${asset}`, 60_000, () => x.products(asset || undefined), id), id, name),
-        within(STATS_MS * 2, c.get(`earn-positions|${id}`, 15_000, () => x.positions(), id), id, name),
+        within(STATS_MS * 2, c.get(`earn-products|${id}|${asset}`, 60_000, () => x.products(asset || undefined), at), id, name),
+        within(STATS_MS * 2, c.get(`earn-positions|${id}`, 15_000, () => x.positions(), at), id, name),
       ]);
       if (isRefusal(ps)) missing.push({ venue: id, venueName: name, why: ps.message, code: ps.code, part: "earn" });
-      else products.push(...ps.filter((p) => !asset || p.asset.toUpperCase() === asset).map((p) => ({ ...p, venue: id, venueName: name })));
-      if (isRefusal(held)) missing.push({ venue: id, venueName: name, why: held.message, code: held.code, part: "earn" });
-      else positions.push(...held.filter((h) => !asset || h.asset.toUpperCase() === asset || products.some((p) => p.venue === id && p.id === h.product)).map((h) => ({ ...h, venue: id, venueName: name })));
+      // a product the venue answered it does not offer to this network is listed closed, in a word, until that answer's time runs out
+      else products.push(...ps.filter((p) => !asset || p.asset.toUpperCase() === asset).map((p) => ({ ...p, venue: id, venueName: name, ...(this.account!.earn.offeredHere(id, p.id) ? {} : { canSupply: false, why: "Not offered on this network" }) })));
+      // one line for a venue whose two earn reads met the same refusal (its place rule, its hold)
+      if (isRefusal(held)) {
+        if (!(isRefusal(ps) && ps.message === held.message)) missing.push({ venue: id, venueName: name, why: held.message, code: held.code, part: "earn" });
+      } else positions.push(...held.filter((h) => !asset || h.asset.toUpperCase() === asset || products.some((p) => p.venue === id && p.id === h.product)).map((h) => ({ ...h, venue: id, venueName: name })));
     }));
     // the highest yield first; what is held, the most dollars first
     products.sort((a, b) => (b.apy ?? -1) - (a.apy ?? -1));
@@ -1046,13 +1092,24 @@ export class PortfolioService {
       else if (got.length) return { got: { venue: t.v.id, venueName: t.v.name, symbol: t.symbol, interval, bars: got } };
     }
     if (k.cls === "crypto") {
-      for (const s of this.publicMarkets().filter((x) => x.kind === "exchange" && x.candles).slice(0, 2)) {
+      // the public exchanges that serve this network, in turn, until two have answered: a source held back (its place rule, a ban) is not
+      // asked, one that refuses is passed over, and a place rule is never what is said in place of a chart
+      let answered = 0;
+      for (const s of this.publicMarkets().filter((x) => x.kind === "exchange" && x.candles && !this.marketReads.heldOf(`public:${x.id}`))) {
+        if (answered >= 2) break;
+        let refused = false;
         for (const quote of ["USD", "USDT", "USDC"]) {
           const symbol = `${k.name}/${quote}`;
           const got = await within(CANDLE_MS, s.candles!(symbol, interval, since), s.id, s.name);
-          if (isRefusal(got)) missing ??= { venue: s.id, venueName: s.name, why: got.message, code: got.code, part: "candles" };
-          else if (got.length) return { got: { venue: s.id, venueName: s.name, symbol, interval, bars: got, public: true } };
+          if (isRefusal(got)) {
+            if (got.code !== "E_VENUE_GEOBLOCKED") missing ??= { venue: s.id, venueName: s.name, why: got.message, code: got.code, part: "candles" };
+            if (holdBackMs(got) > 0) {
+              refused = true;
+              break;
+            }
+          } else if (got.length) return { got: { venue: s.id, venueName: s.name, symbol, interval, bars: got, public: true } };
         }
+        if (!refused) answered++;
       }
     }
     return missing ? { missing } : {};
@@ -1289,7 +1346,8 @@ export class PortfolioService {
     return Promise.all(
       connectors.map((c) => {
         const kept = this.reaches.get(c);
-        if (kept && "pending" in kept) return kept.pending;
+        // a forced check that meets a probe already on its way takes that answer as its own: what it lets go of, it lets go of
+        if (kept && "pending" in kept) return force ? kept.pending.then((r) => (this.reached(c, r, true), r)) : kept.pending;
         if (kept && kept.until > deps.clock() && (!force || kept.ban)) return Promise.resolve(kept.r);
         const id = c.replace(/^live:(exchange:)?/, "");
         const banned = this.marketReads.banOf(id);
@@ -1326,7 +1384,8 @@ export class PortfolioService {
         this.venuesKept = { ...kept, v: kept.v.map((x, j) => (j === i ? { ...rest, verdict: now.verdict, ...(now.said ? { said: now.said } : {}), asked: r.at } : x)), sure: false };
       } else this.venuesKept = { ...kept, v: kept.v.map((x, j) => (j === i ? { ...was, asked: r.at } : x)) };
     }
-    if (!force || r.state !== "ok") return;
+    // a venue that lets this network close what is held (close-only) answers it too: a waiting connection connects, and sells only
+    if (!force || (r.state !== "ok" && r.state !== "close-only")) return;
     for (const [ns, s] of this.publicRaw) {
       if (s.connector !== c) continue;
       this.marketReads.release(ns);
@@ -1337,8 +1396,11 @@ export class PortfolioService {
     for (const [id, a] of this.adapters) {
       if (!a.account.watchOnly || a.account.connector !== c) continue;
       this.marketReads.release(id);
-      // its balance too: what was kept while it was held is not served for the rest of that hold
+      // its balance too: what was kept while it was held is not served for the rest of that hold; and the order door lets go of what it
+      // learned from an order there, and sends an owner's cancel it could not send
+      this.ruleSeen.delete(id);
       if (!this.marketReads.heldOf(id)) a.wake?.();
+      this.account?.trade.letGo(id);
     }
     // the connections waiting for this venue; one it answered and refused (stopped) is the owner's to connect again, not a check's
     for (const [venue, w] of this.waiting) if (w.c.connector === c && !w.stopped) void this.tryAgain(venue);
@@ -1426,7 +1488,13 @@ export class PortfolioService {
   }
   /** the real server keeps the answer fresh without anyone asking: soon after it starts, then every 30 minutes (never in tests) */
   watchVenues(everyMs = 30 * 60_000): () => void {
-    const run = () => void this.venuesHere(true).catch(() => undefined);
+    const run = () => {
+      void this.venuesHere(true).catch(() => undefined);
+      // a waiting connection the list does not ask about (an exchange outside the well-known few): asked here, so it comes back by itself
+      const listed = new Set(venueCatalog(liveOptions(this.opts.home).options).map((c) => c.connector));
+      const extra = [...new Set([...this.waiting.values()].filter((w) => !w.stopped).map((w) => w.c.connector))].filter((c) => !listed.has(c));
+      if (extra.length) void this.connectReach(extra, true).catch(() => undefined);
+    };
     const first = setTimeout(run, 3_000);
     const every = setInterval(run, everyMs);
     first.unref?.();
@@ -1453,7 +1521,7 @@ export class PortfolioService {
     if (isRefusal(opened)) return opened;
     // its balance reads follow the same hold as its market reads: a venue that banned this address, or refuses this network, is asked
     // neither for one nor the other until the hold runs out (of the mm connection's, only what is mm's own holds its other reads)
-    const adapter = await liveAccount(venue, opened.source, { connector, first: opened.first, clock: deps.clock, ...(opened.price ? { price: opened.price } : {}), held: () => this.marketReads.heldOf(venue), refused: (r) => (connector !== "live:metamask" || connectionWide(r)) && this.marketReads.hold(venue, r) });
+    const adapter = await liveAccount(venue, opened.source, { connector, first: opened.first, clock: deps.clock, ...(opened.price ? { price: opened.price } : {}), held: () => this.shutNow(venue), refused: (r) => (connector !== "live:metamask" || connectionWide(r)) && this.marketReads.hold(venue, r) && this.sawRule(venue, r) });
     const src = opened.source;
     // a venue's own words for what it does not do here, as the page and the ledger show them, with this machine's address taken out (not all
     // of them passed through no())
@@ -1602,11 +1670,12 @@ export class PortfolioService {
         if (kind && KEY_SHAPES[kind] && ref) v.keyFile = ref;
         // a connected venue that does not serve the network the account runs on now (it moved, or the venue changed its line): said as
         // that state, with the edition for where the user is when the venue has one that serves it — not as a read that failed
-        const out = v.live ? notServedBy(this.marketReads.heldOf(v.id)) : undefined;
-        if (out) {
-          const ed = v.connector ? this.venuesKept?.v.find((x) => x.connector === v.connector)?.edition : undefined;
-          v.notServed = { said: out, ...(ed ? { edition: ed } : {}) };
-        }
+        // the list of where the user can connect, as it judged this connection from the network the account runs on: a trading line that
+        // closes this place (Hyperliquid's), or close-only (Polymarket's for a US network)
+        const judged = v.live && v.connector ? this.venuesKept?.v.find((x) => x.connector === v.connector) : undefined;
+        const out = v.live ? (notServedBy(this.shutNow(v.id)) ?? (judged?.verdict === "not-served" ? judged.said ?? `${v.name} does not serve this location` : undefined)) : undefined;
+        if (out) v.notServed = { said: out, ...(judged?.edition ? { edition: judged.edition } : {}) };
+        else if (judged?.verdict === "close-only") v.closeOnly = { said: judged.said ?? `${v.name} lets this location close positions, not open new ones` };
       }
     }
     return page;
@@ -1644,7 +1713,7 @@ export class PortfolioService {
         if (!was || was.asOf <= asOf) this.earnSeen.set(id, { asOf, base, held });
         return held;
       };
-      const read = this.marketReads.get(`earn-held|${id}|${asOf}`, KEEP_HELD_MS, () => x.positions(), id);
+      const read = this.marketReads.get(`earn-held|${id}|${asOf}`, KEEP_HELD_MS, () => x.positions(), this.earnAt(id));
       // whenever it answers, the next page has it, beside the balance it was read with
       void read.then((r) => (isRefusal(r) ? undefined : keep(r))).catch(() => undefined);
       const r = await within(3_000, read, id, this.nameOf(id));
@@ -1825,7 +1894,7 @@ export class PortfolioService {
     w.timer = undefined;
     // the venue's rule for this network, or a network that names no place (Hyperliquid's line cannot be held to it): asked again only when a
     // check of the network finds it changed — the venue's rule is not knocked on, nor are the place's sources every few minutes
-    if (w.last.code === "E_VENUE_GEOBLOCKED" || (w.last.native as { unplaceable?: unknown } | undefined)?.unplaceable === true) w.said = `${w.last.message} — asked again when a check of this network finds it answering (Check again, or the half-hourly check)`;
+    if (w.last.code === "E_VENUE_GEOBLOCKED" || (w.last.native as { unplaceable?: unknown } | undefined)?.unplaceable === true || ipListed(w.last)) w.said = `${w.last.message} — asked again when a check of this network finds it answering (Check again, or the half-hourly check)`;
     else {
       const ms = Math.max(COMING_BACK_MS[Math.min(w.tries, COMING_BACK_MS.length - 1)]!, holdBackMs(w.last));
       w.timer = setTimeout(() => void this.tryAgain(w.c.venue), ms);
@@ -1964,6 +2033,7 @@ export class PortfolioService {
         ...(needs === "address" ? { address: w.c.credentialRef } : {}),
         said: w.said,
         code: w.last.code,
+        ...(w.how === "restart" ? lastRead(this.netWorth().lastOf(w.c.venue)) : {}),
         by: byVenue(w.last) ? ("venue" as const) : ("account" as const),
         since: new Date(w.since).toISOString(),
         how: w.how,
@@ -2994,8 +3064,14 @@ const SPLIT: ReadonlySet<string> = new Set(
  * about the account is final, as before */
 function ofThisNetwork(r: Refusal): boolean {
   const status = (r.native as { status?: unknown } | undefined)?.status;
-  return r.code === "E_VENUE_UNREACHABLE" || (r.code === "E_VENUE_GEOBLOCKED" && holdBackMs(r) > 0) || (r.code === "E_VENUE_REJECTED" && typeof status === "number" && status >= 300 && status < 400);
+  return r.code === "E_VENUE_UNREACHABLE" || (r.code === "E_VENUE_GEOBLOCKED" && holdBackMs(r) > 0) || (r.code === "E_VENUE_REJECTED" && typeof status === "number" && status >= 300 && status < 400) || ipListed(r);
 }
+/** the key is bound to a list of addresses, and this machine's is not on it now (OKX 50110, Bybit 10010 …): the key and the venue are fine,
+ * and the address this network gives decides — a laptop back on the network the key was bound to answers again */
+const ipListed = (r: Refusal): boolean => (r.code === "E_VENUE_PERMISSION" || r.code === "E_VENUE_UNAUTHORIZED") && (r.detail as { ipList?: unknown } | undefined)?.ipList === true;
+/** what a venue held at its last good read, for a waiting row (nothing when the log never counted it) */
+const lastRead = (l: { usd: number; at: string } | undefined): { lastUsd?: number; lastAt?: string } => (l && l.usd > 0 ? { lastUsd: l.usd, lastAt: l.at } : {});
+
 /** a hold that is the venue's own line for the whole of the network the account runs on — its place rule, or the server in front of it
  * refusing the network — rather than a rule for one product or leverage (`detail.scope`), or a close-only answer that still lets what is
  * held be sold: its words, or nothing */
@@ -3034,8 +3110,10 @@ function unaddressedRow<T extends { reason?: unknown; native?: unknown; detail?:
 function reachedVenue(r: Exclude<Outcome, Refusal>): "yes" | "maybe" | "no" {
   const unsure = (native: unknown): boolean => (native as { unsure?: unknown } | undefined)?.unsure === true;
   if (r.kind === "result") {
-    const x = (r.result && typeof r.result === "object" ? r.result : {}) as { wallet?: unknown; walletTxs?: unknown };
-    return isRefusal(r.result) || x.wallet !== undefined || x.walletTxs !== undefined ? "no" : "yes";
+    const x = (r.result && typeof r.result === "object" ? r.result : {}) as { wallet?: unknown; walletTxs?: unknown; earn?: { native?: unknown } };
+    if (isRefusal(r.result) || x.wallet !== undefined || x.walletTxs !== undefined) return "no";
+    // money into or out of earn whose answer was lost: it may have landed, and a hold the venue set (its place rule, a ban) stands
+    return x.earn && unsure(x.earn.native) ? "maybe" : "yes";
   }
   if (r.kind === "order") return (r.order.walletTxs && !r.order.ref) || r.order.unfollowed ? "no" : unsure(r.order.native) ? "maybe" : "yes";
   if (r.kind === "payment") return r.payment.status === "authorized" ? "no" : unsure(r.payment.legs[0]?.native) ? "maybe" : "yes";

@@ -48,6 +48,13 @@ npx tsx test/standin/ui-standin.ts --port 4821   # 替身账户：同一个页�
 - **钱**：Move 和 Receive 只列服务这个网络的账户，其余的在表单下一行点名；挪钱这扇门在场所被 hold 时什么都不问它（不再去要充值地址、手续费），场所新答的地区拒绝记进同一个 hold（下单、读数、earn 都等它）；等待中的连接被说成"已接上、还没答这个网络"，不是"没有这个场所"。
 - **agent**：`portfolio_account` 的场所带 `asOf`、`stale` 或 `notServed`，`trading` / `realMoney` 直接说"它现在不服务这个网络"（有版本就点名该请主人接哪一家），agent 不用试了才知道。
 - **地址找不到地方的网络**（Tor、XX）：三个来源都答了"没有地方"，说成这个网络的状态（"this network's address names no place"），不说"过一会儿再试"；地方的来源十分钟内不再问，等待中的 Hyperliquid 交易连接只在网络检查时再问。
+- **下单**：场所的下单接口自己答"不服务这个网络"（读数照样答，比如 Polymarket US 的"你所在的州不能交易"、交易所下单接口的地理围栏），下单这扇门记住它（`refusedHere`，按 hold 的同一条规矩十分钟）：下一单在报价、出卡之前就拒，不再发出去；网络检查发现它答了就放开（`letGo`）。改杠杆也一样，agent 的杠杆卡在出卡之前先问场所的规矩。主人的撤单被拒（网络被拒）时停止跟踪的那一单，记着 `cancelWanted`：网络检查发现场所答了，账户自己把这个撤单再发一次，重启后也接着等。mm 连接有了下单前的检查（Polymarket 的地区检查、Hyperliquid 的 §1.6），不再先报价、出卡、签名再被拒；平 Hyperliquid 永续只读 Hyperliquid 那一半的持仓，Polymarket 拒这个网络时照样能平。
+- **earn**：earn 这扇门也看同一个 hold（被 hold 的场所不问、不出卡），场所的回答记进 hold；等待中的连接说成"等它答"；OKX、Kraken、KuCoin 在发申购 / 赎回之前那一次读数如果是地区拒绝或封禁，就不再发；某个产品被场所按地区拒绝（`scope: product`），十分钟内在列表里标 "Not offered on this network"，不再重发；回答丢了的 earn 请求不再解除场所的 hold。mm 的 earn 读数（LI.FI 的金库）记在 `mm#earn`，它被拒不再冻结 mm 的余额、swap、Polymarket 和永续。
+- **认出来**：交易所和 Hyperliquid 的 HTTP 451 单凭状态就是地区规矩（不管带不带话）；交易库叫 "not available" 的 4xx 是场所答了"不"，不当成"可能已经下了单 / 发了钱"；Hyperliquid 的拒绝话不再进下单票的提示，原话留在 `native`；Kalshi 的地点认证过期只管那几个市场类别（`scope: product`），不 hold 整个 Kalshi。
+- **钥匙绑了别的 IP**：重启时（或等待之后）遇到，不再"停掉"，留着等，网络检查发现场所答了就用钥匙再试（回到钥匙绑定的网络就接上）。
+- **只能平仓的网络**：等待中的 Polymarket 连接遇到 close-only 也接上（只卖、不开新仓）；接上的 close-only 场所在 Venues 里标 "Close only here"，Markets 里不给它买入；没接的 close-only 场所和不服务的一样，不进 Markets。
+- **钥匙不再每十分钟去敲**：接上的场所被地区拒绝、hold 跑完之后，先问它不带钥匙的那个问题（十分钟一次），答"服务"了才用钥匙读。
+- **重启后的等待行**带着重启前最后一次读到的数（`lastUsd`/`lastAt`，净值记录里它最后被读到的那个点），灰字显示，不进总数。
 
 **连不了，就看它有没有给你那里的版本。** 一家场所对你不服务、只能平仓或条款排除你所在的地方时，如果它有给你那里的另一个版本——另一家公司、自己的条款、自己的账户和 API 钥匙，现在有三对：Binance → Binance.US（BAM Trading Services Inc.），OKX → OKX US（OKX INC.），Polymarket → Polymarket US（QCX LLC）——账户就把这个版本标在旁边（`edition`）：卡片旁边多一张它的卡（"serves where you are"，已有卡的不重复），表单里有 "Connect Polymarket US instead"，agent 在 `portfolio_venues` 里读到它，请主人接被拒的那家时，拒绝里也点名该请哪一家。只在两件事都成立时才标：那个版本从你自己的网络能接（它的条款也不排除你那里）；它自己的话说它是为你那里做的，原话、链接和读的日期跟着：Binance.US 自己列的 38 个州、华盛顿特区和波多黎各（2026-06-03；得州、纽约州、俄亥俄州等 12 个州不在内）；OKX US 列出执照或登记的 43 个州、华盛顿特区和波多黎各（2026-09-15；纽约州不服务，加州等 6 个州它的页面没说，就不推荐）；Polymarket US 文档的 "Built for US residents."。OKX 的服务条款（2026-09-17）开头写明，住在 OKX US 获准地区的用户适用当地条款，OKX 的 API FAQ 也说美国账户的钥匙只在 us.okx.com 能用。所以对这些州的用户，OKX 显示"它的条款把你那里交给 OKX US"，旁边标出 OKX US。只是"没排除"、或者不知道你在哪时，不标；美国的属地（波多黎各等）只在它的话单独点到时才算。哪家是哪家的版本，只照各家自己的页面填（`EDITIONS`，`live/availability.ts`）。
 

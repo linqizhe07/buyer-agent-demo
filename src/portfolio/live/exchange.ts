@@ -250,7 +250,9 @@ export function exchangeSaidNo(venue: string, name: string, err: unknown, key: K
   if (LEVERAGE_RULE.test(said)) return no("E_VENUE_GEOBLOCKED", { venue, message: `${name} caps leverage for this location: that is its own rule, and the account does not look for a way around it`, native, detail: { scope: "leverage" } });
   // judged by what the exchange said, not by the class the library picked: Bybit's country block arrives as a "rate limit", OKX's as HTTP 200.
   // Read whole: an edge's HTML page says it further in than the sentence kept, and then the sentence around it is what is kept
-  const region = REGION.test(said) || OKX_REGION.test(said) || DERIBIT_REGION.test(said);
+  // HTTP 451 is the place rule by its status alone (RFC 7725), whatever words come with it — or none: the library files it as "not
+  // available", and its reason phrase arrives empty
+  const region = http?.status === 451 || REGION.test(said) || OKX_REGION.test(said) || DERIBIT_REGION.test(said);
   if (region) return no("E_VENUE_GEOBLOCKED", { venue, message: `${name} does not serve this location: that is its own rule, and the account does not look for a way around it`, native });
   if (REGION.test(folded)) {
     const plain = (http ? http.body : folded).replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();

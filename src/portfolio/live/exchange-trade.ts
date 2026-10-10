@@ -178,7 +178,10 @@ export function lostAnswer(err: unknown, r: Refusal): boolean {
   if (r.code !== "E_VENUE_UNREACHABLE" || (r.native as { until?: unknown } | undefined)?.until !== undefined) return false;
   const kind = String((err as { name?: string })?.name ?? "");
   const status = thrownHttp(String((err as { message?: string })?.message ?? err))?.status ?? 0;
-  return UNSURE.has(kind) || status >= 500 || transportCode(err) !== undefined || (r.native as { page?: unknown } | undefined)?.page === true;
+  // "not available" is the library's name for 4xx answers too (451, 403, 404 …): an exchange that answered with a status said no, and only
+  // one with no status, or a 5xx, may have taken the write
+  const unsureKind = UNSURE.has(kind) && !(kind === "ExchangeNotAvailable" && status > 0 && status < 500);
+  return unsureKind || status >= 500 || transportCode(err) !== undefined || (r.native as { page?: unknown } | undefined)?.page === true;
 }
 /** a leverage or margin mode that is already what was asked: Binance -4046 "No need to change margin type." (the library's
  * MarginModeAlreadySet), Bybit 110026 (the same class) and 110043 "Set leverage not modified" (filed as a bad request) */
