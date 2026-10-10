@@ -170,6 +170,9 @@ describe("the six kinds, as the page runs them", () => {
     p.set("A", pageOf([{ ...EX, notServed: { said: "Exchange does not serve this location" } }, WALLET, READONLY]));
     const away = p.run<{ venues: string[]; away: number }>(`(() => { const r = tkWhereRows(${JSON.stringify(item)}, ${JSON.stringify(ranked)}); return { venues: r.map((x) => x.venue), away: r.away }; })()`);
     expect(away).toEqual({ venues: ["wallet", "okx", "kraken-public"], away: 1 });
+    // a connected close-only venue stays listed for what it takes (a sell), marked so the ticket says its state for a buy
+    p.set("A", pageOf([{ ...EX, closeOnly: { said: "Exchange lets this location close positions, not open new ones" } }, WALLET, READONLY]));
+    expect(p.out<Array<{ venue: string; closeOnly?: boolean }>>(`tkWhereRows(${JSON.stringify(item)}, ${JSON.stringify(ranked)})`).find((r) => r.venue === "ex")).toMatchObject({ state: "able", closeOnly: true });
     p.run(`VENUES.clear()`);
     // the public listing of a venue the owner has since connected is not offered again
     p.set("A", pageOf([EX, venue("kraken", "Kraken", { trade: { can: true, kinds: ["spot"] } })]));
@@ -317,6 +320,14 @@ describe("the six kinds, as the page runs them", () => {
     expect(oacts).toContain('data-amend="ord-9"');
     expect(oacts).toContain('data-cancel="ord-9"');
     expect(p.run<string>(`tkOpenActs({ o: ${JSON.stringify({ ...order, venue: "wallet", venueName: "Wallet", walletTxs: [{}], ref: "" })} })`)).toContain("Send from wallet…");
+    // an order the account stopped following (the owner's cancel asked while its venue refused this network): Not followed, its note on
+    // hover, never Open; no Change, and Cancel stays (it sends the owner's cancel again)
+    const gone = { ...order, unfollowed: true, note: "Exchange refuses this network, so the account can neither cancel it nor see it fill: it stopped following it. Cancel it at Exchange" };
+    expect(p.run<string>(`tkOpenStatus({ o: ${JSON.stringify(gone)} })`)).toBe(`<span class="tp-st dim" title="${gone.note}">Not followed</span>`);
+    const goneActs = p.run<string>(`tkOpenActs({ o: ${JSON.stringify(gone)} })`);
+    expect(goneActs).not.toContain("data-amend");
+    expect(goneActs).toContain('data-cancel="ord-9"');
+    expect(p.run<string>(`tkOpenStatus({ o: ${JSON.stringify(order)} })`)).toBe('<span class="tp-st">Open</span>');
     const src = source("ui/trade.js");
     expect(src).toContain('if (d.review) return void go("portfolio", { card: d.review });');
     expect(src).not.toContain('type: "approveCard"');

@@ -767,6 +767,8 @@ function tkTicket(panel, kind0, preset) {
     const box2 = q("[data-where]");
     const w = q("[data-where-w]");
     const rows = tkWhereRows(item, ranked, kind);
+    // a venue that lets this network only close what is held takes a sell, not a buy: for a buy it is that state, in a word
+    if (side === "buy") for (const r of rows) if (r.state === "able" && r.closeOnly) Object.assign(r, { state: "off", why: "Close only here: what you hold there can be sold", how: "" });
     if (item.kind === "event") {
       const o = (item.outcomes || []).find((x) => x.label.toUpperCase() === outcome.toUpperCase());
       for (const r of rows) if (o && r.state !== "public") r.price = side === "sell" ? o.bid ?? o.price : o.ask ?? o.price;
@@ -1336,7 +1338,7 @@ function tkWhereRows(item, ranked, kind = "") {
       continue;
     }
     const able = canTrade(v) && r.canTrade !== false;
-    rows.push(able ? { state: "able", venue: r.venue, venueName: r.venueName, symbol: r.symbol, price: r.price, best: !!r.best, closed: !r.open, worse: r.best ? 0 : r.worse, note: r.ready === false && r.open ? r.note || "" : "" } : { state: "off", venue: r.venue, venueName: r.venueName, why: tkWhyNot(v), how: tkHow(v) });
+    rows.push(able ? { state: "able", ...(v.closeOnly ? { closeOnly: true } : {}), venue: r.venue, venueName: r.venueName, symbol: r.symbol, price: r.price, best: !!r.best, closed: !r.open, worse: r.best ? 0 : r.worse, note: r.ready === false && r.open ? r.note || "" : "" } : { state: "off", venue: r.venue, venueName: r.venueName, why: tkWhyNot(v), how: tkHow(v) });
   }
   // a public line is a price; it offers its connection only where none of your accounts trades the thing (a connected venue whose key may)
   const tradedHere = (item.at || []).some((a) => a.connected && a.canTrade !== false);
@@ -1364,7 +1366,7 @@ function tkWhereRows(item, ranked, kind = "") {
       continue;
     }
     const able = canTrade(v) && a.canTrade !== false;
-    rows.push(able ? { state: "able", venue: a.venue, venueName: a.venueName, symbol: a.symbol, price: a.price, ...(a.implied ? { implied: a.implied } : {}), closed: a.open === false, note: a.note || "" } : { state: "off", venue: a.venue, venueName: a.venueName, why: a.note || tkWhyNot(v), how: tkHow(v) });
+    rows.push(able ? { state: "able", ...(v.closeOnly || a.closeOnly ? { closeOnly: true } : {}), venue: a.venue, venueName: a.venueName, symbol: a.symbol, price: a.price, ...(a.implied ? { implied: a.implied } : {}), closed: a.open === false, note: a.note || "" } : { state: "off", venue: a.venue, venueName: a.venueName, why: a.note || tkWhyNot(v), how: tkHow(v) });
   }
   const order = { able: 0, off: 1, public: 2 };
   return Object.assign(rows.sort((x, y) => order[x.state] - order[y.state]), { away });
@@ -1653,6 +1655,9 @@ function tkOpenStatus(r) {
   if (r.c) return `<span class="tp-st warn-t">Waiting for you</span>${r.c.expiresAt ? `<span class="why">answer by ${esc(nyTime(r.c.expiresAt))}</span>` : ""}`;
   if (r.o) {
     const o = r.o;
+    // an order the account stopped following (the owner's cancel asked while its venue refused this network, or was not connected): a
+    // state, its note on hover. The account sends that cancel again once the venue answers this network
+    if (o.unfollowed && !o.canceling) return `<span class="tp-st dim"${o.note ? ` title="${esc(o.note)}"` : ""}>Not followed</span>`;
     const note = o.note ? `<span class="why">${esc(o.note)}</span>` : "";
     if (o.canceling) return `<span class="tp-st dim">Canceling</span>${note}`;
     if (o.walletTxs && !o.ref) return `<span class="tp-st warn-t">Waiting for your wallet</span>${note}`;
@@ -1667,7 +1672,8 @@ function tkOpenActs(r) {
   if (r.o) {
     const o = r.o;
     const waiting = o.walletTxs && !o.ref;
-    const amendable = !waiting && !o.canceling && ((A.venues.find((x) => x.id === o.venue) || {}).trade || {}).amend;
+    // an order not followed is not changed (Cancel stays: it sends the owner's cancel again)
+    const amendable = !waiting && !o.canceling && !o.unfollowed && ((A.venues.find((x) => x.id === o.venue) || {}).trade || {}).amend;
     return `<div class="acts">${waiting ? `<button type="button" class="btn btn-sm" data-order-send="${esc(o.id)}" data-fk="send:${esc(o.id)}"${INFLIGHT.has(o.clientId) ? " disabled" : ""}>${o.reported ? "Report again" : "Send from wallet…"}</button>` : ""}${amendable ? `<button type="button" class="btn btn-sm" data-amend="${esc(o.id)}" data-fk="amend:${esc(o.id)}">Change</button>` : ""}${o.canceling ? "" : `<button type="button" class="btn btn-sm" data-cancel="${esc(o.id)}" data-venue="${esc(o.venue)}" data-fk="cancel:${esc(o.id)}">Cancel</button>`}</div>`;
   }
   if (r.p && r.p.status === "authorized") return `<div class="acts"><button type="button" class="btn btn-sm" data-wallet-send="${esc(r.p.id)}" data-fk="send:${esc(r.p.id)}"${INFLIGHT.has(`${r.p.id}@${r.p.at}`) ? " disabled" : ""}>${r.p.live && r.p.live.reported ? "Report again" : "Send from wallet…"}</button></div>`;

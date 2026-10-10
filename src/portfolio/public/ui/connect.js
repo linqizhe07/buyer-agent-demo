@@ -303,7 +303,8 @@ async function openConnect(o, { exchange = "", watch = false, name = "", back = 
   };
   /* what this form's venue answered from here before anything was made (live/reach.ts): something wanted on this machine first, or no way
      in, closes the way in — the steps folded away, Connect off — and says why in the venue's words; a refusal of this network is said the
-     same way, in red, but the steps stay and Connect works: the connection is kept waiting. "Check again" asks the venue again now */
+     same way, in red (quiet, when this connection already waits on the account), but the steps stay and Connect works: the connection is
+     kept waiting. "Check again" asks the venue again now */
   const connNow = () => (o.kind === "exchange" ? (exchangeId() ? `live:exchange:${exchangeId()}` : "") : tileConnector(o.kind, ""));
   let reachShut = false;
   const showReach = () => {
@@ -313,7 +314,9 @@ async function openConnect(o, { exchange = "", watch = false, name = "", back = 
     const was = reachShut;
     reachShut = !!(t && t.shut);
     note.hidden = !t;
-    note.className = `reach-note msg ${reachShut || (t && t.state === "location") ? "no" : "wait"}`;
+    // a connection already on the account, waiting for this venue to answer this network: its refusal is the state it waits in, not an error
+    const onAccount = !!waitingOf(o.kind, o.kind === "exchange" ? exchangeId() : watch ? "watch" : "");
+    note.className = `reach-note msg ${reachShut || (t && t.state === "location" && !onAccount) ? "no" : "wait"}`;
     // the venue named as the form has it; a wallet's "venue" is a chain's endpoint, named by nobody here
     note.innerHTML = t ? reachNoteHtml(t, o.kind, o.kind === "exchange" ? exchangeName() : o.kind === "wallet" ? "" : title) : "";
     for (const el of form.querySelectorAll("#live-body .steps, #live-body details.opts")) el.hidden = reachShut;

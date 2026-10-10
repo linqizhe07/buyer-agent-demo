@@ -70,6 +70,7 @@
      "agent", id, name } · inLens(venue, agent)
    What an account can do
      connected() · nameOf(id) · keyName(address) · owns() · writesOn() · canTrade(v) · canMove(v) · keyOnlyReads(v) · watched(v) ·
+     servedHere(v) · awayMiss(m) / awayLine(list, { fold }) (a venue a read left out because it does not serve this network: one quiet line) ·
      isAgentWallet(v) (never disconnected: emptied with Take back…) · modeOf(m) ("guard" | "open", whichever word a read uses) ·
      dollarsOf() · isDollar(asset) · networksOf() · bridgeChainsOf() (the lists the account publishes, the page's own as the fallback)
    A browser wallet sending what the account built: PROVIDERS (proven address → wallet) · SENT · INFLIGHT · walletFor(address) · mined(w, hash)
@@ -952,6 +953,22 @@ const watched = (v) => !!v.address && !v.proven;
    account all the same (`notServed`: its numbers are the last good read's), and is offered for nothing from here until a check of this
    network finds it answering */
 const servedHere = (v) => !(v && v.notServed);
+/* a venue a read left out because it does not serve this network now (its place rule, or a connected venue marked notServed): a state to name
+   once, never a read that failed */
+const awayMiss = (m) => !!m && (m.code === "E_VENUE_GEOBLOCKED" || !servedHere(((A && A.venues) || []).find((v) => v.id === m.venue)));
+/** those venues named once, in one quiet line: "Not served on this network now: Binance, Bybit." Their own words only on request, on hover
+ * (`title`), or folded in a closed details (`fold`); never as an error. `named: false` keeps only the folded words (where the venue is
+ * already named) */
+function awayLine(list, { cls = "dim small", fold = false, named = true } = {}) {
+  const seen = new Set();
+  const once = (list || []).filter((m) => m && !seen.has(m.venue) && seen.add(m.venue));
+  if (!once.length) return "";
+  const name = (m) => m.venueName || nameOf(m.venue);
+  const said = once.map((m) => [name(m), String(m.said || m.why || "").trim().replace(/[.\s]+$/, "")]).filter(([, w]) => w);
+  const lead = named ? `Not served on this network now: ${esc(once.map(name).join(", "))}.` : "";
+  if (fold) return lead || said.length ? `<div class="${cls}">${lead}${said.length ? `<details class="inl"><summary>Their words</summary>${said.map(([n, w]) => `<div><b>${esc(n)}</b>: ${esc(w)}.</div>`).join("")}</details>` : ""}</div>` : "";
+  return lead ? `<p class="${cls}"${said.length ? ` title="${esc(said.map(([n, w]) => `${n}: ${w}.`).join(" "))}"` : ""}>${lead}</p>` : "";
+}
 /* an order can be placed here: trading is on, the venue trades, the key may (or has not said), and a wallet is proven yours */
 const canTrade = (v) => writesOn() && !!v.trade && v.trade.can !== false && !watched(v) && servedHere(v);
 const canMove = (v) => writesOn() && !!v.liveCan && !v.readOnlyBecause && !watched(v) && servedHere(v) && (v.liveCan.withdraw !== false || ((v.liveCan.ledgers || []).length > 1 && v.liveCan.transfer !== false) || v.liveCan.swap !== false || !!v.liveCan.send);

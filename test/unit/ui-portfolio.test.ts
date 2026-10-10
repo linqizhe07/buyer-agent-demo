@@ -453,6 +453,69 @@ describe("the Portfolio pane", () => {
     expect(String(p.run(`pfWorthHtml(${ALL}, pfVenueIn(${ALL}), null)`))).toContain("Nothing is connected yet.");
   });
 
+  it("a venue that lets this network only close is said in a word beside its health — Close only here, its words on hover — and Trades reads Sells only, in the chips and in its drawer", () => {
+    const said = "Polymarket lets this location close positions, not open new ones (its own rule)";
+    const pm = venue("pm", "Polymarket", { usd: 40, trade: { can: true, what: "event contracts", positions: true }, closeOnly: { said }, plugged: true });
+    const p = account({ venues: [...ACCOUNT.venues, pm] });
+    const chips = String(p.run("pfChips(A.venues[4])"));
+    expect(chips).toContain(`<span class="chip" title="${said}">Close only here</span> <span class="chip warm">Sells only</span>`);
+    expect(chips).not.toContain(">Trades<");
+    expect(chips).not.toContain("Not served here");
+    expect(p.run("pfTrades(A.venues[4])")).toEqual({ can: true, text: "Sells only on this network: what you hold there can be sold or closed; nothing new is bought." });
+    // a venue that trades as before keeps Trades
+    expect(String(p.run("pfChips(A.venues[0])"))).toContain('<span class="chip warm">Trades</span>');
+  });
+
+  it("a waiting connection a restart could not bring back shows what its venue held at the last good read: dim, when on hover, the time under its name, and in no total", () => {
+    const entry = { venue: "binance", name: "Binance", connector: "live:exchange:binance", needs: "key-file", keyFile: "credentials/binance/api-key.json", said: "Binance did not answer this network after the restart. Asked again when a check of this network finds it answering", code: "E_VENUE_GEOBLOCKED", since: "2026-10-06T10:30:00.000Z", how: "restart", lastUsd: 812.5, lastAt: "2026-10-06T09:15:00.000Z" };
+    const p = account({ connectLive: { ...ACCOUNT.connectLive, waiting: [entry] } });
+    const acc = String(p.run(`pfAccountsHtml(pfVenueIn(${ALL}), true)`));
+    expect(acc).toContain('<span class="dim" title="Last read before the restart, Tue 6 Oct 05:15">$812.50</span>');
+    expect(acc).toMatch(/<b>Binance<\/b><span class="dim small">waiting for the venue · last read 05:15<\/span>/);
+    // the card's total is the connected accounts' alone
+    p.run('var NODE = { innerHTML: "", hidden: false }; var EL = { innerHTML: "", dataset: {}, addEventListener() {}, querySelector: () => NODE, contains: () => false }');
+    p.run("renderVenues({ el: EL, owner: true })");
+    expect(String(p.run("NODE.innerHTML"))).toContain("4 accounts · $12,000.00");
+    // one without a last read keeps its dash
+    p.run("A.connectLive.waiting = [{ ...A.connectLive.waiting[0], lastUsd: undefined, lastAt: undefined, how: 'connect' }]");
+    const plain = String(p.run(`pfAccountsHtml(pfVenueIn(${ALL}), true)`));
+    expect(plain).not.toContain("Last read before the restart");
+    expect(plain).toMatch(/<b>Binance<\/b><span class="dim small">waiting for the venue<\/span>/);
+  });
+
+  it("Check again on a waiting row that still finds no answer says so in a neutral word, never the venue's sentence as an error", async () => {
+    const entry = { venue: "binance", name: "Binance", connector: "live:exchange:binance", needs: "key-file", keyFile: "credentials/binance/api-key.json", said: "Binance does not serve this location", code: "E_VENUE_GEOBLOCKED", since: "2026-10-06T10:30:00.000Z", how: "connect" };
+    const p = account({ connectLive: { ...ACCOUNT.connectLive, waiting: [entry] } });
+    p.run('var TOASTS = []; toast = (t, k) => TOASTS.push([t, k]); var LOADS = 0; load = async () => { LOADS++; }; askReach = async (c) => { REACH.set(c[0], { connector: c[0], state: "location", said: "Binance does not serve this location: that is its own rule", at: "2026-10-06T12:00:00.000Z" }); }');
+    p.run('pfAct("recheck", { connector: "live:exchange:binance" })');
+    await settle();
+    expect(p.run("TOASTS")).toEqual([["Binance still doesn't answer this network. It stays on the account and comes back by itself when it does.", "info"]]);
+    expect(p.run("flash")).toBe("");
+    expect(p.run("LOADS")).toBe(1);
+    // no answer at all reads the same
+    p.run('TOASTS = []; askReach = async (c) => { REACH.set(c[0], { connector: c[0], state: "unreachable", said: "Binance did not answer just now", at: "2026-10-06T12:00:00.000Z" }); }');
+    p.run('pfAct("recheck", { connector: "live:exchange:binance" })');
+    await settle();
+    expect(p.run<Array<[string, string]>>("TOASTS").map(([, k]) => k)).toEqual(["info"]);
+    expect(p.run("flash")).toBe("");
+    p.run("REACH.clear()");
+  });
+
+  it("Assets and Positions name a venue that does not serve this network once, quietly, its words on hover; a read that failed keeps its words", () => {
+    const geo = { venue: "binance", venueName: "Binance", why: "Binance does not serve this location", code: "E_VENUE_GEOBLOCKED" };
+    const p = account();
+    p.set("PF.hold", { ...HOLD, missing: [geo, { venue: "okx", venueName: "OKX", why: "OKX did not answer" }] });
+    const assets = String(p.run(`pfAssetsHtml(${ALL}, pfRowsIn(PF.hold.rows, pfVenueIn(${ALL})))`));
+    expect(assets).toContain('<p class="small dim pf-miss" title="Binance: Binance does not serve this location.">Not served on this network now: Binance.</p>');
+    expect(assets).toContain("Not read this time: OKX (OKX did not answer)");
+    expect(assets).not.toContain("Binance (Binance");
+    p.set("PF.pos", { ok: true, positions: [], missing: [geo, { venue: "okx", venueName: "OKX", why: "OKX did not answer" }] });
+    const pos = String(p.run(`pfPositionsHtml(${ALL}, pfVenueIn(${ALL}), true)`));
+    expect(pos).toContain("Not served on this network now: Binance.");
+    expect(pos).toContain("<li><b>OKX</b> could not be read: OKX did not answer</li>");
+    expect(pos).not.toContain("<b>Binance</b> could not be read");
+  });
+
   it("closes an account to agents for free and reopens it signed", async () => {
     const p = account({}, { fetch: async () => ({ ok: true, revoked: ["ex"] }) });
     p.run("var DRAFTS = []; own = async (d) => { DRAFTS.push(d); return { status: 200, body: {} }; }; load = async () => {}");

@@ -353,3 +353,18 @@ describe("fix round · the owner's words and the limit for them", () => {
     expect(source("ui/intent.js")).toContain("for ${esc(lim.intent)}");
   });
 });
+
+describe("after connect: a venue that does not serve this network is named, never printed as an error", () => {
+  it("awayMiss tells a read's place rule (or a venue the account marks notServed) from a read that failed; awayLine names each venue once, its words escaped, on hover or folded", () => {
+    const p = page();
+    p.set("A", account([venue("ex", "Exchange", { notServed: { said: "Exchange does not serve this location" } }), venue("okx", "OKX")]));
+    expect(p.out('[awayMiss({ venue: "binance", code: "E_VENUE_GEOBLOCKED" }), awayMiss({ venue: "ex", code: "E_VENUE_UNREACHABLE" }), awayMiss({ venue: "okx", code: "E_VENUE_UNREACHABLE" }), awayMiss({ venue: "gone" }), awayMiss(null)]')).toEqual([true, true, false, false, false]);
+    const list = '[{ venue: "binance", venueName: "Binance", why: "Binance <b>does not</b> serve this location." }, { venue: "binance", venueName: "Binance", why: "again" }, { venue: "ex", venueName: "Exchange", said: "Its own rule" }]';
+    expect(p.run(`awayLine(${list})`)).toBe('<p class="dim small" title="Binance: Binance &lt;b&gt;does not&lt;/b&gt; serve this location. Exchange: Its own rule.">Not served on this network now: Binance, Exchange.</p>');
+    expect(p.run(`awayLine(${list}, { fold: true, cls: "x" })`)).toBe('<div class="x">Not served on this network now: Binance, Exchange.<details class="inl"><summary>Their words</summary><div><b>Binance</b>: Binance &lt;b&gt;does not&lt;/b&gt; serve this location.</div><div><b>Exchange</b>: Its own rule.</div></details></div>');
+    // the words alone, where the venue is already named; nothing at all for nothing
+    expect(p.run('awayLine([{ venue: "ex", venueName: "Exchange", why: "x" }], { fold: true, named: false })')).toBe('<div class="dim small"><details class="inl"><summary>Their words</summary><div><b>Exchange</b>: x.</div></details></div>');
+    expect(p.run('awayLine([{ venue: "ex", venueName: "Exchange" }], { named: false })')).toBe("");
+    expect(p.run("awayLine([])")).toBe("");
+  });
+});
