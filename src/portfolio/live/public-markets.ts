@@ -162,8 +162,10 @@ import { bannedNo, bannedUntil, edgeRefused, edgeWords, isStable, notTheApi, not
 
 /** a market as a public source lists it: the shared shape, and what only a listing carries */
 export type Listing = Market & {
-  /** the venue's event the market belongs to, where an event holds several (Polymarket's "Brazil Presidential Election") */
-  event?: { id: string; title: string } | undefined;
+  /** the venue's event the market belongs to, where an event holds several (Polymarket's "Brazil Presidential Election"), and `market`
+   * this market's own short name inside it, in the venue's words (Kalshi's yes_sub_title "Fed maintains rate", Polymarket's groupItemTitle
+   * "October 12"): what a row says in place of the market's whole question */
+  event?: { id: string; title: string; market?: string | undefined } | undefined;
   /** the whole event's dollars traded in 24 hours, all its markets together, where the venue reports it (Gamma's volume24hr on the event):
    * how hot the question is, which is what Polymarket itself orders by. Only to ORDER; `volumeUsd24h` stays the market's own */
   eventVolumeUsd24h?: number | undefined;
@@ -759,7 +761,7 @@ function kalshiLegs(m: Rec, ev: Pick<KalshiOpenEvent, "ticker" | "title" | "cate
       ...(tags.length ? { tags } : {}),
       ...(moved !== undefined ? { change24h: yes ? moved : -moved } : {}),
       ...(nonNeg(m.volume_24h_fp) !== undefined ? { contracts24h: nonNeg(m.volume_24h_fp) } : {}),
-      ...(ev.title ? { event: { id: ev.ticker, title: ev.title } } : {}),
+      ...(ev.title ? { event: { id: ev.ticker, title: ev.title, ...(sub ? { market: sub } : {}) } } : {}),
     };
   });
 }
@@ -918,6 +920,8 @@ function polymarketLegs(m: Rec, e: Rec, tags: string[]): Listing[] {
   const volume = nonNeg(m.volume24hr);
   const eventVolume = nonNeg(e.volume24hr);
   const eventId = str(e.id) ?? (typeof e.id === "number" ? String(e.id) : undefined);
+  // the market's own name inside its event ("October 12" in "US-Iran ceasefire continues through...?"), where the event holds several
+  const short = str(m.groupItemTitle);
   return names.map((outcome, i): Listing => {
     const p = prices[i];
     const first = i === 0;
@@ -942,7 +946,7 @@ function polymarketLegs(m: Rec, e: Rec, tags: string[]): Listing[] {
       ...(first && fin(m.oneDayPriceChange) !== undefined ? { change24h: fin(m.oneDayPriceChange) } : {}),
       ...(volume !== undefined ? { volumeUsd24h: volume } : {}),
       ...(eventVolume !== undefined ? { eventVolumeUsd24h: eventVolume } : {}),
-      ...(eventId && str(e.title) ? { event: { id: eventId, title: str(e.title)! } } : {}),
+      ...(eventId && str(e.title) ? { event: { id: eventId, title: str(e.title)!, ...(short ? { market: short } : {}) } } : {}),
     };
   });
 }

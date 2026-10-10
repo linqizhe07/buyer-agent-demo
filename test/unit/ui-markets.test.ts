@@ -308,6 +308,38 @@ describe("the Markets pane", () => {
     expect(p.run<string>("mkCard(ITEM)")).toContain('data-fmt="c">71¢</span>');
   });
 
+  it("names an event's market short — its event's title and the market's own words, as the venue gives them — on one line, in a row and on a card; its whole question in its hover card", () => {
+    const p = page(() => ({}));
+    p.set("A", account());
+    // as Kalshi lists its Fed decision (live/public-markets.ts kalshiLegs): the market's question, its event's title, the market's own words
+    const kfed = { ...fed, key: "kalshi:KXFEDDECISION-26OCT-H0", name: "Will the Federal Reserve Hike rates by 0bps at their October 2026 meeting? (Fed maintains rate)", event: { id: "KXFEDDECISION-26OCT", title: "Fed decision in Oct 2026?", market: "Fed maintains rate" } };
+    p.set("ITEMS", { kfed, btc, plain: fed, same: { ...fed, event: { id: "e", title: "Fed cuts in December? All of December", market: "December" } } });
+    expect(p.run("JSON.stringify(mkShort(ITEMS.kfed))")).toBe(JSON.stringify({ name: "Fed decision in Oct 2026?", opt: "Fed maintains rate" }));
+    // not an event, or an event the venue gives no title for: its name, whole
+    expect(p.run("mkShort(ITEMS.btc).name")).toBe("Bitcoin");
+    expect(p.run("mkShort(ITEMS.plain).name")).toBe(fed.name);
+    // the market's words already in its event's title are not said twice
+    expect(p.run("mkShort(ITEMS.same).opt")).toBe("");
+    const row = p.run<string>("MKT.reg = []; mkTable([ITEMS.kfed], '')");
+    expect(row).toContain('<b>Fed decision in Oct 2026?<span class="mk-opt"> · Fed maintains rate</span></b>');
+    // the whole question is not on the row's face — only in words for a screen reader (and the ★'s label)
+    expect(row.replace(/<span class="sr">[^<]*<\/span>/g, "").replace(/<[^>]*>/g, "")).not.toContain("Hike rates by 0bps");
+    expect(row).toContain('<span class="sr">. Will the Federal Reserve Hike rates by 0bps at their October 2026 meeting? (Fed maintains rate) · Economics · closes Thu 8 Oct, 05:12 New York</span>');
+    // its hover card: the whole question, what it is with its countdown, where it is listed — connected first, public prices quieter
+    const peek = p.run<string>("mkPeekHtml(ITEMS.kfed)");
+    expect(peek).toContain('<b class="mk-peek-n">Will the Federal Reserve Hike rates by 0bps at their October 2026 meeting? (Fed maintains rate)</b>');
+    expect(peek).toContain('<span class="mk-peek-k">Economics · <span class="mk-close" data-ended="Closed" data-close="2026-10-08T09:12:30.000Z">Closes in 2d 04:12</span></span>');
+    expect(peek).toContain('<span class="mk-peek-w">Kalshi · <span class="dim">Polymarket</span></span>');
+    // a card says it short too, the question for a screen reader and in its hover card
+    const card = p.run<string>("mkCard(ITEMS.kfed)");
+    expect(card).toMatch(/class="mk-card-q" data-act="open" data-i="\d+" data-fk="open:kalshi:KXFEDDECISION-26OCT-H0" data-peek="\d+"><span>Fed decision in Oct 2026\?<span class="mk-opt"> · Fed maintains rate<\/span><span class="sr">\. Will the Federal Reserve Hike rates/);
+    // a name the page did not write stays words
+    expect(p.run<string>("mkPeekHtml(ITEMS.plain)")).toContain("Fed cuts in December? &lt;img src=x");
+    expect(p.run<string>("mkPeekHtml(ITEMS.plain)")).not.toContain("<img");
+    // nothing shown, nothing to keep after a draw
+    expect(() => p.run("mkPeekKeep(); mkPeekHide()")).not.toThrow();
+  });
+
   it("names each venue that did not answer in its own words, a location rule as the venue's rule and nothing more", () => {
     const p = page(() => ({}));
     const line = p.run<string>(`mkMissingLine(${JSON.stringify([...explore.missing, { venue: "kraken", venueName: "Kraken <b>", why: "no answer in 4 s", connected: true }, { venue: "ex", venueName: "X", why: "far from the others", symbol: "BTC/USD", connected: true }])})`);
@@ -340,9 +372,17 @@ describe("the Markets pane", () => {
     expect(html).not.toContain("mk-chip");
     expect(html).not.toContain("Your venues");
     expect(html).not.toContain("Connect a venue");
-    // the event is a row too: its lead outcome in cents, a countdown that ticks in place
+    // the event is a row too, one line high: its lead outcome in cents; what kind of thing it is and when it closes are in its hover card
+    // (a screen reader hears them, as a time), not under its name
     expect(html).toContain('<span data-q="kalshi|KXFED-DEC:YES" data-fmt="c-last">62¢</span><span class="dim small"> Yes</span>');
-    expect(html).toContain('Economics · <span class="mk-close" data-ended="Closed" data-close="2026-10-08T09:12:30.000Z">Closes in 2d 04:12</span>');
+    expect(html).not.toContain("mk-close");
+    expect(html).toContain('data-fk="open:kalshi:KXFED-DEC" data-peek="0"');
+    // its row carries its close, so the list is read again the moment it closes (a rolling market's next one takes its place)
+    expect(html).toContain('<tr data-k="kalshi:KXFED-DEC" data-pairs="kalshi|KXFED-DEC:YES,kalshi|KXFED-DEC:NO" data-ends="2026-10-08T09:12:30.000Z">');
+    expect(html).not.toContain('<tr data-k="coin:BTC" data-pairs="ex|BTC/USDT" data-ends');
+    expect(html).toContain('<span class="sr">. Economics · closes Thu 8 Oct, 05:12 New York</span>');
+    p.set("FED", fed);
+    expect(p.run<string>("mkPeekHtml(FED)")).toContain('Economics · <span class="mk-close" data-ended="Closed" data-close="2026-10-08T09:12:30.000Z">Closes in 2d 04:12</span>');
     // DOGE is only at OKX's public prices: its row connects; BTC trades at Exchange X
     expect(html).toContain('data-connector="live:exchange:okx" data-name="OKX"');
     expect(html).toMatch(/data-act="trade" data-i="\d+" data-fk="trade:coin:BTC"/);
@@ -596,6 +636,14 @@ describe("the Markets pane", () => {
     expect(btn.textContent).toBe("Close");
     expect(cd.textContent).toBe(p.run("mkLeft(90_000)"));
     expect(cd.textContent).not.toBe("Closed");
+    // a table row whose countdown is in its hover card carries only its close (data-ends): its words are never written, and the moment it
+    // closes the list is read again, as its countdown would have sent it
+    const row = { className: "mk-t", attrs: { "data-ends": new Date(NOW - 1000).toISOString() } as Record<string, string>, dataset: { ends: new Date(NOW - 1000).toISOString() }, textContent: "Bitcoin up or down", hasAttribute(n: string) { return n in this.attrs; }, setAttribute(n: string, v: string) { this.attrs[n] = v; } };
+    g.document.querySelectorAll = (sel) => [btn, cd, row as unknown as El].filter((e) => [...sel.matchAll(/\.([\w-]+)|\[([\w-]+)\]/g)].every((m) => (m[1] ? e.className.split(" ").includes(m[1]) : m[2]! in e.attrs)));
+    p.run(`MKT.got.set("/api/account/explore", { at: ${NOW} }); MKT.closes = null; mkTick()`);
+    expect(row.textContent).toBe("Bitcoin up or down");
+    expect("data-closed" in row.attrs).toBe(true);
+    expect(p.run('MKT.got.get("/api/account/explore").at')).toBe(0);
   });
 
   it("prices another pane's rows too: the Trade picker's data-pairs are polled while Trade is shown, and the poll stops only when no pane and no drawer needs it", async () => {
@@ -746,15 +794,17 @@ describe("the one drawer", () => {
     expect(ev).toContain("<dt>Closes</dt>");
   });
 
-  it("says a tokenised asset's issuer and whom it is for: a short line on its row, all of it in the drawer; a restricted one in the issuer's words, never a dead button", () => {
+  it("says a tokenised asset's issuer and whom it is for: all of it in its hover card and in the drawer, none on its row; a restricted one in the issuer's words, never a dead button", () => {
     const p = page(() => ({}));
     p.set("A", withWallet());
     p.set("ITEMS", { nvda, ousg });
     const rows = p.run<string>("MKT.reg = []; mkTable([ITEMS.nvda, ITEMS.ousg], '')");
-    expect(rows).toContain('<span class="mk-iss" title="Issued by Ondo Global Markets · Ondo Global Markets: “not available to US persons');
-    expect(rows).toContain(">Issued by Ondo Global Markets · Ondo Global Markets: “not available to US persons, or…</span>");
+    // the row is its name, one line: the issuer's words are its hover card's, whole (a screen reader hears them from the row)
+    expect(rows).not.toContain("mk-iss");
+    expect(rows).toContain('<b>NVIDIA · Ondo Stock on Ethereum</b><span class="sr">. NVDA · Issued by Ondo Global Markets · Ondo Global Markets: “not available to US persons');
+    expect(p.run<string>("mkPeekHtml(ITEMS.nvda)")).toContain("<span class=\"mk-peek-i\">Issued by Ondo Global Markets · Ondo Global Markets: “not available to US persons, or to anyone in a sanctioned or prohibited jurisdiction” — the issuer&#39;s own words, which run long</span>");
     // the issuer and its words carried on a listing read the same
-    expect(rows).toContain(">Issued by Ondo Finance · OUSG moves only between wallets Ondo has approved</span>");
+    expect(p.run<string>("mkPeekHtml(ITEMS.ousg)")).toContain('<span class="mk-peek-i">Issued by Ondo Finance · OUSG moves only between wallets Ondo has approved</span>');
     // NVDA trades at the wallet; OUSG does not: its button opens the drawer, whose callout gives the issuer's rule
     expect(rows).toContain('data-act="trade" data-i="0"');
     expect(rows).toContain('data-act="open" data-i="1" data-fk="why:rwa:OUSG" title="Wallet: OUSG moves only between wallets Ondo has approved."');
@@ -1121,6 +1171,12 @@ describe("the one drawer", () => {
     expect(html).toContain('data-fk="open:coin:BTC"');
     expect(html).toContain("ETH/USD");
     expect([...html.matchAll(/<th scope="col"[^>]*>(?:<span class="sr">)?([^<]*)/g)].map((m) => m[1])).toEqual(["Watch", "Market", "Where", "Price", "24h", "Actions"]);
+    // a watched outcome is said beside its price (not under the name: a row is one line, its name's card says the rest)
+    p.set("A", account({ watch: [{ venue: "kalshi", symbol: "KXFED-DEC:NO", at: "2026-10-06T04:00:00.000Z" }] }));
+    const ev = p.run<string>("MKT.reg = []; mkWatchingHtml(lensNow())");
+    expect(ev).toContain('data-fmt="c-last">38¢</span><span class="dim small"> No</span>');
+    expect(ev).toContain('data-peek="0"');
+    expect(ev).not.toContain('<span class="dim">No</span>');
   });
 });
 

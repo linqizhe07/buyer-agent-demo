@@ -56,24 +56,25 @@
 :root[data-theme="black"] .mk-yn button:hover:not(:disabled), :root[data-theme="black"] .mk-buy:hover:not(:disabled) { box-shadow: none; filter: brightness(1.25); }
 @media (prefers-color-scheme: dark) { :root:not([data-theme]) .mk-yn button:hover:not(:disabled), :root:not([data-theme]) .mk-buy:hover:not(:disabled) { box-shadow: none; filter: brightness(1.25); } }
 
-/* the tables, inside their cards: ★, the market's name as a button, where it is listed (public prices dimmed), one pill button. The name
-   and where it is listed wrap, so the button at the end of a row always fits the card */
+/* the tables, inside their cards: a row is one line — ★, the market's tile and its short name, where it is listed (public prices dimmed),
+   one pill button. The name takes the room the other columns leave and is cut short with … where it ends: its hover card (.mk-peek) says
+   it whole, with what kind of thing it is, its countdown, its issuer and every venue that lists it */
 .mk-t td { white-space: nowrap; }
-.mk-t td.mk-c-name { white-space: normal; min-width: 180px; }
-.mk-t td.mk-c-where { white-space: normal; min-width: 150px; max-width: 280px; }
-/* a venue's name never breaks inside itself: a cell wraps between names only (two at most, then +N) */
-.mk-where .mk-v, .mk-where .mk-more { white-space: nowrap; }
+.mk-t td.mk-c-name { width: 100%; max-width: 0; min-width: 180px; }
+/* where it is listed gives the name its room past 240: the rest of a long pair of venue names is in the hover card */
+.mk-t td.mk-c-where { max-width: 240px; overflow: hidden; text-overflow: ellipsis; }
+.mk-t .mk-name { width: 100%; min-width: 0; }
+.mk-nm { min-width: 0; }
+.mk-name b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* an event's market, beside its event's title: the venue's own short words for it, quieter */
+.mk-opt { font-weight: 500; color: var(--dim); }
 .mk-d .mk-t td { white-space: normal; }
-/* an event's countdown in its row, under the question */
-.mk-t .mk-close { font-weight: 600; }
-/* where it is listed, as a line under the name (aligned with the name, past the 34 tile and its 12 gap): only while the Where column is
-   not drawn */
-.mk-where-l { display: none; padding-left: 46px; margin-top: -6px; font-size: 12px; line-height: 1.4; white-space: normal; }
-/* a window between a phone and about 1220 wide (the rail beside the pane): the table would need more than its card, so Where moves under
-   the name, and Trade · Connect to trade stay whole inside the card */
+/* a venue's name never breaks inside itself where a cell wraps (the drawer's): between names only */
+.mk-where .mk-v, .mk-where .mk-more { white-space: nowrap; }
+/* a window between a phone and about 1220 wide (the rail beside the pane): the table would need more than its card, so Where is left to
+   the hover card, and Trade · Connect to trade stay whole inside the card */
 @media (min-width: 641px) and (max-width: 1219px) {
   .mk-t th.mk-c-where, .mk-t td.mk-c-where { display: none; }
-  .mk-t .mk-where-l { display: block; max-width: 240px; }
   .mk-t td.mk-c-name { min-width: 170px; }
 }
 /* narrower still (under about 1090, the rail beside): the cells sit closer, rather than the row leave the card (under about 980 with the
@@ -83,8 +84,8 @@
   .mk-t th, .mk-t td { padding-left: 8px; padding-right: 8px; }
   .mk-t td.mk-c-name { min-width: 160px; }
 }
-/* a phone: the table scrolls inside its card anyway, so its rows stay one line high */
-@media (max-width: 640px) { .mk-t td.mk-c-name, .mk-t td.mk-c-where { white-space: nowrap; min-width: 0; max-width: none; } }
+/* a phone: the table scrolls inside its card anyway; the name keeps its 160 */
+@media (max-width: 640px) { .mk-t td.mk-c-name { min-width: 160px; } }
 .mk-star { color: var(--dim); }
 .mk-star .ico { width: 18px; height: 18px; }
 .mk-star:hover:not(:disabled) { color: var(--text); }
@@ -92,7 +93,6 @@
 .mk-star[aria-pressed="true"] svg, svg.mk-on { fill: currentColor; }
 .mk-name { border: 0; padding: 0; border-radius: 0; background: none; color: var(--text); text-align: left; display: flex; align-items: center; gap: 12px; min-height: 44px; }
 .mk-name b { font-weight: 600; display: block; }
-.mk-name .dim { font-size: 12px; display: block; }
 .mk-name:hover b { text-decoration: underline; text-underline-offset: 3px; }
 .mk-where .pub { color: var(--dim); }
 .mk-why { font-size: 12px; white-space: nowrap; }
@@ -143,13 +143,26 @@
 .mk-held > div > div { flex: 1; min-width: 0; }
 .mk-held > div > .btn, .mk-held > div > .st { margin-left: auto; flex: none; }
 .mk-cost { margin: 0; font-size: 13px; line-height: 1.5; }
-/* a tokenised asset: who issues it and whom it is for, in the issuer's words (a short line in a row, all of it in the drawer on an inset) */
-.mk-name .mk-iss { display: block; font-size: 11px; color: var(--dim); max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* a tokenised asset: who issues it and whom it is for, in the issuer's words (in its hover card, and all of it in the drawer on an inset) */
 .mk-iss-box { gap: 4px; }
 .mk-d .mk-iss-box { background: var(--bg); border: 0; box-shadow: none; border-radius: var(--radius-m); padding: 14px 16px; }
 .mk-iss-box p { margin: 0; line-height: 1.5; color: var(--dim); }
 /* a venue that keeps no price history for it, said quietly in its own words */
 .mk-quiet { font-size: 12px; color: var(--dim); margin: 6px 0 0; line-height: 1.5; }
+
+/* a market's hover card (markets.js mkPeek): one for the pane, on the page's body, beside the market a mouse rests on or a key reached. Its
+   whole name, what kind of thing it is with its countdown, who issues it, where it is listed (public prices quieter). It takes no click:
+   a click goes to what is under it. It comes in on opacity and transform only */
+.mk-peek { position: fixed; left: 0; top: 0; z-index: 25; display: flex; flex-direction: column; gap: 4px; width: max-content; max-width: min(360px, calc(100vw - 16px)); padding: 12px 14px; background: var(--surface); color: var(--text); border: 1px solid var(--card-border); border-radius: var(--radius-m); box-shadow: var(--shadow); font-size: 13px; line-height: 1.45; pointer-events: none; overflow-wrap: anywhere; }
+.mk-peek[hidden] { display: none; }
+.mk-peek-n { font-size: 14px; font-weight: 700; }
+.mk-peek-k, .mk-peek-i { color: var(--dim); }
+.mk-peek-i { font-size: 12px; }
+.mk-peek-w { font-size: 12px; }
+.mk-peek .mk-close { font-size: 13px; }
+.mk-peek:not([hidden]) { animation: mk-peek-in 140ms cubic-bezier(0.2, 0.8, 0.2, 1); }
+@keyframes mk-peek-in { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .mk-peek:not([hidden]) { animation: none; } }
 
 /* ---- connecting an account (ui/connect.js): what it is, as tiles that are cards, then one short form ------------------------------ */
 .pick .tile { border-radius: var(--radius-m); padding: 14px; gap: 4px; }

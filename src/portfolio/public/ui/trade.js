@@ -397,7 +397,7 @@ function tkPickLists(sec, kind, search) {
 /* one list: its name, its rows (each a button), or a skeleton while its rows are being read, or the words for none */
 function tkGroup(el, title, rows, empty) {
   if (!el) return;
-  const body = rows === null ? '<div class="skel-rows" aria-hidden="true"><span class="skel"></span><span class="skel" style="width:70%"></span></div>' : rows.length ? `<ul class="tk-list" role="list">${rows.map((r, i) => `<li data-k="${esc(r.fk)}"><button type="button" data-i="${i}" data-fk="${esc(r.fk)}"${r.pairs && r.pairs.length ? ` data-pairs="${esc(r.pairs.join(","))}"` : ""}>${r.av}<span class="tk-rn"><b>${esc(r.name)}</b><span class="dim small">${esc(r.sub)}</span></span><span class="tk-rp">${r.right}</span></button></li>`).join("")}</ul>` : empty ? `<p class="empty">${esc(empty)}</p>` : "";
+  const body = rows === null ? '<div class="skel-rows" aria-hidden="true"><span class="skel"></span><span class="skel" style="width:70%"></span></div>' : rows.length ? `<ul class="tk-list" role="list">${rows.map((r, i) => `<li data-k="${esc(r.fk)}"><button type="button" data-i="${i}" data-fk="${esc(r.fk)}"${r.pairs && r.pairs.length ? ` data-pairs="${esc(r.pairs.join(","))}"` : ""}${r.title ? ` title="${esc(r.title)}"` : ""}>${r.av}<span class="tk-rn"><b>${esc(r.name)}</b><span class="dim small">${esc(r.sub)}</span></span><span class="tk-rp">${r.right}</span></button></li>`).join("")}</ul>` : empty ? `<p class="empty">${esc(empty)}</p>` : "";
   el.hidden = !body;
   // the rows a click opens are the ones last drawn; heard once, on the list itself (its rows are kept in place by their key)
   el.tkRows = rows || [];
@@ -410,6 +410,10 @@ function tkGroup(el, title, rows, empty) {
     if (r) r.open();
   });
 }
+/* a market's name in a list: an event's short name — its event's title and the market's own words (markets.js mkShort) — its whole question
+   then in the row's title (tkTitle); anything else by its name */
+const tkName = (x) => { const s = typeof mkShort === "function" ? mkShort(x) : { name: String(x.name || ""), opt: "" }; return s.opt ? `${s.name} · ${s.opt}` : s.name; };
+const tkTitle = (x) => (tkName(x) !== x.name ? String(x.name || "") : "");
 /* a row from the markets read: its name, where it is listed, its price ticking in place (data-q, as Markets' rows), the day's change — a
    pre-IPO company's row says the implied valuation first, an event's its lead outcome's price in cents */
 function tkItemRow(x, kind) {
@@ -417,7 +421,7 @@ function tkItemRow(x, kind) {
   const q = pair ? ` data-q="${esc(pair)}"` : "";
   const imp = kind === "preipo" ? x.implied || ((x.at || []).find((a) => a.implied) || {}).implied : null;
   const right = x.kind === "event" ? `<span class="tab-nums"${q} data-fmt="c">${esc(tkCents(x.price))}</span>${x.closeTime ? `<span class="dim small">${esc(typeof mkLeft === "function" ? mkLeft(Date.parse(x.closeTime) - Date.now()) : nyDay(x.closeTime))}</span>` : ""}` : imp && imp.usd ? `<span class="tab-nums">${esc(tkValuation(imp.usd))} <span class="tag">implied</span></span><span class="dim small tab-nums"${q} data-fmt="usd">${x.price ? `$${esc(px(x.price))}` : ""}</span>` : `<span class="tab-nums"${q} data-fmt="usd">${x.price ? `$${esc(px(x.price))}` : ""}</span>${chg(x.changePct24h)}`;
-  return { fk: `pick:${x.key}`, pairs: tkPairs(x), av: avatar(x.kind === "event" ? String(x.category || "Event").slice(0, 4) : x.base || x.name, "sm"), name: x.name, sub: [kind === "preipo" ? "Pre-IPO" : x.kind === "event" ? x.category || "" : "", tkWhereWords(x)].filter(Boolean).join(" · "), right, open: () => tkPickOpen(x, kind) };
+  return { fk: `pick:${x.key}`, pairs: tkPairs(x), av: avatar(x.kind === "event" ? String(x.category || "Event").slice(0, 4) : x.base || x.name, "sm"), name: tkName(x), title: tkTitle(x), sub: [kind === "preipo" ? "Pre-IPO" : x.kind === "event" ? x.category || "" : "", tkWhereWords(x)].filter(Boolean).join(" · "), right, open: () => tkPickOpen(x, kind) };
 }
 /* a market picked before, from this browser's own list */
 const tkRecentRow = (r, kind) => ({ fk: `recent:${r.venue}:${r.symbol}`, pairs: A.venues.some((v) => v.id === r.venue && v.live) ? [`${r.venue}|${r.symbol}`] : [], av: avatar(r.base || r.name, "sm"), name: r.name, sub: `${r.venueName || nameOf(r.venue)} · ${nyDay(r.at)}`, right: "", open: () => tkOpen({ kind, venue: r.venue, symbol: r.symbol, side: "buy", key: r.key, base: r.base, name: r.name }) });
@@ -692,7 +696,7 @@ function tkTicket(panel, kind0, preset) {
     if (preset.venue) items = [...items.filter((x) => x.at.some((a) => a.venue === preset.venue)), ...items.filter((x) => !x.at.some((a) => a.venue === preset.venue))];
     items = items.slice(0, 8);
     // the count is read out once the search has landed; the list itself is not read out keystroke by keystroke
-    res.innerHTML = `<p class="sr" role="status">${text ? `${plural(items.length, "market")} for ${esc(text)}` : ""}</p>${items.length ? `<ul class="tk-list" role="list">${items.map((x, i) => `<li><button type="button" data-i="${i}">${avatar(x.kind === "event" ? String(x.category || "Event").slice(0, 4) : x.base || x.name, "sm")}<span class="tk-rn"><b>${esc(x.name)}</b><span class="dim small">${esc(tkWhereWords(x))}</span></span><span class="tk-rp"><span class="tab-nums">${x.kind === "event" ? esc(tkCents(x.price)) : tkPre(x) && x.implied && x.implied.usd ? esc(tkValuation(x.implied.usd)) : x.price ? `$${esc(px(x.price))}` : ""}</span>${x.kind === "event" || tkPre(x) ? "" : chg(x.changePct24h)}</span></button></li>`).join("")}</ul>` : `<p class="empty">${got.refused ? `${esc(spec().label)} can't be read here yet.` : text ? `Nothing matches “${esc(text)}” under ${esc(spec().label)} at your accounts or the public venues.` : "Type to find a market."}</p>`}`;
+    res.innerHTML = `<p class="sr" role="status">${text ? `${plural(items.length, "market")} for ${esc(text)}` : ""}</p>${items.length ? `<ul class="tk-list" role="list">${items.map((x, i) => `<li><button type="button" data-i="${i}"${tkTitle(x) ? ` title="${esc(tkTitle(x))}"` : ""}>${avatar(x.kind === "event" ? String(x.category || "Event").slice(0, 4) : x.base || x.name, "sm")}<span class="tk-rn"><b>${esc(tkName(x))}</b><span class="dim small">${esc(tkWhereWords(x))}</span></span><span class="tk-rp"><span class="tab-nums">${x.kind === "event" ? esc(tkCents(x.price)) : tkPre(x) && x.implied && x.implied.usd ? esc(tkValuation(x.implied.usd)) : x.price ? `$${esc(px(x.price))}` : ""}</span>${x.kind === "event" || tkPre(x) ? "" : chg(x.changePct24h)}</span></button></li>`).join("")}</ul>` : `<p class="empty">${got.refused ? `${esc(spec().label)} can't be read here yet.` : text ? `Nothing matches “${esc(text)}” under ${esc(spec().label)} at your accounts or the public venues.` : "Type to find a market."}</p>`}`;
     for (const b of res.querySelectorAll("button[data-i]")) b.addEventListener("click", () => pick(items[Number(b.dataset.i)]));
   };
   let findTimer = 0;
@@ -709,7 +713,7 @@ function tkTicket(panel, kind0, preset) {
     const pk = q("[data-picked]");
     pk.hidden = false;
     const imp = tkPre(x) ? x.implied || ((x.at || []).find((a) => a.implied) || {}).implied : null;
-    pk.innerHTML = `${avatar(x.kind === "event" ? String(x.category || "Event").slice(0, 4) : x.base || x.name)}<span class="tk-rn"><b>${esc(x.name)}</b><span class="dim small">${esc([tkPre(x) ? "Pre-IPO" : x.category, x.closeTime ? `closes ${nyDay(x.closeTime)} ${nyTime(x.closeTime)} New York` : "", x.kind === "perp" && !tkPre(x) && x.fundingRate !== undefined ? `funding ${(x.fundingRate * 100).toFixed(4)}%` : ""].filter(Boolean).join(" · "))}</span></span>${x.kind === "event" ? "" : `<span class="tk-rp"><span class="tab-nums">${imp && imp.usd ? `${esc(tkValuation(imp.usd))} implied` : x.price ? `$${esc(px(x.price))}` : ""}</span>${chg(x.changePct24h)}</span>`}<button type="button" class="link" data-change>Change</button>`;
+    pk.innerHTML = `${avatar(x.kind === "event" ? String(x.category || "Event").slice(0, 4) : x.base || x.name)}<span class="tk-rn"${tkTitle(x) ? ` title="${esc(tkTitle(x))}"` : ""}><b>${esc(tkName(x))}</b><span class="dim small">${esc([tkPre(x) ? "Pre-IPO" : x.category, x.closeTime ? `closes ${nyDay(x.closeTime)} ${nyTime(x.closeTime)} New York` : "", x.kind === "perp" && !tkPre(x) && x.fundingRate !== undefined ? `funding ${(x.fundingRate * 100).toFixed(4)}%` : ""].filter(Boolean).join(" · "))}</span></span>${x.kind === "event" ? "" : `<span class="tk-rp"><span class="tab-nums">${imp && imp.usd ? `${esc(tkValuation(imp.usd))} implied` : x.price ? `$${esc(px(x.price))}` : ""}</span>${chg(x.changePct24h)}</span>`}<button type="button" class="link" data-change>Change</button>`;
     pk.querySelector("[data-change]").addEventListener("click", () => {
       tkDraftKeep(null);
       item = null;

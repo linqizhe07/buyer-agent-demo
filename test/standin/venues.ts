@@ -618,6 +618,9 @@ export interface EventSpec {
   category: string;
   /** the venue's own tags for it, as Gamma gives an event several (the public listing carries them; one under an excluded word is left out) */
   tags?: string[] | undefined;
+  /** the event it is one market of, and the market's own short words in it, as Kalshi and Gamma give them (the public listing carries them:
+   * a row names the market by them, its whole question in its hover card) */
+  event?: { title: string; market: string } | undefined;
   /** when it stops trading */
   closeAt: number;
   /** YES now, and its change over 24 hours in dollars per contract */
@@ -1108,9 +1111,9 @@ function curves(prices: PriceBook, t0: number): { events: EventSpec[]; publicEve
   // the public event exchange's events carry tags as Gamma's do: the Sports one is there to be LEFT OUT of the public listing (categories.ts),
   // and the housekeeping tags ("Hide From New", "Recurring") are never the category shown
   const publicEvents: EventSpec[] = [
-    { id: "SX-JOBS-NEXT", title: "Will the unemployment rate be 4.5% or higher in the next jobs report?", category: "Economics", tags: ["Jobs Report", "Economy", "Recurring"], closeAt: t0 + 6 * D + 2 * H, yes: 0.27, change: 0.02, volume: 530_000 },
+    { id: "SX-JOBS-NEXT", title: "Will the unemployment rate be 4.5% or higher in the next jobs report?", category: "Economics", tags: ["Jobs Report", "Economy", "Recurring"], event: { title: "Unemployment in the next jobs report?", market: "4.5% or higher" }, closeAt: t0 + 6 * D + 2 * H, yes: 0.27, change: 0.02, volume: 530_000 },
     { id: "SX-OPENER-OT", title: "Will the season opener go to overtime?", category: "Sports", tags: ["Games", "Sports", "NFL (All)"], closeAt: t0 + 11 * H, yes: 0.18, change: -0.01, volume: 150_000, vol: 0.7 },
-    { id: "SX-YIELD-FRI", title: "Will the 10-year Treasury yield close above 4.25% on Friday?", category: "Financials", tags: ["Hide From New", "Treasuries", "Finance"], closeAt: t0 + 2 * D + 2 * H, yes: 0.47, change: 0.03, volume: 380_000 },
+    { id: "SX-YIELD-FRI", title: "Will the 10-year Treasury yield close above 4.25% on Friday?", category: "Financials", tags: ["Hide From New", "Treasuries", "Finance"], event: { title: "10-year Treasury yield on Friday?", market: "Above 4.25%" }, closeAt: t0 + 2 * D + 2 * H, yes: 0.47, change: 0.03, volume: 380_000 },
   ];
   for (const e of [...events, ...publicEvents]) prices.add(`ev:${e.id}`, { price: e.yes, change24h: e.change, vol: e.vol, event: true });
   return { events, publicEvents };
@@ -1413,7 +1416,7 @@ export function publicSources(): PublicSource[] {
     ms
       .map((m): Listing => {
         const spec = w().pubevents.events.find((e) => e.id === m.group?.id);
-        return { ...m, types: [], tags: spec?.tags ?? (m.category ? [m.category] : []) };
+        return { ...m, types: [], tags: spec?.tags ?? (m.category ? [m.category] : []), ...(spec?.event ? { event: { id: spec.id, title: spec.event.title, market: spec.event.market } } : {}) };
       })
       .filter((m) => !isExcludedCategory([m.category, ...(m.tags ?? [])]));
   const pubevents: PublicSource = {
