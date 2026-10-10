@@ -66,7 +66,8 @@ export interface LiveMoney {
   held?(venue: string): Refusal | undefined;
   /** a venue's answer that holds it back, given to that shared hold */
   hold?(venue: string, r: Refusal): void;
-  /** a venue that did not come back after a restart and is being connected again (service.ts restore), in the words that say why: what is
+  /** a venue on the account whose venue has not answered this network yet — connected by the owner so, or not back after a restart — and is
+   * asked again (service.ts waiting), in the words that say why: what is
    * followed there waits for it rather than being let go */
   waiting?(venue: string): string | undefined;
 }

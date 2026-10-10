@@ -82,9 +82,12 @@ function drawRestoreNotice() {
   const el = $("restored");
   if (!r) return void (el.hidden = true);
   const back = r.venues.filter((v) => v.ok);
-  const missed = r.venues.filter((v) => !v.ok && v.why !== "connecting again");
+  // a venue the restart found refusing this network, or not answering, waits on the account and has its row under Venues: counted here,
+  // not listed as a miss
+  const waiting = r.venues.filter((v) => v.waiting);
+  const missed = r.venues.filter((v) => !v.ok && !v.waiting && v.why !== "connecting again");
   el.hidden = false;
-  paint(el, `${r.state === "restoring" ? "Restoring after a restart…" : `Continued after a restart: ${back.length} of ${plural(r.venues.length, "account")} connected again`}${r.orders + r.payments ? ` · ${plural(r.orders + r.payments, "transaction")} followed again` : ""}${missed.length || r.skipped.length ? `<details class="inl"><summary>details</summary>${[...missed.map((v) => `${nameOf(v.venue) || v.venue}: ${v.why}`), ...r.skipped].map((x) => `<div>${esc(x)}</div>`).join("")}</details>` : ""}`);
+  paint(el, `${r.state === "restoring" ? "Restoring after a restart…" : `Continued after a restart: ${back.length} of ${plural(r.venues.length, "account")} connected again`}${waiting.length ? ` · ${waiting.length} waiting for ${waiting.length === 1 ? "its venue" : "their venues"} (see Venues)` : ""}${r.orders + r.payments ? ` · ${plural(r.orders + r.payments, "transaction")} followed again` : ""}${missed.length || r.skipped.length ? `<details class="inl"><summary>details</summary>${[...missed.map((v) => `${nameOf(v.venue) || v.venue}: ${v.why}`), ...r.skipped].map((x) => `<div>${esc(x)}</div>`).join("")}</details>` : ""}`);
 }
 
 /* what was done, or refused, said once: as a toast, and in the open sheet when it came from there */

@@ -125,6 +125,8 @@ async function boot(over: { open?: OpenExchange; clock?: () => number; http?: Ht
 }
 
 const code = (o: Outcome): string => (isRefusal(o) ? o.code : o.kind);
+/** the connections kept waiting for their venue to answer this network, as the page reads them */
+const waiting = async (x: { svc: PortfolioService }) => (await x.svc.accountView())?.connectLive?.waiting ?? [];
 const refusal = (o: Outcome): Refusal => {
   if (!isRefusal(o)) throw new Error(`expected a refusal, got ${o.kind}`);
   return o;
@@ -307,34 +309,42 @@ describe("what the exchange says no to", () => {
   it("a location it does not serve is its own rule: said as that, with nothing about getting around it", async () => {
     const x = await boot({ open: failing("ExchangeNotAvailable", 'binance GET https://api.example/api/v3/time 451  {"code":0,"msg":"Service unavailable from a restricted location according to \'b. Eligibility\' in the terms."}') });
     x.keyFile("credentials/binance/api-key.json");
-    const no = refusal(await x.connect("binance", "live:exchange:binance"));
-    expect([no.code, no.message]).toEqual(["E_VENUE_GEOBLOCKED", "Binance does not serve this location: that is its own rule, and the account does not look for a way around it"]);
-    expect(JSON.stringify(no).toLowerCase()).not.toMatch(/vpn|proxy|testnet|another region/);
+    // the venue's answer to THIS network decides nothing about the account: the connection is kept, waiting, and says so in the venue's words
+    const said = summary(await x.connect("binance", "live:exchange:binance"));
+    expect(said).toContain("Binance is on the account, waiting for the venue to answer this network: Binance does not serve this location: that is its own rule, and the account does not look for a way around it");
+    expect(said.toLowerCase()).not.toMatch(/vpn|proxy|testnet|another region/);
+    expect(await waiting(x)).toEqual([expect.objectContaining({ venue: "binance", connector: "live:exchange:binance", code: "E_VENUE_GEOBLOCKED", how: "connect", keyFile: "credentials/binance/api-key.json" })]);
+    expect(x.svc.adapter("binance")?.account.watchOnly).toBeFalsy();
     // Bybit's edge says it differently, and the library files it under rate limits: it is still the venue's rule about where
     const y = await boot({ open: failing("RateLimitExceeded", "bybit GET https://api.example/v5/market/time 403 Forbidden { error:The Amazon CloudFront distribution is configured to block access from your country }") });
     y.keyFile("credentials/bybit/api-key.json");
-    expect(code(await y.connect("bybit", "live:exchange:bybit"))).toBe("E_VENUE_GEOBLOCKED");
+    expect(summary(await y.connect("bybit", "live:exchange:bybit"))).toContain("waiting for the venue to answer this network");
+    expect((await waiting(y))[0]).toMatchObject({ code: "E_VENUE_GEOBLOCKED", said: expect.stringContaining("Bybit does not serve this location") });
     // the simulated venue is still there, untouched
     expect((await x.venue("binance"))!.usd).toBe(28525);
   });
 
   it("a key without the permission, a rate limit, a network that does not answer, an exchange the library does not know", async () => {
-    const tries: Array<[string, string, string]> = [
-      ["PermissionDenied", 'kraken {"error":["EGeneral:Permission denied"]}', "E_VENUE_PERMISSION"],
-      ["RateLimitExceeded", "binance 429 Too Many Requests", "E_VENUE_UNREACHABLE"],
-      ["RequestTimeout", "binance request timed out", "E_VENUE_UNREACHABLE"],
-      ["BadRequest", "binance something else", "E_VENUE_REJECTED"],
+    // `kept`: how this network was answered (a rate limit, no answer, a place rule) keeps the connection waiting with that code; what the
+    // venue said about the key or the request is a refusal
+    const tries: Array<[string, string, string, boolean]> = [
+      ["PermissionDenied", 'kraken {"error":["EGeneral:Permission denied"]}', "E_VENUE_PERMISSION", false],
+      ["RateLimitExceeded", "binance 429 Too Many Requests", "E_VENUE_UNREACHABLE", true],
+      ["RequestTimeout", "binance request timed out", "E_VENUE_UNREACHABLE", true],
+      ["BadRequest", "binance something else", "E_VENUE_REJECTED", false],
       // OKX says these with HTTP 200 and a code the library leaves as a plain ExchangeError
-      ["ExchangeError", 'okx {"msg":"Your IP is barred from this service","code":"50121"}', "E_VENUE_GEOBLOCKED"],
-      ["ExchangeError", 'okx {"msg":"API key doesn\'t have permission","code":"50120"}', "E_VENUE_PERMISSION"],
-      ["ExchangeError", 'okx {"msg":"API key doesn\'t exist","code":"50119"}', "E_VENUE_UNAUTHORIZED"],
+      ["ExchangeError", 'okx {"msg":"Your IP is barred from this service","code":"50121"}', "E_VENUE_GEOBLOCKED", true],
+      ["ExchangeError", 'okx {"msg":"API key doesn\'t have permission","code":"50120"}', "E_VENUE_PERMISSION", false],
+      ["ExchangeError", 'okx {"msg":"API key doesn\'t exist","code":"50119"}', "E_VENUE_UNAUTHORIZED", false],
       // Binance's one code for a wrong key, a missing permission and an IP not on the list, even when the library calls it a rate limit
-      ["DDoSProtection", 'binance {"code":-2015,"msg":"Invalid API-key, IP, or permissions for action."}', "E_VENUE_UNAUTHORIZED"],
+      ["DDoSProtection", 'binance {"code":-2015,"msg":"Invalid API-key, IP, or permissions for action."}', "E_VENUE_UNAUTHORIZED", false],
     ];
-    for (const [name, message, want] of tries) {
+    for (const [name, message, want, kept] of tries) {
       const x = await boot({ open: failing(name, message) });
       x.keyFile("credentials/binance/api-key.json");
-      expect([name, code(await x.connect("binance", "live:exchange:binance"))]).toEqual([name, want]);
+      const out = await x.connect("binance", "live:exchange:binance");
+      const w = await waiting(x);
+      expect([name, isRefusal(out) ? out.code : w[0]?.code, w.length]).toEqual([name, want, kept ? 1 : 0]);
     }
     const x = await boot();
     x.keyFile("credentials/nowhere/api-key.json");
@@ -496,8 +506,10 @@ describe("venues read by address", () => {
     expect(code(await x.ag({ type: "agentSendAsset", destination: "self", sourceDex: "metamask", destinationDex: "wallet-0000a1", token: "USDC", amount: "50", fromSubAccount: "", maxFee: "5" }))).toBe("E_VENUE_RAIL_CLOSED");
 
     expect(code(await x.connect("wallet-bad", "live:wallet", "0x1234"))).toBe("E_ACCOUNT_BAD_ACTION");
+    // no chain answering is this network's doing, not the wallet's: the connection is kept, waiting, with the address as given
     const dark = await boot({ chain: fakeChain({}, { down: ["Ethereum", "Optimism", "BNB Chain", "Polygon", "Base", "Arbitrum", "Robinhood Chain"] }) });
-    expect(code(await dark.connect("wallet-0000a1", "live:wallet", ADDRESS))).toBe("E_VENUE_UNREACHABLE");
+    expect(code(await dark.connect("wallet-0000a1", "live:wallet", ADDRESS))).toBe("account");
+    expect((await waiting(dark))[0]).toMatchObject({ venue: "wallet-0000a1", needs: "address", address: ADDRESS, code: "E_VENUE_UNREACHABLE" });
   });
 
   it("a wallet that signed the account's sentence is shown as the user's own", async () => {
@@ -536,8 +548,8 @@ describe("venues read by address", () => {
     expect((await u.venue("hyperliquid"))!.holdings.map((h) => [h.asset, h.amount, h.note])).toEqual([["USDC", 500, "spot · one account with the perps (unified)"], ["HYPE", 2.5, "spot · one account with the perps (unified)"]]);
     // what the venue answers when it will not serve the caller is the venue's own rule
     const blocked = await boot({ http: async () => json({ error: "restricted jurisdiction" }, 403) });
-    const no = refusal(await blocked.connect("hyperliquid", "live:hyperliquid", ADDRESS));
-    expect([no.code, no.message]).toEqual(["E_VENUE_GEOBLOCKED", "Hyperliquid does not serve this location: that is its own rule, and the account does not look for a way around it"]);
+    expect(summary(await blocked.connect("hyperliquid", "live:hyperliquid", ADDRESS))).toContain("waiting for the venue to answer this network: Hyperliquid does not serve this location: that is its own rule, and the account does not look for a way around it");
+    expect((await waiting(blocked))[0]).toMatchObject({ code: "E_VENUE_GEOBLOCKED", needs: "address", address: ADDRESS });
   });
 
   it("Polymarket: positions from its data API page by page, each named as an order there names it (<slug>:<outcome>, its question beside it) where the row gives its slug; cash from the token at the same address", async () => {

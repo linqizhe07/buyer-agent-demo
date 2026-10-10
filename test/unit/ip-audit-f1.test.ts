@@ -451,13 +451,13 @@ describe("a venue that did not answer when the account started", () => {
     const b = await account({ at: h });
     // the page shows it as connecting again; why, and when it is asked next, beside it
     expect(b.svc.restored?.venues).toEqual([{ venue: "ex", ok: false, why: "connecting again", waiting: true, said: expect.stringMatching(/^Stand-in could not be reached — asked again in \d+ s$/) }]);
-    expect(b.svc.restoreWaiting("ex")).toContain("has not come back after the restart yet");
+    expect(b.svc.waitingWords("ex")).toContain("has not come back after the restart yet");
     expect(b.svc.adapter("ex")).toBeUndefined();
     // a re-check finds its connection answering: it is asked again now
     await b.svc.connectReach(["live:f1-standin"], true);
     await vi.waitFor(() => expect(b.svc.restored?.venues).toEqual([{ venue: "ex", ok: true }]));
     expect(b.svc.adapter("ex")?.account.watchOnly).toBeTruthy();
-    expect(b.svc.restoreWaiting("ex")).toBeUndefined();
+    expect(b.svc.waitingWords("ex")).toBeUndefined();
   });
 
   it("on its own backoff too; a key the venue refuses is final, as before", async () => {
@@ -477,6 +477,6 @@ describe("a venue that did not answer when the account started", () => {
     desk.opens.push(() => no("E_ACCOUNT_CREDENTIAL", { venue: "ex", message: "the key file is gone" }));
     const c = await account({ at: h });
     expect(c.svc.restored?.venues[0]).toEqual({ venue: "ex", ok: false, why: "the key file is gone" });
-    expect(c.svc.restoreWaiting("ex")).toBeUndefined();
+    expect(c.svc.waitingWords("ex")).toBeUndefined();
   });
 });

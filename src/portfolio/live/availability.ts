@@ -55,8 +55,10 @@ export interface VenueHere {
   said?: string | undefined;
   /** the venue's published residency rule, when the table has it: always given, so its words can be read whatever the verdict */
   terms?: (TermsLine & { excludesHere?: boolean | undefined; servesHere?: boolean | undefined }) | undefined;
-  /** already on the account */
+  /** already on the account: read, or connected and waiting for the venue to answer this network (`waiting`) */
   connected: boolean;
+  /** the owner has connected it and the venue has not answered this network yet: why, and when it is asked again (service.ts waiting) */
+  waiting?: string | undefined;
   /** read by address: it reads, it trades nothing */
   readOnly?: boolean | undefined;
   /** this venue cannot be used from here, and its edition for where the user is can: a separate company that answers this network and
@@ -104,6 +106,8 @@ export interface AvailabilityDeps {
   place?: (() => Promise<{ country?: string | undefined; region?: string | undefined } | undefined>) | undefined;
   /** the connections already on the account */
   connected: (connector: string) => boolean;
+  /** a connection the owner made whose venue has not answered this network yet: why it waits (nothing when it is not waiting) */
+  waiting?: ((connector: string) => string | undefined) | undefined;
   clock: () => number;
   /** the editions to offer (EDITIONS unless a test gives its own) */
   editions?: Record<string, Edition[]> | undefined;
@@ -133,6 +137,7 @@ export async function venuesHere(d: AvailabilityDeps): Promise<VenueHere[]> {
     const r = byConnector.get(c.connector);
     const terms = d.terms?.(c.connector, place);
     const v = verdictOf(r, terms, c.needs);
+    const waiting = d.waiting?.(c.connector);
     return {
       connector: c.connector,
       name: c.name,
@@ -141,7 +146,8 @@ export async function venuesHere(d: AvailabilityDeps): Promise<VenueHere[]> {
       verdict: v.verdict,
       ...(v.said ? { said: v.said } : {}),
       ...(terms ? { terms } : {}),
-      connected: d.connected(c.connector),
+      connected: d.connected(c.connector) || waiting !== undefined,
+      ...(waiting !== undefined ? { waiting } : {}),
       ...(c.needs === "address" ? { readOnly: true } : {}),
       ...(r?.at ? { asked: r.at } : {}),
     };

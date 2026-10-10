@@ -134,8 +134,9 @@ const robinhood: Connector = {
   example: "Robinhood's own page opens: you sign in there and approve this account. It reads every Robinhood account through Robinhood's MCP server, and trades only in your Agentic account, only on your signature or inside a limit you give an agent.",
   venues: [],
   async open(req, deps) {
+    // no way in on this server (not the network's doing): the account's own no, final, not a venue that did not answer
     const signIn = deps.signIn?.("robinhood");
-    if (!signIn) return no("E_VENUE_UNREACHABLE", { venue: req.venue, message: "this server has no Robinhood sign-in" });
+    if (!signIn) return no("E_ACCOUNT_BAD_ACTION", { venue: req.venue, message: "this server has no Robinhood sign-in" });
     const opened = await robinhoodStocksSource({ venue: req.venue, label: req.label, token: () => signIn.token(req.reference), open: deps.openMcp ?? realMcp });
     return isRefusal(opened) ? opened : { ...opened, summary: said(opened.source) };
   },

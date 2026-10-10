@@ -23,6 +23,9 @@ const pfDollarRow = (r) => pfDollars(r.class) || (r.class === "earn" && isDollar
 const pfWalletVenue = (name) => `agent-${slug(name)}`;
 /* a venue's sentence without its full stop, so it reads on in another */
 const pfSaid = (t) => String(t || "").trim().replace(/[.\s]+$/, "");
+/* the connections the owner signed whose venues have not answered this network yet (connectLive.waiting): on the account, waiting, read
+   nowhere. The account asks each venue again when a check of this network finds it answering, and sends it nothing until then */
+const pfWaiting = (venueIn = () => true, a = A) => (((a && a.connectLive) || {}).waiting || []).filter((w) => venueIn(w.venue));
 
 // ---- what the lens lets through ------------------------------------------------------------------------------------------------------
 
@@ -157,7 +160,9 @@ function pfAgentLines({ agents = [], lines = [] } = {}) {
 function pfSteps(a) {
   const agents = (a.keys || []).filter((k) => k.status === "ok");
   return [
-    { id: "connect", done: (a.venues || []).some((v) => v.live), title: "Connect an account" },
+    // a connection waiting for its venue to answer this network is on the account too: the step is done. One the venue refused (stopped)
+    // is not connected until the owner connects it again
+    { id: "connect", done: (a.venues || []).some((v) => v.live) || pfWaiting(() => true, a).some((w) => !w.stopped), title: "Connect an account" },
     { id: "agent", done: agents.length > 0, title: "Connect an agent" },
     { id: "limit", done: (a.spend || []).some((s) => !s.expired && s.budgetUsd > 0 && agents.some((k) => k.address === s.agent)), title: "Give it a limit" },
   ];
@@ -302,7 +307,12 @@ function pfStepsHtml(owner, fresh) {
    curve's history), the curve, and one ⓘ holding the footnotes */
 function pfWorthHtml(l, venueIn, rows) {
   const L = connected().filter((v) => venueIn(v.id));
-  if (!connected().length) return `<section class="sec pf-worth"><div class="label">Net worth</div><div class="num">${money(0)}</div><p class="dim">Nothing is connected yet. Connect an account and what it holds shows here.</p></section>`;
+  if (!connected().length) {
+    // nothing read yet; a connection may be on the account all the same, waiting for its venue to answer this network (one the venue
+    // refused is under Venues, with Connect again)
+    const w = pfWaiting().filter((x) => !x.stopped).length;
+    return `<section class="sec pf-worth"><div class="label">Net worth</div><div class="num">${money(0)}</div><p class="dim">${w ? `Nothing is read yet: ${plural(w, "connection")} ${w === 1 ? "waits for its venue" : "wait for their venues"} to answer this network (see Venues).` : "Nothing is connected yet. Connect an account and what it holds shows here."}</p></section>`;
+  }
   // the figure and today's change come from one read where they can (the holdings read says both), so they never disagree by a tick
   const usd = l.kind === "all" ? (PF.hold && Number.isFinite(Number(PF.hold.totalUsd)) ? Number(PF.hold.totalUsd) : A.liveUsd) : L.reduce((s, v) => s + v.usd, 0);
   const label = l.kind === "all" ? "Net worth" : l.kind === "venue" ? `Net worth · ${l.name}` : `${l.name} · agent wallets`;
@@ -560,14 +570,20 @@ const pfSwitchHtml = (v, on, owner) => `<button type="button" role="switch" clas
 function pfAccountsHtml(venueIn, owner) {
   const L = connected().filter((v) => venueIn(v.id));
   const revoked = new Set((A.dial && A.dial.revoked) || []);
+  // under the connected accounts, each connection on the account that nothing was read from: one waiting for its venue to answer this
+  // network, or one its venue answered and refused (stopped: the key, the account). Neither has a value, a standing of its own or a
+  // switch; the venue's words are on the chip. A waiting one is asked again (free, any browser) or taken off the account (signed); a
+  // stopped one is connected again by the owner's new signature, since a check does not retry it, or taken off
+  const rows = [...L.map((v) => ({ v })), ...pfWaiting(venueIn).map((w) => ({ w }))];
+  const look = owner ? "" : PF_LOOK_ONLY;
   return table([
-    { label: "Account", cell: (v) => `<div class="who">${avatar(v.name)}<div><b>${esc(v.name)}</b></div></div>` },
-    { label: "Value", r: true, cell: (v) => money(v.usd) },
-    { label: "Status", cell: (v) => `<span class="pf-chips">${pfChips(v)}</span>` },
-    { label: "Open to agents", cell: (v) => pfSwitchHtml(v, !revoked.has(v.id), owner) },
+    { label: "Account", cell: ({ v, w }) => `<div class="who">${avatar((v || w).name)}<div><b>${esc((v || w).name)}</b>${w ? `<span class="dim small">${w.stopped ? (w.by === "account" ? "not connected: the key could not be read" : "the venue refused the connection") : "waiting for the venue"}</span>` : ""}</div></div>` },
+    { label: "Value", r: true, cell: ({ v }) => (v ? money(v.usd) : "—") },
+    { label: "Status", cell: ({ v, w }) => `<span class="pf-chips">${v ? pfChips(v) : `${w.stopped ? `<span class="chip pf-health bad" title="${esc(w.said)}"><span aria-hidden="true">✗</span>Not connected</span>` : `<span class="chip" title="${esc(w.said)}">Waiting for the venue</span>`}<span class="dim small">since ${esc(pfWhen(w.since))}</span>`}</span>` },
+    { label: "Open to agents", cell: ({ v }) => (v ? pfSwitchHtml(v, !revoked.has(v.id), owner) : "—") },
     // the rest of what an account can do from here — Trade…, Move…, Receive, a new key, Disconnect… — is in its drawer
-    { cell: (v) => `<div class="acts pf-acts">${pfBtn("acct-details", "Details", { cls: "btn btn-sm btn-ghost", data: { venue: v.id } })}</div>` },
-  ], L, { empty: "No account here.", cls: "pf-acct-t" });
+    { cell: ({ v, w }) => `<div class="acts pf-acts">${v ? pfBtn("acct-details", "Details", { cls: "btn btn-sm btn-ghost", data: { venue: v.id } }) : `${w.stopped ? pfBtn("reconnect", "Connect again", { cls: "btn btn-sm", data: { venue: w.venue }, off: !owner, title: look }) : pfBtn("recheck", "Check again", { cls: "btn btn-sm btn-ghost", data: { connector: w.connector }, title: `Ask ${w.name} again now` })}${pfBtn("unwait", "Disconnect", { cls: "btn btn-sm btn-ghost", data: { venue: w.venue }, off: !owner, title: look })}`}</div>` },
+  ], rows, { empty: "No account here.", cls: "pf-acct-t" });
 }
 
 // ---- the Account's Venues (round 7, F5) ------------------------------------------------------------------------------------------
@@ -581,7 +597,18 @@ function renderVenues({ el, owner }) {
   const L = connected().filter((v) => venueIn(v.id));
   const tools = `${typeof downloadBalances === "function" && L.length ? pfBtn("csv", `${icon("download", "sm")}CSV`, { cls: "btn btn-sm btn-ghost" }) : ""}${A.connectLive ? pfBtn("connect", `${icon("plug", "sm")}Connect an account`, { cls: "btn btn-primary btn-sm", off: !owner, title: owner ? "" : PF_LOOK_ONLY }) : ""}`;
   const agents = A.keys.filter((k) => k.status === "ok").length;
-  const sub = L.length ? `${plural(L.length, "account")} · ${money(L.reduce((t, v) => t + num(v.usd), 0))}${agents ? ` · where ${agents === 1 ? "your agent" : "your agents"} may act is each one's switch` : ""}` : "Connect an exchange, a broker, a wallet or a prediction market: each is read through its own interface, and nothing moves without your signature.";
+  // the connections on the account that nothing is read from are counted apart from the accounts: the ones waiting for their venue to
+  // answer this network, and the ones a venue answered and refused (stopped), connected again only by the owner
+  const held = pfWaiting(venueIn);
+  const W = held.filter((w) => !w.stopped).length;
+  const X = held.length - W;
+  const waits = W ? `waiting for ${W === 1 ? "its venue" : "their venues"}` : "";
+  const refused = X ? `${X} not connected` : "";
+  const sub = L.length
+    ? `${plural(L.length, "account")} · ${money(L.reduce((t, v) => t + num(v.usd), 0))}${agents ? ` · where ${agents === 1 ? "your agent" : "your agents"} may act is each one's switch` : ""}${W ? ` · ${W} ${waits}` : ""}${X ? ` · ${refused}` : ""}`
+    : held.length
+      ? `${[W ? `${plural(W, "connection")} ${waits}: nothing is read from ${W === 1 ? "it until it answers" : "them until they answer"} this network` : "", X ? `${refused}: ${X === 1 ? "connect it again, or disconnect it" : "connect them again, or disconnect them"}` : ""].filter(Boolean).join(" · ")}.`
+      : "Connect an exchange, a broker, a wallet or a prediction market: each is read through its own interface, and nothing moves without your signature.";
   pfPut(el, "venues", `<div class="sec-head"><div class="pf-venues-t"><h2 class="h2" id="pf-venues-h">Venues</h2><span class="dim small">${esc(sub)}</span></div><span class="tools">${tools}</span></div>${pfAccountsHtml(venueIn, owner)}`);
 }
 
@@ -690,6 +717,9 @@ async function pfAct(act, d) {
     case "earn-row-out": return void pfEarnRowOut(d.key);
     case "agents": return void pfAgentsSwitch(d.venue, d.on === "true");
     case "acct-details": return void pfDetails(d.venue);
+    case "recheck": return void pfRecheck(d.connector);
+    case "reconnect": return void pfReconnect(d.venue);
+    case "unwait": return void pfUnwait(d.venue);
     case "csv": return void (typeof downloadBalances === "function" && downloadBalances());
     case "statement": return void (typeof openStatement === "function" && openStatement());
     case "all":
@@ -697,6 +727,13 @@ async function pfAct(act, d) {
       return void render();
     default:
   }
+}
+/* a connection its venue answered and refused (stopped: the key, the account), connected again by the owner: the connection's own form, on
+   the same name and key file (or address), through connect.js connectVia. A check of this network does not retry it; a new signature does */
+function pfReconnect(venue) {
+  const w = pfWaiting().find((x) => x.venue === venue);
+  if (!w || !owns() || typeof connectVia !== "function") return;
+  connectVia(w.connector, { name: w.name, label: w.name, ref: w.keyFile || w.address || "", fromWait: true });
 }
 
 /* the order ticket (the Trade pane's), at a venue when one is named */
@@ -751,6 +788,26 @@ async function pfDisconnect(venue) {
     closeDrawer();
     await own({ type: "disconnectVenue", venue });
   }
+}
+
+/* a waiting connection's venue asked again now: its first, keyless question for this network, forced (connect.js askReach). When it
+   answers, the account connects the connection; the page reads the account again to see. A refusal again is said as the toast says one,
+   in the venue's words */
+async function pfRecheck(connector) {
+  if (typeof askReach === "function") await askReach([connector], true);
+  const r = typeof REACH !== "undefined" ? REACH.get(connector) : null;
+  if (r && r.state !== "ok" && r.said) flash = r.said;
+  await load();
+  // the venue answered: the account is connecting the connection behind this answer, and says so on its next read
+  if (r && r.state === "ok") setTimeout(() => void load(), 2500);
+}
+/* a waiting or stopped connection taken off the account, after a yes: nothing was read from its venue in this run, so nothing there changes;
+   a key file stays where it is */
+async function pfUnwait(venue) {
+  const w = pfWaiting().find((x) => x.venue === venue);
+  if (!w || !owns()) return;
+  const ok = await confirmSheet(`Disconnect ${w.name}? The connection comes off the account and ${w.name} is not asked again. ${w.how === "restart" ? "Nothing has been read from it since the restart" : "Nothing was ever read from it"}${w.keyFile ? ", and its key file stays where it is" : ""}.`, { title: "Disconnect", yes: "Disconnect" });
+  if (ok) await own({ type: "disconnectVenue", venue: w.venue });
 }
 
 /** "Open to agents": closing is free (POST /api/revoke: agents keep reads only); reopening widens what they may do, so it is signed */

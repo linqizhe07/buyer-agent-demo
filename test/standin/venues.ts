@@ -1365,6 +1365,12 @@ export function registerStandins(): void {
   add("standin-pubevents", "Stand-in Event Exchange · event contracts (test harness)", `Event contracts; ${STANDIN}.`, (venue, label) => ({ name: label || w().pubevents.name, kind: "prediction", reference: "stand-in", via: `${w().pubevents.name} · ${STANDIN}`, probe: probe(["read", "trade"]), read: async () => w().pubevents.read(), trader: w().pubevents.trader(venue), readOnlyBecause: readOnly }));
   add("standin-wallet", "Stand-in Wallet · tokens on Base and Ethereum (test harness)", `A wallet that swaps on its own (as the mm command line does): WETH, cbBTC and USDY, a tokenised fund; ${STANDIN}.`, (venue, label) => ({ name: label || w().wallet.name, kind: "agent-wallet", reference: "stand-in", via: `${w().wallet.name} · ${STANDIN}`, probe: probe(["read", "swap"]), read: async () => w().wallet.read(), trader: w().wallet.trader(venue), readOnlyBecause: readOnly }));
   add("standin-broker", "Stand-in Broker · US stocks and ETFs (test harness)", `AAPL, NVDA and SPY in New York's market hours, cash in dollars; ${STANDIN}.`, (venue, label) => brokerSource(w().broker, venue, label));
+  // the exchange behind the geoblocked public source below: it refuses this location in its own words, as a real venue's servers would
+  // refuse the network the account runs on — so connecting it shows what the account does then (service.ts waiting: the connection is kept,
+  // read nowhere, asked again when a check of this network finds the venue answering). Nothing here looks for a way around it
+  register({ kind: "standin-geo", label: "Stand-in Geo Exchange · does not serve this location (test harness)", needs: "cli", example: `An exchange whose servers refuse this location; ${STANDIN}.`, venues: [], async open(req) {
+    return no("E_VENUE_GEOBLOCKED", { venue: req.venue, message: "Stand-in Geo Exchange does not serve this location: that is its own rule, and the account does not look for a way around it", native: { status: 451, said: '{"code":0,"msg":"Service unavailable from a restricted location (stand-in)."}' } });
+  } });
 }
 
 // ---- the public market data of venues that are not connected ------------------------------------------------------------------------
