@@ -86,7 +86,10 @@ export async function walletSource(req: AddressRequest): Promise<Opened> {
     };
     for (const chain of [...new Set(refs.map((r) => r.chain))]) part(`tokens:${chain}`, tokens.failed.includes(chain), tokens.rows.filter((b) => b.chain === chain && b.amount > 0).map(dollar), `${chain} did not answer`);
     for (const chain of ALL_CHAINS) part(`coin:${chain}`, coins.failed.includes(chain), coins.rows.filter((b) => b.chain === chain && b.amount > 0).map(dollar), `${chain} did not answer`);
-    part("stocks", stocks.unread !== undefined, stocks.rows, stocks.unread ?? "");
+    // the Stock Tokens chain by chain: one chain not answering keeps that chain's last rows and shows the others as read now; the list itself
+    // not read keeps them all
+    if (stocks.unread !== undefined && stocks.failed === undefined) for (const key of [...last.keys()].filter((k) => k.startsWith("stocks:"))) part(key, true, [], stocks.unread);
+    else for (const chain of ALL_CHAINS) part(`stocks:${chain}`, (stocks.failed ?? []).includes(chain), stocks.rows.filter((b) => (b.where ?? "").startsWith(`${chain} · `)), `${chain} did not answer`);
     for (const chain of [...new Set<ChainName>(["Ethereum", "BNB Chain", ...issued.failed])]) part(`issued:${chain}`, issued.failed.includes(chain), issued.rows.filter((b) => (b.where ?? "").startsWith(`${chain} · `)), `${chain} did not answer`);
     // an issued share on a chain not named above is still counted
     out.push(...issued.rows.filter((b) => !["Ethereum", "BNB Chain", ...issued.failed].some((c) => (b.where ?? "").startsWith(`${c} · `))));
@@ -271,6 +274,9 @@ export async function ondoSource(req: AddressRequest): Promise<Opened> {
   const address = checked(req.venue, req.address);
   if (typeof address !== "string") return address;
   const name = req.label || "Ondo";
+  // the last price the oracle gave for each token, and what this read could not price
+  const lastPrice = new Map<string, number>();
+  let unread: string | undefined;
   const read = async (): Promise<LiveBalance[]> => {
     const held = await req.chain.tokens(address, ONDO_TOKENS);
     if (held.failed.length) throw no("E_VENUE_UNREACHABLE", { venue: req.venue, message: "Ethereum did not answer: the public endpoint may be rate-limiting this machine" });
@@ -282,15 +288,24 @@ export async function ondoSource(req: AddressRequest): Promise<Opened> {
     const usdy = holds("USDY") ? dollars(await req.chain.uint("Ethereum", USDY_ORACLE, "function getPrice() view returns (uint256)")) : undefined;
     // rOUSG is the rebasing form: each token is a dollar of the fund, by construction
     const price: Record<string, number | undefined> = { OUSG: ousg, rOUSG: 1, USDY: usdy };
-    // a token held with no price read (the endpoint refused the oracle's read, as it refuses a rate-limited address) is not worth nothing: the
-    // read is refused, and the last good one stays
+    // a token held with no price read this time (the endpoint refused the oracle's read, as it refuses a rate-limited address, or the oracle
+    // reverted) is not worth nothing: it keeps the last price the oracle gave, said as that — or, never priced, it is shown without one —
+    // and the read says what it could not price (unread), so it is shown as stale and asked again soon
     const unpriced = rows.filter((b) => price[b.asset] === undefined).map((b) => b.asset);
-    if (unpriced.length) throw no("E_VENUE_UNREACHABLE", { venue: req.venue, message: `Ethereum did not answer: Ondo's oracle could not be read for ${unpriced.join(" and ")}` });
-    return rows.map((b) => ({ asset: b.asset, amount: b.amount, usd: b.amount * price[b.asset]!, where: "Ethereum", class: "rwa" as const }));
+    unread = unpriced.length ? `Ondo's oracle could not be read for ${unpriced.join(" and ")} this time` : undefined;
+    return rows.map((b) => {
+      const p = price[b.asset];
+      if (p !== undefined) {
+        lastPrice.set(b.asset, p);
+        return { asset: b.asset, amount: b.amount, usd: b.amount * p, where: "Ethereum", class: "rwa" as const };
+      }
+      const kept = lastPrice.get(b.asset);
+      return { asset: b.asset, amount: b.amount, ...(kept !== undefined ? { usd: b.amount * kept } : {}), where: kept !== undefined ? "Ethereum · priced at the oracle's last answer" : "Ethereum", class: "rwa" as const };
+    });
   };
   try {
     const first = await read();
-    const source: LiveSource = { name, kind: "rwa", reference: address, via: "Ondo tokens on Ethereum · priced by Ondo's oracle", address, readOnlyBecause: "OUSG moves only between addresses Ondo has allowlisted, and subscribing or redeeming is done at Ondo: it is read, never written", noTradeBecause: "OUSG is subscribed and redeemed at Ondo, after Ondo's own checks: there is no order interface for the account to call", probe: probeOf(req, "OUSG, rOUSG and USDY at this address; the price is the one Ondo publishes on-chain, about once a business day", { tokens: ONDO_TOKENS.map((t) => t.address), oracle: ONDO_ORACLE }), read };
+    const source: LiveSource = { name, kind: "rwa", reference: address, via: "Ondo tokens on Ethereum · priced by Ondo's oracle", address, readOnlyBecause: "OUSG moves only between addresses Ondo has allowlisted, and subscribing or redeeming is done at Ondo: it is read, never written", noTradeBecause: "OUSG is subscribed and redeemed at Ondo, after Ondo's own checks: there is no order interface for the account to call", probe: probeOf(req, "OUSG, rOUSG and USDY at this address; the price is the one Ondo publishes on-chain, about once a business day", { tokens: ONDO_TOKENS.map((t) => t.address), oracle: ONDO_ORACLE }), read, unread: () => unread };
     return { source, first };
   } catch (err) {
     return asRefusal(req.venue, name, err);

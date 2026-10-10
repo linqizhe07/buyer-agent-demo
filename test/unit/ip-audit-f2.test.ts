@@ -54,7 +54,7 @@ describe("a keyless read blames no key (R1-9)", () => {
     const slow = await one(page(429, "Too Many Requests", { retryAfterMs: 300_000 }));
     expect([slow.code, slow.message]).toEqual(["E_VENUE_UNREACHABLE", "Kalshi is rate-limiting this machine: try again in 5 minutes"]);
     expect(holdBackMs(slow)).toBeGreaterThan(4 * MIN);
-    expect(await one(page(302, "", { location: "www.kalshi.com" }))).toMatchObject({ code: "E_VENUE_REJECTED", message: "Kalshi answered HTTP 302, sending the request on to www.kalshi.com: not followed" });
+    expect(await one(page(302, "", { location: "www.kalshi.com" }))).toMatchObject({ code: "E_VENUE_REJECTED", message: "Kalshi answered HTTP 302, sending the request on elsewhere: not followed" });
     const portal = await one(page(200, BLOCK_PAGE));
     expect(portal).toMatchObject({ code: "E_VENUE_UNREACHABLE", native: { status: 200, page: true } });
     expect(JSON.stringify(portal)).not.toMatch(/203\.0\.113/);

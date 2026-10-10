@@ -561,7 +561,8 @@ export async function stockTokenBids(http: Http, symbols: string[], now: number)
 /** the Stock Tokens an address holds, priced; a list or a chain that does not answer is said, not thrown. A Stock Token is held as an RWA:
  * it is Robinhood's debt security that tracks a share, not the share, and it is sold from the wallet as `<SYMBOL>/USDG@Robinhood Chain`
  * (dex.ts), the market the holding's row finds by its symbol and its chain */
-export async function stockTokenHoldings(holder: Hex, chain: ChainReader, http: Http, now: number): Promise<{ rows: LiveBalance[]; unread?: string }> {
+/** `failed`: the chains that did not answer (their rows are not in `rows`); `unread` without `failed`: the list itself was not read */
+export async function stockTokenHoldings(holder: Hex, chain: ChainReader, http: Http, now: number): Promise<{ rows: LiveBalance[]; unread?: string; failed?: ChainName[] }> {
   let tokens: StockToken[];
   try {
     tokens = await stockTokens(http, now);
@@ -575,7 +576,7 @@ export async function stockTokenHoldings(holder: Hex, chain: ChainReader, http: 
   const bid = await stockTokenBids(http, [...new Set(held.map((b) => b.asset))], now);
   return {
     rows: held.map((b) => ({ asset: b.asset, amount: b.amount, ...(bid.has(b.asset) ? { usd: b.amount * bid.get(b.asset)! } : {}), where: `${b.chain} · Stock Token`, class: "rwa" })),
-    ...(read.failed.length ? { unread: `${read.failed.join(", ")} did not answer` } : {}),
+    ...(read.failed.length ? { unread: `${read.failed.join(", ")} did not answer`, failed: read.failed } : {}),
   };
 }
 

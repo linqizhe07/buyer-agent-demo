@@ -280,7 +280,8 @@ export class RealPayer implements Payer {
           return "";
         }
       })();
-      return no("E_PAYEE_REDIRECT", { venue: c.host, message: `${c.host} sent the request on to ${to === c.host ? "another page of its own" : to || "another address"}: a payment does not follow a redirect`, ...(to ? { detail: { redirectHost: to } } : {}) });
+      // where it pointed is not named: a network's block page or a regional site says roughly where the user is
+      return no("E_PAYEE_REDIRECT", { venue: c.host, message: `${c.host} sent the request on to ${to === c.host ? "another page of its own" : "another address"}: a payment does not follow a redirect`, detail: { ownHost: to === c.host } });
     }
     if (first.status === 402 && first.headers["payment-required"]) return this.x402(c, first, 2);
     const v1 = first.body as { x402Version?: unknown; accepts?: unknown } | undefined;

@@ -745,10 +745,10 @@ export class SimPayer implements Payer {
   private async ask(c: Ctx): Promise<Outcome> {
     const first = await this.fetch({ method: "GET", url: c.url.href }, c);
     if (first.status === 0) return no("E_PAYEE_REJECTED", { venue: c.host, message: `${c.host} did not answer` });
-    // told by its host only, as the real payer tells it (pay-real.ts): a redirect's path may carry where the user is
+    // told as the real payer tells it (pay-real.ts): where it pointed is not named, only whether it stayed on the payee's own host
     if (first.status >= 300 && first.status < 400) {
       const host = redirectHost(first.headers.location, c.url.href);
-      return no("E_PAYEE_REDIRECT", { venue: c.host, message: `${c.host} sent the request on to ${host ?? "another address"}: a payment does not follow a redirect`, detail: { redirectHost: host } });
+      return no("E_PAYEE_REDIRECT", { venue: c.host, message: `${c.host} sent the request on to ${host === c.host ? "another page of its own" : "another address"}: a payment does not follow a redirect`, detail: { ownHost: host === c.host } });
     }
     if (first.status === 402 && first.headers["payment-required"]) return this.x402(c, first);
     if (first.status === 402 && first.headers["www-authenticate"]) return this.mpp(c, first);

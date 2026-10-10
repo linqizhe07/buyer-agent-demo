@@ -344,7 +344,9 @@ describe("Hyperliquid's own line (its Terms of Use §1.6), held to where this us
     expect(await verdict(geo("IE", "L", true))).toBe("served");
     for (const unknown of [{ status: 200, body: { blocked: false }, text: '{"blocked":false}' }, { status: 502, body: undefined, text: "bad gateway" }, new Error("ETIMEDOUT"), { status: 200, body: { country: "USA" }, text: "" }]) expect(await verdict(unknown)).toBe("unknown");
     // the lists are one rule, shared with the mm perps path (metamask.ts)
-    expect([...HL_CLOSED.countries]).toEqual(["US", "CU", "IR", "KP", "SY"]);
+    expect([...HL_CLOSED.countries]).toEqual(["US", "AS", "GU", "MP", "PR", "UM", "VI", "CU", "IR", "KP", "SY"]);
+    // a US territory is the United States here however a source spells it
+    expect([await verdict(geo("PR", "")), await verdict(geo("US", "PR")), await verdict(geo("US", "US-GU"))]).toEqual(["closed", "closed", "closed"]);
     expect(HL_TERMS).toContain("Terms of Use §1.6");
   });
 

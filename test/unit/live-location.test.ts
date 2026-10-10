@@ -81,7 +81,7 @@ describe("where this user is, from more than one source", () => {
     const unknown = await heldTo(HYPERLIQUID_RULE, locator(net({})), "hyperliquid-trade", "");
     expect(closed?.code).toBe("E_VENUE_GEOBLOCKED");
     expect(unknown?.code).toBe("E_VENUE_UNREACHABLE");
-    expect(unknown?.message).toContain("neither Polymarket's location check nor Cloudflare's trace gave one that the rule can judge");
+    expect(unknown?.message).toContain("where this machine is could not be learned just now");
     for (const r of [closed, unknown]) expect(JSON.stringify(r)).not.toMatch(/203\.0\.113\.7|"US"|\bloc=|EWR/);
   });
 });

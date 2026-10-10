@@ -486,7 +486,9 @@ export class PortfolioService {
           venue: (id: string) => (this.adapters.get(id)?.account.watchOnly ? this.liveVenues.get(id) : undefined),
           realNow: () => this.liveDeps().clock(),
           held: (venue: string): Refusal | undefined => this.marketReads.heldOf(venue),
-          hold: (venue: string, r: Refusal): void => this.marketReads.hold(venue, r),
+          // mm reaches several venues (its swaps, Polymarket, Hyperliquid): a door's refusal at one of them holds the connection only when it
+          // is mm's own (not installed, signed out) — one place rule must not freeze the others
+          hold: (venue: string, r: Refusal): void => void ((this.adapters.get(venue)?.account.connector !== "live:metamask" || connectionWide(r)) && this.marketReads.hold(venue, r)),
           // a venue still waiting to come back after the restart: why (restoreWaiting) — its open orders are not "unfollowed" meanwhile
           waiting: (venue: string): string | undefined => this.restoreWaiting(venue),
         };
@@ -1256,10 +1258,19 @@ export class PortfolioService {
   }
   async venuesHere(force = false): Promise<VenueHere[]> {
     const deps = this.liveDeps();
-    // kept 30 minutes when every venue answered and the place was learned; otherwise asked again after twenty seconds — only what did not
-    // answer, and the place, are asked again then: the answers come from each connection's own keep
-    const keep = this.venuesKept?.sure ? 30 * 60_000 : 20_000;
-    if (!force && this.venuesKept && deps.clock() - this.venuesKept.at < keep) return this.venuesKept.v;
+    // kept 30 minutes when every venue answered and the place was learned. Otherwise it is asked again after twenty seconds — only what did
+    // not answer, and the place, are asked again then (the answers come from each connection's own keep) — behind the list kept, which is
+    // answered at once for those 30 minutes: one venue that does not answer never makes every read wait for its probe
+    const kept = this.venuesKept;
+    const age = kept ? deps.clock() - kept.at : Infinity;
+    if (!force && kept && (age < 20_000 || (kept.sure && age < 30 * 60_000))) return kept.v;
+    if (!force && kept && age < 30 * 60_000) {
+      void this.askVenues(false).catch(() => undefined);
+      return kept.v;
+    }
+    return this.askVenues(force);
+  }
+  private askVenues(force: boolean): Promise<VenueHere[]> {
     // a check on its way answers this one too — unless this one is forced and that one is not: then this one is asked after it, of the
     // network the user is on now, and its answer is the one kept
     const before = this.venuesPending;
@@ -1698,9 +1709,17 @@ export class PortfolioService {
     if (w.timer) clearTimeout(w.timer);
     w.timer = undefined;
     w.asking = true;
-    const out = await this.account
-      .serially(async () => (this.comingBack.get(venue) !== w || this.adapters.get(venue)?.account.watchOnly ? undefined : this.plugAgain(w.c)))
-      .finally(() => void (w.asking = false));
+    // the venue's own keyless question first, outside the account's line: a venue this network still leaves unanswered (or refuses) is not
+    // connected under the line, which every signed instruction waits on — one blackholed venue must not stall the others' orders and cancels
+    let out: Awaited<ReturnType<PortfolioService["plugAgain"]>> | undefined;
+    try {
+      const here = await this.connectReach([w.c.connector]).then(([x]) => x, () => undefined);
+      out = here && (here.state === "unreachable" || here.state === "location")
+        ? no(here.state === "location" ? "E_VENUE_GEOBLOCKED" : "E_VENUE_UNREACHABLE", { venue, message: here.said ?? `${w.c.label || venue} did not answer`, ...(here.until ? { native: { until: here.until } } : {}) })
+        : await this.account.serially(async () => (this.comingBack.get(venue) !== w || this.adapters.get(venue)?.account.watchOnly ? undefined : this.plugAgain(w.c)));
+    } finally {
+      w.asking = false;
+    }
     // stopped meanwhile (the owner connected or disconnected it), or connected some other way: nothing more to ask
     if (this.comingBack.get(venue) !== w) return;
     if (out === undefined) return void this.stopComingBack(venue, true);

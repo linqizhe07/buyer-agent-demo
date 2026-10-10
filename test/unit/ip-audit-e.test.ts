@@ -221,11 +221,20 @@ describe("R2-15 · an agent wallet's send whose answer is lost is followed by it
     expect(await w.confirm!(HASH, expected)).toBe("settled");
   });
 
-  it("…and failed once another transaction of the wallet's took nonce 7 while the chain never showed this one", async () => {
+  it("…and failed once another transaction of the wallet's took nonce 7 while the chain never showed this one — seen so for ten minutes, not on one answer", async () => {
     const { s, w } = await agentWallet({ hash: HASH, nonce: 7, answerLost: true });
     await w.send!({ asset: "USDC", amount: 5, to: DEST, network: "Base" });
     s.mined = 8;
+    // one endpoint's nonce ahead of another's receipts is not enough: a balancer can answer from two nodes a block apart
+    const at = Date.now();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(at);
+    expect(await w.confirm!(HASH, expected)).toBe("pending");
+    vi.setSystemTime(at + 9 * 60_000);
+    expect(await w.confirm!(HASH, expected)).toBe("pending");
+    vi.setSystemTime(at + 11 * 60_000);
     const no = refusal(await w.confirm!(HASH, expected));
+    vi.useRealTimers();
     expect([no.code, no.message]).toEqual(["E_VENUE_REJECTED", "Base never mined 0xabababab…: another transaction from Agent wallet · e took its place (nonce 7), so this transfer did not happen"]);
   });
 
@@ -366,7 +375,7 @@ describe("R2-29 · a payee refusing this network by place is said as that, and a
       ["https://busy.example.com/q", "E_PAYEE_REJECTED", /^busy\.example\.com is busy \(HTTP 429\): nothing was paid; try again later$/],
       ["https://down.example.com/q", "E_PAYEE_REJECTED", /^down\.example\.com did not answer \(HTTP 503\): nothing was paid$/],
       ["https://redir.example.com/q", "E_PAYEE_REDIRECT", /^redir\.example\.com sent the request on to another page of its own: a payment does not follow a redirect$/],
-      ["https://away.example.com/q", "E_PAYEE_REDIRECT", /^away\.example\.com sent the request on to blocked\.example\.net: a payment does not follow a redirect$/],
+      ["https://away.example.com/q", "E_PAYEE_REDIRECT", /^away\.example\.com sent the request on to another address: a payment does not follow a redirect$/],
     ];
     for (const [url, code, words] of cases) {
       const no = refusal(await x.pay(url));
@@ -374,7 +383,7 @@ describe("R2-29 · a payee refusing this network by place is said as that, and a
       expect(JSON.stringify(no)).not.toMatch(/country=|region=|NY\b|ip=/);
       expect(JSON.stringify(no)).not.toMatch(ADDRESSES);
     }
-    expect(refusal(await x.pay("https://away.example.com/q")).detail).toEqual({ redirectHost: "blocked.example.net" });
+    expect(refusal(await x.pay("https://away.example.com/q")).detail).toEqual({ ownHost: false });
   });
 });
 

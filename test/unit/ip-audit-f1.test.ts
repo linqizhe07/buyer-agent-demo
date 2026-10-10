@@ -369,7 +369,7 @@ describe("a forced re-check of the network the user is on now", () => {
     release = undefined;
   });
 
-  it("a list with a venue that did not answer, or no place, is kept twenty seconds, not thirty minutes: the edition comes back with the answer", async () => {
+  it("a list with a venue that did not answer, or no place, is asked again after twenty seconds, not thirty minutes, behind the list kept: the edition comes back with the answer", async () => {
     let now = Date.parse("2026-10-09T15:00:00.000Z");
     const { svc } = await account({ liveDeps: { http, openExchange, clock: () => now } });
     svc.venuePlace = async () => ({ country: "US", region: "PA" });
@@ -377,6 +377,9 @@ describe("a forced re-check of the network the user is on now", () => {
     const first = await svc.venuesHere(false);
     expect(verdicts(first, B, "live:exchange:binanceus")).toEqual({ [B]: ["not-served", ""], "live:exchange:binanceus": ["no-answer", ""] });
     now += 21_000;
+    // the list kept is answered at once, and asked again behind it: the next read has the answer
+    expect(verdicts(await svc.venuesHere(false), B, "live:exchange:binanceus")).toEqual({ [B]: ["not-served", ""], "live:exchange:binanceus": ["no-answer", ""] });
+    await (svc as unknown as { venuesPending?: { p: Promise<unknown> } }).venuesPending?.p;
     expect(verdicts(await svc.venuesHere(false), B, "live:exchange:binanceus")).toEqual({ [B]: ["not-served", "live:exchange:binanceus"], "live:exchange:binanceus": ["connectable", ""] });
     // the agent asking for Binance is told of Binance.US
     expect(svc.account!.host.venueVerdict?.("binance")).toMatchObject({ verdict: "not-served", edition: { venue: "binanceus" } });

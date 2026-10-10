@@ -84,7 +84,7 @@ export function no(code: Code, extra: { venue?: string; tool?: string; detail?: 
 const IPV4 = /(?<![\d.])(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}(?!\d|\.\d)/g;
 // a run of hex digits, colons and dots with at least two colons: the IPv6 address in it, if any, is the longest part of it that starts at its
 // beginning or just after a colon and is one ("IP:<addr>", "whitelist:<addr>" are found)
-const V6_RUN = /[0-9a-f:.]*:[0-9a-f:.]*:[0-9a-f:.]*/gi;
+const V6_RUN = /(?<![0-9a-f:.])[0-9a-f:.]*:[0-9a-f:.]*:[0-9a-f:.]*/gi;
 const PRIVATE_V4 = /^(?:127\.|10\.|0\.|192\.168\.|169\.254\.|172\.(?:1[6-9]|2\d|3[01])\.)/;
 const saysNothing6 = (ip: string): boolean => /^(?:::1$|fe80:|f[cd][0-9a-f]{2}:)/i.test(ip) || ip.split(":").filter(Boolean).length < 3;
 function scrub6(run: string): string {

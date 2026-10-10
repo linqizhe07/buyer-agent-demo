@@ -460,10 +460,14 @@ export class LiveEarns {
   }
   private sweep: Promise<void> | undefined;
 
-  /** the refusal that holds a venue back now: the host's shared hold where it offers one, or this door's own */
+  /** the refusal that holds a venue back now: the host's shared hold where it offers one (a forced re-check or a reconnect lets go of it
+   * there) — only what the venue asked for, never a read that did not answer — or else this door's own */
   private heldAt(venue: string): Refusal | undefined {
-    const shared = (this.money() as { held?(venue: string): Refusal | undefined } | undefined)?.held?.(venue);
-    if (shared) return shared;
+    const host = this.money() as { held?(venue: string): Refusal | undefined } | undefined;
+    if (host?.held) {
+      const shared = host.held(venue);
+      return shared && this.holdMs(shared, Date.now()) > 0 ? shared : undefined;
+    }
     const own = this.holds.get(venue);
     if (own && Date.now() < own.until) return own.r;
     if (own) this.holds.delete(venue);
@@ -474,11 +478,16 @@ export class LiveEarns {
    * back for as long as the one rule says (live/public-markets.ts holdBackMs); a venue that only did not answer is asked again next time */
   private holdOn(venue: string, r: Refusal): void {
     const now = Date.now();
-    const ms = r.code === "E_VENUE_GEOBLOCKED" || typeof (r.native as { until?: unknown } | undefined)?.until === "number" ? holdBackMs(r, now) : 0;
+    const ms = this.holdMs(r, now);
     if (!(ms > 0)) return;
+    const host = this.money() as { hold?(venue: string, r: Refusal): void } | undefined;
+    if (host?.hold) return host.hold(venue, r);
     const was = this.holds.get(venue);
     if (!was || was.until < now + ms) this.holds.set(venue, { until: now + ms, r });
-    (this.money() as { hold?(venue: string, r: Refusal): void } | undefined)?.hold?.(venue, r);
+  }
+
+  private holdMs(r: Refusal, now: number): number {
+    return r.code === "E_VENUE_GEOBLOCKED" || typeof (r.native as { until?: unknown } | undefined)?.until === "number" ? holdBackMs(r, now) : 0;
   }
 
   private async sweepOnce(): Promise<void> {

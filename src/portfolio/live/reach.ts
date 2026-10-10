@@ -130,6 +130,8 @@ function readReply(connector: string, name: string, r: HttpReply, at: string): R
   // the venue's time — read as the account's other readers read it
   if (r.status === 418 || r.status === 429 || bannedUntil(r.text) !== undefined) return fromRefusal(connector, venueSaidNo(connector, name, r.status, r.text, [], r), at);
   if (r.status >= 500 || r.status === 0) return { connector, state: "unreachable", said: `${name} did not answer just now (HTTP ${r.status}); connecting asks again`, at };
+  // sent on elsewhere (a captive portal, a regional site): not the API answering, and not followed — where it pointed is not kept
+  if (r.status >= 300 && r.status < 400) return { connector, state: "unreachable", said: `${name} answered HTTP ${r.status}, sending the request on elsewhere (not followed); connecting asks again`, at };
   // a 2xx that is not JSON (a page, an empty body), or a page for "not found": something on this network answered in the venue's place
   const page = /^\s*</.test(String(r.text ?? ""));
   if ((r.status >= 200 && r.status < 300 && r.status !== 204 && r.body === undefined) || (r.status === 404 && page)) return { connector, state: "unreachable", said: `${notTheApiWords(name)}; connecting asks again`, at };
@@ -213,7 +215,6 @@ export async function reachOf(connector: string, deps: ReachDeps): Promise<Reach
     if (v === "closed") return { connector, state: "location", said: HYPERLIQUID_RULE.closedWords, at };
     if (api.state !== "ok") return api;
     if (v === "served") return { connector, state: "ok", at };
-    if (v === "unknown" && where.missing?.() === "part") return { connector, state: "unreachable", said: `where in its country this machine is could not be learned just now (the lookup of the part of the country did not answer), and Hyperliquid's own line (${HYPERLIQUID_RULE.cite}) closes part of that country; connecting asks again`, at };
     return { connector, state: "unreachable", said: `where this machine is could not be learned just now, so Hyperliquid's own line (${HYPERLIQUID_RULE.cite}) could not be held to it; connecting asks again`, at };
   }
   if (kind === "robinhood") {

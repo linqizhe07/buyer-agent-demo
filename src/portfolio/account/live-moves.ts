@@ -522,8 +522,11 @@ export class LiveMoves {
         landed = "settled";
         said = st.note;
       } else landed = no("E_VENUE_REJECTED", { venue: p.from, message: st.note });
-    } else if (p.live.txHash && src?.writer?.confirm) landed = await src.writer.confirm(p.live.txHash, { asset: p.sourceToken, amount: p.amountUsd, to: p.live.toAddress as Hex, network: p.live.network as ChainName });
-    else if (leg.ref && src?.writer?.landed) landed = await src.writer.landed(leg.ref, p.sourceToken, Date.parse(p.at), { address: p.live.toAddress, amount: p.amountUsd });
+    } else if (p.live.txHash && src?.writer?.confirm) {
+      const nonce = (leg.native as { nonce?: unknown } | undefined)?.nonce;
+      landed = await src.writer.confirm(p.live.txHash, { asset: p.sourceToken, amount: p.amountUsd, to: p.live.toAddress as Hex, network: p.live.network as ChainName, ...(typeof nonce === "number" ? { nonce } : {}) });
+    }
+    else if (leg.ref && src?.writer?.landed) landed = await src.writer.landed(leg.ref, p.sourceToken, Date.parse(p.at), { address: p.live.toAddress, amount: p.amountUsd, taken: this.e.payments.filter((x) => x !== p && x.from === p.from).map((x) => x.legs[0]?.ref ?? "").filter(Boolean) });
     if (landed === "pending") return;
     // answered while the sweep ran: stamped again from the answer, so a slow venue does not make every payment due at once
     this.polled.set(p.id, Math.max(now, m.realNow()));

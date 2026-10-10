@@ -306,9 +306,9 @@ export const VENUE_TERMS: Record<string, VenueTerms> = {
     url: "https://app.hyperliquid.xyz/terms",
     read: READ,
     says: "The Interface is not available to “Restricted Persons.” … who reside in, are located in … the United States of America or Ontario, Canada; (b) … jurisdictions subject to applicable economic and trade sanctions",
-    excludes: ["US", "CU", "IR", "KP", "SY", "CA-ON", "UA-43", "UA-40", "UA-14", "UA-09"],
+    excludes: ["US", "AS", "GU", "MP", "PR", "UM", "VI", "CU", "IR", "KP", "SY", "CA-ON", "UA-43", "UA-40", "UA-14", "UA-09"],
     openEnded: true,
-    note: "The terms do not list the sanctioned territories: the ones held here are the account’s own reading in location.ts (comprehensive sanctions: Cuba, Iran, North Korea, Syria, and Crimea, Sevastopol, Donetsk and Luhansk); §1.6 also covers citizens of those territories wherever they are.",
+    note: "The terms do not list the sanctioned territories: the ones held here are the account’s own reading in location.ts (comprehensive sanctions: Cuba, Iran, North Korea, Syria, and Crimea, Sevastopol, Donetsk and Luhansk); §1.6 also covers citizens of those territories wherever they are. “The United States of America” is read here with its territories (Puerto Rico, Guam, the US Virgin Islands, American Samoa, the Northern Mariana Islands, the minor outlying islands).",
   },
 };
 

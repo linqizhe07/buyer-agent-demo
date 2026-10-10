@@ -148,20 +148,26 @@ export function guardClient<T extends ExchangeClient>(client: T, lib: ErrorClass
     const fetch = x.fetch.bind(x);
     x.fetch = (url, method = "GET", headers, body) => {
       let timer: ReturnType<typeof setTimeout> | undefined;
+      // the library's own timer stops at the headers; this one bounds the whole answer, with room for a large body on a slow link (a market
+      // list), so only an answer that never finishes is cut
       const timeout = Number(x.timeout) || 12_000;
-      const ms = timeout + Math.min(2_000, timeout);
+      const ms = timeout * 4;
       const deadline = new Promise<never>((_, reject) => (timer = setTimeout(() => reject(new lib.RequestTimeout(`${x.id} ${method} ${url} request timed out (${ms} ms, the answer included)`)), ms)));
       return Promise.race([fetch(url, method, headers, body), deadline]).finally(() => clearTimeout(timer));
     };
   }
   if (typeof x.handleErrors === "function" && typeof x.handleHttpStatusCode === "function") {
+    const web = Object.entries(((x as { urls?: { api?: Record<string, unknown> } }).urls?.api ?? {}) as Record<string, unknown>).filter(([k, v]) => /^web/i.test(k) && typeof v === "string").map(([, v]) => v as string);
+    const webPage = (url: string): boolean => web.some((w) => url.startsWith(w));
     const own = x.handleErrors.bind(x);
     const status = x.handleHttpStatusCode.bind(x);
     x.handleErrors = (code, reason, url, method, headers, body, response, requestHeaders, requestBody) => {
       try {
         if (response === undefined || response === null || typeof response !== "object") {
           if (code >= 400) status(code, reason, url, method, body);
-          else if (code >= 200 && code < 300 && code !== 204 && /^\s*</.test(String(body ?? ""))) throw new lib.BadResponse(`${x.id} ${method} ${url} ${code} ${reason} ${String(body ?? "").slice(0, 600)}`);
+          // a page where the API answers JSON — except an exchange's own web pages the library reads on purpose (Gemini's currencies and
+          // trading pairs come from its exchange site's page)
+          else if (code >= 200 && code < 300 && code !== 204 && /^\s*</.test(String(body ?? "")) && !webPage(url)) throw new lib.BadResponse(`${x.id} ${method} ${url} ${code} ${reason} ${String(body ?? "").slice(0, 600)}`);
         }
         const skip = own(code, reason, url, method, headers, body, response, requestHeaders, requestBody);
         if (skip === undefined && code >= 400) status(code, reason, url, method, body);
@@ -374,7 +380,8 @@ function readBalance(bal: Record<string, unknown>, id: string): Record<string, u
 function keyMayNotSee(venue: string, name: string, err: unknown, key: KeyFile): boolean {
   const r = exchangeSaidNo(venue, name, err, key);
   if (String((err as { name?: string } | undefined)?.name) === "NotSupported") return true;
-  return (r.code === "E_VENUE_PERMISSION" && !(r.detail as { ipList?: unknown } | undefined)?.ipList) || (r.code === "E_VENUE_REJECTED" && !(r.native as { status?: unknown } | undefined)?.status);
+  // the main ledger answered with the same key, so a "this key" answer here is about this ledger (Binance's -2015 names permissions too)
+  return ((r.code === "E_VENUE_PERMISSION" || r.code === "E_VENUE_UNAUTHORIZED") && !(r.detail as { ipList?: unknown } | undefined)?.ipList) || (r.code === "E_VENUE_REJECTED" && !(r.native as { status?: unknown } | undefined)?.status);
 }
 
 async function balances(client: ExchangeClient, who: { venue: string; name: string; key: KeyFile } = { venue: client.id, name: client.id, key: {} }): Promise<LiveBalance[]> {

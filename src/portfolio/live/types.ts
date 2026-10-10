@@ -227,9 +227,10 @@ export function rateLimitedNo(venue: string, name: string, waitMs: number | unde
 }
 
 /** a venue that sent the request somewhere else (a 3xx): not followed. It answered — this is not "did not answer" — and no place is read
- * from where it pointed: only the venue's own words say a place */
-export function redirectedNo(venue: string, name: string, status: number, location: string | undefined): Refusal {
-  return no("E_VENUE_REJECTED", { venue, message: `${name} answered HTTP ${status}, sending the request on${location ? ` to ${location}` : ""}: not followed`, native: { status, ...(location ? { location } : {}) } });
+ * from where it pointed: only the venue's own words say a place. Where it pointed is not kept either: a venue's regional site, or a
+ * network's block page, would say roughly where the user is */
+export function redirectedNo(venue: string, name: string, status: number, _location?: string | undefined): Refusal {
+  return no("E_VENUE_REJECTED", { venue, message: `${name} answered HTTP ${status}, sending the request on elsewhere: not followed`, native: { status } });
 }
 
 /** a thrown network failure (DNS, timeout, reset, a certificate that is not the venue's) as a refusal. A failure of the connection itself

@@ -154,13 +154,13 @@ describe("an answer that is not the exchange's, or no answer at all", () => {
     expect((await exchangeClock("coincheck", "coincheck", async () => built(false)))?.code).toBe("E_VENUE_UNREACHABLE");
   });
 
-  it("a redirect is the venue answering, never followed, and only its host is kept", async () => {
+  it("a redirect is the venue answering, never followed, and where it pointed is not kept", async () => {
     vi.stubGlobal("fetch", async () => new Response(null, { status: 302, headers: { location: "https://kalshi.example/restricted?ip=203.0.113.9&cc=XX" } }));
     const r = await realHttp("https://api.kalshi.example/trade-api/v2/exchange/status");
     expect(r).toMatchObject({ status: 302, location: "kalshi.example", text: "" });
     const no3 = venueSaidNo("kalshi", "Kalshi", r.status, r.text, [], r);
-    expect([no3.code, no3.message]).toEqual(["E_VENUE_REJECTED", "Kalshi answered HTTP 302, sending the request on to kalshi.example: not followed"]);
-    expect(JSON.stringify(no3)).not.toMatch(/203\.0\.113\.9|cc=/);
+    expect([no3.code, no3.message]).toEqual(["E_VENUE_REJECTED", "Kalshi answered HTTP 302, sending the request on elsewhere: not followed"]);
+    expect(JSON.stringify(no3)).not.toMatch(/203\.0\.113\.9|cc=|kalshi\.example/);
   });
 });
 
@@ -219,8 +219,16 @@ describe("a move at an exchange: its no read as the connection reads it, and an 
     expect(await w.landed!("client:pay0001abc", "USDC", Date.now() - 1_000)).toBe("settled");
     expect(await w.landed!("client:nobody", "USDC", Date.now() - 1_000)).toBe("pending");
     // where the exchange keeps no id of the account's: found by where it went, how much, and when
-    const byWhere = exchangeWriter(stub(undefined, { fetchWithdrawals: async () => [{ id: "w-1", status: "ok", address: "0x000000000000000000000000000000000000dead", amount: 99, timestamp: Date.now() }] }), "kraken", "Kraken", KEY, { can: [] }, []);
+    const rows = [{ id: "w-1", status: "ok", address: "0x000000000000000000000000000000000000dead", amount: 99, timestamp: Date.now() }];
+    const byWhere = exchangeWriter(stub(undefined, { id: "kraken", fetchWithdrawals: async () => rows }), "kraken", "Kraken", KEY, { can: [] }, []);
     expect(await byWhere.landed!("client:pay0001abc", "USDC", Date.now() - 1_000, { address: "0x000000000000000000000000000000000000dEaD", amount: 99 })).toBe("settled");
+    // never a withdrawal another payment already is, nor one of two alike: one landing never settles two payments
+    expect(await byWhere.landed!("client:pay0001abc", "USDC", Date.now() - 1_000, { address: "0x000000000000000000000000000000000000dEaD", amount: 99, taken: ["w-1"] })).toBe("pending");
+    rows.push({ ...rows[0]!, id: "w-2" });
+    expect(await byWhere.landed!("client:pay0001abc", "USDC", Date.now() - 1_000, { address: "0x000000000000000000000000000000000000dEaD", amount: 99 })).toBe("pending");
+    // where the exchange keeps the account's id, only that id finds it
+    const keyed = exchangeWriter(stub(undefined, { id: "binance", fetchWithdrawals: async () => [rows[0]] }), "binance", "Binance", KEY, { can: [] }, []);
+    expect(await keyed.landed!("client:pay0001abc", "USDC", Date.now() - 1_000, { address: "0x000000000000000000000000000000000000dEaD", amount: 99 })).toBe("pending");
   });
 
   it("a transfer or swap that timed out says it may have been taken — never 'refused'", async () => {

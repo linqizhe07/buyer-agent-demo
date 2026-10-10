@@ -68,7 +68,7 @@ export async function agentWalletSource(req: AgentWalletRequest): Promise<{ sour
   };
   const base = walletWriter(address, req.chain);
   /** sends whose answer was lost, by hash: the nonce each was signed with, so the chain can say once it has mined another in its place */
-  const lost = new Map<string, { chain: ChainName; nonce: number }>();
+  const lost = new Map<string, { chain: ChainName; nonce: number; passedAt?: number | undefined }>();
   const writer: LiveWriter = {
     ...base,
     can: { withdraw: false, ledgers: [], transfer: false, swap: false, receive: true, send: "account" },
@@ -98,7 +98,9 @@ export async function agentWalletSource(req: AgentWalletRequest): Promise<{ sour
     },
     /** the chain's word on a send: its receipt (walletWriter's check, transfer by transfer). An endpoint that does not answer leaves it on its
      * way. A send whose answer was lost and that the chain never shows is failed only once the chain has mined another transaction of this
-     * wallet's at its nonce — then it never can be — and not on a guess about time */
+     * wallet's at its nonce — then it never can be — seen so for ten minutes, with neither its receipt nor the transaction itself shown in
+     * that time: a public endpoint behind a balancer answers the nonce from one node and the receipt from another a block behind, and one
+     * such answer must not fail a transfer that landed. After a restart the nonce comes with the payment (`expected.nonce`) */
     async confirm(hash, expected) {
       let seen: Awaited<ReturnType<NonNullable<LiveWriter["confirm"]>>>;
       try {
@@ -106,20 +108,26 @@ export async function agentWalletSource(req: AgentWalletRequest): Promise<{ sour
       } catch {
         return "pending";
       }
-      const was = lost.get(hash.toLowerCase());
+      const key = hash.toLowerCase();
+      if (!lost.has(key) && expected.nonce !== undefined && Number.isInteger(expected.nonce)) lost.set(key, { chain: expected.network, nonce: expected.nonce });
+      const was = lost.get(key);
       if (seen !== "pending" || !was || !req.chain.nonce) {
-        if (seen !== "pending") lost.delete(hash.toLowerCase());
+        if (seen !== "pending") lost.delete(key);
         return seen;
       }
-      const mined = await req.chain.nonce(was.chain, address);
+      const mined = await req.chain.nonce(was.chain, address).catch(() => undefined);
       if (mined === undefined || mined <= was.nonce) return "pending";
-      // mined just now, between the two reads?
+      // mined just now, between the two reads — or known to the chain at all (a node a block behind has no receipt yet)?
       try {
         if (await req.chain.receipt(was.chain, hash)) return await base.confirm!(hash, expected);
+        if (req.chain.transaction && (await req.chain.transaction(was.chain, hash))) return "pending";
       } catch {
         return "pending";
       }
-      lost.delete(hash.toLowerCase());
+      const now = Date.now();
+      if (was.passedAt === undefined) was.passedAt = now;
+      if (now - was.passedAt < 10 * 60_000) return "pending";
+      lost.delete(key);
       return no("E_VENUE_REJECTED", { venue: req.venue, message: `${was.chain} never mined ${hash.slice(0, 10)}…: another transaction from ${name} took its place (nonce ${was.nonce}), so this transfer did not happen`, native: { hash, nonce: was.nonce } });
     },
   };

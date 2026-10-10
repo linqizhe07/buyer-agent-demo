@@ -52,7 +52,10 @@ import type { Http, HttpReply } from "./types.ts";
  * in territories under economic sanctions. The sanctioned territories are not listed there; these are the ones under comprehensive
  * sanctions (ISO 3166: Cuba, Iran, North Korea, Syria, and Crimea, Sevastopol, Donetsk and Luhansk). Moved here from metamask.ts, whose mm
  * perps path holds the place `mm predict geoblock` names to the same two lists */
-export const HL_CLOSED = { countries: new Set(["US", "CU", "IR", "KP", "SY"]), regions: new Set(["CA-ON", "UA-43", "UA-40", "UA-14", "UA-09"]) };
+// the United States of America read with its territories (Puerto Rico, Guam, the US Virgin Islands, American Samoa, the Northern Mariana
+// Islands, the minor outlying islands): the account's own reading of "located in the United States", the stricter one — a place a source
+// spells as US-PR or as PR gets the same verdict either way
+export const HL_CLOSED = { countries: new Set(["US", "AS", "GU", "MP", "PR", "UM", "VI", "CU", "IR", "KP", "SY"]), regions: new Set(["CA-ON", "UA-43", "UA-40", "UA-14", "UA-09"]) };
 export const HL_TERMS = "Hyperliquid's Terms of Use §1.6: the Interface is not available to persons located in the United States, Ontario, or a sanctioned territory";
 
 /** a venue's rule about places, as its terms write it */
@@ -146,6 +149,10 @@ export function locator(deps: { http: Http; clock: () => number; timeoutMs?: num
   let asking: Promise<Learned | undefined> | undefined;
   let partAsking: { country: string; p: Promise<string> } | undefined;
   let partMissed: { country: string; until: number } | undefined;
+  // the part last learned, kept ten minutes for its country: a write asks the place afresh, and a fresh answer with the country alone (the
+  // trace's, or Polymarket's without a region) must not send every order to the part's lookup again — that service limits how often it is
+  // asked, and an order refused for "part not known" because of it would be the account's doing
+  let partKnown: { country: string; region: string; until: number } | undefined;
   let missing: "place" | "part" | undefined;
   // the place is dropped when its time is up even when nothing asks again (a timer that keeps nothing alive)
   let drop: ReturnType<typeof setTimeout> | undefined;
@@ -216,9 +223,11 @@ export function locator(deps: { http: Http; clock: () => number; timeoutMs?: num
     const region = typeof b.region_code === "string" ? b.region_code.trim().toUpperCase() : "";
     if (c !== country || !/^[A-Z0-9]{1,3}$/.test(region)) return "";
     if (kept && kept.country === country && !kept.region) keep({ country, region, from: kept.from }, PLACE_MS);
+    partKnown = { country, region, until: deps.clock() + PLACE_MS };
     return region;
   };
   const part = async (country: string): Promise<string> => {
+    if (partKnown && partKnown.country === country && deps.clock() < partKnown.until) return partKnown.region;
     if (partMissed && partMissed.country === country && deps.clock() < partMissed.until) return "";
     if (!partAsking || partAsking.country !== country) {
       const p = subdivision(country).finally(() => {
@@ -261,11 +270,10 @@ export function locator(deps: { http: Http; clock: () => number; timeoutMs?: num
   };
 }
 
-/** the account's sentence for a place not known now: which part could not be learned, never the place */
-export function unknownWords(rule: PlaceRule, where: Pick<Locator, "missing">): string {
-  return where.missing?.() === "part"
-    ? `where in its country this machine is could not be learned just now (the location check gave the country but not the part of it, and the lookup of the part did not answer), and ${rule.name}'s own line (${rule.cite}) closes part of that country, so it could not be held to it`
-    : `where this machine is could not be learned just now (neither Polymarket's location check nor Cloudflare's trace gave one that the rule can judge), so ${rule.name}'s own line (${rule.cite}) could not be held to it`;
+/** The account's sentence for a place not known now — the same whichever part could not be learned: that the rule closes part of the
+ * user's country would say which country it is (the line closes part of only a few), and this sentence reaches agents and the ledger */
+export function unknownWords(rule: PlaceRule, _where?: Pick<Locator, "missing">): string {
+  return `where this machine is could not be learned just now, so ${rule.name}'s own line (${rule.cite}) could not be held to it`;
 }
 
 /** The rule held to this user's place now, before anything is sent: nothing when the place is served; otherwise the account's refusal —

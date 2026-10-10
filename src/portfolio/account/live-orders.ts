@@ -229,25 +229,32 @@ export class LiveOrders {
     return this.e.host.liveMoney?.();
   }
 
-  /** the refusal that holds a venue back now: the account's own hold for it, where the host shares one (the venue's reads keep it), or this
-   * door's. Holds run on the real clock (Date.now), the one a ban's `until` is told in */
+  /** the refusal that holds a venue back now: the account's own hold for it where the host shares one (the venue's reads keep it, and a
+   * forced re-check or a reconnect lets go of it there), or else this door's. Only what the venue asked for holds a door — its place rule or
+   * edge, a ban, a wait it named (heldFor): a read that only did not answer never stops an order. Holds run on the real clock (Date.now), the
+   * one a ban's `until` is told in */
   private heldAt(venue: string): Refusal | undefined {
-    const shared = (this.money() as { held?(venue: string): Refusal | undefined } | undefined)?.held?.(venue);
-    if (shared) return shared;
+    const host = this.money() as { held?(venue: string): Refusal | undefined } | undefined;
+    if (host?.held) {
+      const shared = host.held(venue);
+      return shared && heldFor(shared, Date.now()) > 0 ? shared : undefined;
+    }
     const own = this.holds.get(venue);
     if (own && Date.now() < own.until) return own.r;
     if (own) this.holds.delete(venue);
     return undefined;
   }
 
-  /** a venue's answer that asks to be left alone holds it back here, and with the host where it shares its hold */
+  /** a venue's own answer that asks to be left alone holds it back — with the host where it shares its hold, here where it does not. Only
+   * what the venue answered: a refusal this door took from a hold is never held again, so asking during a hold does not lengthen it */
   private holdOn(venue: string, r: Refusal): void {
     const now = Date.now();
     const ms = heldFor(r, now);
     if (!(ms > 0)) return;
+    const host = this.money() as { hold?(venue: string, r: Refusal): void } | undefined;
+    if (host?.hold) return host.hold(venue, r);
     const was = this.holds.get(venue);
     if (!was || was.until < now + ms) this.holds.set(venue, { until: now + ms, r });
-    (this.money() as { hold?(venue: string, r: Refusal): void } | undefined)?.hold?.(venue, r);
   }
 
   /** a READ of a venue (a market, what is held, how an order stands), through the hold: a venue held back is not asked, and its answer that
@@ -523,7 +530,9 @@ export class LiveOrders {
       }
       if (DONE.has(o.status)) return { ok: true, kind: "order", order: o };
     }
-    const r = this.heldAt(o.venue) ?? (await safely(() => v.trader!.cancel(o.ref, o.symbol), o.venue, o.venueName));
+    // a cancel is always sent, whatever holds the venue's reads back: it only takes risk away, and only the venue's own answer to it says
+    // whether it reached the venue
+    const r = await safely(() => v.trader!.cancel(o.ref, o.symbol), o.venue, o.venueName);
     if (isRefusal(r)) {
       this.holdOn(o.venue, r);
       this.e.host.log({ kind: "account-refusal", venue: o.venue, tool: "live cancel", code: r.code, reason: r.message, native: r.native, signer: who.signer });
@@ -939,12 +948,13 @@ export class LiveOrders {
     const charge = moving ? micro(p.maxUsd.toFixed(6)) : p.maxUsd > o.usd ? micro((p.maxUsd - o.usd).toFixed(6)) : 0;
     const back = moving ? micro(o.usd.toFixed(6)) : p.maxUsd < o.usd ? micro((o.usd - p.maxUsd).toFixed(6)) : 0;
     if (onto && charge > 0) this.e.patchSpend(onto, (x) => ({ ...x, spentMicro: x.spentMicro + charge }));
-    const r = this.heldAt(o.venue) ?? (await safely(() => v.trader!.amend!(o.ref, o.symbol, change, requestOfOrder(o)), o.venue, o.venueName));
+    const held = this.heldAt(o.venue);
+    const r = held ?? (await safely(() => v.trader!.amend!(o.ref, o.symbol, change, requestOfOrder(o)), o.venue, o.venueName));
     if (isRefusal(r)) {
       const unsure = (r.detail as { unsure?: unknown } | undefined)?.unsure === true;
       // the order stays on the limit it was counted on when it was moving: the change, if it was made, is counted there (settleChange)
       if (onto && charge > 0 && (!unsure || moving)) this.e.patchSpend(onto, (x) => ({ ...x, spentMicro: Math.max(0, x.spentMicro - charge) }));
-      this.holdOn(o.venue, r);
+      if (!held) this.holdOn(o.venue, r);
       this.e.host.log({ kind: "account-refusal", venue: o.venue, tool: "live amend", code: r.code, reason: r.message, native: r.native, signer: who.signer });
       if (unsure) {
         o.changing = { qty: p.qty, price: p.price, usd: Number(p.maxUsd.toFixed(6)), ...(p.limitPrice !== undefined ? { limitPrice: p.limitPrice } : {}), ...(p.stopPrice !== undefined ? { stopPrice: p.stopPrice } : {}), ...(p.worstPrice !== undefined ? { worstPrice: p.worstPrice } : {}) };

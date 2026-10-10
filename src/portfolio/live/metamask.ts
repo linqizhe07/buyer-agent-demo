@@ -555,7 +555,10 @@ export function mmTrader(d: MmTraderDeps): LiveTrader & { kinds: MarketKind[] } 
     return n === undefined || n <= 0 ? undefined : n > 1e12 ? n : n * 1000;
   };
   /** an order sent within this long of the answer being lost is the one found resting like it (clocks differ a little) */
-  const SINCE_MS = 30_000;
+  const SINCE_MS = 5_000;
+  /** the venue ids this trader has already handed out: an order found resting like a lost one is never one the account already follows —
+   * a second identical order would otherwise take the first one's id, and cancelling one would cancel the other */
+  const handedOut = new Set<string>();
 
   const seen = new Map<string, Seen>();
   const infos = new Map<string, PmInfo>();
@@ -1018,7 +1021,7 @@ export function mmTrader(d: MmTraderDeps): LiveTrader & { kinds: MarketKind[] } 
     }
     const o = arr(obj(obj(data)?.result)?.orders)
       .map(obj)
-      .find((x) => x && str(x.asset_id) === spot.tokenId && same(str(x.side), side) && Math.abs(num(x.price) - price) < 1e-9 && Math.abs(num(x.original_size) - qty) < 1e-9 && (madeAt(x.created_at) ?? 0) >= sent - SINCE_MS);
+      .find((x) => x && !handedOut.has(str(x.id)) && str(x.asset_id) === spot.tokenId && same(str(x.side), side) && Math.abs(num(x.price) - price) < 1e-9 && Math.abs(num(x.original_size) - qty) < 1e-9 && (madeAt(x.created_at) ?? 0) >= sent - SINCE_MS);
     if (!o) return undefined;
     const matched = num(o.size_matched);
     return { ref: str(o.id), status: matched > 0 ? "partial" : "open", filledQty: matched, ...(matched > 0 && num(o.price) > 0 ? { avgPrice: num(o.price) } : {}), native: { command: cmd(args), found: "mm predict place's answer was lost: this order, resting since then with the same outcome, side, price and size, is it", order: { id: str(o.id), status: str(o.status), side: str(o.side), price: str(o.price), original_size: str(o.original_size), size_matched: str(o.size_matched) } } };
@@ -1345,7 +1348,7 @@ export function mmTrader(d: MmTraderDeps): LiveTrader & { kinds: MarketKind[] } 
     }
     const o = arr(data)
       .map(obj)
-      .find((x) => x && same(str(x.symbol), coin) && (side === "long" ? ["long", "buy", "b"] : ["short", "sell", "a"]).includes(str(x.side).toLowerCase()) && Math.abs(num(x.limitPrice) - price) < 1e-9 && Math.abs((knownFigure(x.originalSize) ?? num(x.size)) - qty) < 1e-12 && (madeAt(x.timestamp) ?? 0) >= sent - SINCE_MS);
+      .find((x) => x && !handedOut.has(str(x.orderId)) && same(str(x.symbol), coin) && (side === "long" ? ["long", "buy", "b"] : ["short", "sell", "a"]).includes(str(x.side).toLowerCase()) && Math.abs(num(x.limitPrice) - price) < 1e-9 && Math.abs((knownFigure(x.originalSize) ?? num(x.size)) - qty) < 1e-12 && (madeAt(x.timestamp) ?? 0) >= sent - SINCE_MS);
     if (!o || !/^\d{1,20}$/.test(str(o.orderId))) return undefined;
     const filled = Math.max(0, sig(qty - num(o.size)));
     return { ref: str(o.orderId), status: filled > 0 ? "partial" : "open", filledQty: filled, ...(filled > 0 ? { avgPrice: price } : {}), native: { command: cmd(args), found: "mm perps open's answer was lost: this order, resting since then with the same coin, side, price and size, is it", order: { orderId: str(o.orderId), symbol: str(o.symbol), side: str(o.side), size: str(o.size), originalSize: str(o.originalSize), limitPrice: str(o.limitPrice) } } };
@@ -1477,6 +1480,7 @@ export function mmTrader(d: MmTraderDeps): LiveTrader & { kinds: MarketKind[] } 
     // the same answer, never a second order
     void p.then((r) => {
       if (isRefusal(r) && !(r.detail as { unsure?: unknown } | undefined)?.unsure) placing.delete(o.clientId);
+      else if (!isRefusal(r) && r.ref) handedOut.add(r.ref);
     });
     return p;
   }

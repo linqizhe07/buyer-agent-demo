@@ -77,9 +77,9 @@ export interface LiveWriter {
   send?(r: { asset: string; amount: number; to: Hex; network: ChainName }): Promise<LiveReceipt | Refusal>;
   /** has something this venue started landed? `hint`: where it went and how much, for a move whose answer was lost and that is known only by
    * the account's own id for it */
-  landed?(ref: string, asset: string, sinceMs: number, hint?: { address?: string | undefined; amount?: number | undefined }): Promise<Landed>;
+  landed?(ref: string, asset: string, sinceMs: number, hint?: { address?: string | undefined; amount?: number | undefined; taken?: string[] | undefined }): Promise<Landed>;
   /** a browser wallet's transaction: on chain, and the payment that was asked for? */
-  confirm?(hash: Hex, expected: { asset: string; amount: number; to: Hex; network: ChainName }): Promise<Landed | Refusal>;
+  confirm?(hash: Hex, expected: { asset: string; amount: number; to: Hex; network: ChainName; /** the nonce it was sent at, when the account signed it (an agent wallet) */ nonce?: number | undefined }): Promise<Landed | Refusal>;
   /** a proven wallet's dollars moved to another chain, routed by LI.FI and sent by the wallet (wallet-bridge.ts) */
   bridge?: WalletBridge | undefined;
 }
@@ -153,7 +153,8 @@ export function exchangeWriter(client: ExchangeClient, venue: string, name: stri
     const base = exchangeSaidNo(venue, name, err, key);
     if (base.code === "E_VENUE_GEOBLOCKED" || base.code === "E_VENUE_UNAUTHORIZED" || (base.code === "E_VENUE_PERMISSION" && (base.detail as { ipList?: unknown } | undefined)?.ipList) || (base.code === "E_VENUE_UNREACHABLE" && (base.native as { until?: unknown } | undefined)?.until !== undefined)) return base;
     const status = thrownHttp(String((err as { message?: string })?.message ?? err))?.status;
-    if (move && (UNSURE.has(kind) || transportCode(err) !== undefined || (status !== undefined && status >= 500))) return unsureNo(what);
+    // a page answered in the exchange's place (guardClient) is no answer too: whether the request reached the exchange is not known
+    if (move && (UNSURE.has(kind) || transportCode(err) !== undefined || (status !== undefined && status >= 500) || (base.native as { page?: unknown } | undefined)?.page === true)) return unsureNo(what);
     if (base.code === "E_VENUE_UNREACHABLE") return base;
     if (kind === "InsufficientFunds" || /insufficient|not enough/i.test(text)) return no("E_VENUE_INSUFFICIENT", { venue, message: `${name}: not enough to ${what}`, native: { error: kind, said: text } });
     if (kind === "InvalidAddress" || ADDRESS_NOT_ALLOWED.test(text)) return no("E_VENUE_WITHDRAW_WHITELIST", { venue, message: `${name} refused the address: an exchange sends only to addresses verified there first, in its own withdrawal settings`, native: { error: kind, said: text } });
@@ -271,12 +272,15 @@ export function exchangeWriter(client: ExchangeClient, venue: string, name: stri
       try {
         type Row = { id?: string; status?: string; address?: string; amount?: number; timestamp?: number; info?: Record<string, unknown> };
         const list = (await client.fetchWithdrawals(asset, sinceMs - 60_000)) as Row[];
-        // a withdrawal whose answer was lost is known by the account's own id for it (Binance's withdrawOrderId, OKX's clientId), or else by
-        // where it went and how much, sent no earlier than it was asked for
+        // a withdrawal whose answer was lost is known by the account's own id for it where the exchange took one (Binance's withdrawOrderId,
+        // OKX's clientId, Coinbase's idem) — and only by it there. Elsewhere by where it went and how much, sent no earlier than it was asked
+        // for: only when exactly one such withdrawal is there, and it is not another payment's (`taken`), so one landing never settles two
         const cid = /^client:(.+)$/.exec(ref)?.[1];
         const mine = (x: Row) => [x.info?.withdrawOrderId, x.info?.clientId, x.info?.idem, x.info?.client_id].some((v) => v !== undefined && String(v) === cid);
-        const near = (x: Row) => !!hint?.address && !!x.address && x.address.toLowerCase() === hint.address.toLowerCase() && typeof x.amount === "number" && hint.amount !== undefined && Math.abs(x.amount - hint.amount) <= Math.max(0.01, hint.amount * 0.01) && (x.timestamp ?? 0) >= sinceMs - 60_000;
-        const t = cid ? (list.find(mine) ?? list.find(near)) : list.find((x) => String(x.id) === ref);
+        const near = (x: Row) => !!hint?.address && !!x.address && x.address.toLowerCase() === hint.address.toLowerCase() && typeof x.amount === "number" && hint.amount !== undefined && x.amount <= hint.amount + 1e-9 && x.amount >= hint.amount * 0.95 && (x.timestamp ?? 0) >= sinceMs - 60_000 && !(hint.taken ?? []).includes(String(x.id));
+        const keyed = client.id.startsWith("binance") || client.id.startsWith("okx") || client.id === "coinbase";
+        const nearOnes = keyed ? [] : list.filter(near);
+        const t = cid ? (list.find(mine) ?? (nearOnes.length === 1 ? nearOnes[0] : undefined)) : list.find((x) => String(x.id) === ref);
         return t?.status === "ok" ? "settled" : t?.status === "failed" || t?.status === "canceled" ? "failed" : "pending";
       } catch {
         return "pending";

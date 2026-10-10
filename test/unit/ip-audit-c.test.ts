@@ -333,7 +333,9 @@ describe("where this user is: a place that is no place, one place spelled two wa
     expect(await Promise.all(Array.from({ length: 5 }, () => w.verdict(HYPERLIQUID_RULE)))).toEqual(Array(5).fill("unknown"));
     expect(n.asked.filter((a) => a.url === SUBDIVISION)).toHaveLength(1);
     const r = refusal(await heldTo(HYPERLIQUID_RULE, w, "hyperliquid-trade", "buy 1 BTC"));
-    expect(r.message).toContain("the location check gave the country but not the part of it, and the lookup of the part did not answer");
+    // the same sentence whichever part was not learned: that the line closes part of the country would say which country it is
+    expect(r.message).toContain("where this machine is could not be learned just now");
+    expect(r.message).not.toMatch(/part of (that|its) country|in its country/);
     expect(r.message).not.toContain("neither Polymarket");
     pm = reply(200, { country: "CA", region: "QC" });
     now += TRACE_MS + 1;
@@ -509,9 +511,11 @@ describe("read by address: a chain, a ledger or a price not answering this time 
     expect((await opened.source.read()).map((b) => [b.asset, b.amount])).toEqual([["USDC", 1000]]);
   });
 
-  it("Ondo: a token held whose oracle read was refused is not worth $0: the read is refused; a token not held is never priced", async () => {
+  it("Ondo: a token held whose oracle read was refused is not worth $0: it keeps the oracle's last price, or none, and the read says so; a token not held is never priced", async () => {
     const oracle = "0x9cad45a8bf0ed41ff33074449b357c7a1fab4094";
-    expect(refusal(await ondoSource({ venue: "ondo", label: "", address: ADDRESS, http: quiet, chain: chainOf({ "Ethereum:OUSG": 45.5 }, new Set()) })).message).toBe("Ethereum did not answer: Ondo's oracle could not be read for OUSG");
+    const silent = await ondoSource({ venue: "ondo", label: "", address: ADDRESS, http: quiet, chain: chainOf({ "Ethereum:OUSG": 45.5 }, new Set()) });
+    if (isRefusal(silent)) throw new Error(silent.message);
+    expect([silent.first.map((b) => [b.asset, b.usd]), silent.source.unread?.()]).toEqual([[["OUSG", undefined]], "Ondo's oracle could not be read for OUSG this time"]);
     const chain = chainOf({ "Ethereum:OUSG": 10 }, new Set(), { [oracle]: 110_000000000000000000n });
     const opened = await ondoSource({ venue: "ondo", label: "", address: ADDRESS, http: quiet, chain });
     if (isRefusal(opened)) throw new Error(opened.message);
