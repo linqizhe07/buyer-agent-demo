@@ -217,7 +217,7 @@ export async function reachOf(connector: string, deps: ReachDeps): Promise<Reach
     if (v === "served") return { connector, state: "ok", at };
     // a network whose address the place's sources answered with no place stays one until the network changes: held as long as a place is
     // kept, so neither the list nor a waiting connection asks the sources again every few seconds
-    if (v !== "late" && where.missing?.() === "unplaceable") return { connector, state: "unreachable", said: `${unknownWords(HYPERLIQUID_RULE, where)}; connecting asks again on another network`, at, until: Date.parse(at) + PLACE_MS };
+    if (v !== "late" && where.missing?.() === "unplaceable") return { connector, state: "unreachable", said: `${unknownWords(HYPERLIQUID_RULE, where)}; connecting asks again in a few minutes`, at, until: Date.parse(at) + PLACE_MS };
     return { connector, state: "unreachable", said: `where this machine is could not be learned just now, so Hyperliquid's own line (${HYPERLIQUID_RULE.cite}) could not be held to it; connecting asks again`, at };
   }
   if (kind === "robinhood") {

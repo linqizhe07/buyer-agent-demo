@@ -164,7 +164,16 @@ export interface CompareMissing {
   why: string;
   /** the refusal's code, when the venue refused */
   code?: string;
+  /** a place rule that is not the venue's line for the whole network: one product's, the leverage's, or close-only (positions may be closed) */
+  scope?: string | undefined;
 }
+
+/** a refusal's reach, when it is a place rule for less than the whole network */
+export const scopeOf = (r: Refusal): string | undefined => {
+  const s = (r.detail as { scope?: unknown } | undefined)?.scope;
+  if (typeof s === "string") return s;
+  return (r.native as { closeOnly?: unknown } | undefined)?.closeOnly === true ? "close-only" : undefined;
+};
 
 export interface Comparison {
   /** the one name compared, as normalBase gives it */
@@ -228,7 +237,7 @@ function settle<T>(call: () => Promise<T | Refusal>): Promise<T | Refusal | Erro
 type Outcome = { row: CompareRow } | { missing: CompareMissing };
 
 async function atVenue(v: CompareVenue, w: Want, side: Side, ms: number, most: number, usd: number | undefined): Promise<Outcome> {
-  const gone = (why: string, code?: string): Outcome => ({ missing: { venue: v.id, venueName: v.name, why, ...(code ? { code } : {}) } });
+  const gone = (why: string, code?: string, scope?: string): Outcome => ({ missing: { venue: v.id, venueName: v.name, why, ...(code ? { code } : {}), ...(scope ? { scope } : {}) } });
   const slow = `did not answer in ${seconds(ms)}`;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const late = new Promise<typeof LATE>((resolve) => {
@@ -237,7 +246,7 @@ async function atVenue(v: CompareVenue, w: Want, side: Side, ms: number, most: n
   try {
     const listed = await Promise.race([settle(() => v.trader.markets(w.query)), late]);
     if (listed === LATE) return gone(slow, "E_VENUE_UNREACHABLE");
-    if (isRefusal(listed)) return gone(listed.message, listed.code);
+    if (isRefusal(listed)) return gone(listed.message, listed.code, scopeOf(listed));
     if (listed instanceof Error || !Array.isArray(listed)) return gone("answered in a way this comparison could not read");
     let picked = candidates(listed, w, most);
     // a venue answers one page of markets (20): a name that starts many others (UNI: United Airlines, Union Pacific, … at a broker that
@@ -306,7 +315,7 @@ async function atVenue(v: CompareVenue, w: Want, side: Side, ms: number, most: n
       return { row: rows[0]! };
     }
     if (unpriced) return gone(`shows no price for ${unpriced.symbol} right now`);
-    if (refusal) return gone(refusal.message, refusal.code);
+    if (refusal) return gone(refusal.message, refusal.code, scopeOf(refusal));
     if (another) return gone(`answered ${String(another.symbol)} (${String(another.base)}, ${String(another.kind)}) for a ${w.query} market it listed: not compared`);
     if (unreadable) return gone("answered in a way this comparison could not read");
     return gone(done ? `shows no price for ${w.query} right now` : slow, done ? undefined : "E_VENUE_UNREACHABLE");

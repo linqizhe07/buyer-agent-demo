@@ -499,6 +499,13 @@ export class PortfolioService {
           // mm reaches several venues (its swaps, Polymarket, Hyperliquid): a door's refusal at one of them holds the connection only when it
           // is mm's own (not installed, signed out) — one place rule must not freeze the others
           hold: (venue: string, r: Refusal): void => void ((this.adapters.get(venue)?.account.connector !== "live:metamask" || connectionWide(r)) && this.marketReads.hold(venue, r) && this.sawRule(venue, r)),
+          // the earn door's hold: the mm connection's earn (LI.FI's vaults) is held apart from the rest of mm (earnAt)
+          earnHeld: (venue: string): Refusal | undefined => this.shutNow(venue) ?? (this.earnAt(venue) !== venue ? this.marketReads.heldOf(this.earnAt(venue)) : undefined),
+          earnHold: (venue: string, r: Refusal): void => {
+            const at = this.earnAt(venue);
+            if (at !== venue) this.marketReads.hold(at, r);
+            else if (this.marketReads.hold(venue, r)) this.sawRule(venue, r);
+          },
           // a venue on the account whose venue has not answered this network yet (connected by the owner so, or not back after the
           // restart): why (waitingWords) — its open orders are not "unfollowed" meanwhile
           waiting: (venue: string): string | undefined => this.waitingWords(venue),
@@ -635,7 +642,7 @@ export class PortfolioService {
 
   /** the order ticket's reads, kept for a moment and shared while they are in flight: a page (or anything else on this machine) asking
    * again and again costs the venue one request, not one each — the venue's rate limit is for the orders */
-  private readonly marketReads = new ReadCache();
+  private readonly marketReads = new ReadCache((venue, r) => void this.sawRule(venue, r));
 
   /** a venue connected live that orders are placed through, or why it is not one */
   private tradingVenue(venue: string): LiveVenue | Refusal {
@@ -709,7 +716,7 @@ export class PortfolioService {
   private readonly ruleSeen = new Map<string, number>();
   /** a refusal that is the venue's rule for the whole network, taken on the shared hold: remembered (always answers true, for chaining) */
   private sawRule(venue: string, r: Refusal): true {
-    if (notServedBy(r) !== undefined) this.ruleSeen.set(venue, Date.now());
+    if (notServedBy(r) !== undefined && !partyOf(r) && !venue.includes("#") && !venue.startsWith("public:")) this.ruleSeen.set(venue, Date.now());
     return true;
   }
   /** what holds a connected venue back now: the shared hold; else, for one whose rule refused this network before, its keyless question's
@@ -723,7 +730,7 @@ export class PortfolioService {
     const kept = this.reaches.get(connector);
     const now = this.liveDeps().clock();
     if (kept && "r" in kept && kept.until > now) {
-      if (kept.r.state === "location") return no("E_VENUE_GEOBLOCKED", { venue, message: kept.r.said ?? `${this.nameOf(venue)} does not serve this location: that is its own rule, and the account does not look for a way around it`, native: { keyless: true } });
+      if (kept.r.state === "location") return no("E_VENUE_GEOBLOCKED", { venue, message: `${this.nameOf(venue)} does not serve this location: that is its own rule, and the account does not look for a way around it`, native: { keyless: true, ...(kept.r.said ? { said: kept.r.said } : {}) } });
       // it answers this network again: its key is used again
       this.ruleSeen.delete(venue);
       return undefined;
@@ -1546,6 +1553,7 @@ export class PortfolioService {
     // the venue has just answered this network: no hold, kept read or health under its id from before carries over (a keyless source's
     // refusal on the network the user left, an earlier connection's)
     this.marketReads.forget(venue, true);
+    this.ruleSeen.delete(venue);
     // Markets and the comparison were answered from what the venues listed before this one: they are asked again
     this.marketReads.forgetAll(["explore", "compare"]);
     const usd = r2((await adapter.read()).reduce((s, h) => s + h.usd, 0));
@@ -1575,6 +1583,7 @@ export class PortfolioService {
     this.earners.delete(venue);
     this.earnSeen.delete(venue);
     this.marketReads.forget(venue);
+    this.ruleSeen.delete(venue);
     // Markets and the comparison were answered with this venue among the connected ones: they are asked again
     this.marketReads.forgetAll(["explore", "compare"]);
     // a live connection that stood in for a simulated venue: the simulated one comes back
@@ -1672,7 +1681,9 @@ export class PortfolioService {
         // that state, with the edition for where the user is when the venue has one that serves it — not as a read that failed
         // the list of where the user can connect, as it judged this connection from the network the account runs on: a trading line that
         // closes this place (Hyperliquid's), or close-only (Polymarket's for a US network)
-        const judged = v.live && v.connector ? this.venuesKept?.v.find((x) => x.connector === v.connector) : undefined;
+        // only an answer asked in the last ten minutes, as the door counts it: an older one may be of the network the user left
+        const kept = v.live && v.connector ? this.venuesKept?.v.find((x) => x.connector === v.connector) : undefined;
+        const judged = kept?.asked !== undefined && this.liveDeps().clock() - Date.parse(kept.asked) < 600_000 ? kept : undefined;
         const out = v.live ? (notServedBy(this.shutNow(v.id)) ?? (judged?.verdict === "not-served" ? judged.said ?? `${v.name} does not serve this location` : undefined)) : undefined;
         if (out) v.notServed = { said: out, ...(judged?.edition ? { edition: judged.edition } : {}) };
         else if (judged?.verdict === "close-only") v.closeOnly = { said: judged.said ?? `${v.name} lets this location close positions, not open new ones` };
@@ -1894,7 +1905,7 @@ export class PortfolioService {
     w.timer = undefined;
     // the venue's rule for this network, or a network that names no place (Hyperliquid's line cannot be held to it): asked again only when a
     // check of the network finds it changed — the venue's rule is not knocked on, nor are the place's sources every few minutes
-    if (w.last.code === "E_VENUE_GEOBLOCKED" || (w.last.native as { unplaceable?: unknown } | undefined)?.unplaceable === true || ipListed(w.last)) w.said = `${w.last.message} — asked again when a check of this network finds it answering (Check again, or the half-hourly check)`;
+    if (w.last.code === "E_VENUE_GEOBLOCKED" || ipListed(w.last)) w.said = `${w.last.message} — asked again when a check of this network finds it answering (Check again, or the half-hourly check)`;
     else {
       const ms = Math.max(COMING_BACK_MS[Math.min(w.tries, COMING_BACK_MS.length - 1)]!, holdBackMs(w.last));
       w.timer = setTimeout(() => void this.tryAgain(w.c.venue), ms);
@@ -1981,6 +1992,7 @@ export class PortfolioService {
     const asked = `asked ${w.tries + 1} times`;
     if (!isRefusal(out)) {
       this.waiting.delete(venue);
+      this.account.trade.letGo(venue);
       if (w.row) w.row.report.venues[w.row.i] = { venue, ok: true };
       this.ledger.append({ kind: "note", venue, reason: w.how === "restart" ? `connected again after the restart (${asked}) · ${out.summary}` : `${name} answered this network and is connected (${asked} since you connected it) · ${out.summary}` });
       return;
@@ -3153,6 +3165,8 @@ function liveLiquidity(page: AccountPage): Liquidity {
  * one from a part of a connection (`mm#swaps`, one of the venues mm reaches; `public:polymarket#history`, a source's other host) holds that
  * part only — while the connection's own hold holds every part of it */
 class ReadCache {
+  /** `onRule`: a venue's own rule for the whole network, met by one of its reads and held here (the service remembers it for the keyless gate) */
+  constructor(private readonly onRule?: (venue: string, r: Refusal) => void) {}
   private readonly kept = new Map<string, { at: number; value: Promise<unknown>; failed: boolean; settled: boolean }>();
   private readonly slots = new Map<string, { busy: number; waiting: Array<() => void> }>();
   private readonly health = new Map<string, VenueHealth>();
@@ -3260,7 +3274,8 @@ class ReadCache {
   hold(venue: string, r: Refusal): boolean {
     if (!holdsBack(r)) return false;
     this.holdBack(venue, r);
-    return true;
+    // a party's refusal (LI.FI for a wallet's swaps) holds that party, not the venue: the venue's reads go on as before
+    return !partyOf(r);
   }
 
   private holding(venue: string, parties: boolean): { until: number; refusal: Refusal } | undefined {
@@ -3279,6 +3294,7 @@ class ReadCache {
   /** held back until the later of what is held and what this refusal says: a 429 or a timeout that lands after a ban does not shorten
    * it, nor does a 20-second "no answer" shorten a ten-minute place rule. Reads meanwhile answer in the words of the longer hold */
   private holdBack(venue: string, r: Refusal): void {
+    if (!partyOf(r)) this.onRule?.(venue, r);
     const now = Date.now();
     const until = now + holdBackMs(r, now);
     const at = partyOf(r) ? `${venue}|${partyOf(r)}` : connectionWide(r) ? baseVenue(venue) : venue;

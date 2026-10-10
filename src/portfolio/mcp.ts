@@ -782,12 +782,14 @@ async function read(path: string, pick?: (b: Record<string, unknown>) => unknown
 function served<T>(b: T): T {
   const x = b as { missing?: unknown };
   if (!x || typeof x !== "object" || !Array.isArray(x.missing)) return b;
-  const list = x.missing as Array<{ venue?: string; venueName?: string; code?: string; connected?: boolean }>;
-  const geo = list.filter((m) => m.code === "E_VENUE_GEOBLOCKED");
+  const list = x.missing as Array<{ venue?: string; venueName?: string; code?: string; connected?: boolean; scope?: string }>;
+  // only a venue's line for the whole network: a rule for one product, the leverage, or close-only (it still closes) stays where it was
+  const whole = (m: { code?: string; scope?: string }) => m.code === "E_VENUE_GEOBLOCKED" && m.scope === undefined;
+  const geo = list.filter(whole);
   if (!geo.length) return b;
   const names = new Map<string, { venue: string; venueName: string; connected?: boolean }>();
   for (const m of geo) if (m.venueName && !names.has(m.venueName)) names.set(m.venueName, { venue: m.venue ?? "", venueName: m.venueName, ...(m.connected !== undefined ? { connected: m.connected } : {}) });
-  return { ...(b as object), missing: list.filter((m) => m.code !== "E_VENUE_GEOBLOCKED"), notServedHere: [...names.values()] } as T;
+  return { ...(b as object), missing: list.filter((m) => !whole(m)), notServedHere: [...names.values()] } as T;
 }
 
 server.registerTool(

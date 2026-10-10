@@ -80,7 +80,7 @@
  */
 import { isRefusal, type Refusal } from "../../core/errors.ts";
 import { isExcludedCategory, isIpoCategory, isRwaMarket, TABS, type TabId } from "./categories.ts";
-import { normalBase, type CompareMissing, type PlaceRule } from "./compare.ts";
+import { normalBase, scopeOf, type CompareMissing, type PlaceRule } from "./compare.ts";
 import { impliedUsd, PER_SHARE, PRE_IPO_CATEGORY, PRE_IPO_GROUP, PRE_IPO_PER_POINT } from "./preipo.ts";
 import type { EventsQuery, Listing, PublicSource } from "./public-markets.ts";
 import { inDollars, type LiveTrader, type Market, type MarketSession, type MarketStats } from "./trade.ts";
@@ -447,7 +447,8 @@ async function atSource(r: Reader, o: { q: string; ms: number; perSource: number
     if (!s.done) failed.push(gone(`did not answer in ${seconds(o.ms)}`, { code: "E_VENUE_UNREACHABLE", part: s.part }));
     else if (isRefusal(s.v)) {
       const said = wordsOf(s.v);
-      failed.push(gone(s.v.message, { code: s.v.code, part: s.part, ...(said ? { said } : {}) }));
+      const scope = scopeOf(s.v);
+      failed.push(gone(s.v.message, { code: s.v.code, part: s.part, ...(said ? { said } : {}), ...(scope ? { scope } : {}) }));
     } else if (s.v instanceof Error || (s.part === "stats" ? !(s.v instanceof Map) : !Array.isArray(s.v))) failed.push(gone("answered in a way this could not read", { part: s.part }));
   }
   // what a source says its list is made of, only when its listing answered: a source that refused this network, timed out or could not be
@@ -464,9 +465,11 @@ async function atSource(r: Reader, o: { q: string; ms: number; perSource: number
 
 /** the venues that do not serve this network, in a line under 160 characters: named, never quoted */
 function awayNote(names: string[]): string {
-  const shown = names.length > 4 ? [...names.slice(0, 3), `${names.length - 3} more`] : names;
+  const cut = (n: string) => (n.length > 24 ? `${n.slice(0, 23)}…` : n);
+  const shown = names.length > 4 ? [...names.slice(0, 3).map(cut), `${names.length - 3} more`] : names.map(cut);
   const list = shown.length > 1 ? `${shown.slice(0, -1).join(", ")} and ${shown[shown.length - 1]}` : shown[0]!;
-  return `${list} ${names.length === 1 ? "does" : "do"} not serve this network: ${names.length === 1 ? "its" : "their"} markets are not listed here.`;
+  const line = `${list} ${names.length === 1 ? "does" : "do"} not serve this network: ${names.length === 1 ? "its" : "their"} markets are not listed here.`;
+  return line.length <= 160 ? line : `${names.length} venues do not serve this network: their markets are not listed here.`;
 }
 
 /** one line per thing missing: a source that is missing as a whole (no part, no symbol) is one line per venue name and reason, so an exchange
@@ -474,7 +477,7 @@ function awayNote(names: string[]): string {
 const dedupe = (list: ExploreMissing[]): ExploreMissing[] => {
   const keys = new Set<string>();
   return list.filter((m) => {
-    const k = m.part === undefined && m.symbol === undefined ? `whole|${m.venueName}|${m.why}` : `${m.venue}|${m.part ?? ""}|${m.why}|${m.symbol ?? ""}`;
+    const k = m.part === undefined && m.symbol === undefined && !m.connected ? `whole|${m.venueName}|${m.why}` : `${m.venue}|${m.part ?? ""}|${m.why}|${m.symbol ?? ""}`;
     return !keys.has(k) && keys.add(k) !== undefined;
   });
 };

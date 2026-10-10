@@ -492,9 +492,11 @@ export class LiveEarns {
   /** the refusal that holds a venue back now: the host's shared hold where it offers one (a forced re-check or a reconnect lets go of it
    * there) — only what the venue asked for, never a read that did not answer — or else this door's own */
   private heldAt(venue: string): Refusal | undefined {
-    const host = this.money() as { held?(venue: string): Refusal | undefined } | undefined;
-    if (host?.held) {
-      const shared = host.held(venue);
+    const host = this.money() as { held?(venue: string): Refusal | undefined; earnHeld?(venue: string): Refusal | undefined } | undefined;
+    // the earn's own place in the shared hold where the host keeps one (the mm connection's earn is held apart from the rest of mm)
+    const held = host?.earnHeld ?? host?.held;
+    if (held) {
+      const shared = held(venue);
       return shared && this.holdMs(shared, Date.now()) > 0 ? shared : undefined;
     }
     const own = this.holds.get(venue);
@@ -509,7 +511,8 @@ export class LiveEarns {
     const now = Date.now();
     const ms = this.holdMs(r, now);
     if (!(ms > 0)) return;
-    const host = this.money() as { hold?(venue: string, r: Refusal): void } | undefined;
+    const host = this.money() as { hold?(venue: string, r: Refusal): void; earnHold?(venue: string, r: Refusal): void } | undefined;
+    if (host?.earnHold) return host.earnHold(venue, r);
     if (host?.hold) return host.hold(venue, r);
     const was = this.holds.get(venue);
     if (!was || was.until < now + ms) this.holds.set(venue, { until: now + ms, r });

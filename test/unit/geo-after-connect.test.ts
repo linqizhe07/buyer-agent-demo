@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { isRefusal, type Refusal } from "../../src/core/errors.ts";
 import type { AccountPage } from "../../src/portfolio/account/exchange.ts";
 import { signOwner, simKey, type OwnerAction } from "../../src/portfolio/account/sign.ts";
@@ -211,7 +211,7 @@ describe("the money door and a venue that does not serve the network", () => {
 });
 
 describe("a network whose address names no place", () => {
-  it("is said as that, held to Hyperliquid's line without 'try again in a moment', and its sources are not asked again on the same network", async () => {
+  it("is held to Hyperliquid's line in the same words as a place not known (nothing about the address), asked again in a few minutes, and its sources are not asked again meanwhile", async () => {
     let asked = 0;
     const http: Http = async (url) => {
       asked++;
@@ -221,9 +221,10 @@ describe("a network whose address names no place", () => {
     let now = 1_000_000;
     const where = locator({ http, clock: () => now });
     const r = await heldTo(HYPERLIQUID_RULE, where, "hl", "");
-    expect(r && [r.code, (r.native as { unplaceable?: boolean }).unplaceable]).toEqual(["E_VENUE_UNREACHABLE", true]);
-    expect(r!.message).toContain("this network's address names no place");
-    expect(r!.message).not.toContain("Try again in a moment");
+    expect(r?.code).toBe("E_VENUE_UNREACHABLE");
+    expect(r!.message).toContain("where this machine is could not be learned just now");
+    expect(r!.message).toContain("It is asked again in a few minutes");
+    expect(JSON.stringify(r)).not.toMatch(/unplaceable|anonymi|Tor\b/);
     expect(asked).toBe(3);
     now += PLACE_MS / 2;
     expect(await where.verdict(HYPERLIQUID_RULE)).toBe("unknown");
@@ -247,9 +248,16 @@ describe("orders after connect, at a venue that refuses this network", () => {
   it("an order its order call refused for this network is remembered: the next is refused before it is quoted, nothing sent; a check that finds it answering lets go", async () => {
     const x = await account();
     await x.connect("ex", "Stand-in Exchange");
+    // a quote taken before the venue said so, signed after: nothing is sent either
+    const older = await x.svc.account!.prepare(order as never);
+    if (isRefusal(older)) throw new Error(older.message);
     net.ex = "orders";
     const first = await sign(x);
     expect(isRefusal(first) && first.code).toBe("E_VENUE_GEOBLOCKED");
+    expect(calls.filter((k) => k === "ex place")).toHaveLength(1);
+    const { nonce: _n, ...rest } = (older as { action: Record<string, unknown> }).action;
+    const late = await x.own(rest as never);
+    expect(isRefusal(late) && late.code).toBe("E_VENUE_GEOBLOCKED");
     expect(calls.filter((k) => k === "ex place")).toHaveLength(1);
     // its reads still answer: the venue is not held, only no order is offered there
     expect(isRefusal(await x.svc.liveMarket("ex", "BTC/USDT"))).toBe(false);
@@ -309,5 +317,67 @@ describe("what a venue answers, read the right way", () => {
     await y.connectReach(["live:geo-standin"], true);
     await new Promise((r) => setTimeout(r, 20));
     expect(y.adapter("ex")?.account.watchOnly).toBeTruthy();
+  });
+});
+
+describe("after a restart, and after a rule's hold runs out", () => {
+  const order = { type: "liveOrder", venue: "ex", symbol: "BTC/USDT", side: "buy", orderType: "limit", qty: "0.001", limitPrice: "50000" };
+  const again = async (home: string) => {
+    const svc = await PortfolioService.create({ home, venues: "frontline", real: true, publicMarkets: [], liveDeps: { http: async () => ({ status: 404, body: undefined, text: "" }), price: async () => undefined, mm: (async () => ({ authenticated: true })) as unknown as RunMm }, liveWrites: { capUsd: 100, pairingCode: "K7QX-M2PA" }, account: { owners: [{ id: owner.address, kind: "eoa", label: "owner", addedAt: new Date().toISOString() }] } } as never);
+    await svc.restoring;
+    return svc;
+  };
+
+  it("the owner's cancel a refusing venue could not take outlives a restart, and is sent once the venue comes back", async () => {
+    const x = await account();
+    await x.connect("ex", "Stand-in Exchange");
+    const p = await x.svc.account!.prepare(order as never);
+    if (isRefusal(p)) throw new Error(p.message);
+    const { nonce: _n, ...rest } = (p as { action: Record<string, unknown> }).action;
+    const placed = await x.own(rest as never);
+    if (isRefusal(placed)) throw new Error(placed.message);
+    const id = (placed as { order: { id: string } }).order.id;
+    net.ex = "451";
+    await x.own({ type: "liveCancel", venue: "ex", order: id } as never);
+    // the restart, on the same network: the venue waits, and the order with its cancel is followed again
+    const home = (x.svc as unknown as { opts: { home: string } }).opts.home;
+    const y = await again(home);
+    expect(y.adapter("ex")).toBeUndefined();
+    calls.length = 0;
+    await y.account!.trade.poll();
+    expect(calls).not.toContain("ex cancel");
+    // back on a network the venue serves: the check connects it, and the next poll sends the owner's cancel
+    net.ex = "ok";
+    await y.connectReach(["live:geo-standin"], true);
+    await new Promise((r) => setTimeout(r, 20));
+    await y.account!.trade.poll();
+    expect(calls).toContain("ex cancel");
+    const o = ((await y.accountView()) as AccountPage).orders.find((z) => z.id === id)!;
+    expect([o.status, o.unfollowed]).toEqual(["canceled", undefined]);
+  });
+
+  it("once its rule's hold runs out, the venue's keyless question decides before its key is used again", async () => {
+    const x = await account();
+    await x.connect("ex", "Stand-in Exchange");
+    net.ex = "451";
+    x.pass(31_000);
+    await x.page();
+    // ten minutes on: the hold has run out; the keyless question (kept as the list keeps it) still says it does not serve this network
+    const reaches = (x.svc as unknown as { reaches: Map<string, unknown> }).reaches;
+    const at = new Date().toISOString();
+    reaches.set("live:geo-standin", { r: { connector: "live:geo-standin", state: "location", said: "Stand-in Exchange does not serve this location. It answered: “Service unavailable from a restricted location”", at }, until: Number.MAX_SAFE_INTEGER });
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.now() + 11 * 60_000 });
+    calls.length = 0;
+    x.pass(11 * 60_000);
+    const held = await x.venue("ex");
+    expect(calls).toEqual([]);
+    expect(held.notServed?.said).toBe("Stand-in Exchange does not serve this location: that is its own rule, and the account does not look for a way around it");
+    // the keyless question answers now: the key is used again
+    reaches.set("live:geo-standin", { r: { connector: "live:geo-standin", state: "ok", at }, until: Number.MAX_SAFE_INTEGER });
+    net.ex = "ok";
+    x.pass(31_000);
+    await x.page();
+    expect(calls).toContain("ex balance");
+    vi.useRealTimers();
   });
 });

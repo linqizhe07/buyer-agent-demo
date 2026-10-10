@@ -289,9 +289,7 @@ export function locator(deps: { http: Http; clock: () => number; timeoutMs?: num
 
 /** The account's sentence for a place not known now — the same whichever part could not be learned: that the rule closes part of the
  * user's country would say which country it is (the line closes part of only a few), and this sentence reaches agents and the ledger */
-export function unknownWords(rule: PlaceRule, where?: Pick<Locator, "missing">): string {
-  // an address the sources answered with no place is a state of this network, not a moment: said as that, not "just now"
-  if (where?.missing?.() === "unplaceable") return `this network's address names no place (an anonymising network, or an address the account's sources cannot place), so ${rule.name}'s own line (${rule.cite}) cannot be held to it`;
+export function unknownWords(rule: PlaceRule, _where?: Pick<Locator, "missing">): string {
   return `where this machine is could not be learned just now, so ${rule.name}'s own line (${rule.cite}) could not be held to it`;
 }
 
@@ -303,8 +301,8 @@ export async function heldTo(rule: PlaceRule, where: Locator, venue: string, doi
   const v = await where.verdict(rule, ask);
   if (v === "served") return undefined;
   if (v === "closed") return no("E_VENUE_GEOBLOCKED", { venue, message: `${rule.closedWords}. ${doing ? `Nothing was sent to ${rule.name} (${doing})` : "Nothing was connected"}`, native: { rule: rule.terms } });
-  // a network that names no place stays one until the network changes: asked again when a check of this network finds a place, not "in a
-  // moment"
-  if (where.missing?.() === "unplaceable") return no("E_VENUE_UNREACHABLE", { venue, message: `${unknownWords(rule, where)}: ${doing ? `nothing was sent (${doing})` : "nothing was connected"}. It is asked again when this machine is on a network that names a place`, native: { rule: rule.terms, unplaceable: true } });
+  // the sources answered and named no place: asked again in a while, not "in a moment" (the sentence is the same as for no answer, and says
+  // nothing about what kind of address this is)
+  if (where.missing?.() === "unplaceable") return no("E_VENUE_UNREACHABLE", { venue, message: `${unknownWords(rule, where)}: ${doing ? `nothing was sent (${doing})` : "nothing was connected"}. It is asked again in a few minutes`, native: { rule: rule.terms } });
   return no("E_VENUE_UNREACHABLE", { venue, message: `${unknownWords(rule, where)}: ${doing ? `nothing was sent (${doing})` : "nothing was connected"}. Try again in a moment`, native: { rule: rule.terms } });
 }

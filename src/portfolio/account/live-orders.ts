@@ -99,6 +99,9 @@ export interface LiveOrder {
   /** the owner asked to cancel it while its venue refused this network: the account sends that cancel again by itself once a check of the
    * network finds the venue answering, and follows the order again from the venue's answer */
   cancelWanted?: true | undefined;
+  /** while the cancel waits to be sent again: the limit the order was counted on and what had filled then, so that what fills before the
+   * venue takes the cancel is counted on that limit too */
+  wantedFrom?: { approval: string; filled: number } | undefined;
   /** the order call's answer was lost (the network turned, a timeout, a gateway's 5xx): the venue may hold it. It has no ref yet, it keeps
    * what it counts on a limit, and it is looked up by the account's id (`clientId`) until the venue shows it or shows none */
   unconfirmed?: true | undefined;
@@ -377,9 +380,9 @@ export class LiveOrders {
   private async placeRule(v: LiveVenue & { trader: LiveTrader }, side: Side, reduceOnly?: boolean, symbol?: string): Promise<Refusal | undefined> {
     // the venue answered an order from here that it does not serve this network (its reads may still answer): no order is offered, carded or
     // sent there until that answer's time runs out, or a check of the network lets it go (letGo)
-    const was = this.refusedHere.get(v.id);
-    if (was && Date.now() < was.until && !reduceOnly) return was.r;
-    if (was && Date.now() >= was.until) this.refusedHere.delete(v.id);
+    // a close too: what is remembered here is the venue's rule for the whole network (close-only answers never are), so nothing is sent there
+    const was = this.refusedNow(v.id);
+    if (was) return was;
     const t = v.trader as Extras;
     if (!t.held) return undefined;
     const r = await safely(() => t.held!({ side, ...(reduceOnly ? { reduceOnly } : {}), ...(symbol ? { symbol } : {}) }), v.id, v.name, STATUS_MS);
@@ -389,9 +392,18 @@ export class LiveOrders {
   /** the venues whose order call answered that they do not serve this network, until when: a door's own memory, not the shared hold — the
    * venue's reads (its balance, its markets, how open orders stand) may still answer, and are not held back for it */
   private readonly refusedHere = new Map<string, { until: number; r: Refusal }>();
+  private refusedNow(venue: string): Refusal | undefined {
+    const was = this.refusedHere.get(venue);
+    if (was && Date.now() < was.until) return was.r;
+    if (was) this.refusedHere.delete(venue);
+    return undefined;
+  }
   /** an order call's refusal of this network as a whole (not one product's rule, not close-only, not the account's own reading of terms,
-   * where nothing was sent): remembered for as long as the one hold rule says */
-  private refusedOrder(venue: string, r: Refusal): void {
+   * where nothing was sent): remembered for as long as the one hold rule says. Not at a trader that asks the venue's place rule before every
+   * order itself (held: Hyperliquid, Polymarket, the mm connection, whose one refusal is one of the several venues it reaches) */
+  private refusedOrder(v: LiveVenue, r: Refusal): void {
+    if ((v.trader as Extras | undefined)?.held) return;
+    const venue = v.id;
     const n = (r.native ?? {}) as { closeOnly?: unknown; rule?: unknown; terms?: unknown };
     if (r.code !== "E_VENUE_GEOBLOCKED" || (r.detail as { scope?: unknown } | undefined)?.scope !== undefined || n.closeOnly === true || n.rule !== undefined || n.terms !== undefined) return;
     const ms = holdBackMs(r);
@@ -575,8 +587,10 @@ export class LiveOrders {
       // it, and neither can a look at how the order stands. The account stops following it, so the owner can disconnect or reconnect the
       // venue, and says to cancel it there. An agent's cancel stays the venue's answer
       if (who.authority === "owner" && refusesNetwork(r)) {
-        this.unfollow(o, by, who, `${o.venueName} refuses this network, so the account can neither cancel it nor see it fill: it stopped following it, and what it held of a limit beyond what had filled is free. It sends your cancel again when a check of this network finds ${o.venueName} answering; meanwhile you can cancel it at ${o.venueName}`);
+        // remembered before the order's line is written: a restart sends the cancel again too
         o.cancelWanted = true;
+        if (o.approval) o.wantedFrom = { approval: o.approval, filled: o.filledQty };
+        this.unfollow(o, by, who, `${o.venueName} refuses this network, so the account can neither cancel it nor see it fill: it stopped following it, and what it held of a limit beyond what had filled is free. It sends your cancel again when a check of this network finds ${o.venueName} answering; meanwhile you can cancel it at ${o.venueName}`);
         return { ok: true, kind: "order", order: o };
       }
       return r;
@@ -612,6 +626,14 @@ export class LiveOrders {
       o.canceling = true;
       this.apply(o, r, `cancel asked of ${o.venueName} again, now that it answers: waiting for it to say the order is gone`);
       this.polled.set(o.id, 0);
+    }
+    // what filled while the account was not following it is counted on the limit it was placed under, as a fill always is
+    const from = o.wantedFrom;
+    o.wantedFrom = undefined;
+    if (from && o.filledQty > from.filled + 1e-12) {
+      const more = notionalOf(o, o.filledQty - from.filled, o.avgPrice !== undefined && o.avgPrice > 0 ? o.avgPrice : o.price);
+      this.e.patchSpend(from.approval, (x) => ({ ...x, spentMicro: x.spentMicro + micro(more.toFixed(6)) }));
+      this.e.host.log({ kind: "order", venue: o.venue, tool: "live order", outcome: "filled while not followed", reason: `${o.id} · ${usd(more)} filled at ${o.venueName} while the account was not following it: counted on its limit`, notionalUsd: more });
     }
     this.line(o);
     this.e.host.log({ kind: "order", venue: o.venue, tool: "live cancel", outcome: o.status, venueOrderId: o.ref, reason: `${o.id} · the owner's cancel, sent again now that ${o.venueName} answers this network` });
@@ -662,6 +684,9 @@ export class LiveOrders {
    * the account's id until the venue shows it or shows none. The refusal goes back with that order's id, so that nobody places it again
    * under a new id before looking */
   private async place(p: Plan, who: Who, send?: (clientId: string) => Promise<OrderState | Refusal>): Promise<Outcome> {
+    // quoted (or carded) before the venue answered an order that it does not serve this network: nothing is sent now either
+    const refused = this.refusedNow(p.v.id);
+    if (refused) return refused;
     const id = this.e.nextOrderId();
     const clientId = createHash("sha256").update(`${this.run}:${id}`).digest("hex").slice(0, 32);
     const at = new Date(this.money()!.realNow()).toISOString();
@@ -670,7 +695,7 @@ export class LiveOrders {
     if (isRefusal(answer)) {
       this.e.host.log({ kind: "account-refusal", venue: p.v.id, tool: "live order", code: answer.code, reason: answer.message, native: answer.native, signer: who.signer, ...(who.envelope ? { envelope: who.envelope } : {}) });
       if (!lost) {
-        this.refusedOrder(p.v.id, answer);
+        this.refusedOrder(p.v, answer);
         return answer;
       }
     }
@@ -1179,8 +1204,8 @@ export class LiveOrders {
     if (isRefusal(mk)) return mk;
     if (mk.kind !== "perp" && mk.kind !== "future") return no("E_ACCOUNT_BAD_ACTION", { venue: v.id, message: `leverage is set on a perpetual or a future; ${mk.name} is ${mk.kind}` });
     if (mk.maxLeverage !== undefined && lev > mk.maxLeverage) return no("E_VENUE_ORDER_INVALID", { venue: v.id, message: `${v.name} takes at most ${mk.maxLeverage}x in ${mk.name}` });
-    // the venue's place rule (or what this door learned of it) before a card is raised or a change is sent: asked as an opening order, since
-    // a leverage change can add exposure. The owner's own change was quoted with it already; an agent's card is not raised for a refusal
+    // the venue's place rule (or what this door learned of it) before a card is raised: asked as an opening order, since a leverage change can
+    // add exposure, so that no card is raised for a change the account would refuse (what this door learned stops every change below)
     if (who.authority === "agent" && who.card === undefined) {
       const line = await this.placeRule(v as LiveVenue & { trader: LiveTrader }, "buy", false, mk.symbol);
       if (line) return line;
@@ -1200,10 +1225,12 @@ export class LiveOrders {
         }
       }
     }
+    const refused = this.refusedNow(v.id);
+    if (refused) return refused;
     const r = await safely(() => v.trader!.setLeverage!(mk.symbol, lev, (text(a.marginMode) || undefined) as "cross" | "isolated" | undefined), v.id, v.name);
     if (isRefusal(r)) {
       this.e.host.log({ kind: "account-refusal", venue: v.id, tool: "live leverage", code: r.code, reason: r.message, native: r.native, signer: who.signer });
-      this.refusedOrder(v.id, r);
+      this.refusedOrder(v, r);
       return r;
     }
     this.e.host.log({ kind: "action", venue: v.id, tool: "live leverage", signer: who.signer, ...(who.envelope ? { envelope: who.envelope } : {}), ...(who.card ? { intentId: who.card } : {}), outcome: "ok", reason: `${mk.name} at ${v.name}: ${r.leverage}x${r.marginMode ? `, ${r.marginMode} margin` : ""}`, native: r.native });
@@ -1261,9 +1288,10 @@ export class LiveOrders {
     const now = m.realNow();
     // the owner's cancels that could not reach a venue that refused this network, sent again once a check found it answering
     for (const venue of [...this.cancelAgain]) {
-      this.cancelAgain.delete(venue);
       const v = m.venue(venue);
+      // not connected yet (waiting to come back after a restart), or held back: kept for when it is
       if (!v?.trader || this.heldAt(venue)) continue;
+      this.cancelAgain.delete(venue);
       for (const o of this.e.orders.filter((x) => x.venue === venue && x.cancelWanted && x.ref)) await this.cancelWanted(o, v as LiveVenue & { trader: LiveTrader });
     }
     const due = this.e.orders.filter((o) => {

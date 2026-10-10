@@ -67,6 +67,9 @@ export interface LiveMoney {
   held?(venue: string): Refusal | undefined;
   /** a venue's answer that holds it back, given to that shared hold */
   hold?(venue: string, r: Refusal): void;
+  /** the same for the earn door, whose place in the hold is its own where a connection reaches several venues (mm's earn is LI.FI's) */
+  earnHeld?(venue: string): Refusal | undefined;
+  earnHold?(venue: string, r: Refusal): void;
   /** a venue on the account whose venue has not answered this network yet — connected by the owner so, or not back after a restart — and is
    * asked again (service.ts waiting), in the words that say why: what is
    * followed there waits for it rather than being let go */
@@ -185,8 +188,9 @@ export class LiveMoves {
     const src = m.venue(f.from);
     if (!src) return this.notYet(f.from, "from") ?? no("E_WALLET_ACCOUNT_UNKNOWN", { venue: f.from, message: `"${f.from}" is not a venue connected live: real money moves only between venues connected live` });
     if (!src.writer) return no("E_VENUE_RAIL_CLOSED", { venue: src.id, message: `${src.name}: ${src.readOnlyBecause ?? "this venue is read, not written"}` });
-    // a venue that does not serve this network now, or asked to be left alone: not asked for anything, in its own words
-    const srcHeld = this.heldNow(src.id);
+    // a venue that does not serve this network now, or asked to be left alone: not asked for anything, in its own words. A wallet the user
+    // sends from themselves (a browser wallet, a bridge from it) is not a venue asked for anything
+    const srcHeld = src.writer.can.send === "wallet" ? undefined : this.heldNow(src.id);
     if (srcHeld) return srcHeld;
     const from = src as Plan["src"];
     if (kind === "transfer" || kind === "swap") {
