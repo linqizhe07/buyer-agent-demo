@@ -2,7 +2,7 @@
 
 [README](README.md) 是一页的总览，[docs/account.md](docs/account.md) 讲这一层**是什么**的全部细节，这里讲**怎么做**。每条做法写的是：想做什么、怎么做、会看到什么、什么会被拒。
 
-分两半。**上半是你真实的账户**：`npm run account` 起的服务，一个桌面钱包页面（`/`），叫 Account：左边一条 rail，三个屏 Portfolio（你有什么）· Markets（有什么可以交易）· Trade（交易），上面只有你经各家自己的接口接进来的账户和不带钥匙读来的真实公开行情，没有一样是模拟的。**下半是模拟账户里的规则**：场所之间的路由、float、替 agent 付 API（x402、MPP、AP2）、地址簿、Unified、可插的模拟场所。这些只跑在进程里（`examples/account/headless.ts` 从头走一遍，`npm run account:demo` 的十四个 beat 带断言，外加测试）；只认真实账户的服务器对这类指令一律回 `this account holds real accounts only`。模拟里的钥匙从源码里的标签派生，是公开的。
+分两半。**上半是你真实的账户**：`npm run account` 起的服务，一个桌面钱包页面（`/`），叫 Account，样子是 Demo v2 画布第七轮的：左边一条 rail（Markets · Trade · Agents），rail 最下面的 Account 钱包打开三页 Portfolio（你有什么）· Venues（接上的账户）· Memory（agent 记得什么）。**下半是模拟账户里的规则**：场所之间的路由、float、替 agent 付 API（x402、MPP、AP2）、地址簿、Unified、可插的模拟场所。这些只跑在进程里（`examples/account/headless.ts` 从头走一遍，`npm run account:demo` 的十四个 beat 带断言，外加测试）；只认真实账户的服务器对这类指令一律回 `this account holds real accounts only`。模拟里的钥匙从源码里的标签派生，是公开的。
 
 ## 三个角色，一个入口
 
@@ -44,9 +44,10 @@
 
 页面是一个桌面钱包：
 
-- **左边的 rail**：三个屏 Portfolio · Markets · Trade（Portfolio 旁边的数是等你批的卡加 agent 的请求，浏览器标签页的标题也带着，比如 "(2) Account"）；Mode（Guard | Beast 两个按钮、一行说明、"What changes ›"，第 4 条）；"Agents"（数是敲门等放行的 agent）、"Settings"；最下面 "Trading on" 或 "Read-only"、账户不应答时一枚 "Not answering since HH:MM"，和纽约时间的钟。
-- **顶栏**：Lens（All accounts / 一个场所 / 一个 agent，三屏的表都按它筛）、搜索（按 `/`，打字就去 Markets 搜）、时钟图标（Statement）。按 `t` 打开下单票。重启过的，顶栏下面一行写着接回了什么。没有 Menu。
-- **三个屏**：Portfolio（第 2b 条）、Markets（第 2c 条）、Trade（第 5 条）。
+- **左边的 rail**（第七轮 F1 / F5 的样子）：圆的 "A" 和名字；Markets · Trade；"Agents"（数是敲门等放行的 agent）；最下面纽约时间的钟（账户不应答时一枚 "Not answering since HH:MM"），和 **Account** 钱包按钮：净值 · 模式（"$12,480 · Guard"），旁边的数是等你批的卡加 agent 的请求（浏览器标签页的标题也带着，比如 "(2) Account"）。手机宽度上 rail 变成顶上一条：第一行圆标和 Account，第二行 Markets · Trade · Agents。
+- **Account 的头**（Portfolio · Venues · Memory 三页上）：Account · Lens（All accounts / 一个场所 / 一个 agent，表都按它筛）；右边 Mode（Guard | Beast 两个按钮，ⓘ 打开 "What changes"，第 4 条）· "Trading on · $250 a move"（或 "Read-only"）· "Settings" · 时钟图标（Statement）；下面一行三页的切换，和这一档模式的一句说明。
+- **Markets 和 Trade 的顶栏**：Lens、搜索（按 `/`，打字就去 Markets 搜；在 Account 的三页上按 `/` 先去 Markets）、时钟图标。按 `t` 打开下单票。重启过的，顶栏下面一行写着接回了什么。没有 Menu。
+- **几页**：Portfolio（第 2b 条）、Venues（第 2 条）、Memory（第 8c 条，照画布的 F13）、Markets（第 2c 条）、Trade（第 5 条）。
 - **弹层**：Statement（第 5 条）、Mode（第 4 条）、Settings（交易开没开和单笔上限、agent 的会话和杠杆上限、背景 Cream / Black、Devices）、Agents（第 3 条）、Receive（第 2b 条）、Move（第 7 条）、Earn（第 7c 条）、Sell many（第 5b 条）；右边的抽屉是一个市场（Portfolio 的资产行打开的也是它）或一个账户的 Details。要你确认的都是页面自己的小问话框，没有浏览器的 `prompt` / `confirm`。
 
 `seat` 是这个别名：
@@ -66,7 +67,7 @@ alias seat='npx tsx examples/account/agent-seat.ts'
 
 ## 2 · 接你真的账户
 
-"Connect an account" 打开一组卡片，按 Exchanges · Brokers · Wallets · Markets and tokens 分组（服务能接、上面没列的，放在 "More" 里）。它在这几处：Portfolio 的三步清单第一步；Portfolio › Accounts 段头的 "Connect an account"；一个都没接时 Trade 屏的 "Connect an account"。agent 请求你接一个场所时，Waiting for you 里那条请求的 "Connect" 直接是那家的表单。点哪张就是哪个的接法，已经接上的写着 "Connected · add another"。银行和卡不在里面：它们没有给个人的接口。
+"Connect an account" 打开一组卡片，按 Exchanges · Brokers · Wallets · Markets and tokens 分组（服务能接、上面没列的，放在 "More" 里）。它在这几处：Portfolio 的三步清单第一步；Account › Venues 右上的 "Connect an account"；一个都没接时 Trade 屏的 "Connect an account"。agent 请求你接一个场所时，Waiting for you 里那条请求的 "Connect" 直接是那家的表单。点哪张就是哪个的接法，已经接上的写着 "Connected · add another"。银行和卡不在里面：它们没有给个人的接口。
 
 卡片上已经写着每家对**你**怎么样：账户启动后几秒、之后每 30 分钟，自动替每个场所问一遍它在建 key 之前的那个问题（不带任何钥匙、令牌或地址：交易所的公开时钟、Alpaca 和 Robinhood Crypto 不带 key 的一次 GET、Kalshi 的公开状态、Polymarket US 公开 gateway 的一次市场列表、Polymarket 自己的地区检查、Robinhood 登录的两份公开元数据、本机 `mm auth status`、Hyperliquid 条款 §1.6 对你此刻所在地方的规定），再把场所公布的居住地规矩对上这台机器此刻所在的地方（`GET /api/account/venues`，开发者文档「地区」一节）。场所说不服务这个网络的，卡片写 "Not served here"（悬停是它的原话），点进去是它的原话和问的时间、"Check again"，建 key 的步骤收起来、Connect 按不了；Polymarket 和 Hyperliquid 的还给一个 "Watch … by its address instead"，那是只看、不交易。场所只让你那里平仓的（Polymarket 对美国），卡片写 "Close only here"，照样能接：读得到持仓，能卖、能撤单，买入会被它的原话拒掉。连不了的场所如果有给你那里的另一个版本（Binance → Binance.US、OKX → OKX US、Polymarket → Polymarket US：另一家公司、自己的账户和钥匙），而且那个版本从你的网络能接、它自己的话说它是为你那里做的，表单里就有 "Connect Polymarket US instead"（没有自己卡片的版本，旁边多一张它的卡）。它的条款排除你所在地方的，卡片写 "Its terms exclude where you are"，点进去是它条款的原话、链接和读的日期——**只提示、不拦**，开户时的居住地审核是场所的事。mm 没装或没登录的写 "Set up first" 和要跑的命令。一个都没答的不标，Connect 时照样再问。所在的地方只在内存里用于这个判断，不保存、不返回。从开发者那台机器（美国，2026-10-08）：Binance、Bybit 和 Hyperliquid 的交易连接不服务那里，Polymarket 的交易连接只能平仓，其余的都答；这只是美国网络看到的，别处照各自的网络算。
 
@@ -81,7 +82,7 @@ alias seat='npx tsx examples/account/agent-seat.ts'
 OKX connected live · $1,000.00 there now · the venue says this credential can read, trade · bound to an IP list · it can do more than read (trade) · real money moves only when you sign it, at most $100.00 a movement
 ```
 
-页面上这一句缩成 "OKX connected · $1,000.00"，后面 "details" 展开是全文。Portfolio › Accounts 多一行：价值是 OKX 自己报的，半分钟读一次；状态是几枚标签，第一枚是健康（✓ Answers；✗ Not answering，悬停看它最近一次的原话；Not read yet），后面是它从这里能做什么（Trades、Moves money、Receives、Earns、Watched）；"Open to agents" 开关（第 9 条）；"Details" 打开右边的 Account 抽屉：价值和标签，"Trade…" · "Move…" · "Receive" · "Show only this"，它持有什么（Holds），从这里能做什么和为什么不能（From here：它交易什么、场所对这把钥匙的说法、最近一次答了还是失败了），最下面 "Disconnect…"。钥匙没开交易的，那枚标签写场所自己的话（没有就是 "Key can't trade"），Details 里写着这家要勾什么，还有 "Connect a new key"：先确认，签一次拔掉，再用同一个名字、同一个钥匙文件按这家自己的连接重新接。
+页面上这一句缩成 "OKX connected · $1,000.00"，后面 "details" 展开是全文。Account › Venues 多一行：价值是 OKX 自己报的，半分钟读一次；状态是几枚标签，第一枚是健康（✓ Answers；✗ Not answering，悬停看它最近一次的原话；Not read yet），后面是它从这里能做什么（Trades、Moves money、Receives、Earns、Watched）；"Open to agents" 开关（第 9 条）；"Details" 打开右边的 Account 抽屉：价值和标签，"Trade…" · "Move…" · "Receive" · "Show only this"，它持有什么（Holds），从这里能做什么和为什么不能（From here：它交易什么、场所对这把钥匙的说法、最近一次答了还是失败了），最下面 "Disconnect…"。钥匙没开交易的，那枚标签写场所自己的话（没有就是 "Key can't trade"），Details 里写着这家要勾什么，还有 "Connect a new key"：先确认，签一次拔掉，再用同一个名字、同一个钥匙文件按这家自己的连接重新接。
 
 **钱包**（OKX Wallet、Binance Wallet、MetaMask 扩展等）：在装了钱包的浏览器里点 "Browser wallet"，再点你的钱包。钱包先给地址，再签一句话（不是交易，什么都不批准），这个地址就是你的，从它可以换币（下面第 5 条）。"Watch an address" 只粘贴地址：能看，既不交易也不收发。
 
@@ -100,20 +101,19 @@ OKX connected live · $1,000.00 there now · the venue says this credential can 
 
 ## 2b · Portfolio：你有什么，在哪
 
-rail 上点 "Portfolio"。都按顶栏的 Lens 筛。左边一栏从上到下：
+rail 最下面点 Account（钱包按钮），落在 Portfolio。都按 Account 头上的 Lens 筛。左边一栏从上到下：
 
 1. **Next steps**：三步（Connect an account → Connect an agent → Give it a limit）没做完时在最上面，写着做到第几步；一个都没接时它就是整页（"Get started"）。
 2. **Net worth**：一个数，下面一行变化，跟着右边的范围走：1D 是今天，每个持仓按它市场自己报的 24 小时涨跌算；1W / 1M / All 按曲线算，比第一个点还早的写 "since <日期>"。脚注都收在旁边的 ⓘ 里：24 小时变化覆盖了多少（有持仓没有场所报，就写明，不估）、在途的钱算在数里、agent 付出去的不算亏、接拔不算变化、某个场所用的是上一次的好数。
 3. **曲线**：1D / 1W / 1M / All。账户每五分钟记一个点（接上、拔掉一个场所时也记一个，标在曲线上），从第一个点开始，不到两个点不画；指针放上去读出那一点。Lens 是一个场所或一个 agent 时换成 "Show all accounts"：曲线是整个账户的。
 4. 快捷操作：Trade · Move · Receive · Hand to agent，做不了的不出现。
-5. 三段 **Assets | Positions | Accounts**，段头右边是这一段的工具（`#/portfolio?view=positions` 直接打开那一段）：
+5. 两段 **Assets | Positions**，段头右边是这一段的工具（`#/portfolio?view=positions` 直接打开那一段）；原来的第三段 Accounts 现在是 Account 的 Venues 一页（`#/venues`，旧的 `?view=accounts` 链接落到那里）：
    - **Assets**：每个资产一行（交易所的 BTC、Arbitrum 钱包里的 WBTC、券商的 BTC 是同一行，名字下面是在哪些场所）：Amount · Price · 24h · Value；earn 的钱是自己的一行，下面 "Withdraw…"（第 7c 条）。工具："Sell many…"（第 5b 条）。
    - **Positions**：所有场所的持仓：Position · Value · Entry · Mark · Liquidation · P&L，右边 "Close…"（币、股票、合约这样的持有是 "Sell…"，第 5 条）。
-   - **Accounts**：第 2 条。工具："Connect an account"、"CSV"。
 
 右边一栏：
 
-6. **Waiting for you**：agent 的卡和请求，按 agent 分组（第 8、8b 条）。
+6. **Waiting for you**：agent 的卡和请求，按 agent 分组（第 8、8b 条）；你开了"它学到的先问我再记"时，它学到的记忆也在这里等你（"Wants to remember: …"，第 8c 条）。回答是第七轮的圆键：32 的圆形图标，蓝的 ✓ 是 Approve（一次签名）、✗ 是 Reject；请求的 ✓ 是 Grant（打开你签的那张表）、插头是 Connect、✗ 是 Decline；敲门的 ✓ 是 Let in。每个键给读屏器和悬停都有它的字。
 7. **Agents at work**：你开着的意图，带每个 agent 最新的回报（"Change words" / "Withdraw"，第 8b 条）；下面是 agent 最近的五件事，✓ 做了、✗ 被拒；"Statement" 打开流水。
 8. **Cash ready**：现金和美元稳定币一个数，一行写其中多少能在你的账户之间挪；有接上的场所做 earn 时右上 "Earn…"（第 7c 条）。
 9. **Allocation**：一条配置条和图例。
@@ -144,7 +144,7 @@ rail 上点 "Markets"，或在顶栏搜索里打几个字母。一张表里两�
 - **你接上的场所**列的市场；
 - **你没接的场所**不带钥匙读来的真实公开行情：Kraken、Coinbase、OKX、Binance、Bybit 的公开 ticker，Hyperliquid 的永续（"Connect to trade" 接的是 Hyperliquid 的 API 钱包连接；MetaMask Agent Wallet 的 `mm perps` 也能下），Kalshi 名单上 12 个 series 的市场、Polymarket 按 24 小时成交额最忙的事件和 Polymarket US 六个分类里最热的市场（下面 **Predictions**），Robinhood 的 Stock Token 清单，九个源的 pre-IPO 永续（下面 **Pre-IPO**）。这些行写 **"Connect to trade"**，点了就是那家的连接表单；接上以后，开着的下单票自动换成它。
 
-Markets 只管看和挑，不管账户：接上、拔掉、对 agent 开关、换钥匙都在 Portfolio › Accounts（第 2 条）。
+Markets 只管看和挑，不管账户：接上、拔掉、对 agent 开关、换钥匙都在 Account › Venues（第 2 条）。
 
 同一个东西是一行（BTC/USDT、BTC-USD、WBTC 都是 BTC；一个问题的 YES 和 NO 是一张卡；一家 pre-IPO 公司是一行），后面列着在哪些场所有。数字只用场所自己报的：Kraken 不报 24 小时涨跌，就不显示；Kalshi 的成交量是合约数，不换成美元；公开行也列买一卖一（Bid / Ask）；Kalshi 标题里的 markdown 星号去掉。离别家价格超过 10% 的当作同名的另一种东西，排除，在下面写明。没应答、或不服务这个地区的场所（从这台机器看 Binance 是 451、Bybit 是 403），写进列表底下那一行，用它自己的话，不找别的路；没应答的搁 20 秒不再问，说不服务这个地区的搁 10 分钟。
 
@@ -196,7 +196,7 @@ trading limit: every venue on the account now · up to $25 an order · $100 of o
 
 ## 4 · 选模式：Guard 还是 Beast
 
-rail 上 Mode 一组：Guard | Beast 两个按钮，下面一行说这一档的意思（Guard："What agents ask for waits for you on a card."；Beast："Inside their limits, agents act at once."），再下面 "What changes ›" 打开 **Mode 弹层**。Settings 里没有模式。
+Account 的头上（rail 最下面的 Account 打开的三页）：Guard | Beast 两个按钮，旁边的 ⓘ 打开 **Mode 弹层**；三页切换那一行的右边一句说这一档的意思（Guard："What agents ask for waits for you on a card."；Beast："Inside their limits, agents act at once."）。rail 最下面的 Account 按钮上也写着现在是哪一档。Settings 里没有模式。
 
 | 模式 | agent 下单时 | 怎么切 |
 |---|---|---|
@@ -355,8 +355,9 @@ agent 付 API 调用、按次计费的服务，用的是一个 **agent 钱包**�
 
 ## 8 · 批卡、拒卡
 
-Portfolio 右边一栏最上面的 **Waiting for you**：卡按 agent 分组，每张写着它要做什么、值多少、几点前要答（"answer by 16:42"，一张卡只说一次）；Trade 屏的 Under way 和市场抽屉的 Agents on it 里，agent 的卡也是一行，按钮只有 "Review"：带你回到这里，那张卡滚到眼前、描一圈边（`#/portfolio?card=<id>`）。批只在这一处。rail 上 Portfolio 旁边的数和浏览器标签页的标题带着等你的张数，比如 "(1) Account"。Lens 选一个 agent 就只看它的。
+Portfolio 右边一栏最上面的 **Waiting for you**：卡按 agent 分组，每张写着它要做什么、值多少、几点前要答（"answer by 16:42"，一张卡只说一次）；Trade 屏的 Under way 和市场抽屉的 Agents on it 里，agent 的卡也是一行，按钮只有 "Review"：带你回到这里，那张卡滚到眼前、描一圈边（`#/portfolio?card=<id>`）。批只在这一处。rail 最下面 Account 旁边的数和浏览器标签页的标题带着等你的张数，比如 "(1) Account"。Lens 选一个 agent 就只看它的。
 
+- 两个圆键（第七轮的）：✗ 是 Reject，蓝的 ✓ 是 Approve；悬停和读屏器都说它的字。
 - "What it asks" 展开是你将要签的每个字段：市场、数量、价格、价值；挪钱的是目的地址和网络。
 - "Approve all N"（同一个 agent 两张以上才有）：先确认一次（写明这个 agent 一共几张、一共多少钱），然后每张卡还是一次签名，和单独批一样；一张被拒就停在那里。
 - 批准是 owner 的一次签名，写明卡号和这张卡将放行的内容的哈希。批了下的就是卡上那一单：同一个市场、同样的数量；价格动过了头就不下。agent 的额度、签名、模式也都重查一遍：卡还在等的时候你收回了额度，批了也不下。
@@ -393,6 +394,49 @@ portfolio_ask {kind: "limit", venue, usd, text}         # letIn · limit · venu
 
 会被拒：agent 的钥匙签关注、意图或 `answerAsk` `E_ACCOUNT_OWNER_ONLY` · 没被放进来的钥匙签 `E_ACCOUNT_UNKNOWN_SIGNER` · 关注、意图、请求、回报超过上面的数 `E_ACCOUNT_LIMIT` · 回报一条给别的 agent 的意图、回报里认领别人的单、拒一条已经没了的请求（答过了、过期了、或者服务重启过）`E_ACCOUNT_BAD_ACTION`。
 
+## 8c · 记忆：agent 记得的你
+
+照 Demo v2 画布的 F13。账户替每个 agent 记一份「它记得的你」，换会话、重启、同一个席位换个程序来接，它都读得回来；你在 rail 最下面的 Account › **Memory** 读得到每一个字，能改、能删，开关在你手里（`account/memory.ts`）。
+
+**一份记忆长什么样**：三段——**风格**（你怎么交易、偏好什么）· **规矩**（不做什么、先问什么）· **场所和人**（哪里便宜、跟谁的披露）。每条写着从哪来：
+
+- **你说的**（"You said · 2 Oct"）：你在最下面那一栏写的（"Add one thing it should remember…"，选一段，"Add"），或者你改过的——你改了 agent 学的那条，它就变成你说的。一次签名（`setMemory`）。
+- **它学的**（"It learned from your questions · 6 Oct"）：agent 用它自己的钥匙记下的（`agentRemember`），带一句它怎么学到的，是它自己的话。
+- **来自额度**（"From your limit · 8 Oct"）：你给它签的额度、你的模式，账户照它们此刻的样子写成一句话（"Up to $25 an order, $100 in all, at OKX · until Thu 15 Oct"、"Real money goes through you first…"）。它不存，额度变了它跟着变；旁边的笔打开额度表，改它是一次新签名；模式在 Account 头上的 Guard | Beast。
+
+每条旁边两个 28 的圆键：笔（就地改，"Sign and save"）和红的垃圾桶（先确认，再签 `forgetMemory`，删掉，不是藏起来）。
+
+**右边**：「Where it's used」——它在会话开始时读（`portfolio_memory`）、别的 agent 读不读、额度那几句是照实写的；底下一句：每条都写着从哪来，记忆是话不是权限。「Switches」三个开关，一个 agent 一组，每次拨都是你的签名（`setMemoryRules`）：
+
+| 开关 | 开着 | 关着 |
+|---|---|---|
+| 让它记新东西（默认开） | 它能记 | 它只用现有的这几条（`E_ACCOUNT_MEMORY_OFF`），还能忘掉它自己学的 |
+| 它学到的先问我再记（默认关） | 它记的每一条先 **waiting**：进 Portfolio 的 Waiting for you（"Wants to remember: …"，✓ 记下、✗ 忘掉），也在 Memory 里标 "Waits for you"；在你记下之前哪个 agent 都不把它当记忆读；它已经记下的不能悄悄改 | 直接记下 |
+| 别的 agent 也能读（默认关） | 账户上别的 agent 在 `portfolio_memory` 的 `sharedWithYou` 里读到它 | 只有它自己读 |
+
+再下面 **Export**（一份 JSON：这个 agent 的记忆、来自额度的几句、开关）和 **Forget all**（先确认，删掉它的文件，没有回收站；开关留着）。agent 不止一个时最上面一排药丸挑看谁的；Agents 弹层每个 agent 那一行有 "Memory" 直接到它。
+
+**agent 这边**
+
+```bash
+# 在 MCP 里
+portfolio_memory {q}                                    # 它记得的你（notes：from you / agent，how）、等你答的（waiting）、来自额度的（fromLimits）、别人分享的（sharedWithYou）、你的开关（rules）
+portfolio_remember {text, topic, how, id}               # topic: style · rules · venues；how 接在 "It learned " 后面读："from your questions"；id 是改它学的一条
+portfolio_forget {id}                                   # 忘掉它学的一条
+```
+
+`portfolio_account` 多一个 `memory: {notes, waitingForOwner, mayLearn, ownerAsksFirst}`，提醒它会话开始时先读 `portfolio_memory`。
+
+几条要知道的：
+
+- **记忆是话，不是权限**：额度、门、卡都不读它。一条写着 "owner 允许每单 $10,000" 的记忆什么都不允许（有测试钉着）；你要 agent 做的事走意图和额度，你签的。
+- **从来不收**：私钥（64 个十六进制字符）、助记词（连着 12 个 BIP-39 单词）、API 钥匙和密钥、密码、签过名的 token、公网 IP——在字里或在它说的 "how" 里都一样。这样的一条在门口就被拒，拒绝不复述那几个字，账本上也没有。用户所在的地方账户自己从不写进记忆。
+- **忘了就是没了**：一条从文件里删掉；Forget all 删文件。记忆的字从来不进哈希链账本（账本那一行只写谁在什么时候改了哪一条），所以没有别处还留着。
+- **文件**：`<home>/memory/agent-<地址>.json`（记忆）和 `rules.json`（开关），只有这个系统用户读得到（0600），整份写、先写临时文件再换名。home 是信任边界：同一个系统用户下的 agent 席位互相读得到文件，MCP 席位只读它该读的，那是席位的约定，不是墙（和第 11b 条一样）。
+- 按钥匙记：一把新钥匙从空的开始；撤销了的钥匙的记忆留到你忘掉它，页面上写 "key gone"。
+
+会被拒：一条里有钥匙、密码、密钥或 IP `E_ACCOUNT_MEMORY_SECRET` · 开关关着时 agent 要记新的 `E_ACCOUNT_MEMORY_OFF` · 记满了（100 条，等你答的也算）`E_ACCOUNT_MEMORY_FULL` · 改或忘一条不存在的 `E_ACCOUNT_MEMORY_UNKNOWN` · 一条超过 500 字、"how" 超过 80 字、一个 agent 一小时改超过 120 次 `E_ACCOUNT_LIMIT` · agent 改或忘你说的、忘全部、开着"先问我"时改它已经记下的 `E_ACCOUNT_BAD_ACTION` · agent 的钥匙签 `setMemory` / `forgetMemory` / `setMemoryRules` `E_ACCOUNT_OWNER_ONLY` · 没被放进来的钥匙 `E_ACCOUNT_UNKNOWN_SIGNER`。
+
 ## 9 · 把 agent 停下来
 
 从轻到重：
@@ -402,7 +446,7 @@ portfolio_ask {kind: "limit", venue, usd, text}         # letIn · limit · venu
 | 只停这一单 | 那张卡点 "Reject"；已经下了的，Trade 屏 Under way 里 "Cancel"（agent 的单先问你一次） |
 | 收回一句话 | Portfolio › Agents at work 里那条意图的 "Withdraw"（连同随它给的额度） |
 | 以后每一单都先问你 | rail 上切到 "Guard"，不用签名 |
-| 这个场所不让 agent 碰 | Portfolio › Accounts 那一行关掉 "Open to agents"，不用签名（重新打开要签） |
+| 这个场所不让 agent 碰 | Account › Venues 那一行关掉 "Open to agents"，不用签名（重新打开要签） |
 | 收紧或收回它的额度 | Agents 弹层里那一行 "Change limit"；只收回 earn 的用 "End earn limit" |
 | 停掉这把钥匙 | Agents 弹层里那一行 "Revoke" |
 | 撤掉所有挂着的单 | Trade 屏 Under way 右上 "Cancel all N" |
@@ -496,8 +540,8 @@ Agent 的管理（放谁进来、给多少额度、它们在做什么、它们�
 
 **挂在哪**
 
-- 页面是 `public/ui/` 下几个普通脚本，共享一个全局作用域，按 `account.html` 里的顺序跑：`owner.js`（设备钥匙）先跑，然后 `core` · `connect` · `money` · `asset` · `intent` · `portfolio` · `earn` · `markets` · `trade` · `statement` · **`agents-mount`** · `shell`。约定写在 `ui/core.js` 顶上的注释里。
-- 挂载位是 `ui/agents-mount.js` 的 **`openAgents()`**：rail 上的 "Agents" 调它（旁边的数是敲门等放行的钥匙个数）。保留这个名字，换掉它的内容就是接管。现在的内容是 agent 表和表单、Agent wallets，和最下面一行 "Copy agent setup command"，原样能用，你们的模块到之前不动；Devices 搬进了 Settings（owner 自己的设备，不归 agent 模块）。
+- 页面是 `public/ui/` 下几个普通脚本，共享一个全局作用域，按 `account.html` 里的顺序跑：`owner.js`（设备钥匙）先跑，然后 `core` · `connect` · `money` · `asset` · `intent` · `portfolio` · `memory` · `earn` · `markets` · `trade` · `statement` · **`agents-mount`** · `shell`。约定写在 `ui/core.js` 顶上的注释里。
+- 挂载位是 `ui/agents-mount.js` 的 **`openAgents()`**：rail 上的 "Agents" 调它（旁边的数是敲门等放行的钥匙个数；第七轮的 rail 上它在 Markets · Trade 下面）。路由是 `#/portfolio` · `#/venues` · `#/memory`（Account 的三页，`ACCOUNT_TABS`）和 `#/markets` · `#/trade`。保留这个名字，换掉它的内容就是接管。现在的内容是 agent 表和表单、Agent wallets，和最下面一行 "Copy agent setup command"，原样能用，你们的模块到之前不动；Devices 搬进了 Settings（owner 自己的设备，不归 agent 模块）。
 - 规矩：每个顶层名字在所有脚本里只声明一次（`test/unit/page-scripts.test.ts` 会把它们按 HTML 顺序拼起来编译、抓重名）；新文件放 `ui/<名字>.js|css`（服务只认 `ui/` 下一个简单名字），加进 `account.html`，样式加进那个测试的清单；颜色只用 `ui/tokens.css` 里的，Cream 和 Black 一起对。没有构建步骤。
 - 别的屏也会把人送到 agent 的事上，这几处你们接管时要一起看：Portfolio 的 Waiting for you（卡、请求的 "Grant…" / "Decline…"，`portfolio.js` 的 `declineAsk(ask)` 和各个 Grant 表）、各处的 Hand to agent（下单票的 "Hand to agent instead"、市场抽屉、Portfolio 的快捷操作、Earn 弹层，都是 `intent.js` 的 `openHandToAgent(preset)`；在 Trade 屏上它占右边的面板）、Settings 里的会话和杠杆上限（`agents-mount.js` 的 `renderDial`）、Portfolio 的 Agents at work（开着的意图，`intent.js` 的 `htaIntents`；agent 最近做了什么）、Mode 弹层（`agents-mount.js` 的 `openMode()`，画的是 `A.modeRules`）、Statement 的 Who 筛选。
 - 能直接用的工具（都在 `core.js`）：`A`（上一次 `GET /api/account` 的结果）、`load()`、`own(draft, then)`、`api(path, {ttl})`、`openSheet` / `openDrawer` / `confirmSheet` / `pickSheet` / `quoteDialog`、`whatYouSign(prepared)`、`toast`、`esc` 和画表的 `table`、`seg`、`field`。从别的脚本里调一个打开函数之前先问 `typeof openX === "function"`。
@@ -524,7 +568,9 @@ Agent 的管理（放谁进来、给多少额度、它们在做什么、它们�
 | `agentSetup` | 加这个 MCP 席位的那一行命令（`command`）和服务地址（`url`） |
 | `dollars` · `networks` · `bridgeChains` · `real` | 门收的三张表：账户认的美元稳定币、它们所在的链、桥能到的链；`real: true`。真实账户上每个场所**不带** `runways` / `agentKey` / `in` / `out` / `swaps` / `fiat` / `ledgers`，顶层不带 `destinations`——那些是模拟门的词，别读 |
 
-`GET /api/account/agents` 是同样的东西按 agent 摊开（`mode` 也是 `guard` / `open`，和 `/api/account` 一个词）：`{asOf, mode, requests, agents: [{address, name, code, status, validUntil, approvedAt, limits: [{id, scope, allow, perPaymentUsd, budgetUsd, spentUsd, reservedUsd, leftUsd, windowHours, validUntil, expired}], cards, orders, payments, earns, wallets, intents, asks, declinedAsks, flights}]}`。`GET /api/account/statement` 的每一行也带 `agent` / `agentName`。
+`GET /api/account/agents` 是同样的东西按 agent 摊开（`mode` 也是 `guard` / `open`，和 `/api/account` 一个词）：`{asOf, mode, requests, agents: [{address, name, code, status, validUntil, approvedAt, limits: [{id, scope, allow, perPaymentUsd, budgetUsd, spentUsd, reservedUsd, leftUsd, windowHours, validUntil, expired}], cards, orders, payments, earns, wallets, intents, asks, declinedAsks, flights, memory: {notes, turns}}]}`。
+
+记忆（第 8c 条）：`GET /api/account/memory` 是 owner 读的全部：`{asOf, agents: [{address, name, code, status, rules: {learn, ask, share}, notes, fromLimits}], limits}`（`status` 多一个 `gone`：账户不再列这把钥匙，它的记忆还在）；`GET /api/account/memory/agent?address=&q=` 是一个 agent 读到的：`{rules, notes, waiting, fromLimits, sharedWithYou: [{agent, name, notes}], limits}`。一条记忆是 `{id, topic: style | rules | venues, text, from: you | agent, how?, at, updatedAt?, waiting?}`；来自额度的是 `{id, from: limit | mode, topic: "rules", text, at?}`。`GET /api/account` 多一个 `memoryAsks`：等 owner 答的记忆 `[{agent, agentName, id, topic, text, how?, at}]`（Waiting for you 画它们，等你的数也算它们）。`GET /api/account/statement` 的每一行也带 `agent` / `agentName`。
 
 **要签的动作**（owner 的，都从 `POST /api/exchange` 进；字段必须恰好是这些）
 
@@ -538,6 +584,9 @@ Agent 的管理（放谁进来、给多少额度、它们在做什么、它们�
 | `approveCard` | `card, action, decision` | `action` 是那张卡的 `hash`，`decision` 是 `approve` 或 `reject`；放行时所有检查重跑 |
 | `setPolicy` | `change, value` | `mode` / `open`（切到 Beast）、`session` / `30d`（重开或续会话）、`maxLeverage` / 倍数、`restore` / 场所（对 agent 重新打开）、`reach` / `场所:能力,能力`（对 agent 开放这家的哪些动作）、`say` / 一句话（送给页面的关键词脚本 agent——`--classic` 对账单上的那个；Account 页面上没有它的对话框）；`advance`、`reset` 只在模拟上。收紧（切回 Guard、对 agent 关掉一个场所）不用签：`POST /api/mode {mode: "guard"}`、`POST /api/revoke {account}` |
 | `convertToMultiSigUser` | `signers` | Devices：让一个待批的浏览器也能签（页面上只有这个；要两个都签的流程没做） |
+| `setMemory` | `scope, id, topic, text` | 记忆（第 8c 条）：`scope` 是一个 agent 的地址；`id` 空是新的一条，写一条的 id 是改它（改了就是你说的），把一条等你答的原样签一遍就是记下它（还是它学的）；`topic` 是 style · rules · venues。字不进账本 |
+| `forgetMemory` | `scope, what` | `scope` 是一个 agent 的地址；`what` 是一条的 id，或 `all`（删掉它的文件，没有回收站）|
+| `setMemoryRules` | `scope, learn, ask, share` | 三个开关，各是 `on` 或 `off`：它能记新东西 · 它学的先问你 · 别的 agent 也能读 |
 
 **在浏览器里怎么签**（`public/owner.js`）
 
@@ -804,8 +853,9 @@ npx vitest run test/attack
 | `E_ACCOUNT_UNKNOWN_SIGNER` · `E_ACCOUNT_AGENT_EXPIRED` · `E_ACCOUNT_AGENT_REVOKED` | 这把钥匙不是（或不再是）签名人 |
 | `E_ACCOUNT_BAD_SIGNATURE` · `E_ACCOUNT_BAD_ACTION` | 签名对不上，或者动作的字段不是签名覆盖的那些（名字不是明文或太长：agent 钥匙名 32 字、子账户名 16 字、地址簿标签 32 字；金额的整数部分超过 15 位）；在只认真实账户的服务器上，也是只动模拟钱的指令 |
 | `E_ACCOUNT_NONCE` · `E_ACCOUNT_EXPIRED` | 用过的 nonce（同一条信封重发拿第一次的结果；两天前的信封再来已出了窗口，不认），或者离标注的时刻超过十分钟（改杠杆也算资金指令） |
-| `E_ACCOUNT_OWNER_ONLY` | 这件事只有 owner 能签：提现、Send、授权、批卡、收回 float、关注、意图、拒一条请求 |
+| `E_ACCOUNT_OWNER_ONLY` | 这件事只有 owner 能签：提现、Send、授权、批卡、收回 float、关注、意图、拒一条请求、写进或忘掉 agent 的记忆、记忆的开关 |
 | `E_ACCOUNT_NOT_HOME` | agent 想把钱送到你自己的场所之外 |
+| `E_ACCOUNT_MEMORY_SECRET` · `E_ACCOUNT_MEMORY_OFF` · `E_ACCOUNT_MEMORY_FULL` · `E_ACCOUNT_MEMORY_UNKNOWN` | 记忆（第 8c 条）：一条里有钥匙、密码、密钥、助记词或公网 IP（不收，也不复述）；你关了它记新东西；记满了；没有这一条 |
 | `E_ACCOUNT_SOURCE` | 没写来源而账户是 Separate；或者动了别人的 float |
 | `E_ACCOUNT_DESTINATION` · `E_ACCOUNT_DEST_COOLING` | 目的地不是你的、不在地址簿、链不对，或者还在冷静期 |
 | `E_ACCOUNT_REQUOTE` · `E_ACCOUNT_CARD_EXPIRED` | 签过之后价格或报价变了；卡过期了（30 分钟没人答，账户自己关的） |
@@ -824,4 +874,4 @@ npx vitest run test/attack
 | `E_WALLET_ACCOUNT_UNKNOWN` · `E_WALLET_UNKNOWN_VENUE` | 来源或目的地不是接在账户上的场所（agent 挪真钱只在接上的场所之间），或没有这个子账户；统一接口库不认识这个交易所 id，或连接器名字不对 |
 | `E_ACCOUNT_CREDENTIAL` · `E_VENUE_UNREACHABLE` · `E_VENUE_GEOBLOCKED` · `E_VENUE_UNAUTHORIZED` | 真实连接：钥匙文件不能用（席位和 agent 钱包的钥匙文件也一样，拒绝里只说是哪把钥匙，路径在 `detail`）、场所没应答或答得账户读不懂（或因为请求太多封了这个地址，到它说的时间；网络上别的东西冒充场所回了一页，也算没答）、场所不服务这个地区（含只能平仓的地方的买入、场所前面的服务器拒绝这个网络；只针对某个交易对或产品的地区规矩带 `detail.scope`，不挡这家的其它东西）、场所不认这把钥匙。`E_VENUE_UNREACHABLE` 带 `detail.unsure: true`（或 `placed: "unknown"`）的不是拒绝：单子或转账的答复在路上丢了，可能已经成了——先去场所看，别重发；能按账户自己的 id 跟的，账户在跟（付款显示 pending） |
 | `E_WALLET_LIVE_WRITES_OFF` | 这个服务是 `--read-only` 起的，或者 MetaMask 自己的开关没开 |
-| `E_WALLET_SESSION_EXPIRED` · `E_WALLET_ACCOUNT_REVOKED` · `E_WALLET_REACH` | agent 的会话结束了；这个场所对 agent 关着（Portfolio › Accounts 的 "Open to agents"）；owner 没对 agent 开放这家的这一类动作（`setPolicy reach`：交易、放进 / 取出 earn） |
+| `E_WALLET_SESSION_EXPIRED` · `E_WALLET_ACCOUNT_REVOKED` · `E_WALLET_REACH` | agent 的会话结束了；这个场所对 agent 关着（Account › Venues 的 "Open to agents"）；owner 没对 agent 开放这家的这一类动作（`setPolicy reach`：交易、放进 / 取出 earn） |

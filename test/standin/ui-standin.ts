@@ -29,6 +29,8 @@
  *                 in Guard it asks for a market buy of ETH, which waits on a card for the owner
  *   steering      two intents (one to Claude Code, one to every agent), Claude Code's report on the first, two asks (a bigger budget, a
  *                 venue connected), three watched markets — one at a venue that is not connected
+ *   memory        what Claude Code remembers about the owner (account/memory.ts): two notes the owner wrote, two it learned, each
+ *                 saying how (Account › Memory)
  *   the curve     net worth points over the last seven days, off the stand-in's own price curves, so the curve draws at once
  *
  * PAIRING. The seed key paired first, with the code, the way a browser does. The page then asks this browser for the code too: typed
@@ -254,6 +256,12 @@ export async function startStandin(o: StandinOptions): Promise<Standin> {
   ok("Claude Code's ask for a bigger budget", await ag({ type: "agentAsk", kind: "limit", venue: "ex", usd: "1000", text: "Raise my trading budget to $1,000 so I can finish the SOL position you asked for" }));
   ok("Claude Code's ask for a venue", await ag({ type: "agentAsk", kind: "venue", venue: "standin-pubex", usd: "", text: "Connect Stand-in Public Exchange: DOGE trades only there" }));
   for (const [venue, symbol] of [["ex", "BTC/USDT"], ["predict", "SI-FEDCUT-DEC:YES"], ["standin-pubex", "DOGE/USD"]] as const) ok(`${symbol} watched`, await own({ type: "setWatch", venue, symbol, on: "true" }));
+  // memory (account/memory.ts; the canvas's F13): what Claude Code remembers about the owner — two things the owner said, and two it
+  // learned, signed with its key and saying how
+  ok("the owner's style", await own({ type: "setMemory", scope: agent.address, id: "", topic: "style", text: "Value over hype: no chasing what is hot this week." }));
+  ok("the owner's rule", await own({ type: "setMemory", scope: agent.address, id: "", topic: "rules", text: "Never leverage above 3x without asking me first." }));
+  ok("what Claude Code learned of the owner", await ag({ type: "agentRemember", id: "", topic: "style", text: "Builds a position a little at a time, with limit orders on dips.", how: "from your intents" }));
+  ok("what Claude Code worked out about the venues", await ag({ type: "agentRemember", id: "", topic: "venues", text: "SOL is cheaper at Stand-in Exchange than at the wallet's DEX.", how: "by comparing the venues" }));
 
   // ---- the net worth curve: points over the last seven days, off the same curves the candles come from ----
   const curvePoints = await drawThePast(svc, world, home, walletVenue, walletAt);

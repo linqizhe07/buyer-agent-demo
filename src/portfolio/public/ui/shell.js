@@ -1,6 +1,9 @@
-/* The shell, loaded last: the rail, the top bar and the three panes, drawn from what /api/account said, and the page started — the route
-   from the hash, pairing, the first load, and a fresh read every 20 seconds while nothing is being signed, no sheet is open, nothing outside
-   the search is being typed, and the page is in view. */
+/* The shell, loaded last: the rail, the top bar and the panes, drawn from what /api/account said, and the page started — the route from
+   the hash, pairing, the first load, and a fresh read every 20 seconds while nothing is being signed, no sheet is open, nothing outside
+   the search is being typed, and the page is in view.
+   The look is round 7's (the Demo v2 canvas, F1 and F5): a white rail with Markets · Trade and the agents, and the Account at its foot —
+   a wallet button with the net worth and the mode — which opens Portfolio · Venues · Memory under the Account's own header (the mode,
+   trading on or off, Settings). Markets and Trade keep the search in their top bar. */
 
 /** the whole page from A: the chrome, the visible pane, whatever sheet or drawer is open, then what was done or refused as a toast */
 function render() {
@@ -24,11 +27,14 @@ function render() {
 /* the rail and the top bar: the tab's title with what waits, the clock, trading on or off, the mode, the counts, the lens, pairing, a restart */
 function renderChrome(L, owner) {
   // what waits for the owner: the cards to approve, and what the agents asked for (both answered under Portfolio's Waiting for you)
-  const waiting = A.cards.length + (A.asks || []).length;
+  const waiting = A.cards.length + (A.asks || []).length + (A.memoryAsks || []).length;
   document.title = `${waiting ? `(${waiting}) ` : ""}Account`;
   $("stamp").textContent = `${ny(A.now, { weekday: "short", day: "numeric", month: "short" }).replace(",", "")} · ${nyTime(A.now)} New York`;
-  // the cap is said in the Settings sheet's Trading sentence, and when an action goes over it: not here
-  paint($("writes"), writesOn() ? '<span class="pill warm" title="Orders and moves go through only when you sign them, or inside a limit you gave an agent">Trading on</span>' : '<span class="pill" title="Started with --read-only">Read-only</span>');
+  // trading on or off, and the most one order or move may be worth (round 7's "Trading on · $100 a move"; the sentence is in Settings)
+  const cap = A.connectLive && A.connectLive.writes ? Number(A.connectLive.writes.capUsd) : NaN;
+  paint($("writes"), writesOn() ? `<span class="pill up" title="Orders and moves go through only when you sign them, or inside a limit you gave an agent">Trading on${Number.isFinite(cap) ? ` · $${cap.toLocaleString("en-US")} a move` : ""}</span>` : '<span class="pill" title="Started with --read-only">Read-only</span>');
+  // the Account at the rail's foot: what it is worth, and the mode
+  setText($("rail-worth"), `${money(A.liveUsd)} · ${A.mode === "open" ? "Beast" : "Guard"}`);
   for (const b of document.querySelectorAll("button[data-set-mode]")) {
     b.setAttribute("aria-pressed", String(b.dataset.setMode === A.mode));
     b.disabled = !owner;
@@ -103,7 +109,7 @@ function speak() {
 function drawPane(L, owner) {
   const tab = ROUTE.tab;
   const el = $(`pane-${tab}`);
-  const draw = { portfolio: typeof renderPortfolio === "function" ? renderPortfolio : null, markets: typeof renderMarkets === "function" ? renderMarkets : null, trade: typeof renderTrade === "function" ? renderTrade : null }[tab];
+  const draw = { portfolio: typeof renderPortfolio === "function" ? renderPortfolio : null, venues: typeof renderVenues === "function" ? renderVenues : null, memory: typeof renderMemory === "function" ? renderMemory : null, markets: typeof renderMarkets === "function" ? renderMarkets : null, trade: typeof renderTrade === "function" ? renderTrade : null }[tab];
   try {
     if (!draw) throw new Error(`its script did not load. Reload the page`);
     draw({ el, owner, lens: lensNow(), params: ROUTE.params });
@@ -129,6 +135,15 @@ onRoute((tab, params, moved) => {
     if (a.dataset.tab === tab) a.setAttribute("aria-current", "page");
     else a.removeAttribute("aria-current");
   }
+  // the Account's three under its own header, the wallet at the rail's foot marked while one of them is shown; Markets and Trade keep the search
+  const account = ACCOUNT_TABS.includes(tab);
+  $("main").dataset.at = account ? "account" : "trading";
+  for (const a of document.querySelectorAll(".acct-tabs a[data-acct]")) {
+    if (a.dataset.acct === tab) a.setAttribute("aria-current", "page");
+    else a.removeAttribute("aria-current");
+  }
+  if (account) $("rail-wallet").setAttribute("aria-current", "page");
+  else $("rail-wallet").removeAttribute("aria-current");
   railPill(motion);
   if (document.activeElement !== $("search")) $("search").value = tab === "markets" ? params.q || "" : "";
   if (moved) window.scrollTo(0, 0);
@@ -181,7 +196,8 @@ function railPill(motion) {
   if (!pill || !RAIL.at || !pill.style) return;
   const i = [...nav.querySelectorAll("a[data-tab]")].findIndex((a) => a.dataset.tab === ROUTE.tab);
   const at = RAIL.at[i];
-  if (!at) return;
+  // the Account's tabs are marked at the rail's foot: no pill in the nav
+  if (!at) return void (pill.hidden = true);
   nav.classList.toggle("moves", !!motion);
   const t = `translateY(${at.top}px)`;
   if (pill.style.transform !== t) pill.style.transform = t;
@@ -349,6 +365,8 @@ document.addEventListener("keydown", (e) => {
   if (typing || modal) return;
   if (e.key === "/") {
     e.preventDefault();
+    // the search is Markets' and Trade's: from the Account, "/" goes to Markets with it
+    if (ACCOUNT_TABS.includes(ROUTE.tab)) go("markets", {});
     $("search").focus();
     $("search").select();
   } else if (e.key === "t" && A) {

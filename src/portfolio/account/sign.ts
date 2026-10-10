@@ -134,7 +134,16 @@ export type OwnerAction =
   /** the owner's answer to an agent's ask (`ask`: its id, `ask-0003`) that is not the thing asked for: `decision` "decline". Granting an
    * ask is the owner's own action for it (a limit, a venue connected, a top-up …), which closes the ask; this closes it without one. It
    * moves nothing and widens nothing */
-  | { type: "answerAsk"; ask: string; decision: string; nonce: number };
+  | { type: "answerAsk"; ask: string; decision: string; nonce: number }
+  /** MEMORY (account/memory.ts), the owner's: a note in what an agent remembers about the owner (`scope`: the agent's address); `id` "" is a
+   * new note, a note's id changes that one — and signing a waiting note's words as they are keeps it; `topic` style · rules · venues.
+   * Words for the agents to read, never a permission: no limit reads them */
+  | { type: "setMemory"; scope: string; id: string; topic: string; text: string; nonce: number }
+  /** the owner forgets: one note of an agent's memory (`what` its id), or `all` of it (its file deleted). Gone, not hidden */
+  | { type: "forgetMemory"; scope: string; what: string; nonce: number }
+  /** the owner's switches for an agent's memory, each "on" or "off": `learn` it may keep new notes · `ask` what it learns waits for the
+   * owner first · `share` the other agents read it too */
+  | { type: "setMemoryRules"; scope: string; learn: string; ask: string; share: string; nonce: number };
 
 export type AgentAction =
   | { type: "agentSendAsset"; destination: string; sourceDex: string; destinationDex: string; token: string; amount: string; fromSubAccount: string; maxFee: string; nonce: number }
@@ -171,18 +180,26 @@ export type AgentAction =
   /** an agent puts money into a venue's earn product (`kind` supply) or takes it back out (withdraw: `amount` "all" is all of it), inside
    * the earn limit the owner signed for it. It names no destination: what comes out lands where it came from. Guard: a card;
    * Beast: inside its limit, at once */
-  | { type: "agentLiveEarn"; venue: string; kind: string; product: string; asset: string; amount: string; nonce: number };
+  | { type: "agentLiveEarn"; venue: string; kind: string; product: string; asset: string; amount: string; nonce: number }
+  /** an agent keeps a note in what it remembers about the owner (account/memory.ts): `id` "" is a new one, a note it learned changes by its
+   * id; `topic` style · rules · venues; `how` how it learned it, in its words ("from your questions"). Read back by it and by the owner;
+   * it widens nothing */
+  | { type: "agentRemember"; id: string; topic: string; text: string; how: string; nonce: number }
+  /** an agent forgets one of its own notes */
+  | { type: "agentForget"; id: string; nonce: number };
 
 export type Action = OwnerAction | AgentAction;
 
-export const OWNER_TYPES = ["sendAsset", "swap", "approveAgent", "approveBuilderFee", "approveSpend", "createSubAccount", "userSetAbstraction", "convertToMultiSigUser", "setDestination", "approveCard", "setPolicy", "connectVenue", "disconnectVenue", "liveMove", "liveOrder", "liveCancel", "liveAmend", "liveClose", "liveLeverage", "setWatch", "setIntent", "liveEarn", "answerAsk"] as const;
-export const AGENT_TYPES = ["agentSendAsset", "agentSwap", "agentPay", "agentExecute", "agentOrder", "agentLiveMove", "agentLiveOrder", "agentLiveCancel", "agentLiveAmend", "agentLiveClose", "agentLiveLeverage", "agentReport", "agentAsk", "agentLiveEarn"] as const;
+export const OWNER_TYPES = ["sendAsset", "swap", "approveAgent", "approveBuilderFee", "approveSpend", "createSubAccount", "userSetAbstraction", "convertToMultiSigUser", "setDestination", "approveCard", "setPolicy", "connectVenue", "disconnectVenue", "liveMove", "liveOrder", "liveCancel", "liveAmend", "liveClose", "liveLeverage", "setWatch", "setIntent", "liveEarn", "answerAsk", "setMemory", "forgetMemory", "setMemoryRules"] as const;
+export const AGENT_TYPES = ["agentSendAsset", "agentSwap", "agentPay", "agentExecute", "agentOrder", "agentLiveMove", "agentLiveOrder", "agentLiveCancel", "agentLiveAmend", "agentLiveClose", "agentLiveLeverage", "agentReport", "agentAsk", "agentLiveEarn", "agentRemember", "agentForget"] as const;
 /** an instruction that moves money — or, like a leverage change, changes what a position risks — is good for minutes after it is signed,
  * not for the two days of the nonce window */
 export const MONEY_TYPES: ReadonlySet<string> = new Set(["sendAsset", "swap", "approveCard", "agentSendAsset", "agentSwap", "agentPay", "agentExecute", "agentOrder", "liveMove", "agentLiveMove", "liveOrder", "agentLiveOrder", "liveAmend", "agentLiveAmend", "liveClose", "agentLiveClose", "liveLeverage", "agentLiveLeverage", "liveEarn", "agentLiveEarn"]);
 /** how the owner steers and the agents answer: a watchlist, intents, reports, asks. None moves money and none is read by a limit (state.ts
  * covers, spendFor): they are words between the owner and the agents, and authority still comes only from limits, cards and the cap */
-export const STEER_TYPES: ReadonlySet<string> = new Set(["setWatch", "setIntent", "answerAsk", "agentReport", "agentAsk"]);
+export const STEER_TYPES: ReadonlySet<string> = new Set(["setWatch", "setIntent", "answerAsk", "agentReport", "agentAsk", "setMemory", "forgetMemory", "setMemoryRules", "agentRemember", "agentForget"]);
+/** what is kept in memory (account/memory.ts): their words never reach the ledger, so that what is forgotten is gone */
+export const MEMORY_TYPES: ReadonlySet<string> = new Set(["setMemory", "forgetMemory", "setMemoryRules", "agentRemember", "agentForget"]);
 export const MONEY_TTL_MS = 10 * 60_000;
 
 export function isOwnerAction(a: { type: string }): a is OwnerAction {
@@ -239,6 +256,9 @@ const OWNER_FIELDS: Record<OwnerAction["type"], { primary: string; fields: Field
   setIntent: { primary: "AccountTransaction:SetIntent", fields: [{ name: "id", type: "string" }, { name: "agent", type: "string" }, { name: "venue", type: "string" }, { name: "symbol", type: "string" }, { name: "side", type: "string" }, { name: "usd", type: "string" }, { name: "text", type: "string" }, { name: "validUntil", type: "uint64" }, NONCE] },
   liveEarn: { primary: "AccountTransaction:LiveEarn", fields: [{ name: "venue", type: "string" }, { name: "kind", type: "string" }, { name: "product", type: "string" }, { name: "asset", type: "string" }, { name: "amount", type: "string" }, { name: "maxUsd", type: "string" }, { name: "lands", type: "string" }, { name: "deadline", type: "uint64" }, NONCE] },
   answerAsk: { primary: "AccountTransaction:AnswerAsk", fields: [{ name: "ask", type: "string" }, { name: "decision", type: "string" }, NONCE] },
+  setMemory: { primary: "AccountMemory:Keep", fields: [{ name: "scope", type: "string" }, { name: "id", type: "string" }, { name: "topic", type: "string" }, { name: "text", type: "string" }, NONCE] },
+  forgetMemory: { primary: "AccountMemory:Forget", fields: [{ name: "scope", type: "string" }, { name: "what", type: "string" }, NONCE] },
+  setMemoryRules: { primary: "AccountMemory:Rules", fields: [{ name: "scope", type: "string" }, { name: "learn", type: "string" }, { name: "ask", type: "string" }, { name: "share", type: "string" }, NONCE] },
 };
 /** a spending approval that answers an intent names it: one more signed field, before the nonce */
 const INTENT_FIELD: Field = { name: "intent", type: "string" };
@@ -288,6 +308,8 @@ const AGENT_TEXT: Partial<Record<AgentAction["type"], string[]>> = {
   agentReport: ["intent", "status", "note", "refs"],
   agentAsk: ["kind", "venue", "usd", "text"],
   agentLiveEarn: ["venue", "kind", "product", "asset", "amount"],
+  agentRemember: ["id", "topic", "text", "how"],
+  agentForget: ["id"],
 };
 /** text fields an agent request MAY carry (when it does, they are text too, and signed like the rest) */
 const AGENT_OPTIONAL: Partial<Record<AgentAction["type"], string[]>> = {

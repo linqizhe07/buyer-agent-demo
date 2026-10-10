@@ -47,6 +47,8 @@ import { eventState, eventSymbol, eventTop, EVENTS, isEventSymbol, PREDICTION_VE
 import { orderPlan, type OrderPlan, type Part } from "./router.ts";
 import type { Side } from "./venues.ts";
 import { cents, detailOf, plainRefusal, routeLine, sayOf, waitWords } from "./words.ts";
+import { HOW_TEXT, MAX_NOTES, MemoryStore, NOTE_TEXT, TOPIC_WORDS, TOPICS, type MemoryNote, type MemoryRules, type Topic } from "./account/memory.ts";
+import { etDate } from "./account/calendar.ts";
 import { AccountEngine, CARD_TTL_MS, slug, type AccountPage, type AccountSeed, type AgentAsk, type CardOffer, type DeclinedAsk, type Outcome } from "./account/exchange.ts";
 import { assetKey, byAsset, change24h, withEarn, type AssetRow, type DayChange, type EarnHeld, type MoneySummary } from "./account/holdings.ts";
 import { NetWorthLog, networthPath, type NetWorthHistory, type NetWorthSnapshot } from "./account/networth.ts";
@@ -76,7 +78,7 @@ import { agentWalletKey, agentWalletKeyPath, hasKey } from "./account/keystore.t
 import { agentWalletSource, agentWalletVenue } from "./live/agent-wallet.ts";
 import { guardedHttp, type PayHttp } from "./live/guarded-http.ts";
 import { publicSender } from "./live/chain.ts";
-import type { SubAccount } from "./account/state.ts";
+import { agentStatus, type SubAccount } from "./account/state.ts";
 import { publicChain } from "./live/chain.ts";
 import { realMm } from "./live/metamask.ts";
 import { publicPrices } from "./live/prices.ts";
@@ -297,6 +299,8 @@ export class PortfolioService {
   readonly live: boolean;
   /** the account layer, when it is mounted */
   readonly account: AccountEngine | undefined;
+  /** what the agents remember, kept with the account layer (account/memory.ts): the conversation, their notes, the owner's About you */
+  readonly memory: MemoryStore | undefined;
   /** the simulated payees an agent's payment can reach (x402, MPP, ACP, AP2), mounted with the account layer */
   readonly payees: PayeeWorld | undefined;
   /** the page's scripted agent, when a server has one: the owner talks to it through a signed instruction */
@@ -339,6 +343,7 @@ export class PortfolioService {
     if (opts.real) this.openness = { ...this.openness, mode: "guard" };
     this.ledger = this.openLedger();
     this.mount();
+    this.memory = opts.account !== undefined || opts.venues === "frontline" ? new MemoryStore(join(opts.home, "memory"), () => Date.parse(this.now())) : undefined;
     this.account = opts.account !== undefined || opts.venues === "frontline" ? new AccountEngine(this.host(), opts.account ?? {}) : undefined;
     if (this.account) this.catalog = opts.connectable ?? loadConnectable();
     // the payees are simulated hosts: a real account has none. A real account pays real ones, from agent wallets (account/pay-real.ts)
@@ -518,6 +523,7 @@ export class PortfolioService {
         return v ? { name: v.name, verdict: v.verdict, ...(v.said ? { said: v.said } : {}), ...(edition ? { edition } : {}) } : undefined;
       },
       pairingCode: () => this.opts.liveWrites?.pairingCode ?? this.opts.pairingCode,
+      memory: () => this.memory,
       ...(real && this.opts.liveWrites
         ? {
             agentWalletAddress: (name: string) => {
@@ -1141,10 +1147,83 @@ export class PortfolioService {
       intents: page.intents.filter((i) => i.agent === k.address || i.agent === "*"),
       asks: page.asks.filter((a) => a.agent === k.address),
       declinedAsks: page.declinedAsks.filter((a) => a.agent === k.address),
+      memory: this.memory ? { notes: this.memory.notes(k.address).filter((n) => !n.waiting).length, waiting: this.memory.notes(k.address).filter((n) => n.waiting).length } : { notes: 0, waiting: 0 },
       flights: this.flights.filter((f) => f.agent.name === k.name && f.agent.code === k.code).slice(-10).reverse().map((f) => ({ no: f.no, at: f.at, request: f.request, legs: f.legs.map((l) => `${l.mark === "ok" ? "✓" : l.mark === "no" ? "✗" : l.mark === "wait" ? "▣" : "·"} ${l.text}`) })),
     }));
     // the mode as every other read wires it (`guard` is Guard, `open` is Beast): the page puts the words on it
     return { asOf: page.now, mode: this.openness.mode === "open" ? "open" : "guard", agents, requests: page.requests };
+  }
+
+  /** MEMORY, as the owner reads it (Account › Memory; the canvas's F13): each agent the account let in (an earlier key included) and any
+   * whose memory outlived its key — its notes (the waiting ones too), the owner's switches for it, and what its limits say as they stand */
+  memoryView(): MemoryPage | Refusal {
+    if (!this.account || !this.memory) return no("E_ACCOUNT_BAD_ACTION", { message: "the account layer is not mounted" });
+    const nowMs = Date.parse(this.now());
+    // the key that stands for an address, when there is one; else its latest
+    const keys = new Map<string, { name: string; code: string; status: string }>();
+    for (const k of this.account.state.agents) {
+      const status = agentStatus(this.account.state, k.address, nowMs);
+      if (!keys.has(k.address) || status === "ok") keys.set(k.address, { name: k.name, code: k.code, status });
+    }
+    const addresses = [...new Set([...keys.keys(), ...this.memory.agents()])];
+    return {
+      asOf: this.now(),
+      agents: addresses.map((address) => {
+        const k = keys.get(address);
+        return { address, name: k?.name ?? "", code: k?.code ?? "", status: k?.status ?? "gone", rules: this.memory!.rules(address), notes: this.memory!.notes(address), fromLimits: this.memoryLimits(address) };
+      }),
+      limits: MEMORY_LIMITS,
+    };
+  }
+
+  /** MEMORY, as one agent reads it (portfolio_memory): its notes kept, the ones waiting for the owner, what its limits say, and the memory of
+   * every other agent whose owner's switch shares it; `q` narrows the notes to what mentions it. Words, never a permission */
+  memoryFor(address: string, o: { q?: string | undefined } = {}): AgentMemoryView | Refusal {
+    if (!this.account || !this.memory) return no("E_ACCOUNT_BAD_ACTION", { message: "the account layer is not mounted" });
+    const a = address.trim().toLowerCase();
+    if (!/^0x[0-9a-f]{40}$/.test(a)) return no("E_ACCOUNT_BAD_ACTION", { message: "an agent's memory is read by the address of its key" });
+    const own = this.memory.notes(a);
+    const shared = this.memory.agents().filter((x) => x !== a && this.memory!.rules(x).share);
+    return {
+      asOf: this.now(),
+      rules: this.memory.rules(a),
+      notes: MemoryStore.matching(own.filter((n) => !n.waiting), o.q),
+      waiting: own.filter((n) => n.waiting),
+      fromLimits: this.memoryLimits(a),
+      sharedWithYou: shared.map((x) => ({ agent: x, name: this.account!.agentName(x), notes: MemoryStore.matching(this.memory!.notes(x).filter((n) => !n.waiting), o.q) })).filter((x) => x.notes.length),
+      limits: MEMORY_LIMITS,
+    };
+  }
+
+  /** the agents' notes waiting for the owner (the switch "ask me first"), as Waiting for you shows them */
+  memoryAsks(): Array<{ agent: string; agentName: string; id: string; topic: Topic; text: string; how?: string | undefined; at: string }> {
+    if (!this.account || !this.memory) return [];
+    return this.memory.waiting().map(({ address, note }) => ({ agent: address, agentName: this.account!.agentName(address), id: note.id, topic: note.topic, text: note.text, ...(note.how ? { how: note.how } : {}), at: note.at }));
+  }
+
+  /** "From your limit" (F13): what the owner's signed limits for this agent say, as they stand, and the mode — written out by the account,
+   * kept nowhere, so never out of date; changed only by changing the limit or the mode */
+  private memoryLimits(address: string): MemoryFromLimit[] {
+    if (!this.account) return [];
+    const nowMs = Date.parse(this.now());
+    const dollars = (micro: number) => `$${(micro / 1e6).toLocaleString("en-US", { maximumFractionDigits: 2 })}`;
+    const where = (allow: string[]) => (allow.includes("*") ? "every venue" : allow.map((v) => this.account!.name(v.split(":")[0]!)).join(", "));
+    const items: MemoryFromLimit[] = this.account.state.spends
+      .filter((x) => x.agent === address && x.revokedAt === undefined && x.budgetMicro > 0 && nowMs < x.validUntil)
+      .map((x) => {
+        const words =
+          x.scope === "trade"
+            ? `Up to ${dollars(x.perPaymentMicro)} an order, ${dollars(x.budgetMicro)} in all, at ${where(x.allow)}`
+            : x.scope === "venues"
+              ? `Moves money between your own accounts (${where(x.allow)}): up to ${dollars(x.perPaymentMicro)} a move, ${dollars(x.budgetMicro)} in all`
+              : x.scope === "payees"
+                ? `Pays ${x.allow.includes("*") ? "any payee" : x.allow.join(", ")} from its wallet: up to ${dollars(x.perPaymentMicro)} a payment, ${dollars(x.budgetMicro)} in all`
+                : `Puts money into earn at ${where(x.allow)}: up to ${dollars(x.perPaymentMicro)} at a time, ${dollars(x.budgetMicro)} in all`;
+        return { id: x.id, from: "limit" as const, topic: "rules" as const, text: `${words} · until ${etDate(x.validUntil)}`, at: x.at };
+      });
+    if (!items.length) return items;
+    const open = this.openness.mode === "open";
+    return [...items, { id: "mode", from: "mode", topic: "rules", text: open ? "Inside its limits it acts at once: your mode is Beast" : "Real money goes through you first: every order waits for you on a card (Guard)" }];
   }
 
   /** every order the account ever placed, as last logged, with each row at which more of it filled (account/costbasis.ts ordersOf): every run's */
@@ -2516,6 +2595,40 @@ export interface AgentView {
   /** what the owner declined of its asks in the last day */
   declinedAsks: DeclinedAsk[];
   flights: Array<{ no: string; at: string; request: string; legs: string[] }>;
+  /** what it remembers about the owner (account/memory.ts): its notes kept, and the ones waiting for the owner */
+  memory: { notes: number; waiting: number };
+}
+
+/** the most a memory takes, and its three parts with their words */
+const MEMORY_LIMITS = { noteText: NOTE_TEXT, howText: HOW_TEXT, maxNotes: MAX_NOTES, topics: TOPICS.map((t) => ({ id: t, words: TOPIC_WORDS[t] })) };
+
+/** a line of "From your limit": a signed limit (its id) or the mode, as they stand */
+export interface MemoryFromLimit {
+  id: string;
+  from: "limit" | "mode";
+  topic: "rules";
+  text: string;
+  /** when the limit was signed */
+  at?: string | undefined;
+}
+
+/** the owner's view of what the agents remember */
+export interface MemoryPage {
+  asOf: string;
+  /** `status` ok · expired · revoked, or gone: memory kept for a key the account no longer lists */
+  agents: Array<{ address: string; name: string; code: string; status: string; rules: MemoryRules; notes: MemoryNote[]; fromLimits: MemoryFromLimit[] }>;
+  limits: typeof MEMORY_LIMITS;
+}
+
+/** one agent's view of its memory */
+export interface AgentMemoryView {
+  asOf: string;
+  rules: MemoryRules;
+  notes: MemoryNote[];
+  waiting: MemoryNote[];
+  fromLimits: MemoryFromLimit[];
+  sharedWithYou: Array<{ agent: string; name: string; notes: MemoryNote[] }>;
+  limits: typeof MEMORY_LIMITS;
 }
 
 export interface AgentsView {

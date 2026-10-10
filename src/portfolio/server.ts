@@ -57,6 +57,10 @@
  *   GET  /api/account/quotes?pairs=okx|BTC/USDT,…        fresh prices for up to twelve markets
  *   GET  /api/account/sellable                           everything held that is not a dollar, and what selling it would sign
  *   GET  /api/account/agents                             the agents one by one: keys, limits, cards, orders, payments, wallets, intents
+ *   GET  /api/account/memory                             what each agent remembers about the owner (account/memory.ts), as the owner
+ *                                                        reads it: its notes (the waiting ones too), the switches, what its limits say
+ *   GET  /api/account/memory/agent?address=&q=           one agent's memory as that agent reads it (portfolio_memory): its notes kept,
+ *                                                        the ones waiting for the owner, its limits in words, and what other agents share
  *   GET  /api/account/candles?venue=&symbol=&interval=   one market's price history (5m · 1h · 1d): a connected venue's own, or a venue not
  *                                                        connected from its public data, without a key; kept a minute
  *   GET  /api/account/earn?venue=&asset=                 Earn: the products the connected venues offer (the MetaMask Agent Wallet's
@@ -364,7 +368,7 @@ export async function startPortfolioServer(opts: PortfolioServerOptions): Promis
     // the dial as the page needs it: the agents' session, the venues switched off for agents, the most leverage they may set
     // and how each venue connected live has answered lately (its health, for the Venues board)
     // and the command an agent's owner runs to add this account's seat (the server's own origin, the seat by its absolute path)
-    res.json({ ok: true, ...(view.real ? realPage(view) : view), mode: o.mode, live: svc.live, dial: { sessionExpiresAt: o.sessionExpiresAt, sessionEnded: Date.parse(o.sessionExpiresAt) <= Date.parse(view.now), revoked: o.revoked, maxLeverage: o.maxLeverage ?? 1 }, health: svc.venueHealth(), agentSetup: agentSetupOf(origin || `${req.protocol}://${req.get("host") ?? "127.0.0.1"}`) });
+    res.json({ ok: true, ...(view.real ? realPage(view) : view), mode: o.mode, live: svc.live, dial: { sessionExpiresAt: o.sessionExpiresAt, sessionEnded: Date.parse(o.sessionExpiresAt) <= Date.parse(view.now), revoked: o.revoked, maxLeverage: o.maxLeverage ?? 1 }, health: svc.venueHealth(), memoryAsks: svc.memoryAsks(), agentSetup: agentSetupOf(origin || `${req.protocol}://${req.get("host") ?? "127.0.0.1"}`) });
   }));
 
   app.post("/api/account/pair", (req, res) => {
@@ -563,6 +567,18 @@ export async function startPortfolioServer(opts: PortfolioServerOptions): Promis
   app.get("/api/account/agents", wrap(async (_req, res) => {
     if (!mounted(res)) return;
     answerOf(res, await svc.agents());
+  }));
+
+  // what each agent remembers about the owner: the owner's whole view (Account › Memory), and one agent's (its MCP seat reads its own)
+  app.get("/api/account/memory", wrap(async (_req, res) => {
+    if (!mounted(res)) return;
+    answerOf(res, svc.memoryView());
+  }));
+  app.get("/api/account/memory/agent", wrap(async (req, res) => {
+    if (!mounted(res)) return;
+    const q = strings(req, res, { address: 42, q: 120 });
+    if (!q) return;
+    answerOf(res, svc.memoryFor(q.address, { q: q.q || undefined }));
   }));
 
   // one market's price history: a connected venue's own, or a public source's without a key. The venue is an id the account knows and the

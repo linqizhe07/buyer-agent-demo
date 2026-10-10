@@ -48,47 +48,60 @@ document.documentElement.setAttribute("data-theme", t === "black" ? "black" : "c
   <symbol id="i-chart" viewBox="0 0 24 24"><path d="M4 4v16h16" /><path d="m7 15 4-4 3 3 5-6" /></symbol>
   <symbol id="i-stock" viewBox="0 0 24 24"><path d="M4 20h16" /><path d="M6 17v-4M11 17V9M16 17v-6" /><path d="m5 8 5-4 4 3 5-4" /></symbol>
   <symbol id="i-rwa" viewBox="0 0 24 24"><path d="M9 11V4.5A1.5 1.5 0 0 1 10.5 3H19a1.5 1.5 0 0 1 1.5 1.5v10A1.5 1.5 0 0 1 19 16h-5" /><path d="M13 7h4M13 10h4" /><circle cx="8" cy="16" r="5" /><path d="M8 13.5v5M6.5 15h3" /></symbol>
+  <symbol id="i-markets" viewBox="0 0 24 24"><path d="M4 18l5-6 4 3 7-9" /></symbol>
+  <symbol id="i-ticket" viewBox="0 0 24 24"><path d="M7 7h10M7 12h10M7 17h6" /></symbol>
+  <symbol id="i-purse" viewBox="0 0 24 24"><path d="M3 7h15a3 3 0 0 1 3 3v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /><path d="M3 7V6a2 2 0 0 1 2-2h11v3" /><circle cx="17" cy="14" r="1.2" /></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M12 11v5M12 8h.01" /></symbol>
+  <symbol id="i-pencil" viewBox="0 0 24 24"><path d="M4 20l4-1 11-11-3-3L5 16z" /></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3" /></symbol>
   <symbol id="i-preipo" viewBox="0 0 24 24"><path d="M4 16 9 11l3 3 7-8" /><path d="M15 6h4v4" /><path d="M4 20h2M9 20h2M14 20h2M19 20h1" /></symbol>
 </svg>
 <a class="skip" href="#main">Skip to the page</a>
 <div class="app">
   <nav class="rail" aria-label="Main">
-    <div class="brand">Account</div>
+    <a class="brand" href="#/portfolio"><span class="brand-mark" aria-hidden="true">A</span><span>Account</span></a>
     <div class="rail-nav">
       <span class="rail-pill" aria-hidden="true" hidden></span>
-      <a href="#/portfolio" data-tab="portfolio"><svg class="ico" aria-hidden="true"><use href="#i-home"></use></svg>Portfolio<span class="count" id="count-portfolio" hidden></span></a>
-      <a href="#/markets" data-tab="markets"><svg class="ico" aria-hidden="true"><use href="#i-compass"></use></svg>Markets</a>
-      <a href="#/trade" data-tab="trade"><svg class="ico" aria-hidden="true"><use href="#i-trade"></use></svg>Trade</a>
+      <a href="#/markets" data-tab="markets"><svg class="ico" aria-hidden="true"><use href="#i-markets"></use></svg>Markets</a>
+      <a href="#/trade" data-tab="trade"><svg class="ico" aria-hidden="true"><use href="#i-ticket"></use></svg>Trade</a>
+    </div>
+    <div class="rail-links">
+      <button type="button" id="open-agents"><svg class="ico" aria-hidden="true"><use href="#i-agent"></use></svg>Agents<span class="count" id="count-agents" hidden></span></button>
     </div>
     <div class="rail-foot">
-      <div class="group">
-        <div class="label" id="mode-label">Mode</div>
-        <div class="seg" role="group" aria-labelledby="mode-label" id="mode"><button type="button" data-set-mode="guard" aria-pressed="false">Guard</button><button type="button" data-set-mode="open" aria-pressed="false">Beast</button></div>
-        <div class="note-s" id="mode-note"></div>
-        <button type="button" class="link dim" id="mode-more">What changes ›</button>
-      </div>
-      <div class="rail-links">
-        <button type="button" id="open-agents"><svg class="ico" aria-hidden="true"><use href="#i-agent"></use></svg>Agents<span class="count" id="count-agents" hidden></span></button>
-        <button type="button" id="open-settings"><svg class="ico" aria-hidden="true"><use href="#i-sliders"></use></svg>Settings</button>
-      </div>
-      <div class="rail-status"><div id="writes"></div><div id="reach" hidden></div><div class="dim stamp" id="stamp"></div></div>
+      <div class="rail-status"><div id="reach" hidden></div><div class="dim stamp" id="stamp"></div></div>
+      <!-- the Account at the rail's foot: Portfolio · Venues · Memory open from here (round 7, F5) -->
+      <a class="rail-wallet" href="#/portfolio" id="rail-wallet"><svg class="ico" aria-hidden="true"><use href="#i-purse"></use></svg><span class="rw"><span class="rw-h">Account<span class="count" id="count-portfolio" hidden></span></span><span class="rw-sub" id="rail-worth">&nbsp;</span></span></a>
     </div>
   </nav>
 
-  <main class="main" id="main" tabindex="-1" aria-busy="true">
+  <main class="main" id="main" tabindex="-1" aria-busy="true" data-at="account">
     <header class="topbar">
+      <div class="acct-h" data-only="account">Account</div>
       <button type="button" class="lens" id="lens" aria-haspopup="menu" aria-expanded="false" aria-controls="lens-menu"><span id="lens-name">All accounts</span><svg class="ico sm" aria-hidden="true"><use href="#i-chevron"></use></svg></button>
       <div class="menu" id="lens-menu" role="menu" aria-label="Show" hidden></div>
       <div class="top-tools">
-        <form class="search" id="search-form" role="search" data-live><svg class="ico" aria-hidden="true"><use href="#i-search"></use></svg><label class="sr" for="search">Search markets, assets, agents</label><input type="search" id="search" placeholder="Search markets, assets, agents" autocomplete="off" spellcheck="false" /><kbd aria-hidden="true">/</kbd></form>
+        <div class="acct-tools" data-only="account">
+          <div class="seg" role="group" aria-label="Mode" id="mode"><button type="button" data-set-mode="guard" aria-pressed="false">Guard</button><button type="button" data-set-mode="open" aria-pressed="false">Beast</button></div>
+          <button type="button" class="icon-btn" id="mode-more" aria-label="What changes between Guard and Beast" title="What changes between Guard and Beast"><svg class="ico" aria-hidden="true"><use href="#i-info"></use></svg></button>
+          <div id="writes"></div>
+          <button type="button" class="btn btn-sm" id="open-settings">Settings</button>
+        </div>
+        <form class="search" id="search-form" role="search" data-live data-only="trading"><svg class="ico" aria-hidden="true"><use href="#i-search"></use></svg><label class="sr" for="search">Search markets, assets, agents</label><input type="search" id="search" placeholder="Search markets, assets, agents" autocomplete="off" spellcheck="false" /><kbd aria-hidden="true">/</kbd></form>
         <button type="button" class="icon-btn" id="open-statement" aria-label="Statement" title="Statement"><svg class="ico lg" aria-hidden="true"><use href="#i-clock"></use></svg></button>
       </div>
     </header>
+    <nav class="acct-tabs" data-only="account" aria-label="Account">
+      <div class="seg"><a href="#/portfolio" data-acct="portfolio">Portfolio</a><a href="#/venues" data-acct="venues">Venues</a><a href="#/memory" data-acct="memory">Memory</a></div>
+      <span class="note-s dim" id="mode-note"></span>
+    </nav>
     <div class="banner" id="banner" hidden></div>
     <div class="notice" id="restored" hidden></div>
 
     <div class="panes">
     <section class="pane" data-pane="portfolio" aria-labelledby="h-portfolio"><h1 class="sr" id="h-portfolio">Portfolio</h1><div id="pane-portfolio"><div class="skel-rows" aria-hidden="true"><span class="skel big"></span><span class="skel"></span><span class="skel"></span><span class="skel" style="width:60%"></span></div></div></section>
+    <section class="pane" data-pane="venues" aria-labelledby="h-venues" hidden><h1 class="sr" id="h-venues">Venues</h1><div id="pane-venues"><div class="skel-rows" aria-hidden="true"><span class="skel"></span><span class="skel"></span><span class="skel" style="width:60%"></span></div></div></section>
+    <section class="pane" data-pane="memory" aria-labelledby="h-memory" hidden><h1 class="sr" id="h-memory">Memory</h1><div id="pane-memory"><div class="skel-rows" aria-hidden="true"><span class="skel"></span><span class="skel"></span><span class="skel" style="width:60%"></span></div></div></section>
     <section class="pane" data-pane="markets" aria-labelledby="h-markets" hidden><h1 class="sr" id="h-markets">Markets</h1><div id="pane-markets"><div class="skel-rows" aria-hidden="true"><span class="skel"></span><span class="skel"></span><span class="skel" style="width:60%"></span></div></div></section>
     <section class="pane" data-pane="trade" aria-labelledby="h-trade" hidden><h1 class="sr" id="h-trade">Trade</h1><div id="pane-trade"><div class="skel-rows" aria-hidden="true"><span class="skel"></span><span class="skel"></span><span class="skel" style="width:60%"></span></div></div></section>
     </div>
@@ -109,6 +122,7 @@ document.documentElement.setAttribute("data-theme", t === "black" ? "black" : "c
 <script defer src="/ui/asset.js"></script>
 <script defer src="/ui/intent.js"></script>
 <script defer src="/ui/portfolio.js"></script>
+<script defer src="/ui/memory.js"></script>
 <script defer src="/ui/earn.js"></script>
 <script defer src="/ui/markets.js"></script>
 <script defer src="/ui/trade.js"></script>
