@@ -390,8 +390,9 @@ function tkPickLists(sec, kind, search) {
   const items = search ? search.items.filter(here).slice(0, 12) : got ? got.items.filter(here).slice(0, 6) : null;
   if (!items) tkGroup(g("top"), "Most traded", null, "");
   else tkGroup(g("top"), q ? `Results for “${q}”` : "Most traded", items.map((x) => tkItemRow(x, kind)), q ? `Nothing matches “${q}” under ${tkKindSpec(kind).label}.` : `Nothing is listed under ${tkKindSpec(kind).label}${lens.kind === "venue" ? ` at ${lens.name}` : ""} yet.`);
-  const words = (search || got || { missing: [] }).missing.slice(0, 3).map((m) => `<p class="tk-said dim small">${esc(m.venueName)}: “${esc(m.said || m.why)}” — the venue's own rule.</p>`).join("");
-  paint(g("foot"), words);
+  // the venues that did not answer this read, or do not serve this network, are simply not among a row's "public venues": the ticket lists
+  // what answers from here and says nothing of the rest (Markets' "Why these, and what's not shown" has their words, folded)
+  paint(g("foot"), "");
 }
 /* one list: its name, its rows (each a button), or a skeleton while its rows are being read, or the words for none */
 function tkGroup(el, title, rows, empty) {
@@ -691,7 +692,7 @@ function tkTicket(panel, kind0, preset) {
     if (preset.venue) items = [...items.filter((x) => x.at.some((a) => a.venue === preset.venue)), ...items.filter((x) => !x.at.some((a) => a.venue === preset.venue))];
     items = items.slice(0, 8);
     // the count is read out once the search has landed; the list itself is not read out keystroke by keystroke
-    res.innerHTML = `<p class="sr" role="status">${text ? `${plural(items.length, "market")} for ${esc(text)}` : ""}</p>${items.length ? `<ul class="tk-list" role="list">${items.map((x, i) => `<li><button type="button" data-i="${i}">${avatar(x.kind === "event" ? String(x.category || "Event").slice(0, 4) : x.base || x.name, "sm")}<span class="tk-rn"><b>${esc(x.name)}</b><span class="dim small">${esc(tkWhereWords(x))}</span></span><span class="tk-rp"><span class="tab-nums">${x.kind === "event" ? esc(tkCents(x.price)) : tkPre(x) && x.implied && x.implied.usd ? esc(tkValuation(x.implied.usd)) : x.price ? `$${esc(px(x.price))}` : ""}</span>${x.kind === "event" || tkPre(x) ? "" : chg(x.changePct24h)}</span></button></li>`).join("")}</ul>` : `<p class="empty">${got.refused ? `${esc(spec().label)} can't be read here yet.` : text ? `Nothing matches “${esc(text)}” under ${esc(spec().label)} at your accounts or the public venues.` : "Type to find a market."}</p>`}${got.missing.map((m) => `<p class="tk-said dim small">${esc(m.venueName)}: “${esc(m.said || m.why)}” — the venue's own rule.</p>`).join("")}`;
+    res.innerHTML = `<p class="sr" role="status">${text ? `${plural(items.length, "market")} for ${esc(text)}` : ""}</p>${items.length ? `<ul class="tk-list" role="list">${items.map((x, i) => `<li><button type="button" data-i="${i}">${avatar(x.kind === "event" ? String(x.category || "Event").slice(0, 4) : x.base || x.name, "sm")}<span class="tk-rn"><b>${esc(x.name)}</b><span class="dim small">${esc(tkWhereWords(x))}</span></span><span class="tk-rp"><span class="tab-nums">${x.kind === "event" ? esc(tkCents(x.price)) : tkPre(x) && x.implied && x.implied.usd ? esc(tkValuation(x.implied.usd)) : x.price ? `$${esc(px(x.price))}` : ""}</span>${x.kind === "event" || tkPre(x) ? "" : chg(x.changePct24h)}</span></button></li>`).join("")}</ul>` : `<p class="empty">${got.refused ? `${esc(spec().label)} can't be read here yet.` : text ? `Nothing matches “${esc(text)}” under ${esc(spec().label)} at your accounts or the public venues.` : "Type to find a market."}</p>`}`;
     for (const b of res.querySelectorAll("button[data-i]")) b.addEventListener("click", () => pick(items[Number(b.dataset.i)]));
   };
   let findTimer = 0;
