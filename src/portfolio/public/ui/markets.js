@@ -264,10 +264,12 @@ const mkServes = (a) => {
 /* the lens narrows Markets to one venue's markets; under an agent's lens every market stays (agents hold no markets of their own) */
 const mkInLens = (item, lens) => !lens || lens.kind !== "venue" || item.at.some((a) => a.venue === lens.id || a.connectTo === lens.id);
 
-/* the venues that did not answer this read, each in its own words (a venue's rule for this location is said as its rule, nothing more) */
+/* the venues that did not answer this read, each in its own words (a venue's rule for this location is said as its rule, nothing more).
+   One line per venue and answer: an exchange read through two public sources (its spot tickers, its pre-IPO perpetuals) that refused both
+   with the same words is named once */
 function mkMissingLine(missing) {
   const seen = new Set();
-  const list = (missing || []).filter((m) => !m.symbol && !seen.has(m.venue) && seen.add(m.venue));
+  const list = (missing || []).filter((m) => !m.symbol && !seen.has(`${m.venueName}|${m.said || m.why}`) && seen.add(`${m.venueName}|${m.said || m.why}`));
   if (!list.length) return "";
   const one = (m) => `<b>${esc(m.venueName)}</b>: ${m.said ? `“${esc(mkSaid(m.said))}”${m.code === "E_VENUE_GEOBLOCKED" ? " — its own rule for this location" : ""}` : esc(mkSaid(m.why))}`;
   return `<p class="mk-missing">Not shown: ${list.map(one).join(" · ")}.</p>`;

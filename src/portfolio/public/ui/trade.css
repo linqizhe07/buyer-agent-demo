@@ -89,7 +89,7 @@
 .tk-rp .tab-nums { font-weight: 600; }
 .tk-rp .tag { vertical-align: baseline; }
 /* a venue's own words (a market it refuses), an issuer and its terms: a soft note on the second surface */
-.tk-said, .tk-iss { margin: 0; padding: 8px 12px; border-radius: var(--radius-s); background: var(--surface-2); line-height: 1.45; }
+.tk-iss { margin: 0; padding: 8px 12px; border-radius: var(--radius-s); background: var(--surface-2); line-height: 1.45; }
 /* the market picked: a row on the ground's colour, rounded like the fields */
 .tk-picked { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: var(--radius-s); background: var(--bg); min-width: 0; }
 .tk-picked .link { flex: none; }

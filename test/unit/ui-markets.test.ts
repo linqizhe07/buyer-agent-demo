@@ -314,6 +314,10 @@ describe("the Markets pane", () => {
     expect(line).toBe('<p class="mk-missing">Not shown: <b>Binance</b>: “Service unavailable from a restricted location” — its own rule for this location · <b>Kraken &lt;b&gt;</b>: no answer in 4 s.</p>');
     expect(line).not.toMatch(/vpn|proxy|another region|elsewhere/i);
     expect(p.run("mkMissingLine([])")).toBe("");
+    // an exchange read through two public sources (its spot tickers and its pre-IPO perpetuals), both refused with the same words: named once
+    const twice = p.run<string>(`mkMissingLine(${JSON.stringify([...explore.missing, { ...explore.missing[0], venue: "binance-preipo-public" }, { venue: "bybit-public", venueName: "Bybit", why: "Bybit does not serve this location", said: "The Amazon CloudFront distribution is configured to block access from your country", code: "E_VENUE_GEOBLOCKED", connected: false }])})`);
+    expect(twice.match(/<b>Binance<\/b>/g)).toHaveLength(1);
+    expect(twice).toContain("<b>Bybit</b>");
   });
 
   it("draws All as one table of everything the read returned, with the tabs it lists (a legacy Now is All), a skeleton while it loads, and keeps what it drew when a later read fails", async () => {
