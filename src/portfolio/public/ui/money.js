@@ -59,11 +59,15 @@ async function sendPaymentOnce(p, key, tx, txs) {
 function openLiveMove(venueId, preset = {}) {
   const v = A.venues.find((x) => x.id === venueId);
   if (!v || !v.liveCan) return;
+  if (!servedHere(v)) return void toast(`${v.name} does not serve this network now: nothing is moved from it until a check of this network finds it answering.`);
   const c = v.liveCan;
   const ledgers = c.ledgers || [];
   const kinds = [...(c.withdraw !== false && !c.send ? [["withdraw", "Withdraw to another account of yours"]] : []), ...(c.send ? [["send", "Send from this wallet"]] : []), ...(c.send === "wallet" && v.proven ? [["bridge", "Across chains"]] : []), ...(ledgers.length > 1 && c.transfer !== false ? [["transfer", "Between its own ledgers"]] : []), ...(c.swap !== false && !c.send ? [["swap", "Swap stablecoins"]] : [])];
   if (!kinds.length) return void toast(`${v.name} moves nothing from here: ${v.readOnlyBecause || (v.liveCan && v.liveCan.why && v.liveCan.why.withdraw) || "its key may not withdraw, transfer or swap"}.`, "no");
-  const dests = A.venues.filter((x) => x.id !== v.id && x.watchOnly && x.liveCan && x.liveCan.receive && !x.readOnlyBecause);
+  // where it can go: the accounts that receive and serve the network the account runs on now; one that does not is named once, under the
+  // form, and offered when a check of this network finds it answering
+  const dests = A.venues.filter((x) => x.id !== v.id && x.watchOnly && x.liveCan && x.liveCan.receive && !x.readOnlyBecause && servedHere(x));
+  const notHere = A.venues.filter((x) => x.id !== v.id && x.watchOnly && x.liveCan && x.liveCan.receive && !x.readOnlyBecause && !servedHere(x));
   // what can leave: the dollars this venue holds (of the stablecoins the account knows); what it can become: any of them
   const heldDollars = [...new Set((v.holdings || []).filter((h) => h.amount > 0 && isDollar(h.asset)).map((h) => String(h.asset).toUpperCase()))];
   const assets = (heldDollars.length ? heldDollars : dollarsOf().filter((a) => a !== "USD").slice(0, 2)).map((a) => [a, a]);
@@ -78,7 +82,7 @@ function openLiveMove(venueId, preset = {}) {
       ? `<div class="row2">${field("Sell", select("asset", assets, assets[0][0]))}${field("Buy", select("toAsset", toAssets, toAssets.find(([a]) => a !== assets[0][0])[0]))}</div>${amount("50")}`
       : k === "bridge"
         ? `${field("To", select("to", [[v.id, "This wallet, on the other chain"], ...dests.filter((d) => !d.address || d.proven).map((d) => [d.id, d.name])]))}<div class="row2">${field("From chain", nets("network", chains[0], chains))}${field("To chain", nets("toLedger", chains[1] || chains[0], chains))}</div><div class="row2">${field("Send", select("asset", assets))}${field("Arrives as", select("toAsset", toAssets, assets[0][0]))}</div>${amount("25")}`
-        : `${dests.length ? field("To", select("to", dests.map((d) => [d.id, `${d.name}${d.address ? (d.proven ? "" : " · watched") : ""}`, !!d.address && !d.proven]))) : '<div class="path dim">Connect where it should go first: another exchange, or your wallet from the wallet itself.</div>'}<div class="row2">${field("Network", nets("network"))}${field("Currency", select("asset", assets))}</div>${amount("25")}${k === "withdraw" ? '<div class="path"><button type="button" class="link dim" data-fees>Fees on every network</button><span class="dim small" data-fees-list></span></div>' : ""}`);
+        : `${dests.length ? field("To", select("to", dests.map((d) => [d.id, `${d.name}${d.address ? (d.proven ? "" : " · watched") : ""}`, !!d.address && !d.proven]))) : notHere.length ? "" : '<div class="path dim">Connect where it should go first: another exchange, or your wallet from the wallet itself.</div>'}${notHere.length ? `<div class="path dim small">Not served on this network now: ${notHere.map((d) => esc(d.name)).join(", ")}.</div>` : ""}<div class="row2">${field("Network", nets("network"))}${field("Currency", select("asset", assets))}</div>${amount("25")}${k === "withdraw" ? '<div class="path"><button type="button" class="link dim" data-fees>Fees on every network</button><span class="dim small" data-fees-list></span></div>' : ""}`);
   const draftOf = (form) => {
     const f = formFields(form);
     const k = f.kind;
@@ -193,7 +197,7 @@ async function topUpFrom(walletVenue, amount = "") {
 const receiveNetworks = () => (A && Array.isArray(A.networks) && A.networks.length ? [...new Set([...networksOf(), ...bridgeChainsOf()])] : [...NETWORKS_KNOWN, "Robinhood Chain"]);
 /* an account gives an address to send to: a wallet proven yours (or one whose key the account holds), or a venue whose key or sign-in
    gives deposit addresses. A watched address gives none, and neither does a venue the account only reads */
-const canReceive = (v) => (v.address ? !!v.proven : !!v.liveCan && v.liveCan.receive !== false && !v.readOnlyBecause);
+const canReceive = (v) => servedHere(v) && (v.address ? !!v.proven : !!v.liveCan && v.liveCan.receive !== false && !v.readOnlyBecause);
 /* what one might send there: the dollars first, then what the account already holds there */
 const receiveAssets = (v) => [...new Set(["USDC", "USDT", "ETH", ...(v.holdings || []).filter((h) => h.class !== "cash").map((h) => String(h.asset).toUpperCase())])].filter((a) => /^[A-Z0-9.]{1,15}$/.test(a));
 /* the asset an exchange row starts on: the dollar the venue holds most of (what one would send there), else the first it could receive */
@@ -245,11 +249,14 @@ const rcvCap = (s) => { const t = String(s || ""); return t.charAt(0).toUpperCas
 function openReceive(venueId = "") {
   if (!A) return;
   const R = connected().filter(canReceive);
-  const none = connected().filter((v) => !canReceive(v));
+  // the accounts that give no address from here, each asked for its own words — save one that does not serve this network now: named once,
+  // in a quiet line, with nothing asked of it
+  const none = connected().filter((v) => !canReceive(v) && servedHere(v));
+  const away = connected().filter((v) => !servedHere(v));
   if (!R.length) return void toast("None of your accounts gives an address to send to from here. Connect a wallet you prove is yours, or an exchange whose key reads deposit addresses.", "no");
   let only = venueId && R.some((v) => v.id === venueId) ? venueId : "";
   const rows = receiveRows(R);
-  const body = openSheet(`<div class="rcv" data-rcv><label class="rcv-search"><span class="sr">Search accounts and networks</span>${icon("search", "sm")}<input type="search" data-rcv-q placeholder="Search accounts and networks" autocomplete="off" spellcheck="false" /></label><p class="path warn-t rcv-warn">Send only the asset on the network the row names: anything else may not arrive.</p><p class="dim small rcv-only" data-rcv-only${only ? "" : " hidden"}>Showing ${esc(only ? nameOf(only) : "")} · <button type="button" class="link" data-rcv-all>All accounts</button></p><div class="rcv-list" data-rcv-list role="list">${rows.map(rcvRowHtml).join("")}</div><p class="empty" data-rcv-none hidden>Nothing matches.</p>${none.length ? `<div class="rcv-foot" data-rcv-foot>${none.map((v) => `<div data-rcv-no="${esc(v.id)}" data-text="${esc(v.name.toLowerCase())}"><b>${esc(v.name)}</b> · <span data-rcv-why>asking…</span></div>`).join("")}</div>` : ""}<div class="end"><button type="button" class="btn" data-sheet-close>Done</button></div></div>`, { title: "Receive" });
+  const body = openSheet(`<div class="rcv" data-rcv><label class="rcv-search"><span class="sr">Search accounts and networks</span>${icon("search", "sm")}<input type="search" data-rcv-q placeholder="Search accounts and networks" autocomplete="off" spellcheck="false" /></label><p class="path warn-t rcv-warn">Send only the asset on the network the row names: anything else may not arrive.</p><p class="dim small rcv-only" data-rcv-only${only ? "" : " hidden"}>Showing ${esc(only ? nameOf(only) : "")} · <button type="button" class="link" data-rcv-all>All accounts</button></p><div class="rcv-list" data-rcv-list role="list">${rows.map(rcvRowHtml).join("")}</div><p class="empty" data-rcv-none hidden>Nothing matches.</p>${none.length ? `<div class="rcv-foot" data-rcv-foot>${none.map((v) => `<div data-rcv-no="${esc(v.id)}" data-text="${esc(v.name.toLowerCase())}"><b>${esc(v.name)}</b> · <span data-rcv-why>asking…</span></div>`).join("")}</div>` : ""}${away.length ? `<p class="dim small rcv-away">Not served on this network now: ${away.map((v) => esc(v.name)).join(", ")}.</p>` : ""}<div class="end"><button type="button" class="btn" data-sheet-close>Done</button></div></div>`, { title: "Receive" });
   const root = body.querySelector("[data-rcv]");
   const list = root.querySelector("[data-rcv-list]");
   const live = () => !!root && root.isConnected;

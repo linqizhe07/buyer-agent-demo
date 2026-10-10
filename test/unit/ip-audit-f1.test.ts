@@ -229,15 +229,16 @@ describe("the venues the mm connection reaches, a venue's words on the ledger, a
     expect(svc.adapter("chat")!.account.readOnlyBecause).toBe("it sends nothing to (this machine's address)");
   });
 
-  it("Hyperliquid's line closes this network: the comparison's row says so in its words and is not ready — no place, no address", async () => {
+  it("Hyperliquid's line closes this network: it is left out of the comparison (only where an order could go from here is compared) — no place, no address", async () => {
     const http: LiveDeps["http"] = async (url: string) => (url.includes("polymarket.com/api/geoblock") ? { status: 200, body: { blocked: true, country: "US", region: "PA", ip: "203.0.113.9" }, text: "" } : { status: 404, body: undefined, text: "" });
     const { svc, plug } = await account({ liveDeps: { http } });
     await plug("hl");
     svc.adapter("hl")!.account.connector = "live:hyperliquid-trade";
     desk.answer = (w, q) => Promise.resolve(w === "markets" ? [BTC] : { ...BTC, symbol: q });
+    desk.asked = 0;
     const c = ok(await svc.liveCompare("BTC", "buy"));
-    const row = c.rows.find((x) => x.venue === "hl");
-    expect(row).toMatchObject({ canTrade: false, note: expect.stringContaining("Hyperliquid does not serve this location") });
+    expect(c.rows.find((x) => x.venue === "hl")).toBeUndefined();
+    expect(desk.asked).toBe(0);
     expect(JSON.stringify(c)).not.toMatch(/203\.0\.113|"US"|\bPA\b/);
   });
 });
@@ -274,7 +275,7 @@ describe("a balance read waits out the venue's hold (adapters/live.ts)", () => {
     let reads = 0;
     let held: Refusal | undefined = banned("v");
     const met: Refusal[] = [];
-    const a = await liveAccount("v", source(async () => (reads++, Promise.reject(no("E_VENUE_UNREACHABLE", { venue: "v", message: "Stand-in did not answer" })))), { connector: "live:f1-standin", ttlMs: 1, held: () => held, refused: (r) => met.push(r) });
+    const a = await liveAccount("v", source(async () => (reads++, Promise.reject(no("E_VENUE_UNREACHABLE", { venue: "v", message: "Stand-in did not answer" })))), { connector: "live:f1-standin", ttlMs: 1, held: () => held, refused: (r) => (met.push(r), false) });
     await a.read();
     expect([reads, a.account.stale]).toEqual([0, expect.stringContaining("has banned this machine's address")]);
     held = undefined;

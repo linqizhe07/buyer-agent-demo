@@ -30,9 +30,11 @@ export interface LiveAccountOptions {
   /** the balances read while connecting, so the venue is not asked twice */
   first?: LiveBalance[] | undefined;
   /** the one hold the service keeps for this venue (its market reads' read cache): what holds it back now, and a refusal this read met,
-   * for the market reads to wait out too. Absent: this adapter keeps its own */
+   * for the market reads to wait out too — `refused` answers whether that hold took it: then the balance follows that hold, and a re-check
+   * of the network that lets the venue go (service.ts reached → wake) lets the balance go with it. Absent, or not taken (one of the mm
+   * connection's inner venues): this adapter keeps its own hold */
   held?: (() => Refusal | undefined) | undefined;
-  refused?: ((r: Refusal) => void) | undefined;
+  refused?: ((r: Refusal) => boolean) | undefined;
 }
 
 export const WATCH_ONLY = "Live · read-only";
@@ -109,10 +111,10 @@ export async function liveAccount(id: string, source: LiveSource, opts: LiveAcco
       // (until a ban's time, ten minutes for a place rule or an edge page), fifteen seconds at least. A refusal's own time is on the wall
       // clock, as the venue said it and the refusal was stamped, so its hold is measured on that clock
       account.stale = unaddressed(String((err as Partial<Refusal> & { message?: string })?.message ?? err)).slice(0, 200);
-      if (isRefusal(err)) {
-        waitFor(holdBackMs(err));
-        opts.refused?.(err);
-      } else waitFor(0);
+      // the service's one hold, when it took the refusal, decides when the venue is asked again (asked about every fifteen seconds above):
+      // a re-check that finds the venue answering lets it go at once. Otherwise this adapter holds it itself, as long as the refusal says
+      if (isRefusal(err)) waitFor(opts.refused?.(err) === true ? 0 : holdBackMs(err));
+      else waitFor(0);
     }
     return cached;
   };
@@ -125,6 +127,11 @@ export async function liveAccount(id: string, source: LiveSource, opts: LiveAcco
         pending = undefined;
       });
       return pending;
+    },
+    // a check of this network found the venue answering again, or a write it took answered: the next read asks it at once rather than
+    // serving what was kept while it was held
+    wake(): void {
+      if (account.stale !== undefined) readAt = 0;
     },
     async execute(i: Intent) {
       // the simulated door: what a live venue does is done through its live doors, so the answer is where that is — or, where the venue

@@ -140,6 +140,9 @@ export type VenueResult = VenueOk | Refusal;
 export interface AccountAdapter {
   readonly account: Account;
   read(): Promise<Holding[]>;
+  /** the venue was let go of a hold (a re-check of this network found it answering, or it answered a write): a live adapter's next read
+   * asks it at once rather than serving what it kept while the venue was held */
+  wake?(): void;
   /** the venue-side write. An adapter applies ONLY the credential's native scope
    * (what the venue itself would do); the wallet's policy lives in openness.ts */
   execute(intent: Intent): Promise<ExecResult>;

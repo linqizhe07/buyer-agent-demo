@@ -158,10 +158,18 @@ describe("the six kinds, as the page runs them", () => {
     p.run(`VENUES.set("live:exchange:okx", { connector: "live:exchange:okx", name: "OKX", verdict: "terms-exclude", said: "its terms exclude where you are (https://www.okx.com/help/terms-of-service, read 2026-10-08)" })`);
     const told = p.out<Array<Record<string, any>>>(`tkWhereRows(${JSON.stringify({ ...ANTH, at: [ANTH.at[0]] })}, null, "preipo")`);
     expect(told).toEqual([expect.objectContaining({ state: "public", venue: "okx-preipo", connector: "live:exchange:okx", terms: expect.objectContaining({ word: "Its terms exclude where you are" }) })]);
-    // where OKX does not serve this network at all, the line offers no connection — OKX's own words instead
+    // where OKX does not serve this network at all, it is not listed: the list is what serves the user, and it counts what it left out
     p.run(`VENUES.set("live:exchange:okx", { connector: "live:exchange:okx", name: "OKX", verdict: "not-served", said: "OKX does not serve this location" })`);
-    const shut = p.out<Array<Record<string, any>>>(`tkWhereRows(${JSON.stringify({ ...ANTH, at: [ANTH.at[0]] })}, null, "preipo")`);
-    expect(shut).toEqual([expect.objectContaining({ state: "public", venue: "okx-preipo", connector: "", refuses: expect.objectContaining({ word: "Not served here" }) })]);
+    const shut = p.run<{ rows: unknown[]; away: number }>(`(() => { const r = tkWhereRows(${JSON.stringify({ ...ANTH, at: [ANTH.at[0]] })}, null, "preipo"); return { rows: [...r], away: r.away }; })()`);
+    expect(shut).toEqual({ rows: [], away: 1 });
+    // close-only (a venue that takes the user only to close) stays, in a word, with no connection offered
+    p.run(`VENUES.set("live:exchange:okx", { connector: "live:exchange:okx", name: "OKX", verdict: "close-only", said: "OKX lets this location close positions, not open new ones" })`);
+    const closing = p.out<Array<Record<string, any>>>(`tkWhereRows(${JSON.stringify({ ...ANTH, at: [ANTH.at[0]] })}, null, "preipo")`);
+    expect(closing).toEqual([expect.objectContaining({ state: "public", venue: "okx-preipo", connector: "", refuses: expect.objectContaining({ word: "Close only here" }) })]);
+    // a connected venue that does not serve this network now is not listed either
+    p.set("A", pageOf([{ ...EX, notServed: { said: "Exchange does not serve this location" } }, WALLET, READONLY]));
+    const away = p.run<{ venues: string[]; away: number }>(`(() => { const r = tkWhereRows(${JSON.stringify(item)}, ${JSON.stringify(ranked)}); return { venues: r.map((x) => x.venue), away: r.away }; })()`);
+    expect(away).toEqual({ venues: ["wallet", "okx", "kraken-public"], away: 1 });
     p.run(`VENUES.clear()`);
     // the public listing of a venue the owner has since connected is not offered again
     p.set("A", pageOf([EX, venue("kraken", "Kraken", { trade: { can: true, kinds: ["spot"] } })]));

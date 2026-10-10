@@ -170,7 +170,8 @@ function mkRoute(item, oi) {
   let refused = null;
   for (const l of mkLegs(item, oi)) {
     const v = mkVenue(l.venue);
-    if (!v || !l.symbol) continue;
+    // a connected venue that does not serve this network now is not offered, nor said: the list is what serves the user
+    if (!v || !l.symbol || !servedHere(v)) continue;
     const a = mkAtOf(item, l.venue);
     if (canTrade(v) && a.canTrade !== false && a.open !== false) return { act: "trade", venue: v.id, symbol: l.symbol, venueName: v.name };
     refused = refused || { venue: v.id, text: mkWhyNot(v, a) };
@@ -185,11 +186,10 @@ function mkRoute(item, oi) {
     return { act: "connect", connector: pub.connector, venue: pub.connectTo || "", venueName: pub.venueName, note: pub.note || "", ...(terms ? { terms: `${pub.venueName}: ${terms.word.toLowerCase()}${terms.said ? ` — ${mkSaid(terms.said)}` : ""}.` } : {}) };
   }
   if (refused) return { act: "why", venue: refused.venue, text: refused.text };
+  // every venue that lists it would not take the user from this network: said in a word (the venue's own sentence is in the list of where
+  // the user can connect, and under Why these), not as an error
   const shut = pubs.map((a) => ({ a, no: venueRefuses(a.connector) })).find((x) => x.no);
-  if (shut) {
-    const one = `${shut.a.venueName}: ${shut.no.word.toLowerCase()}${shut.no.said ? ` — ${mkSaid(shut.no.said)}` : ""}.`;
-    return { act: "why", word: shut.no.word, text: pubs.length > 1 ? `None of the ${pubs.length} venues that list it would take you from where you are. ${one}` : one };
-  }
+  if (shut) return { act: "why", word: shut.no.word, text: pubs.length > 1 ? `None of the ${pubs.length} venues that list it serves this network.` : `${shut.a.venueName}: ${shut.no.word.toLowerCase()}.` };
   const p0 = item.at.find((a) => a.public);
   return { act: "why", text: p0 ? (p0.note ? `${p0.venueName}: ${mkSaid(p0.note)}.` : `This server can't connect ${p0.venueName}.`) : "No venue on the account trades it." };
 }
@@ -243,6 +243,14 @@ function mkAgentsOn(item) {
     intents: (A.intents || []).filter((x) => hit(x.symbol)),
   };
 }
+/* a venue line of a market that serves the network the account runs on: a connected venue that does not now, or a public one whose venue does
+   not serve this network or offers no way in, is not listed (the list is what serves the user) */
+const mkServes = (a) => {
+  const v = a.connected ? mkVenue(a.venue) : null;
+  if (v) return servedHere(v);
+  const no = a.connector ? venueRefuses(a.connector) : null;
+  return !(no && (no.verdict === "not-served" || no.verdict === "closed"));
+};
 /* the lens narrows Markets to one venue's markets; under an agent's lens every market stays (agents hold no markets of their own) */
 const mkInLens = (item, lens) => !lens || lens.kind !== "venue" || item.at.some((a) => a.venue === lens.id || a.connectTo === lens.id);
 
@@ -312,7 +320,8 @@ function mkActs(item, i) {
   const k = esc(item.key);
   if (r.act === "trade") return `<div class="acts"><button type="button" class="btn btn-sm" data-act="trade" data-i="${i}" data-fk="trade:${k}"${mkDis()}>Trade</button></div>`;
   if (r.act === "connect") return `<div class="acts"><button type="button" class="btn btn-sm" data-act="connect" data-connector="${esc(r.connector)}" data-name="${esc(r.venueName)}" data-fk="connect:${k}"${r.terms ? ` title="${esc(r.terms)}"` : ""}${mkDis()}>${icon("plug", "sm")}Connect to trade</button></div>`;
-  return `<div class="acts"><button type="button" class="link dim mk-why" data-act="open" data-i="${i}" data-fk="why:${k}" title="${esc(r.text)}">${esc(r.word || "Can't trade here")} · why</button></div>`;
+  // a state in a word (Not served here, Close only here) is said as that; anything else opens the drawer, which says why
+  return `<div class="acts"><button type="button" class="link dim mk-why" data-act="open" data-i="${i}" data-fk="why:${k}" title="${esc(r.text)}">${esc(r.word || "Can't trade here · why")}</button></div>`;
 }
 /* a row's price now: the fresh one from its venue when there is one, else what the explore read said */
 function mkPriceOf(item) {
@@ -1108,7 +1117,7 @@ function mkAcrossHtml(o) {
   const c = pre ? null : cmp;
   const rows = [];
   for (const r of c ? c.rows : []) rows.push({ venue: r.venue, venueName: r.venueName, symbol: r.symbol, price: r.price, spread: r.spreadPct, note: r.note, best: r.best, ready: r.ready, connected: true });
-  for (const a of it.at) if (a.symbol && !rows.some((r) => r.venue === a.venue)) rows.push({ venue: a.venue, venueName: a.venueName, symbol: a.symbol, price: a.price, note: a.note, connected: a.connected, public: a.public, connector: a.connector, connectTo: a.connectTo, implied: a.implied });
+  for (const a of it.at) if (a.symbol && !rows.some((r) => r.venue === a.venue) && mkServes(a)) rows.push({ venue: a.venue, venueName: a.venueName, symbol: a.symbol, price: a.price, note: a.note, connected: a.connected, public: a.public, connector: a.connector, connectTo: a.connectTo, implied: a.implied });
   // an order goes here (its note is the venue's: fees, slippage); or only public prices list it (connect it); or the venue says why not
   const takes = (r) => { const v = mkVenue(r.venue); return !!v && canTrade(v) && mkAtOf(it, r.venue).canTrade !== false; };
   // a public line is a price; it offers its connection only where none of the owner's venues trades the thing (and its venue is not on)
@@ -1116,7 +1125,8 @@ function mkAcrossHtml(o) {
     const v = mkVenue(r.venue);
     if (takes(r)) return `<button type="button" class="btn btn-sm" data-act="trade-at" data-venue="${esc(r.venue)}" data-symbol="${esc(r.symbol)}"${ev && it.outcomes ? ` data-outcome="${esc(it.outcomes[0].label)}"` : ""} data-fk="trade-at:${esc(r.venue)}"${mkDis()}>Trade</button>`;
     const no = !v && r.connector ? venueRefuses(r.connector) : null;
-    if (no) return `<span class="why"><b>${esc(no.word)}</b>${no.said ? ` — ${esc(mkSaid(no.said))}` : ""}</span>`;
+    // close-only, or something to set up here first: its word, the venue's sentence on hover
+    if (no) return `<span class="why" title="${esc(no.said || "")}"><b>${esc(no.word)}</b></span>`;
     const terms = !v && r.connector ? venueTermsSay(r.connector) : null;
     if (terms && connectionOf(r.connector) && !mkTradedHere(it) && !(r.connectTo && mkVenue(r.connectTo))) return `<span class="why"><b>${esc(terms.word)}</b>${terms.said ? ` — ${esc(mkSaid(terms.said))}` : ""}</span> <button type="button" class="btn btn-sm" data-act="connect" data-connector="${esc(r.connector)}" data-name="${esc(r.venueName)}" data-fk="connect-at:${esc(r.venue)}"${mkDis()}>Connect to trade</button>`;
     if (!v && r.connector && connectionOf(r.connector) && !mkTradedHere(it) && !(r.connectTo && mkVenue(r.connectTo))) return `<button type="button" class="btn btn-sm" data-act="connect" data-connector="${esc(r.connector)}" data-name="${esc(r.venueName)}" data-fk="connect:${esc(r.venue)}"${mkDis()}>${icon("plug", "sm")}Connect to trade</button>`;

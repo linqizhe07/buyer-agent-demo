@@ -604,9 +604,11 @@ export class PortfolioService {
     if (side !== "buy" && side !== "sell") return no("E_ACCOUNT_BAD_ACTION", { message: "compare a buy or a sell" });
     // each venue's reads go through the same short-lived cache as the order ticket's: a new amount or the other side asks no venue again.
     // A venue whose own place rule bars an order from this network says so on its row (placeRuleOf)
-    const venues = this.tradingVenues().map((v) => ({ id: v.id, name: v.name, trader: this.kept(v), connector: this.adapters.get(v.id)?.account.connector }));
+    // a venue that does not serve the network the account runs on now (its place rule, its edge) is not compared: it is not asked
+    const venues = this.tradingVenues().filter((v) => notServedBy(this.marketReads.heldOf(v.id)) === undefined).map((v) => ({ id: v.id, name: v.name, trader: this.kept(v), connector: this.adapters.get(v.id)?.account.connector }));
     return this.marketReads.get(`compare|${b.toUpperCase()}|${side}|${usd ?? ""}|${asset ?? ""}`, 15_000, async () => {
-      const placed = await Promise.all(venues.map(async ({ connector, ...v }) => ({ ...v, ...(await this.placed(connector)) })));
+      // nor is one whose trading line closes this place (Hyperliquid's): the comparison is of where an order could go from here
+      const placed = (await Promise.all(venues.map(async ({ connector, ...v }) => ({ ...v, ...(await this.placed(connector)) })))).filter((v) => v.place?.rule !== "closed");
       return compareAcross(placed, b, side, { timeoutMs: 4_000, ...(usd !== undefined ? { usd } : {}), ...(asset ? { asset } : {}) });
     });
   }
@@ -751,7 +753,13 @@ export class PortfolioService {
     });
     return this.marketReads.get(`explore|${tab ?? ""}|${q.toUpperCase()}|${sort ?? ""}|${limit}`, 30_000, async () => {
       const placed = await Promise.all(connected.map(async (v) => ({ ...v, ...(await this.placed(v.connector)) })));
-      return exploreAcross({ connected: placed, public: this.publicMarkets() }, { q, limit, clock: () => this.realNow(), ...(tab ? { tab: tab as TabId } : {}), ...(sort ? { sort: sort as ExploreSort } : {}) });
+      // what is listed is what serves the network the account runs on: a connected venue that does not now (its place rule, its edge, or
+      // its trading line closed here), and a public source whose venue the list of where the user can connect judged not served or with
+      // no way in, are left out — named in a note, without their words
+      const away = new Set(placed.filter((v) => notServedBy(this.marketReads.heldOf(v.id)) !== undefined || v.place?.rule === "closed").map((v) => v.id));
+      const refusing = new Set((this.venuesKept?.v ?? []).filter((x) => x.verdict === "not-served" || x.verdict === "closed").map((x) => x.connector));
+      const serves = (r: { id: string; connected: boolean; connector?: string | undefined }): boolean => (r.connected ? !away.has(r.id) : !(r.connector !== undefined && refusing.has(r.connector)));
+      return exploreAcross({ connected: placed, public: this.publicMarkets() }, { q, limit, clock: () => this.realNow(), serves, ...(tab ? { tab: tab as TabId } : {}), ...(sort ? { sort: sort as ExploreSort } : {}) });
     });
   }
 
@@ -1326,7 +1334,12 @@ export class PortfolioService {
       // the source's own keeping of a refusal from the network before, where it has a way to let go of it
       s.reset?.();
     }
-    for (const [id, a] of this.adapters) if (a.account.watchOnly && a.account.connector === c) this.marketReads.release(id);
+    for (const [id, a] of this.adapters) {
+      if (!a.account.watchOnly || a.account.connector !== c) continue;
+      this.marketReads.release(id);
+      // its balance too: what was kept while it was held is not served for the rest of that hold
+      if (!this.marketReads.heldOf(id)) a.wake?.();
+    }
     // the connections waiting for this venue; one it answered and refused (stopped) is the owner's to connect again, not a check's
     for (const [venue, w] of this.waiting) if (w.c.connector === c && !w.stopped) void this.tryAgain(venue);
   }
@@ -1440,7 +1453,7 @@ export class PortfolioService {
     if (isRefusal(opened)) return opened;
     // its balance reads follow the same hold as its market reads: a venue that banned this address, or refuses this network, is asked
     // neither for one nor the other until the hold runs out (of the mm connection's, only what is mm's own holds its other reads)
-    const adapter = await liveAccount(venue, opened.source, { connector, first: opened.first, clock: deps.clock, ...(opened.price ? { price: opened.price } : {}), held: () => this.marketReads.heldOf(venue), refused: (r) => void ((connector !== "live:metamask" || connectionWide(r)) && this.marketReads.hold(venue, r)) });
+    const adapter = await liveAccount(venue, opened.source, { connector, first: opened.first, clock: deps.clock, ...(opened.price ? { price: opened.price } : {}), held: () => this.marketReads.heldOf(venue), refused: (r) => (connector !== "live:metamask" || connectionWide(r)) && this.marketReads.hold(venue, r) });
     const src = opened.source;
     // a venue's own words for what it does not do here, as the page and the ledger show them, with this machine's address taken out (not all
     // of them passed through no())
@@ -1536,6 +1549,7 @@ export class PortfolioService {
       // own). A write whose answer was lost may have landed: what was kept of the venue's reads goes, and its hold stands
       const asked = reached === "yes" && (!(move === "liveMove" || move === "agentLiveMove") || v === from || this.liveVenues.get(v)?.address === undefined);
       this.marketReads.drop(v, asked);
+      if (asked) this.adapters.get(v)?.wake?.();
     }
     return r;
   }
@@ -1586,6 +1600,13 @@ export class PortfolioService {
         const kind = v.live && v.connector ? parseConnector(v.connector)?.kind : undefined;
         const ref = this.adapters.get(v.id)?.account.credentialRef;
         if (kind && KEY_SHAPES[kind] && ref) v.keyFile = ref;
+        // a connected venue that does not serve the network the account runs on now (it moved, or the venue changed its line): said as
+        // that state, with the edition for where the user is when the venue has one that serves it — not as a read that failed
+        const out = v.live ? notServedBy(this.marketReads.heldOf(v.id)) : undefined;
+        if (out) {
+          const ed = v.connector ? this.venuesKept?.v.find((x) => x.connector === v.connector)?.edition : undefined;
+          v.notServed = { said: out, ...(ed ? { edition: ed } : {}) };
+        }
       }
     }
     return page;
@@ -1802,7 +1823,9 @@ export class PortfolioService {
   private waitLater(w: Waiting): string {
     if (w.timer) clearTimeout(w.timer);
     w.timer = undefined;
-    if (w.last.code === "E_VENUE_GEOBLOCKED") w.said = `${w.last.message} — asked again when a check of this network finds it answering (Check again, or the half-hourly check)`;
+    // the venue's rule for this network, or a network that names no place (Hyperliquid's line cannot be held to it): asked again only when a
+    // check of the network finds it changed — the venue's rule is not knocked on, nor are the place's sources every few minutes
+    if (w.last.code === "E_VENUE_GEOBLOCKED" || (w.last.native as { unplaceable?: unknown } | undefined)?.unplaceable === true) w.said = `${w.last.message} — asked again when a check of this network finds it answering (Check again, or the half-hourly check)`;
     else {
       const ms = Math.max(COMING_BACK_MS[Math.min(w.tries, COMING_BACK_MS.length - 1)]!, holdBackMs(w.last));
       w.timer = setTimeout(() => void this.tryAgain(w.c.venue), ms);
@@ -2973,6 +2996,15 @@ function ofThisNetwork(r: Refusal): boolean {
   const status = (r.native as { status?: unknown } | undefined)?.status;
   return r.code === "E_VENUE_UNREACHABLE" || (r.code === "E_VENUE_GEOBLOCKED" && holdBackMs(r) > 0) || (r.code === "E_VENUE_REJECTED" && typeof status === "number" && status >= 300 && status < 400);
 }
+/** a hold that is the venue's own line for the whole of the network the account runs on — its place rule, or the server in front of it
+ * refusing the network — rather than a rule for one product or leverage (`detail.scope`), or a close-only answer that still lets what is
+ * held be sold: its words, or nothing */
+function notServedBy(r: Refusal | undefined): string | undefined {
+  if (!r || r.code !== "E_VENUE_GEOBLOCKED") return undefined;
+  if ((r.detail as { scope?: unknown } | undefined)?.scope !== undefined) return undefined;
+  if ((r.native as { closeOnly?: unknown } | undefined)?.closeOnly === true) return undefined;
+  return r.message;
+}
 /** whose no a refusal is: the venue's own (its codes), or this account's own check before anything was sent (a key file not there or
  * unreadable, mm not installed, no sign-in on this server) */
 const byVenue = (r: Refusal): boolean => r.code.startsWith("E_VENUE_");
@@ -3147,8 +3179,10 @@ class ReadCache {
 
   /** a refusal the venue gave elsewhere on the account (its balance read, an order or earn door, the keyless probe's ban): held as one of
    * these, by the same rule — it lengthens a hold, never cuts one */
-  hold(venue: string, r: Refusal): void {
-    if (holdsBack(r)) this.holdBack(venue, r);
+  hold(venue: string, r: Refusal): boolean {
+    if (!holdsBack(r)) return false;
+    this.holdBack(venue, r);
+    return true;
   }
 
   private holding(venue: string, parties: boolean): { until: number; refusal: Refusal } | undefined {

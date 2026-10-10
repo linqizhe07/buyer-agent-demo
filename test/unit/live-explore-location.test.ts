@@ -115,16 +115,15 @@ describe("a venue that does not serve this location", () => {
     expect(Date.now() - started).toBeLessThan(1_000);
     expect(out.items.map((i) => i.key)).toEqual(["coin:BTC"]);
     const where = "does not serve this location: that is its own rule, and the account does not look for a way around it";
+    // each venue once: its spot tickers and its pre-IPO perpetuals refused with the same words, and one line says so
     expect(out.missing).toEqual([
       { venue: "binance", venueName: "Binance", why: `Binance ${where}`, code: "E_VENUE_GEOBLOCKED", said: BINANCE_SAID, connected: false },
       { venue: "bybit", venueName: "Bybit", why: `Bybit ${where}`, code: "E_VENUE_GEOBLOCKED", said: BYBIT_SAID, connected: false },
-      { venue: "binance-preipo", venueName: "Binance", why: `Binance ${where}`, code: "E_VENUE_GEOBLOCKED", said: BINANCE_SAID, connected: false },
-      { venue: "bybit-preipo", venueName: "Bybit", why: `Bybit ${where}`, code: "E_VENUE_GEOBLOCKED", said: BYBIT_SAID, connected: false },
     ]);
     // nine minutes on, another search: each is said the same, and none is asked again
     now += 9 * MIN;
     const again = await exploreAcross({ public: sources }, { clock: () => now, q: "anthropic" });
-    expect(again.missing.map((m) => m.venue)).toEqual(["binance", "bybit", "binance-preipo", "bybit-preipo"]);
+    expect(again.missing.map((m) => m.venue)).toEqual(["binance", "bybit"]);
     expect([bnLib.counts.loads, byLib.counts.loads, bnNet.sent.length, byNet.sent.length]).toEqual([1, 1, 1, 1]);
   });
 

@@ -948,9 +948,13 @@ const inLens = (venue, agent) => {
 
 const writesOn = () => !!(A.connectLive && A.connectLive.writes && A.connectLive.writes.on);
 const watched = (v) => !!v.address && !v.proven;
+/* a connected venue serves the network the account runs on now: one whose place rule (or the server in front of it) refuses it is on the
+   account all the same (`notServed`: its numbers are the last good read's), and is offered for nothing from here until a check of this
+   network finds it answering */
+const servedHere = (v) => !(v && v.notServed);
 /* an order can be placed here: trading is on, the venue trades, the key may (or has not said), and a wallet is proven yours */
-const canTrade = (v) => writesOn() && !!v.trade && v.trade.can !== false && !watched(v);
-const canMove = (v) => writesOn() && !!v.liveCan && !v.readOnlyBecause && !watched(v) && (v.liveCan.withdraw !== false || ((v.liveCan.ledgers || []).length > 1 && v.liveCan.transfer !== false) || v.liveCan.swap !== false || !!v.liveCan.send);
+const canTrade = (v) => writesOn() && !!v.trade && v.trade.can !== false && !watched(v) && servedHere(v);
+const canMove = (v) => writesOn() && !!v.liveCan && !v.readOnlyBecause && !watched(v) && servedHere(v) && (v.liveCan.withdraw !== false || ((v.liveCan.ledgers || []).length > 1 && v.liveCan.transfer !== false) || v.liveCan.swap !== false || !!v.liveCan.send);
 /* WHERE THIS USER CAN CONNECT, as the account judged it from the network it runs on (GET /api/account/venues, live/availability.ts): each
    venue's own answer to that network, and its own terms matched to where the user is (never named). Read when the page is idle and again
    when older than ten minutes; Markets, Trade and the list of accounts read it before offering "Connect to trade", so a venue that would

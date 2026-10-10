@@ -349,7 +349,9 @@ describe("the Portfolio pane", () => {
     expect(String(p.run(`pfAccountsHtml(pfVenueIn(${ALL}), false)`))).toMatch(/data-venue="wallet" data-on="false"[^>]*disabled/);
     // the health chip: ✓ for a venue that answered, ✗ with the venue's own geoblock words for one that did not; the caption and "as of" are gone
     expect(acc).toMatch(/<span class="chip pf-health" title="Answered at 07:58 · 12 ms"><span aria-hidden="true">✓<\/span>Answers<\/span>/);
-    expect(acc).toMatch(/<span class="chip pf-health bad" title="Predictions does not serve this location\. That is Predictions&#39;s own rule for this location\."><span aria-hidden="true">✗<\/span>Not answering<\/span>/);
+    // a venue that does not serve this network is that state, said in a word (not a failure: no ✗), and offered for nothing from here
+    expect(acc).toContain('<span class="chip pf-health away" title="Predictions does not serve this location. Its numbers are from the last good read; it is asked again when a check of this network finds it answering."><span aria-hidden="true">·</span>Not served here</span></span>');
+    expect(acc).not.toContain("Not answering");
     expect(acc).not.toContain("API key");
     expect(acc).not.toContain("as of");
     // what a venue trades from here, or why not — and when a new key would fix it

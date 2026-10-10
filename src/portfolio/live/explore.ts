@@ -126,6 +126,9 @@ export interface ExploreOptions {
   /** what "closing soon" means, in milliseconds from now (a day) */
   closingWithinMs?: number | undefined;
   clock?: (() => number) | undefined;
+  /** does this source's venue serve the network the account runs on (its own answer to it, as the account last learned it): one that does
+   * not — or offers no way in — is not asked, and its markets are not listed; a note names it, without its words. Absent: every source is */
+  serves?: ((r: { id: string; name: string; connected: boolean; connector?: string | undefined }) => boolean) | undefined;
 }
 
 /** one venue where a row's thing is listed */
@@ -457,10 +460,19 @@ async function atSource(r: Reader, o: { q: string; ms: number; perSource: number
   return { got, missing: [whole], notes };
 }
 
+/** the venues that do not serve this network, in a line under 160 characters: named, never quoted */
+function awayNote(names: string[]): string {
+  const shown = names.length > 4 ? [...names.slice(0, 3), `${names.length - 3} more`] : names;
+  const list = shown.length > 1 ? `${shown.slice(0, -1).join(", ")} and ${shown[shown.length - 1]}` : shown[0]!;
+  return `${list} ${names.length === 1 ? "does" : "do"} not serve this network: ${names.length === 1 ? "its" : "their"} markets are not listed here.`;
+}
+
+/** one line per thing missing: a source that is missing as a whole (no part, no symbol) is one line per venue name and reason, so an exchange
+ * read through two public sources (its spot tickers and its pre-IPO perpetuals) that both refused with the same words is named once */
 const dedupe = (list: ExploreMissing[]): ExploreMissing[] => {
   const keys = new Set<string>();
   return list.filter((m) => {
-    const k = `${m.venue}|${m.part ?? ""}|${m.why}|${m.symbol ?? ""}`;
+    const k = m.part === undefined && m.symbol === undefined ? `whole|${m.venueName}|${m.why}` : `${m.venue}|${m.part ?? ""}|${m.why}|${m.symbol ?? ""}`;
     return !keys.has(k) && keys.add(k) !== undefined;
   });
 };
@@ -834,7 +846,10 @@ export async function exploreAcross(sources: ExploreSources, opts: ExploreOption
   const connected = sources.connected ?? [];
   // a source nothing is ever traded through (Stock Tokens) is the public side of no connection: it is always asked
   const covered = (s: PublicSource) => s.readOnly === undefined && connected.some((v) => v.id === s.connectTo || (v.connector !== undefined && v.connector === s.connector));
-  const readers = [...connected.map(fromVenue), ...(sources.public ?? []).filter((s) => !covered(s)).map((s) => fromPublic(s, perSource))];
+  const every = [...connected.map(fromVenue), ...(sources.public ?? []).filter((s) => !covered(s)).map((s) => fromPublic(s, perSource))];
+  // the markets listed are the ones of the venues that serve the network the account runs on: the others are not asked, and named once
+  const readers = opts.serves ? every.filter((r) => opts.serves!(r)) : every;
+  const away = [...new Set(every.filter((r) => !readers.includes(r)).map((r) => r.name))];
   const answers = await Promise.all(readers.map((r) => atSource(r, { q, ms, perSource, closingWithinMs: window })));
   const missing: ExploreMissing[] = answers.flatMap((a) => a.missing);
   const now = clock();
@@ -870,6 +885,7 @@ export async function exploreAcross(sources: ExploreSources, opts: ExploreOption
   const kept = curated ? new Set(curated) : undefined;
   const all = kept ? made.filter((i) => i.kind !== "event" || kept.has(i)) : made;
   const notes = [...new Set(answers.flatMap((a) => a.notes))];
+  if (away.length) notes.push(awayNote(away));
   if (curated?.length) notes.push(`Predictions: at most ${PREDICTIONS_MAX} rows, each venue's busiest in turn, without sports, weather and entertainment; a search reaches everything the venues' listings loaded.`);
   if (curated && ipo.length) notes.push("Predictions: and the IPO questions at Kalshi and Polymarket, beside the busiest few.");
   if (all.some((i) => i.tabs.includes("preipo"))) notes.push("Pre-IPO perpetuals are contracts on a venue's estimate of a private company's valuation, not shares; each venue says who may trade them once a key connects.");

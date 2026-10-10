@@ -107,9 +107,10 @@ export interface Locator {
    * put in an answer; undefined when it cannot be learned now. `splits`: the lists in use name parts of this country (US states for an
    * edition, Ontario), so a place with no part is given its part from the subdivision lookup, when that answers for the same country */
   place(fill?: { splits?: ((country: string) => boolean) | undefined }): Promise<{ country: string; region: string } | undefined>;
-  /** why the last verdict was "not known", for the sentence — no place at all, or the part of a country a rule closes in part — and
-   * nothing about the place itself */
-  missing?(): "place" | "part" | undefined;
+  /** why the last verdict was "not known", for the sentence — no place at all, the part of a country a rule closes in part, or a network
+   * whose address the sources answered with no place (XX, T1: an anonymising network, an address they cannot place) — and nothing about the
+   * place itself */
+  missing?(): "place" | "part" | "unplaceable" | undefined;
 }
 
 /** the second and third place to ask, when Polymarket gives no place: Cloudflare's public trace, on two hosts */
@@ -153,7 +154,7 @@ export function locator(deps: { http: Http; clock: () => number; timeoutMs?: num
   // trace's, or Polymarket's without a region) must not send every order to the part's lookup again — that service limits how often it is
   // asked, and an order refused for "part not known" because of it would be the account's doing
   let partKnown: { country: string; region: string; until: number } | undefined;
-  let missing: "place" | "part" | undefined;
+  let missing: "place" | "part" | "unplaceable" | undefined;
   // the place is dropped when its time is up even when nothing asks again (a timer that keeps nothing alive)
   let drop: ReturnType<typeof setTimeout> | undefined;
   const forget = (): void => {
@@ -168,6 +169,10 @@ export function locator(deps: { http: Http; clock: () => number; timeoutMs?: num
     drop = setTimeout(forget, ms);
     (drop as { unref?: () => void }).unref?.();
   };
+  // a source answered, and named no place (XX, T1): this network's address is not placed, which asking again on the same network does not
+  // change — remembered as long as a place would be, unlike a source that did not answer
+  let unplaced = false;
+  let blank: { at: number; until: number } | undefined;
   const polymarket = async (): Promise<Learned | undefined> => {
     let r: HttpReply;
     try {
@@ -180,7 +185,10 @@ export function locator(deps: { http: Http; clock: () => number; timeoutMs?: num
     const country = typeof (b as { country?: unknown }).country === "string" ? (b as { country: string }).country.trim().toUpperCase() : "";
     const region = typeof (b as { region?: unknown }).region === "string" ? (b as { region: string }).region.trim().toUpperCase() : "";
     // Polymarket sits behind Cloudflare, and passes on its XX for an address it cannot place: no place, so the trace is asked
-    if (!readablePlace(country)) return undefined;
+    if (!readablePlace(country)) {
+      if (country) unplaced = true;
+      return undefined;
+    }
     return { ...placeOf(country, /^[A-Z0-9-]{1,12}$/.test(region) ? region : ""), from: "polymarket" };
   };
   // Cloudflare's trace: only `loc`, the country; no subdivision (region "")
@@ -194,12 +202,21 @@ export function locator(deps: { http: Http; clock: () => number; timeoutMs?: num
     if (r.status !== 200) return undefined;
     const loc = /^loc=([A-Za-z]{2})\s*$/m.exec(String(r.text ?? ""));
     const country = loc ? loc[1]!.toUpperCase() : "";
+    if (country && !readablePlace(country)) unplaced = true;
     return readablePlace(country) ? { country, region: "", from: "trace" } : undefined;
   };
-  const ask = async (): Promise<Learned | undefined> => (await polymarket()) ?? (await cloudflare(TRACE[0]!)) ?? (await cloudflare(TRACE[1]!));
+  const ask = async (): Promise<Learned | undefined> => {
+    unplaced = false;
+    const got = (await polymarket()) ?? (await cloudflare(TRACE[0]!)) ?? (await cloudflare(TRACE[1]!));
+    const now = deps.clock();
+    blank = !got && unplaced ? { at: now, until: now + PLACE_MS } : undefined;
+    return got;
+  };
   const place = async (fresh: boolean): Promise<Learned | undefined> => {
     const now = deps.clock();
     if (kept && now < kept.until && (!fresh || now - kept.at < WRITE_MS)) return kept;
+    // the sources answered that this network's address names no place: not asked again for a while (a write asks again after a few seconds)
+    if (!kept && blank && now < blank.until && (!fresh || now - blank.at < WRITE_MS)) return undefined;
     // asked afresh for a write: the place kept for reads stays until its time unless this answer replaces it
     if (!fresh) forget();
     asking ??= ask().finally(() => (asking = undefined));
@@ -250,7 +267,7 @@ export function locator(deps: { http: Http; clock: () => number; timeoutMs?: num
       const p = await place(ask.fresh === true);
       // another source's country that this place is not in: not judged here, so not served
       if (!p || (ask.country !== undefined && ask.country.trim().toUpperCase() !== p.country)) {
-        missing = "place";
+        missing = !p && blank && deps.clock() < blank.until ? "unplaceable" : "place";
         return "unknown";
       }
       missing = undefined;
@@ -272,7 +289,9 @@ export function locator(deps: { http: Http; clock: () => number; timeoutMs?: num
 
 /** The account's sentence for a place not known now — the same whichever part could not be learned: that the rule closes part of the
  * user's country would say which country it is (the line closes part of only a few), and this sentence reaches agents and the ledger */
-export function unknownWords(rule: PlaceRule, _where?: Pick<Locator, "missing">): string {
+export function unknownWords(rule: PlaceRule, where?: Pick<Locator, "missing">): string {
+  // an address the sources answered with no place is a state of this network, not a moment: said as that, not "just now"
+  if (where?.missing?.() === "unplaceable") return `this network's address names no place (an anonymising network, or an address the account's sources cannot place), so ${rule.name}'s own line (${rule.cite}) cannot be held to it`;
   return `where this machine is could not be learned just now, so ${rule.name}'s own line (${rule.cite}) could not be held to it`;
 }
 
@@ -284,5 +303,8 @@ export async function heldTo(rule: PlaceRule, where: Locator, venue: string, doi
   const v = await where.verdict(rule, ask);
   if (v === "served") return undefined;
   if (v === "closed") return no("E_VENUE_GEOBLOCKED", { venue, message: `${rule.closedWords}. ${doing ? `Nothing was sent to ${rule.name} (${doing})` : "Nothing was connected"}`, native: { rule: rule.terms } });
+  // a network that names no place stays one until the network changes: asked again when a check of this network finds a place, not "in a
+  // moment"
+  if (where.missing?.() === "unplaceable") return no("E_VENUE_UNREACHABLE", { venue, message: `${unknownWords(rule, where)}: ${doing ? `nothing was sent (${doing})` : "nothing was connected"}. It is asked again when this machine is on a network that names a place`, native: { rule: rule.terms, unplaceable: true } });
   return no("E_VENUE_UNREACHABLE", { venue, message: `${unknownWords(rule, where)}: ${doing ? `nothing was sent (${doing})` : "nothing was connected"}. Try again in a moment`, native: { rule: rule.terms } });
 }

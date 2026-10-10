@@ -945,7 +945,7 @@ describe("the one drawer", () => {
     expect(p.run<string>(`mkWhere(${JSON.stringify({ key: "coin:ETH", kind: "coin", name: "Ether", at: [at("Exchange X", true)] })})`)).not.toContain("mk-more");
   });
 
-  it("offers Connect to trade only at a venue that would take the user from where they are; one that would not says so in its own words, on the row and in the drawer", () => {
+  it("offers Connect to trade only at a venue that would take the user from where they are; one that would not is said in a word, not in its sentence, and a row none of whose venues serves this network says so", () => {
     const p = page(() => ({}));
     p.set("A", account());
     const at = (venue: string, venueName: string, connector: string) => ({ venue, venueName, symbol: "BTC-PERP", connected: false, canTrade: false, public: true, connectTo: venue, connector, price: 62_000 });
@@ -956,8 +956,8 @@ describe("the one drawer", () => {
     p.run(`VENUES.set("live:exchange:okx", { connector: "live:exchange:okx", name: "Hyperliquid", verdict: "not-served", said: "Hyperliquid's Terms of Use §1.6 do not serve this location." })`);
     const r = p.run<Record<string, string>>(`mkRoute(${JSON.stringify(item)})`);
     expect(r).toMatchObject({ act: "why", word: "Not served here" });
-    expect(r.text).toBe("Hyperliquid: not served here — Hyperliquid's Terms of Use §1.6 do not serve this location.");
-    expect(p.run<string>(`mkActs(${JSON.stringify(item)}, 0)`)).toContain(">Not served here · why</button>");
+    expect(r.text).toBe("Hyperliquid: not served here.");
+    expect(p.run<string>(`mkActs(${JSON.stringify(item)}, 0)`)).toContain(">Not served here</button>");
     // two venues list it, one would take the user: that one is offered
     const two = { ...item, at: [item.at[0], at("kraken", "Kraken", "live:exchange:kraken")] };
     expect(p.run<Record<string, unknown>>(`mkRoute(${JSON.stringify(two)})`)).toMatchObject({ act: "connect", venueName: "Kraken" });
@@ -968,7 +968,7 @@ describe("the one drawer", () => {
     expect(p.run<string>(`mkActs(${JSON.stringify(two)}, 0)`)).toContain('title="Kraken: its terms exclude where you are');
     // both refuse this network: none of them is offered, and the row says how many list it
     p.run(`VENUES.set("live:exchange:kraken", { connector: "live:exchange:kraken", name: "Kraken", verdict: "not-served", said: "Kraken does not serve this location" })`);
-    expect(p.run<Record<string, string>>(`mkRoute(${JSON.stringify(two)})`).text).toMatch(/^None of the 2 venues that list it would take you from where you are\. Hyperliquid: not served here/);
+    expect(p.run<Record<string, string>>(`mkRoute(${JSON.stringify(two)})`).text).toBe("None of the 2 venues that list it serves this network.");
     // setup and no answer are not a no: a venue that did not answer just now is still offered
     p.run(`VENUES.set("live:exchange:kraken", { connector: "live:exchange:kraken", name: "Kraken", verdict: "no-answer" })`);
     expect(p.run<Record<string, unknown>>(`mkRoute(${JSON.stringify(two)})`)).toMatchObject({ act: "connect", venueName: "Kraken" });
